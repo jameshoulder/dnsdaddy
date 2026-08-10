@@ -1,0 +1,221 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -coverprofile=coverage.out
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+      # The resolver is concurrent by nature: atomic snapshot swaps, a sharded
+      # cache, and a batching log writer. A data race here would be a
+      # correctness bug in the DNS path, so it is worth the slower run.
+      - name: Test with race detector
+        run: go test -race ./...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: arm }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags="-s -w" -o /dev/null ./cmd/dnsdaddy
+
+  smoke:
+    name: End-to-end smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -o dnsdaddy ./cmd/dnsdaddy
+
+      - name: Start the resolver against a local feed
+        run: |
+          mkdir -p /tmp/dd
+          printf '0.0.0.0 blocked-by-ci.example\n' > /tmp/dd/feed.txt
+          cat > /tmp/dd/config.yaml <<EOF
+          data_dir: /tmp/dd/data
+          dns:
+            listen_udp: "127.0.0.1:15353"
+            listen_tcp: "127.0.0.1:15353"
+            upstreams: ["udp://1.1.1.1:53"]
+          http:
+            listen: "127.0.0.1:18080"
+            admin_password: "ci-test-password-longer-than-twelve"
+          feeds:
+            refresh_on_start: false
+            # file:// feeds are confined to this directory and disabled
+            # without it; the smoke test loads its fixture from here.
+            local_feed_dir: /tmp/dd
+          EOF
+          ./dnsdaddy -config /tmp/dd/config.yaml &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:18080/api/v1/health && break
+            sleep 0.5
+          done
+
+      - name: Load the feed and rebuild the index
+        run: |
+          curl -sf -c /tmp/dd/jar -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"ci-test-password-longer-than-twelve"}' \
+            http://127.0.0.1:18080/api/v1/auth/login
+          # Disable the built-in remote feeds so CI does not depend on third
+          # parties being up.
+          for f in urlhaus hagezi-tif-mini phishing-army \
+                   blocklistproject-phishing botnet-c2 coinblocker; do
+            curl -sf -b /tmp/dd/jar -X PATCH -H 'Content-Type: application/json' \
+              -d '{"enabled":false}' "http://127.0.0.1:18080/api/v1/feeds/$f" > /dev/null
+          done
+          curl -sf -b /tmp/dd/jar -X POST -H 'Content-Type: application/json' \
+            -d '{"name":"CI feed","url":"file:///tmp/dd/feed.txt","category":"malware","format":"hosts"}' \
+            http://127.0.0.1:18080/api/v1/feeds
+          curl -sf -b /tmp/dd/jar -X POST http://127.0.0.1:18080/api/v1/feeds/refresh
+          sleep 5
+
+      - name: Assert blocking and resolution
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq dnsutils
+
+          echo "--- a listed domain must be NXDOMAIN ---"
+          dig @127.0.0.1 -p 15353 blocked-by-ci.example +short +timeout=5 > /tmp/blocked.txt
+          status=$(dig @127.0.0.1 -p 15353 blocked-by-ci.example +timeout=5 | grep -oP 'status: \K\w+')
+          echo "status=$status"
+          [ "$status" = "NXDOMAIN" ] || { echo "expected NXDOMAIN"; exit 1; }
+
+          echo "--- a subdomain of a listed domain must also be blocked ---"
+          status=$(dig @127.0.0.1 -p 15353 sub.blocked-by-ci.example +timeout=5 | grep -oP 'status: \K\w+')
+          [ "$status" = "NXDOMAIN" ] || { echo "expected NXDOMAIN for the subdomain"; exit 1; }
+
+          echo "--- a lookalike must NOT be blocked ---"
+          # Asserting on the rcode cannot work here: .example is reserved
+          # (RFC 2606) so a lookalike gets NXDOMAIN from the upstream anyway,
+          # which is indistinguishable from ours. The query log records why,
+          # which is the thing actually under test.
+          dig @127.0.0.1 -p 15353 notblocked-by-ci.example +timeout=5 > /dev/null
+          sleep 2
+          action=$(curl -sf -b /tmp/dd/jar 'http://127.0.0.1:18080/api/v1/queries?limit=50' \
+            | jq -r '[.queries[] | select(.domain == "notblocked-by-ci.example")][0].action')
+          echo "action=$action"
+          [ "$action" = "allowed" ] || { echo "suffix confusion: lookalike was $action"; exit 1; }
+
+          echo "--- a clean domain must resolve ---"
+          dig @127.0.0.1 -p 15353 example.com +short +timeout=5 | grep -qE '^[0-9]' \
+            || { echo "clean domain did not resolve"; exit 1; }
+
+          echo "--- health must report a loaded blocklist ---"
+          curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"status":"ok"' \
+            || { echo "health is not ok"; exit 1; }
+
+          echo "--- the API must reject unauthenticated calls ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/v1/overview)
+          [ "$code" = "401" ] || { echo "expected 401, got $code"; exit 1; }
+
+          echo "--- ANY must get a minimal RFC 8482 answer, not a forwarded one ---"
+          dig @127.0.0.1 -p 15353 example.com ANY +timeout=5 | grep -q 'RFC8482' \
+            || { echo "ANY was not answered per RFC 8482"; exit 1; }
+
+          echo "--- the bare DoH path must require a token ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'Content-Type: application/dns-message' \
+            --data-binary @/dev/null http://127.0.0.1:18080/dns-query)
+          [ "$code" = "403" ] || { echo "expected 403 on untokenized /dns-query, got $code"; exit 1; }
+
+          echo "--- a cross-origin state change must be refused ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/dd/jar \
+            -H 'Origin: https://evil.example' \
+            -X POST http://127.0.0.1:18080/api/v1/feeds/refresh)
+          [ "$code" = "403" ] || { echo "expected 403 on a cross-origin POST, got $code"; exit 1; }
+
+          echo "--- a file:// feed outside local_feed_dir must be refused ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/dd/jar \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"escape","url":"file:///etc/passwd","category":"malware","format":"hosts"}' \
+            -X POST http://127.0.0.1:18080/api/v1/feeds)
+          [ "$code" = "400" ] || { echo "expected 400 for a file:// feed outside local_feed_dir, got $code"; exit 1; }
+
+          echo "all smoke assertions passed"
+
+      - name: An open resolver configuration must refuse to start
+        run: |
+          cat > /tmp/dd/open.yaml <<EOF
+          data_dir: /tmp/dd/open-data
+          dns:
+            listen_udp: "0.0.0.0:15453"
+            listen_tcp: "0.0.0.0:15453"
+            upstreams: ["udp://1.1.1.1:53"]
+            allowed_client_cidrs: []
+          http:
+            listen: "127.0.0.1:18081"
+            admin_password: "ci-test-password-longer-than-twelve"
+          EOF
+          if ./dnsdaddy -config /tmp/dd/open.yaml; then
+            echo "an open-resolver configuration started successfully"
+            exit 1
+          fi
+          echo "open-resolver configuration correctly refused to start"
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the image
+        run: docker build --build-arg VERSION=ci -t dnsdaddy:ci .
+      - name: The binary must start and report a version
+        run: docker run --rm dnsdaddy:ci -version

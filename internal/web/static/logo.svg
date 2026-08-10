@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!--
+    DNS Daddy mark: a "D" built from a resolver ring — lime on the request
+    side, white on the response side — with circuit traces feeding in from the
+    left and a dot at the centre for the resolved answer.
+  -->
+  <symbol id="mark" viewBox="0 0 40 40">
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <!-- circuit traces feeding the resolver -->
+      <path d="M3 8 v10 M3 22 v10" stroke="#BFED6D" stroke-width="2.6"/>
+      <path d="M7.5 5 v13 q0 2 2 2" stroke="#BFED6D" stroke-width="2.6"/>
+      <path d="M7.5 35 v-9" stroke="#F5F7FA" stroke-width="2.6"/>
+
+      <!-- resolver ring: lime upper arc (query), white lower arc (answer) -->
+      <path d="M20 6 a14 14 0 0 1 0 28" stroke="#BFED6D" stroke-width="4.4"/>
+      <path d="M20 34 a14 14 0 0 1 -9.9 -23.9" stroke="#F5F7FA" stroke-width="4.4"/>
+
+      <!-- the "D" upright -->
+      <path d="M20 6 v28" stroke="#BFED6D" stroke-width="4.4"/>
+
+      <!-- connector stub -->
+      <path d="M24 4.5 h4 v3" stroke="#BFED6D" stroke-width="2.4"/>
+    </g>
+    <circle cx="20" cy="20" r="3.6" fill="#BFED6D"/>
+  </symbol>
+
+  <use href="#mark"/>
+</svg>

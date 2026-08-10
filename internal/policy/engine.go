@@ -1,0 +1,318 @@
+// Package policy decides what happens to a DNS question: which network the
+// client belongs to, which policy that network carries, and whether the name
+// should be answered or blocked.
+//
+// The engine keeps a compiled snapshot of every network and policy in memory
+// and swaps it atomically when configuration changes, so the DNS hot path does
+// no database work and never blocks on a write.
+package policy
+
+import (
+	"context"
+	"net/netip"
+	"sort"
+	"sync/atomic"
+
+	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/catalog"
+	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
+	"github.com/jameshoulder/dnsdaddy/internal/store"
+)
+
+// Decision is the outcome of evaluating a question against a policy.
+type Decision struct {
+	Blocked bool
+	// Reason is written to the query log in plain English, because the person
+	// reading it is often relaying it to a user over the phone.
+	Reason    string
+	Category  string
+	Source    string
+	BlockMode store.BlockMode
+	LogQuery  bool
+}
+
+// Match identifies the network and policy a client resolved to.
+type Match struct {
+	NetworkID   string
+	NetworkName string
+	PolicyID    string
+	PolicyName  string
+}
+
+// compiledPolicy is the query-time form of a store.Policy.
+type compiledPolicy struct {
+	id         string
+	name       string
+	categories map[string]bool
+	allow      map[string]bool
+	block      map[string]bool
+	blockMode  store.BlockMode
+	logQueries bool
+}
+
+// compiledNetwork pairs a network with its parsed CIDRs.
+type compiledNetwork struct {
+	id       string
+	name     string
+	policyID string
+	prefixes []netip.Prefix
+	enabled  bool
+	// bits is the longest prefix length, used to prefer the most specific match.
+	maxBits int
+}
+
+type snapshot struct {
+	networks []compiledNetwork
+	policies map[string]*compiledPolicy
+	// fallback is the network used for clients matching no CIDR.
+	fallback      *compiledNetwork
+	clients       map[string]string // IP -> friendly name
+	defaultPolicy *compiledPolicy
+}
+
+// Engine evaluates questions against the current configuration.
+type Engine struct {
+	snap  atomic.Pointer[snapshot]
+	lists *blocklist.Holder
+	store *store.Store
+}
+
+// NewEngine returns an engine reading blocklists from holder. Reload must be
+// called before it will match anything.
+func NewEngine(st *store.Store, holder *blocklist.Holder) *Engine {
+	e := &Engine{lists: holder, store: st}
+	e.snap.Store(&snapshot{policies: map[string]*compiledPolicy{}, clients: map[string]string{}})
+	return e
+}
+
+// Reload rebuilds the compiled snapshot from the database. It is called at
+// startup and after any configuration change through the API.
+func (e *Engine) Reload(ctx context.Context) error {
+	policies, err := e.store.ListPolicies(ctx)
+	if err != nil {
+		return err
+	}
+	networks, err := e.store.ListNetworks(ctx)
+	if err != nil {
+		return err
+	}
+	clients, err := e.store.ListClients(ctx)
+	if err != nil {
+		return err
+	}
+
+	snap := &snapshot{
+		policies: make(map[string]*compiledPolicy, len(policies)),
+		clients:  make(map[string]string, len(clients)),
+	}
+
+	for _, p := range policies {
+		cp := &compiledPolicy{
+			id:         p.ID,
+			name:       p.Name,
+			categories: toSet(p.Categories),
+			allow:      toSet(p.AllowDomains),
+			block:      toSet(p.BlockDomains),
+			blockMode:  p.BlockMode,
+			logQueries: p.LogQueries,
+		}
+		if !cp.blockMode.Valid() {
+			cp.blockMode = store.BlockNXDOMAIN
+		}
+		snap.policies[p.ID] = cp
+		if p.IsDefault {
+			snap.defaultPolicy = cp
+		}
+	}
+
+	for _, n := range networks {
+		cn := compiledNetwork{
+			id:       n.ID,
+			name:     n.Name,
+			policyID: n.PolicyID,
+			enabled:  n.Enabled,
+		}
+		for _, c := range n.CIDRs {
+			p, err := netip.ParsePrefix(c)
+			if err != nil {
+				continue // stored CIDRs are validated on write; skip anything stale
+			}
+			cn.prefixes = append(cn.prefixes, p)
+			if p.Bits() > cn.maxBits {
+				cn.maxBits = p.Bits()
+			}
+		}
+		snap.networks = append(snap.networks, cn)
+	}
+
+	// Most specific prefix wins, so a /32 exception beats the /16 it sits in.
+	sort.SliceStable(snap.networks, func(i, j int) bool {
+		return snap.networks[i].maxBits > snap.networks[j].maxBits
+	})
+
+	// A network with no CIDRs is the catch-all for unmatched clients. If more
+	// than one exists we take the first by name for determinism.
+	for i := range snap.networks {
+		if len(snap.networks[i].prefixes) == 0 && snap.networks[i].enabled {
+			snap.fallback = &snap.networks[i]
+			break
+		}
+	}
+	if snap.fallback == nil && len(snap.networks) > 0 {
+		snap.fallback = &snap.networks[len(snap.networks)-1]
+	}
+
+	for _, c := range clients {
+		snap.clients[c.IP] = c.Name
+	}
+
+	e.snap.Store(snap)
+	return nil
+}
+
+// MatchClient resolves a client address to its network and policy.
+func (e *Engine) MatchClient(addr netip.Addr) Match {
+	snap := e.snap.Load()
+	if addr.Is4In6() {
+		addr = addr.Unmap()
+	}
+
+	for i := range snap.networks {
+		n := &snap.networks[i]
+		if !n.enabled || len(n.prefixes) == 0 {
+			continue
+		}
+		for _, p := range n.prefixes {
+			if prefixContains(p, addr) {
+				return e.matchFor(snap, n)
+			}
+		}
+	}
+	if snap.fallback != nil {
+		return e.matchFor(snap, snap.fallback)
+	}
+	return Match{}
+}
+
+// MatchNetworkID resolves an explicitly identified network, used by DoH and DoT
+// clients that present a per-network token rather than arriving from a known IP.
+func (e *Engine) MatchNetworkID(id string) (Match, bool) {
+	snap := e.snap.Load()
+	for i := range snap.networks {
+		if snap.networks[i].id == id {
+			return e.matchFor(snap, &snap.networks[i]), true
+		}
+	}
+	return Match{}, false
+}
+
+func (e *Engine) matchFor(snap *snapshot, n *compiledNetwork) Match {
+	m := Match{NetworkID: n.id, NetworkName: n.name, PolicyID: n.policyID}
+	if p := snap.policies[n.policyID]; p != nil {
+		m.PolicyName = p.name
+	}
+	return m
+}
+
+// ClientName returns the operator-assigned name for an IP, if any.
+func (e *Engine) ClientName(ip string) string {
+	return e.snap.Load().clients[ip]
+}
+
+// Evaluate decides whether a question should be blocked under the given policy.
+//
+// Order matters and is deliberate:
+//  1. the policy's allow list, so an operator can always override a bad entry
+//     without waiting for a feed to be corrected;
+//  2. the policy's own block list;
+//  3. the shared threat-intelligence index, filtered to the categories this
+//     policy actually enables.
+func (e *Engine) Evaluate(policyID, domain string) Decision {
+	snap := e.snap.Load()
+	p := snap.policies[policyID]
+	if p == nil {
+		p = snap.defaultPolicy
+	}
+	if p == nil {
+		return Decision{LogQuery: true, BlockMode: store.BlockNXDOMAIN}
+	}
+
+	d := Decision{BlockMode: p.blockMode, LogQuery: p.logQueries}
+
+	if len(p.allow) > 0 && matchSuffix(p.allow, domain) {
+		d.Reason = "Allowed by policy allow-list"
+		d.Source = "allow-list"
+		return d
+	}
+
+	if len(p.block) > 0 && matchSuffix(p.block, domain) {
+		d.Blocked = true
+		d.Reason = "Blocked by your custom block-list"
+		d.Category = "custom"
+		d.Source = "block-list"
+		return d
+	}
+
+	if len(p.categories) > 0 {
+		if entry, ok := e.lists.Load().Lookup(domain); ok && p.categories[entry.Category] {
+			d.Blocked = true
+			d.Category = entry.Category
+			d.Source = entry.FeedName
+			d.Reason = catalog.CategoryReason(entry.Category)
+			return d
+		}
+	}
+
+	return d
+}
+
+// PolicyLogsQueries reports whether the named policy records per-query rows.
+func (e *Engine) PolicyLogsQueries(policyID string) bool {
+	snap := e.snap.Load()
+	if p := snap.policies[policyID]; p != nil {
+		return p.logQueries
+	}
+	if snap.defaultPolicy != nil {
+		return snap.defaultPolicy.logQueries
+	}
+	return true
+}
+
+func matchSuffix(set map[string]bool, domain string) bool {
+	found := false
+	domainutil.Suffixes(domain, func(suffix string) bool {
+		if set[suffix] {
+			found = true
+			return true
+		}
+		return false
+	})
+	return found
+}
+
+func toSet(items []string) map[string]bool {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(items))
+	for _, i := range items {
+		if d := domainutil.Normalize(i); d != "" {
+			out[d] = true
+		} else {
+			out[i] = true
+		}
+	}
+	return out
+}
+
+// prefixContains reports whether p contains addr, tolerating the IPv4/IPv6
+// mismatch that arises when a v4 client arrives over a dual-stack socket.
+func prefixContains(p netip.Prefix, addr netip.Addr) bool {
+	if p.Addr().Is4() && addr.Is4In6() {
+		addr = addr.Unmap()
+	}
+	if p.Addr().Is4() != addr.Is4() {
+		return false
+	}
+	return p.Contains(addr)
+}

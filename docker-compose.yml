@@ -1,0 +1,158 @@
+# DNS Daddy — protective DNS on a small VPS.
+#
+#   cp .env.example .env     # set DNSDADDY_ALLOWED_CLIENT_CIDRS — see below
+#   docker compose up -d
+#
+# The dashboard is published on 127.0.0.1:8080 only. It is NOT reachable from
+# another machine by design: put Caddy in front for HTTPS (deploy/Caddyfile.example)
+# and browse to your own domain. See docs/deploy.md.
+#
+# First-run password:  docker compose logs dnsdaddy | grep -i password
+# Health:              ./deploy/healthcheck.sh
+#
+# Sized for a 1 GB / 1 vCPU box (a $5 Linode Nanode, Hetzner CX22, DO basic
+# droplet).
+
+services:
+  dnsdaddy:
+    build:
+      context: .
+      args:
+        VERSION: ${DNSDADDY_VERSION:-dev}
+    # Or use a published image instead of building:
+    # image: ghcr.io/jameshoulder/dnsdaddy:latest
+    container_name: dnsdaddy
+
+    # "always", not "unless-stopped".
+    #
+    # unless-stopped remembers a manual `docker stop` across a reboot, so a
+    # container stopped once during maintenance stays down after the machine
+    # comes back — silently, and for a DNS resolver that means the whole
+    # network loses name resolution until somebody notices and SSHes in.
+    # "always" restores it on every daemon start. Deliberate maintenance is
+    # `docker compose down` or `systemctl stop dnsdaddy-compose`, both of which
+    # keep it down because the stack itself is no longer deployed.
+    restart: always
+
+    # Reap zombies and forward signals properly, so a graceful shutdown really
+    # is graceful and the query-log buffer gets flushed.
+    init: true
+    stop_grace_period: 20s
+
+    ports:
+      # The container runs as an unprivileged user and cannot bind port 53
+      # itself, so the host's 53 is published to the container's 5353.
+      - "53:5353/udp"
+      - "53:5353/tcp"
+      # Dashboard and API — loopback only, on purpose.
+      #
+      # Do NOT change this to "8080:8080" to make the dashboard reachable. That
+      # publishes an authenticated-but-plaintext management API to the whole
+      # internet, and Docker's port publishing bypasses ufw. The supported way
+      # to reach it remotely is a reverse proxy terminating TLS on 443.
+      - "127.0.0.1:8080:8080"
+
+    environment:
+      # ---- Who may use this resolver -------------------------------------
+      # REQUIRED on a public VPS. Queries from anything not listed here are
+      # REFUSED before any upstream work.
+      #
+      # The built-in default covers loopback and the private ranges only, which
+      # is right for a resolver on a LAN but WRONG for a VPS: your clients
+      # arrive from public addresses, so leaving this unset means every real
+      # query is refused and DNS appears dead.
+      #
+      # Set it to the same source addresses your firewall allows on port 53.
+      # Include Docker's bridge gateway (172.16.0.0/12) so the published port
+      # keeps working, and loopback for health checks.
+      DNSDADDY_ALLOWED_CLIENT_CIDRS: "${DNSDADDY_ALLOWED_CLIENT_CIDRS:-127.0.0.0/8,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}"
+
+      # Upstreams are DNS-over-TLS by default: queries DNS Daddy forwards are
+      # encrypted, so the ISP cannot read or tamper with them.
+      DNSDADDY_UPSTREAMS: "tls://9.9.9.9:853#dns.quad9.net,tls://1.1.1.1:853#cloudflare-dns.com"
+      DNSDADDY_UPSTREAM_MODE: "failover"
+
+      # ---- Reverse proxy --------------------------------------------------
+      # Peers whose X-Forwarded-For / X-Real-IP / X-Forwarded-Proto are
+      # believed. Empty means none, which is correct when nothing proxies us.
+      #
+      # With Caddy on the host, requests reach the container from the Docker
+      # bridge gateway, not 127.0.0.1 — so trusting only loopback would not
+      # work here. Keep it to the bridge network and nothing wider.
+      DNSDADDY_TRUSTED_PROXY_CIDRS: "${DNSDADDY_TRUSTED_PROXY_CIDRS:-}"
+
+      # auto | always | never. Set "always" once TLS is in front, so the
+      # session cookie can never travel over plain HTTP.
+      DNSDADDY_SECURE_COOKIES: "${DNSDADDY_SECURE_COOKIES:-auto}"
+
+      # Public URL of the dashboard, used to build the DoH URLs shown on the
+      # Setup page. Without it they are built from the Host header.
+      DNSDADDY_BASE_URL: "${DNSDADDY_BASE_URL:-}"
+
+      # Leave off. The bare /dns-query path has no client authentication, so
+      # behind a public proxy it would be an open DoH resolver.
+      DNSDADDY_ALLOW_UNTOKENIZED_DOH: "false"
+
+      # Set this to skip the generated first-run password. Leave it unset and
+      # DNS Daddy writes one to the data volume and prints it once.
+      # DNSDADDY_ADMIN_PASSWORD: "change-me-to-something-long"
+
+      # Query logging. Retention is in days; statistics outlive the raw log so
+      # the dashboard keeps its history at a shorter retention.
+      DNSDADDY_QUERY_LOG: "true"
+      DNSDADDY_LOG_CLIENT_IP: "true"
+      DNSDADDY_RETENTION_DAYS: "7"
+      DNSDADDY_ROLLUP_DAYS: "90"
+
+      DNSDADDY_LOG_LEVEL: "info"
+      # Set your own IANA timezone (e.g. UTC) so report timestamps
+      # render in your local time. Defaults to UTC.
+      TZ: "${TZ:-UTC}"
+
+      # Go's heap target. Keeps the resolver well inside a 1 GB box even with
+      # a large blocklist, at the cost of slightly more GC work.
+      GOMEMLIMIT: "512MiB"
+
+    volumes:
+      # Named volume holding the SQLite database, session key, cached feeds and
+      # the first-run password. Never `docker compose down -v` in production —
+      # that deletes it.
+      - dnsdaddy-data:/var/lib/dnsdaddy
+
+    # Liveness, not "is the service fully protecting the network".
+    #
+    # This deliberately accepts "degraded", because a fresh install is degraded
+    # until the first feed download finishes and restarting the container would
+    # only make that take longer. Whether filtering is actually in force is a
+    # monitoring question, answered by deploy/healthcheck.sh, which requires
+    # status=ok and a non-empty blocklist.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/v1/health | grep -q '\"status\"' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Generous: a cold start rebuilds the blocklist index from cached feeds.
+      start_period: 60s
+
+    # Modest caps so a runaway process cannot take the whole VPS with it.
+    # mem_limit applies under plain `docker compose`; the deploy block is
+    # honoured by Swarm. Both are set so either path is bounded.
+    mem_limit: 640m
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  dnsdaddy-data:

@@ -1,0 +1,65 @@
+version: 2
+
+# Pinning every action to a commit SHA removes the supply-chain risk of a
+# mutable tag, but it also freezes us on whatever that commit contained —
+# including its bugs and its vulnerabilities. Dependabot is the other half of
+# that trade: it raises a reviewable pull request when a pinned reference has
+# moved on, so the pin stays deliberate rather than merely stale.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      # One PR for routine action bumps; they are reviewed together and almost
+      # never conflict with each other.
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - dependencies
+      - go
+    groups:
+      go-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      # The resolver's DNS wire handling is the most exposed code in the tree.
+      # A major bump here changes protocol behaviour and needs a deliberate
+      # upgrade with the DoH and handler tests re-read, not an automated PR.
+      - dependency-name: github.com/miekg/dns
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: UTC
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "docker"
+    labels:
+      - dependencies
+      - docker

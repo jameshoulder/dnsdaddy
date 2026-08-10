@@ -1,0 +1,62 @@
+# Build output
+/bin/
+/dist/
+/dnsdaddy
+coverage.out
+sbom.json
+
+# Local development state (make run)
+/tmp/
+
+# Runtime data — never commit a database, backup, or session key
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*-backup-*.db
+dnsdaddy-backup-*.db
+session.key
+initial-password.txt
+
+# Logs
+*.log
+logs/
+
+# Backups and archives that may contain a full data directory
+*.bak
+*.tar.gz
+*.tgz
+*.zip
+
+# Certificates and private keys — never commit these
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+!deploy/*.example
+
+# Local config, which usually holds an admin password
+/config.yaml
+/dnsdaddy.yaml
+/etc/dnsdaddy/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local AI coding assistant session state — machine/session-specific, not
+# project config.
+.claude/settings.local.json
+
+# Environment files: deployment-specific addresses and secrets, never
+# committed. .env.example is the template and is intentionally kept.
+.env
+.env.*
+!.env.example

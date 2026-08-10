@@ -1,0 +1,69 @@
+# DNS Daddy — systemd unit for the Docker Compose stack.
+#
+# Docker's own `restart: always` already brings the container back after a
+# crash or a daemon restart, and on a correctly enabled Docker it also survives
+# a reboot. This unit exists for the cases that policy does not cover:
+#
+#   - it fails loudly at boot if the stack cannot come up, instead of leaving a
+#     resolver silently absent from the network;
+#   - it gives you one obvious place to start and stop the whole deployment;
+#   - it re-applies docker-compose.yml on boot, so a change committed to the
+#     file is picked up rather than the old container being resurrected.
+#
+# It is NOT a second process manager: Type=oneshot with RemainAfterExit means
+# systemd runs compose up and then steps back. Docker owns the container
+# lifecycle from that point, so the two cannot fight over restarts.
+#
+# Install:
+#   sudo cp deploy/dnsdaddy-compose.service /etc/systemd/system/
+#   sudo $EDITOR /etc/systemd/system/dnsdaddy-compose.service   # set WorkingDirectory
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dnsdaddy-compose
+#
+# IMPORTANT: this and the native deploy/dnsdaddy.service are mutually
+# exclusive. Both bind port 53 and port 8080 and will fight. Pick one:
+#   sudo systemctl disable --now dnsdaddy      # if you use Docker (recommended)
+
+[Unit]
+Description=DNS Daddy (Docker Compose stack)
+Documentation=https://github.com/jameshoulder/dnsdaddy
+# docker.service alone is not enough: the socket can be up before the daemon is
+# ready to accept work, and compose then fails on a cold boot.
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+# Refuse to start if the native binary service is running, rather than racing
+# it for port 53.
+Conflicts=dnsdaddy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Absolute path to the checkout containing docker-compose.yml.
+# Change this to wherever you cloned the repository on this server.
+WorkingDirectory=/opt/dnsdaddy
+
+# Compose reads .env from WorkingDirectory automatically.
+ExecStartPre=/usr/bin/docker compose pull --ignore-buildable --quiet
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+
+# Stop the stack, but never with -v: that would delete the data volume holding
+# the database, session key and cached feeds.
+ExecStop=/usr/bin/docker compose down
+
+# Re-apply the file on reload rather than restarting the world.
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+
+# A cold start may build the image and download feeds.
+TimeoutStartSec=900
+TimeoutStopSec=120
+
+# If the boot-time bring-up fails, keep trying: an unreachable registry or a
+# not-yet-ready Docker daemon should not leave the network without DNS.
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

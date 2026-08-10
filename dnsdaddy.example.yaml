@@ -1,0 +1,168 @@
+# DNS Daddy configuration.
+#
+# Copy to /etc/dnsdaddy/config.yaml and edit. Every value here is the default,
+# so an empty file works too. Any setting can also be given as an environment
+# variable (DNSDADDY_*), which takes precedence — handy in Docker.
+#
+# Defaults are tuned for a 1 GB / 1 vCPU VPS.
+
+# Where the database, session key, and cached feed files live.
+data_dir: /var/lib/dnsdaddy
+
+dns:
+  # Address:port for plain DNS. Use "127.0.0.1:53" to listen only on loopback,
+  # or ":53" for every interface. If you expose this to the internet, restrict
+  # it with a firewall — an open resolver will be found and abused for
+  # amplification attacks within days.
+  listen_udp: ":53"
+  listen_tcp: ":53"
+
+  # DNS-over-TLS. Empty disables it. Requires a certificate below.
+  listen_dot: ""
+  tls_cert_file: ""
+  tls_key_file: ""
+
+  # Where queries DNS Daddy does not block are forwarded.
+  #
+  #   9.9.9.9                          plain UDP — visible to your ISP
+  #   tls://9.9.9.9:853#dns.quad9.net  DNS-over-TLS, certificate verified
+  #   https://dns.quad9.net/dns-query  DNS-over-HTTPS
+  #
+  # The "#name" suffix on a tls:// upstream is the certificate name to verify.
+  # Without it, a connection to a bare IP cannot be verified and the encryption
+  # buys you nothing.
+  upstreams:
+    - "tls://9.9.9.9:853#dns.quad9.net"
+    - "tls://1.1.1.1:853#cloudflare-dns.com"
+
+  # failover: try upstreams in order (fewer upstream queries).
+  # race:     ask all at once, take the first answer (lower latency, more traffic).
+  upstream_mode: failover
+
+  timeout: 4s
+  max_inflight: 2048
+
+  # Which source addresses may resolve. Anything else is REFUSED before any
+  # upstream work happens. The default below is loopback plus the private
+  # address space (including the 100.64.0.0/10 range Tailscale uses), which is
+  # what a self-hosted resolver normally serves.
+  #
+  # This is deliberately belt-and-braces with your firewall. An open resolver
+  # is found and conscripted into amplification attacks within days, and by
+  # then it is your IP address in the abuse report.
+  allowed_client_cidrs:
+    - "127.0.0.0/8"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+    - "100.64.0.0/10"
+    - "169.254.0.0/16"
+    - "::1/128"
+    - "fc00::/7"
+    - "fe80::/10"
+
+  # Emptying allowed_client_cidrs while listening on a public interface is a
+  # startup error unless you set this. Only turn it on if you really intend to
+  # run a resolver open to the whole internet, and rate-limit it upstream.
+  allow_public_resolver: false
+
+  # Answer ANY queries with a minimal RFC 8482 response instead of forwarding
+  # them. ANY replies are large and are the classic DNS amplification lever.
+  refuse_any: true
+
+http:
+  # Dashboard and management API. Bind to loopback and put a reverse proxy in
+  # front if this server faces the internet.
+  listen: ":8080"
+
+  # Leave empty and a password is generated on first run, written to
+  # <data_dir>/initial-password.txt and printed once to the log.
+  admin_password: ""
+
+  # Peers whose X-Forwarded-For / X-Real-IP / X-Forwarded-Proto headers are
+  # believed, as a CIDR list. Empty means no forwarding header is ever trusted.
+  #
+  # Set this to your reverse proxy and nothing else. A client can prepend
+  # anything it likes to X-Forwarded-For, so trusting the header from an
+  # untrusted peer lets any caller claim any source address — and with it
+  # another network's filtering policy.
+  #
+  #   trusted_proxy_cidrs: ["127.0.0.1/32"]
+  trusted_proxy_cidrs: []
+
+  # Session cookie Secure flag:
+  #   auto   — set it when the request arrived over TLS (default)
+  #   always — set it unconditionally; the right choice once TLS is in front
+  #   never  — never set it; plain-HTTP LAN only
+  #
+  # "auto" exists because a hard-coded Secure flag makes login impossible on a
+  # plain-HTTP LAN deployment: the browser simply never sends the cookie back.
+  secure_cookies: auto
+
+  # Permit /dns-query without a per-network token. Off by default — behind a
+  # public reverse proxy that path would otherwise be an open DoH resolver for
+  # anyone who finds it. Per-network token URLs (/dns-query/<token>) always
+  # work regardless of this setting.
+  allow_untokenized_doh: false
+
+  # Public URL, used to build the DoH URLs shown on the Setup page.
+  base_url: ""
+
+log:
+  # false records dashboard statistics but stores no per-query rows anywhere.
+  query_log: true
+
+  # false omits client IPs from the query log. Statistics still work; you lose
+  # the ability to say which device made a request.
+  log_client_ip: true
+
+  # How long individual query rows are kept. At roughly 100 bytes per row,
+  # 1,000,000 queries a day for 7 days is about 700 MB.
+  retention_days: 7
+
+  # How long the hourly statistics used by the dashboard and reports are kept.
+  # These survive the query-log prune, so charts keep their history.
+  rollup_days: 90
+
+  # Events are batched before being written so the DNS hot path never waits on
+  # disk. If the buffer fills, events are dropped and counted rather than
+  # slowing down resolution.
+  buffer_size: 8192
+  flush_interval_ms: 500
+
+cache:
+  enabled: true
+
+  # Roughly 500 bytes per entry, so 50,000 entries is about 25 MB.
+  max_entries: 50000
+
+  # Clamp upstream TTLs into this range. min_ttl 0 honours whatever the
+  # upstream said.
+  min_ttl: 30
+  max_ttl: 86400
+  negative_ttl: 300
+
+feeds:
+  # How often to re-download enabled feeds. Downloads are cached to disk, so a
+  # restart rebuilds the index locally without touching the network.
+  refresh_interval: 12h
+
+  # Refresh shortly after startup. The cached copy is loaded first either way,
+  # so the resolver is filtering before this runs.
+  refresh_on_start: true
+
+  http_timeout: 90s
+
+  # Reject a feed larger than this rather than exhausting disk.
+  max_feed_bytes: 134217728
+
+  # The only directory a file:// feed may read from. Empty (the default)
+  # rejects file:// feeds outright.
+  #
+  # Feeds are added through the management API, so without this restriction a
+  # stolen session or an over-broad API token could point a "feed" at any file
+  # the process can read and pull it back out through the dashboard. Set it
+  # only if you actually drop blocklists on disk, e.g.:
+  #
+  #   local_feed_dir: /etc/dnsdaddy/feeds.d
+  local_feed_dir: ""

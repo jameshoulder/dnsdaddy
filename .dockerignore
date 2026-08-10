@@ -1,0 +1,47 @@
+.git
+.github
+bin
+dist
+tmp
+docs
+*.md
+!README.md
+coverage.out
+sbom.json
+
+# Runtime data — never send a database, backup, or session key into the
+# build context or a resulting image layer.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*-backup-*.db
+session.key
+initial-password.txt
+
+# Logs and archives
+*.log
+logs/
+*.bak
+*.tar.gz
+*.tgz
+*.zip
+
+# Certificates and private keys
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# Local config and secrets — never bake deployment-specific values into an
+# image build.
+/config.yaml
+/dnsdaddy.yaml
+.env
+.env.*
+!.env.example

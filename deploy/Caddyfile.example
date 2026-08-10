@@ -1,0 +1,67 @@
+# DNS Daddy — Caddy reverse proxy for the dashboard.
+#
+#   sudo cp deploy/Caddyfile.example /etc/caddy/Caddyfile
+#   sudo $EDITOR /etc/caddy/Caddyfile        # set your real hostname
+#   sudo caddy validate --config /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#   sudo systemctl enable caddy              # so it returns after a reboot
+#
+# Architecture:
+#
+#   Internet → :443 (Caddy, TLS) → 127.0.0.1:8080 (DNS Daddy container)
+#
+# DNS itself does NOT pass through Caddy. Queries reach the resolver directly
+# on port 53, restricted by the firewall to source addresses you control.
+#
+# Requirements:
+#   - an A/AAAA record for this hostname pointing at the server
+#   - ports 80 and 443 open (80 is needed for the ACME HTTP challenge)
+#       sudo ufw allow 80,443/tcp
+
+# Replace with your hostname. Caddy obtains and renews the certificate
+# automatically from Let's Encrypt using this name.
+dns.example.co.uk {
+	# The container publishes only on loopback, which is why the dashboard is
+	# unreachable from outside without this proxy. That is intentional: it
+	# means the management API is never exposed in plaintext.
+	reverse_proxy 127.0.0.1:8080 {
+		# Caddy sets X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host by
+		# default. DNS Daddy ignores them unless the peer is listed in
+		# http.trusted_proxy_cidrs — see .env.example, and note that the
+		# container sees the Docker bridge gateway rather than 127.0.0.1.
+		header_up X-Real-IP {remote_host}
+
+		# Fail fast rather than hanging a browser if the container is down.
+		transport http {
+			dial_timeout 5s
+		}
+	}
+
+	encode gzip
+
+	# HSTS. Only safe once you are certain this hostname will always be HTTPS.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/dnsdaddy.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}
+
+# Optional: DNS-over-HTTPS for roaming devices.
+#
+# Only add this if you actually want DoH published. Per-network token URLs
+# (/dns-query/<token>, shown on the Setup page) are the credential — leave
+# http.allow_untokenized_doh off, or the bare path becomes an open resolver.
+#
+# doh.example.co.uk {
+# 	reverse_proxy 127.0.0.1:8080
+# }

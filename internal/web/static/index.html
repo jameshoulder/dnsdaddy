@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DNS Daddy</title>
+<meta name="description" content="Open-source protective DNS. Block malware, phishing and C2 at the resolver.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div id="login" class="login" hidden>
+  <form class="login-card" id="login-form" autocomplete="on">
+    <div class="login-brand">
+      <svg class="logo-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <use href="/logo.svg#mark"></use>
+      </svg>
+      <span class="wordmark">DNS <b>Daddy</b></span>
+    </div>
+    <h1>Sign in</h1>
+    <p class="muted">Protective DNS control centre.</p>
+    <label for="password">Admin password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <p class="form-error" id="login-error" role="alert" hidden></p>
+    <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+    <p class="login-hint muted">
+      First run? The generated password is in
+      <code>&lt;data-dir&gt;/initial-password.txt</code> and in the startup log.
+    </p>
+  </form>
+</div>
+
+<div id="app" class="app" hidden>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <svg class="logo-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <use href="/logo.svg#mark"></use>
+      </svg>
+      <span class="wordmark">DNS <b>Daddy</b></span>
+    </div>
+
+    <nav class="nav" aria-label="Main">
+      <a href="#/dashboard" data-route="dashboard"><span class="nav-ico" aria-hidden="true">▦</span>Dashboard</a>
+      <a href="#/threats"   data-route="threats"><span class="nav-ico" aria-hidden="true">⚠</span>Threats</a>
+      <a href="#/queries"   data-route="queries"><span class="nav-ico" aria-hidden="true">≡</span>Query log</a>
+      <a href="#/networks"  data-route="networks"><span class="nav-ico" aria-hidden="true">⌗</span>Networks</a>
+      <a href="#/policies"  data-route="policies"><span class="nav-ico" aria-hidden="true">◈</span>Policies</a>
+      <a href="#/feeds"     data-route="feeds"><span class="nav-ico" aria-hidden="true">↻</span>Threat feeds</a>
+      <a href="#/setup"     data-route="setup"><span class="nav-ico" aria-hidden="true">⇄</span>Setup</a>
+      <a href="#/reports"   data-route="reports"><span class="nav-ico" aria-hidden="true">▤</span>Reports</a>
+      <a href="#/settings"  data-route="settings"><span class="nav-ico" aria-hidden="true">⚙</span>Settings</a>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="status-chip" id="sidebar-status">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="sidebar-status-text">Checking…</span>
+      </div>
+      <div class="muted small" id="sidebar-version">—</div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menu-btn" aria-label="Toggle navigation">☰</button>
+      <div>
+        <h1 id="page-title">Dashboard</h1>
+        <p class="muted small" id="page-subtitle"></p>
+      </div>
+      <div class="topbar-actions">
+        <span class="muted small" id="refresh-note"></span>
+        <button class="btn btn-ghost" id="refresh-btn">Refresh</button>
+        <button class="btn btn-ghost" id="logout-btn">Sign out</button>
+      </div>
+    </header>
+
+    <main class="content" id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

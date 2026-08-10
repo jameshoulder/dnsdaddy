@@ -1,0 +1,995 @@
+openapi: 3.1.0
+
+info:
+  title: DNS Daddy management API
+  version: "1.0"
+  description: |
+    The management API for a DNS Daddy protective DNS resolver.
+
+    Every self-hosted resolver serves this specification from `/openapi.yaml`,
+    so a control plane can be generated against the exact build it is talking
+    to rather than against documentation that may have drifted.
+
+    ## Authentication
+
+    All `/api/v1/*` endpoints except `health`, `auth/login`, `auth/logout`, and
+    `auth/session` require one of:
+
+    * `Authorization: Bearer dnsd_…` — an API token, for machine access.
+    * A `dnsdaddy_session` cookie, issued by `POST /api/v1/auth/login`.
+
+    Create API tokens from Settings in the dashboard, or via `POST /api/v1/tokens`.
+    A token's secret is returned exactly once, at creation.
+
+    ## Cross-origin requests
+
+    A request authenticated by **session cookie** that uses a method other than
+    `GET`, `HEAD`, or `OPTIONS` must carry a same-origin `Origin` or `Referer`
+    header, or it is rejected with `403`. This is CSRF protection: the session
+    cookie is `SameSite=Lax`, which does not cover every cross-site case.
+
+    Requests authenticated by **bearer token** are exempt — a browser never
+    attaches an `Authorization` header cross-site, so CSRF does not apply.
+    Programmatic clients should use an API token and can ignore this entirely.
+
+    ## Resolver endpoints (not part of this API)
+
+    * `POST|GET /dns-query/{networkToken}` — DoH scoped to a network's policy.
+      The path token is the credential.
+    * `POST|GET /dns-query` — RFC 8484 DNS-over-HTTPS with no client
+      authentication. Returns `403` unless the operator has set
+      `http.allow_untokenized_doh`, because on an internet-facing deployment
+      this path would otherwise be an open DoH resolver.
+
+    Both take and return `application/dns-message`. An unrecognised network
+    token is a `404`, never a silent fall back to IP-based attribution.
+
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: /
+    description: The resolver serving this document
+
+security:
+  - bearerAuth: []
+  - sessionCookie: []
+
+tags:
+  - name: Status
+  - name: Metrics
+  - name: Networks
+  - name: Policies
+  - name: Feeds
+  - name: Reports
+  - name: Administration
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [Status]
+      summary: Liveness and blocklist readiness
+      security: []
+      responses:
+        "200":
+          description: Resolver status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version, uptimeSeconds, blocklistSize]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, degraded]
+                    description: "`degraded` means no blocklist is loaded: the resolver answers, but filters nothing."
+                  version: { type: string }
+                  uptimeSeconds: { type: integer, format: int64 }
+                  blocklistSize: { type: integer }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Administration]
+      summary: Exchange the admin password for a session cookie
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Signed in; a `dnsdaddy_session` cookie is set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authenticated: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429":
+          description: Too many failed attempts from this address
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Administration]
+      summary: Clear the session cookie
+      security: []
+      responses:
+        "200": { description: Signed out }
+
+  /api/v1/auth/session:
+    get:
+      tags: [Administration]
+      summary: Report whether the caller is authenticated
+      security: []
+      responses:
+        "200":
+          description: Session state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authenticated: { type: boolean }
+                  principal: { type: string }
+
+  /api/v1/auth/password:
+    post:
+      tags: [Administration]
+      summary: Change the admin password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, format: password }
+                newPassword: { type: string, format: password, minLength: 12 }
+      responses:
+        "200": { description: Password updated }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/overview:
+    get:
+      tags: [Status]
+      summary: Dashboard headline figures
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Overview" }
+
+  /api/v1/activity/queries:
+    get:
+      tags: [Metrics]
+      summary: Hourly query and block counts
+      parameters:
+        - name: hours
+          in: query
+          schema: { type: integer, default: 24, minimum: 1, maximum: 720 }
+      responses:
+        "200":
+          description: Hourly buckets, including hours with no traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buckets:
+                    type: array
+                    items: { $ref: "#/components/schemas/ActivityBucket" }
+
+  /api/v1/threats/categories:
+    get:
+      tags: [Metrics]
+      summary: Blocked counts grouped by category
+      parameters:
+        - name: hours
+          in: query
+          schema: { type: integer, default: 24 }
+      responses:
+        "200":
+          description: Category breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  categories:
+                    type: array
+                    items: { $ref: "#/components/schemas/CategoryCount" }
+
+  /api/v1/threats/top-domains:
+    get:
+      tags: [Metrics]
+      summary: Most frequently blocked domains
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, default: 7 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 10, maximum: 200 }
+      responses:
+        "200":
+          description: Ranked domains
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domains:
+                    type: array
+                    items: { $ref: "#/components/schemas/TopBlockedDomain" }
+
+  /api/v1/queries:
+    get:
+      tags: [Metrics]
+      summary: Query log, newest first
+      description: |
+        Cursor-paginated. Pass the returned `nextCursor` to fetch the next page;
+        a `nextCursor` of `0` means the result set is exhausted.
+      parameters:
+        - { name: networkId, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string, enum: [allowed, blocked, error] } }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: domain, in: query, schema: { type: string }, description: Substring match }
+        - { name: clientIp, in: query, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer } }
+        - { name: cursor, in: query, schema: { type: integer, format: int64 } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+      responses:
+        "200":
+          description: Query-log page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queries:
+                    type: array
+                    items: { $ref: "#/components/schemas/QueryEvent" }
+                  nextCursor: { type: integer, format: int64 }
+
+  /api/v1/categories:
+    get:
+      tags: [Policies]
+      summary: Available filtering categories and how many domains each holds
+      responses:
+        "200":
+          description: Category catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  categories:
+                    type: array
+                    items: { $ref: "#/components/schemas/Category" }
+
+  /api/v1/resolvers:
+    get:
+      tags: [Status]
+      summary: Connection details and upstream health
+      responses:
+        "200":
+          description: Resolver endpoints
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolverInfo" }
+
+  /api/v1/settings:
+    get:
+      tags: [Administration]
+      summary: Effective runtime configuration
+      description: Read-only. Configuration is owned by the YAML file and environment.
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+
+  /api/v1/networks:
+    get:
+      tags: [Networks]
+      summary: List networks with 24-hour activity
+      responses:
+        "200":
+          description: Networks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  networks:
+                    type: array
+                    items: { $ref: "#/components/schemas/NetworkWithActivity" }
+    post:
+      tags: [Networks]
+      summary: Create a network
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NetworkInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Network" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/networks/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Networks]
+      summary: Get a network
+      responses:
+        "200":
+          description: Network
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Network" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Networks]
+      summary: Update a network
+      description: Omitted fields are left unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NetworkInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Network" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Networks]
+      summary: Delete a network
+      description: The last remaining network cannot be deleted.
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/networks/{id}/rotate-token:
+    post:
+      tags: [Networks]
+      summary: Issue a new DoH token, invalidating the old one
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Network with its new token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Network" }
+
+  /api/v1/policies:
+    get:
+      tags: [Policies]
+      summary: List policies
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policies:
+                    type: array
+                    items: { $ref: "#/components/schemas/Policy" }
+    post:
+      tags: [Policies]
+      summary: Create a policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+
+  /api/v1/policies/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Policies]
+      summary: Get a policy
+      responses:
+        "200":
+          description: Policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Policies]
+      summary: Update a policy
+      description: |
+        Omitted fields are left unchanged. Supplying `allowDomains` or
+        `blockDomains` replaces that list wholesale; use the rules endpoints to
+        add or remove a single entry.
+
+        A successful update purges the answer cache so the change takes effect
+        on the next query rather than after the current TTL.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+    delete:
+      tags: [Policies]
+      summary: Delete a policy
+      description: The default policy, and any policy still assigned to a network, cannot be deleted.
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/policies/{id}/rules:
+    post:
+      tags: [Policies]
+      summary: Add one allow or block entry
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, domain]
+              properties:
+                kind: { type: string, enum: [allow, block] }
+                domain: { type: string, example: supplier.example.com }
+                note: { type: string, description: Free text, e.g. a ticket reference }
+      responses:
+        "200":
+          description: The updated policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+
+  /api/v1/policies/{id}/rules/{kind}/{domain}:
+    delete:
+      tags: [Policies]
+      summary: Remove one allow or block entry
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [allow, block] } }
+        - { name: domain, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/feeds:
+    get:
+      tags: [Feeds]
+      summary: List threat-intelligence feeds
+      responses:
+        "200":
+          description: Feeds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  feeds:
+                    type: array
+                    items: { $ref: "#/components/schemas/Feed" }
+                  refreshing: { type: boolean }
+                  totalIndexedDomains: { type: integer }
+    post:
+      tags: [Feeds]
+      summary: Add a custom feed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FeedInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Feed" }
+
+  /api/v1/feeds/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Feeds]
+      summary: Update a feed
+      description: Built-in feeds may only be enabled or disabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FeedInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Feed" }
+    delete:
+      tags: [Feeds]
+      summary: Delete a custom feed
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/feeds/refresh:
+    post:
+      tags: [Feeds]
+      summary: Download every enabled feed and rebuild the index
+      description: |
+        Returns immediately; the refresh runs in the background. Poll
+        `GET /api/v1/feeds` and watch `refreshing` to know when it has finished.
+      responses:
+        "202":
+          description: Refresh started
+        "409":
+          description: A refresh is already running
+
+  /api/v1/clients:
+    get:
+      tags: [Administration]
+      summary: List device names
+      responses:
+        "200":
+          description: Named devices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clients:
+                    type: array
+                    items: { $ref: "#/components/schemas/Client" }
+    put:
+      tags: [Administration]
+      summary: Name a device by IP, or clear its name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ip, name]
+              properties:
+                ip: { type: string, example: 10.0.4.23 }
+                name: { type: string, example: laptop-07, description: An empty name removes the entry }
+      responses:
+        "204": { description: Saved }
+
+  /api/v1/tokens:
+    get:
+      tags: [Administration]
+      summary: List API tokens
+      responses:
+        "200":
+          description: Tokens; secrets are never returned here
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items: { $ref: "#/components/schemas/APIToken" }
+    post:
+      tags: [Administration]
+      summary: Create an API token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "201":
+          description: The token, including its secret. This is the only time the secret is returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIToken" }
+
+  /api/v1/tokens/{id}:
+    delete:
+      tags: [Administration]
+      summary: Revoke an API token
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Revoked }
+
+  /api/v1/reports/summary:
+    get:
+      tags: [Reports]
+      summary: Reporting-period summary
+      description: |
+        With `format=markdown` the response is a `text/markdown` document
+        written for a non-technical reader — a director, an insurer, or a
+        Cyber Essentials assessor.
+      parameters:
+        - name: days
+          in: query
+          schema: { type: integer, default: 7, minimum: 1, maximum: 90 }
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, markdown], default: json }
+      responses:
+        "200":
+          description: Report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportSummary" }
+            text/markdown:
+              schema: { type: string }
+
+  /metrics:
+    get:
+      tags: [Metrics]
+      summary: Prometheus metrics
+      responses:
+        "200":
+          description: Metrics in Prometheus text exposition format
+          content:
+            text/plain:
+              schema: { type: string }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: An API token, which always begins `dnsd_`.
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: dnsdaddy_session
+
+  responses:
+    BadRequest:
+      description: The request was rejected
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Authentication required or incorrect
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    Overview:
+      type: object
+      properties:
+        protectionStatus:
+          type: string
+          enum: [protected, degraded, offline]
+          description: |
+            `offline` means no blocklist is loaded. `degraded` means a blocklist
+            is loaded but no policy is enforcing anything.
+        resolverStatus: { type: string, enum: [operational, degraded] }
+        queries24h: { type: integer, format: int64 }
+        threatsBlocked24h: { type: integer, format: int64 }
+        blockRate24h: { type: number, format: double }
+        protectedNetworks: { type: integer }
+        activePolicies: { type: integer }
+        blocklistDomains: { type: integer }
+        lastFeedRefresh: { type: [string, "null"], format: date-time }
+        uptimeSeconds: { type: integer, format: int64 }
+        version: { type: string }
+
+    ActivityBucket:
+      type: object
+      properties:
+        hour: { type: string, format: date-time }
+        label: { type: string, example: "14:00" }
+        total: { type: integer, format: int64 }
+        blocked: { type: integer, format: int64 }
+
+    CategoryCount:
+      type: object
+      properties:
+        category: { type: string }
+        label: { type: string }
+        count: { type: integer, format: int64 }
+
+    TopBlockedDomain:
+      type: object
+      properties:
+        domain: { type: string }
+        category: { type: string }
+        count: { type: integer, format: int64 }
+        lastSeen: { type: string, format: date-time }
+
+    QueryEvent:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        time: { type: string, format: date-time }
+        clientIp: { type: string }
+        clientName: { type: string }
+        networkId: { type: string }
+        domain: { type: string }
+        qtype: { type: string, example: A }
+        action: { type: string, enum: [allowed, blocked, error] }
+        reason:
+          type: string
+          description: Plain-English explanation, suitable for reading back to a user.
+          example: Domain is on a phishing list
+        category: { type: string }
+        source: { type: string, description: The feed or list that matched }
+        proto: { type: string, enum: [udp, tcp, dot, doh] }
+        elapsedMs: { type: integer }
+        cached: { type: boolean }
+
+    Category:
+      type: object
+      properties:
+        id: { type: string }
+        label: { type: string }
+        description: { type: string }
+        reason: { type: string }
+        defaultOn: { type: boolean }
+        indexedDomains: { type: integer }
+
+    Network:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        location: { type: string }
+        policyId: { type: string }
+        token:
+          type: string
+          description: The per-network DoH path token. Treat it as a credential.
+        enabled: { type: boolean }
+        cidrs:
+          type: array
+          items: { type: string }
+          description: Client ranges attributed to this network. Empty means catch-all.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    NetworkWithActivity:
+      allOf:
+        - $ref: "#/components/schemas/Network"
+        - type: object
+          properties:
+            queries24h: { type: integer, format: int64 }
+            blocked24h: { type: integer, format: int64 }
+            status: { type: string, enum: [healthy, no-traffic, disabled] }
+
+    NetworkInput:
+      type: object
+      properties:
+        name: { type: string }
+        location: { type: string }
+        policyId: { type: string }
+        cidrs:
+          type: array
+          items: { type: string, example: 10.0.10.0/24 }
+        enabled: { type: boolean }
+
+    Policy:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        categories:
+          type: array
+          items: { type: string }
+        blockMode: { type: string, enum: [nxdomain, zeroip, refused] }
+        safeSearch: { type: boolean }
+        logQueries:
+          type: boolean
+          description: When false, statistics are still recorded but no per-query rows are stored.
+        isDefault: { type: boolean }
+        allowDomains:
+          type: array
+          items: { type: string }
+        blockDomains:
+          type: array
+          items: { type: string }
+        assigned: { type: integer, description: Number of networks using this policy }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    PolicyInput:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        categories:
+          type: array
+          items: { type: string }
+        blockMode: { type: string, enum: [nxdomain, zeroip, refused] }
+        safeSearch: { type: boolean }
+        logQueries: { type: boolean }
+        allowDomains:
+          type: array
+          items: { type: string }
+        blockDomains:
+          type: array
+          items: { type: string }
+
+    Feed:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        url: { type: string }
+        category: { type: string }
+        format: { type: string, enum: [auto, hosts, domains, adblock] }
+        enabled: { type: boolean }
+        builtin: { type: boolean }
+        domainCount: { type: integer }
+        indexedDomains:
+          type: integer
+          description: Domains this feed contributes after de-duplication against higher-priority feeds.
+        lastRefreshedAt: { type: [string, "null"], format: date-time }
+        lastStatus: { type: string }
+        lastError: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    FeedInput:
+      type: object
+      properties:
+        name: { type: string }
+        url: { type: string }
+        category: { type: string }
+        format: { type: string, enum: [auto, hosts, domains, adblock] }
+        enabled: { type: boolean }
+
+    Client:
+      type: object
+      properties:
+        ip: { type: string }
+        name: { type: string }
+        updatedAt: { type: string, format: date-time }
+
+    APIToken:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        prefix: { type: string }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: [string, "null"], format: date-time }
+        secret:
+          type: string
+          description: Present only in the response to token creation.
+
+    ResolverInfo:
+      type: object
+      properties:
+        listenUdp: { type: string }
+        listenTcp: { type: string }
+        listenDot: { type: string }
+        dohUrl: { type: string }
+        upstreams:
+          type: array
+          items:
+            type: object
+            properties:
+              spec: { type: string }
+              protocol: { type: string, enum: [udp, tcp, tls, https] }
+              address: { type: string }
+              queries: { type: integer, format: int64 }
+              errors: { type: integer, format: int64 }
+              avgLatencyMs: { type: number, format: double }
+        networks:
+          type: array
+          items:
+            type: object
+            properties:
+              networkId: { type: string }
+              name: { type: string }
+              dohUrl: { type: string }
+
+    Settings:
+      type: object
+      properties:
+        version: { type: string }
+        dataDir: { type: string }
+        queryLog: { type: boolean }
+        logClientIp: { type: boolean }
+        retentionDays: { type: integer }
+        rollupDays: { type: integer }
+        cacheEnabled: { type: boolean }
+        cacheMaxEntries: { type: integer }
+        cacheEntries: { type: integer }
+        cacheHitRate: { type: number, format: double }
+        feedRefreshInterval: { type: string }
+        upstreamMode: { type: string, enum: [failover, race] }
+        queryLogRows: { type: integer, format: int64 }
+        memoryMb: { type: number, format: double }
+        goroutines: { type: integer }
+        uptimeSeconds: { type: integer, format: int64 }
+
+    ReportSummary:
+      type: object
+      properties:
+        generatedAt: { type: string, format: date-time }
+        periodDays: { type: integer }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        version: { type: string }
+        totals:
+          type: object
+          properties:
+            queries: { type: integer, format: int64 }
+            blocked: { type: integer, format: int64 }
+        blockRate: { type: number, format: double }
+        blocklistDomains: { type: integer }
+        categories:
+          type: array
+          items: { $ref: "#/components/schemas/CategoryCount" }
+        topBlockedDomains:
+          type: array
+          items: { $ref: "#/components/schemas/TopBlockedDomain" }
+        networks:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              location: { type: string }
+              policy: { type: string }
+              queries: { type: integer, format: int64 }
+              blocked: { type: integer, format: int64 }
+        feeds:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              category: { type: string }
+              domains: { type: integer }
+              lastRefreshedAt: { type: [string, "null"], format: date-time }
