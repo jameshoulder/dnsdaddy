@@ -237,6 +237,11 @@ func (a *Auth) SetSessionCookie(w http.ResponseWriter, r *http.Request) {
 	// and httpx.TestIsHTTPS / TestIsHTTPSWithTLS.
 	//
 	// nosemgrep: go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
+	//
+	// #nosec G124 -- HttpOnly and SameSite are set literally; only Secure is
+	// computed, and G124 cannot evaluate secureFlag to see that it resolves to
+	// true on every TLS request. The suppression covers this one cookie
+	// literal, so a future cookie elsewhere is still checked.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    a.issueSession(),
@@ -265,6 +270,11 @@ func (a *Auth) ClearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	// Proven by TestClearSessionCookieMatchesSetAttributes.
 	//
 	// nosemgrep: go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
+	//
+	// #nosec G124 -- same reasoning as SetSessionCookie, and additionally
+	// forced here: the deletion cookie has to carry byte-identical attributes
+	// to the one it clears, so hard-coding Secure would leave the live session
+	// cookie in place on a plain-HTTP deployment and break logout outright.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",

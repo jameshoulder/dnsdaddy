@@ -6,11 +6,32 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 )
+
+// shutdownTimeout bounds how long the listeners are given to drain in-flight
+// queries. ShutdownContext closes the listener first and only then waits, so
+// this caps the wait rather than the close: a query still in a handler when
+// the deadline passes is abandoned, and the process is not held open by one
+// slow upstream. DNS queries are answered in milliseconds, so five seconds is
+// generous.
+const shutdownTimeout = 5 * time.Second
+
+// shutdownContext derives the context the listeners are torn down with.
+//
+// The parent is usually already cancelled — its cancellation is what triggers
+// the shutdown — so inheriting it directly would mean every Shutdown ran
+// against a dead context and skipped the drain entirely. WithoutCancel keeps
+// the parent's values while dropping that cancellation, and the timeout puts a
+// finite bound back on in place of the unbounded context.Background this
+// replaced. The caller must call cancel.
+func shutdownContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), shutdownTimeout)
+}
 
 // Server owns the UDP, TCP, and DNS-over-TLS listeners.
 type Server struct {
@@ -100,7 +121,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 	for range servers {
 		if err := <-ready; err != nil {
-			s.Shutdown(context.Background())
+			// One listener failed to bind, so unwind the ones that did. Nothing
+			// is serving traffic yet, but the same bounded context is used so a
+			// failed start cannot hang either.
+			shutdownCtx, cancel := shutdownContext(ctx)
+			s.Shutdown(shutdownCtx)
+			cancel()
 			return err
 		}
 	}
@@ -111,7 +137,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		s.Shutdown(context.Background())
+		shutdownCtx, cancel := shutdownContext(ctx)
+		defer cancel()
+		s.Shutdown(shutdownCtx)
 	}()
 
 	return nil
