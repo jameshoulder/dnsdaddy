@@ -288,6 +288,26 @@ anything sensitive privately.
 There is no roadmap promise and no commercial edition — this is free,
 self-hosted, open-source software, full stop.
 
+## ☕ Support the project
+
+DNS Daddy is free, open source and self-hosted. There are no subscriptions, no
+paid tiers and no licence fees, and buying a coffee unlocks precisely nothing —
+there is no supporter-only build, no supporter-only feature, and no private
+support queue. Everything is in this repository under Apache-2.0, for everyone,
+including the people who never send a penny.
+
+If you find the project useful and fancy supporting the hosting, testing and
+caffeine behind it, you are welcome to
+[buy me a coffee](https://buymeacoffee.com/jameshoulder). You absolutely don't
+have to, and it buys no guarantees — this is still an unaudited proof of
+concept built in someone's spare time, and a coffee does not change that.
+
+Code reviews, bug reports, documentation improvements and pull requests are
+every bit as appreciated — genuinely more so, if you have security experience
+and are willing to
+[poke holes in it](#contributing-and-security-review). Code, bug reports and
+coffee, all gratefully accepted.
+
 ## Licence
 
 [Apache-2.0](LICENSE).
