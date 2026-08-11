@@ -276,6 +276,50 @@ Worth knowing before you rely on this:
 
 Tracked in [issues](https://github.com/jameshoulder/dnsdaddy/issues).
 
+## Security testing and review
+
+**None of this makes DNS Daddy secure, audited, certified, or free of
+vulnerabilities.** It is still an experimental, AI-assisted proof of concept
+that has had no independent adversarial review. Automated tools find the bugs
+they have rules for; they do not find design flaws, and a clean run is evidence
+of nothing much. This section describes what has actually been done, so you can
+judge it for yourself rather than take a badge on trust.
+
+**Running in CI on every change** — [`security.yml`](.github/workflows/security.yml):
+
+| | |
+|---|---|
+| [CodeQL](https://codeql.github.com/) | `security-extended` query set |
+| [gosec](https://github.com/securego/gosec) | Go security linter, medium severity and above |
+| [govulncheck](https://go.dev/blog/govulncheck) | Advisories actually reachable from this code, standard library included |
+| [Trivy](https://trivy.dev/) | Container image and filesystem scanning |
+| Fuzzing | Domain normalisation and suffix matching, the parsers every query hits before authentication |
+| SBOM | CycloneDX, so an operator can answer "am I affected?" without waiting for me |
+
+Dependencies and pinned action SHAs are monitored by Dependabot, with a
+seven-day cooldown on routine version bumps so a freshly poisoned release is
+not pulled in on the day it lands. Security updates are exempt from that
+cooldown and still arrive immediately.
+
+**Semgrep static analysis** — run as a point-in-time review, *not* in CI.
+DNS Daddy has been scanned with [Semgrep](https://semgrep.dev/) and the findings
+manually triaged against the actual code and data flow rather than the rule
+name. The review produced real fixes, most notably remediation of a **Markdown
+injection** issue in generated reports: feed, network, location and policy names
+reached the rendered report unescaped. It also produced contextual false
+positives — binary DNS wire responses, Prometheus text output and a static
+embedded OpenAPI document are all flagged by an HTML-escaping rule that does not
+apply to them, and escaping any of the three would corrupt the protocol rather
+than protect anyone. Those are documented with narrow, line-specific
+suppressions naming the exact rule and the tests that justify it; no rule is
+disabled repository-wide.
+
+The full triage — every finding, its classification, what was changed, and the
+residual risk that was *not* fixed — is in
+[docs/security/semgrep-triage-2026-07-29.md](docs/security/semgrep-triage-2026-07-29.md).
+It is kept in the repository for scrutiny, on the view that showing the
+reasoning is worth more than treating a green scanner as proof of security.
+
 ## Contributing and security review
 
 This is a solo, experimental project and it would benefit enormously from
