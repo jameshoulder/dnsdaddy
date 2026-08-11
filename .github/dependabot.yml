@@ -5,6 +5,19 @@ version: 2
 # including its bugs and its vulnerabilities. Dependabot is the other half of
 # that trade: it raises a reviewable pull request when a pinned reference has
 # moved on, so the pin stays deliberate rather than merely stale.
+#
+# Every ecosystem below sets an explicit seven-day cooldown. A poisoned release
+# is at its most dangerous in the hours after it is published, before anyone has
+# noticed — the Trivy compromise in March 2026 was live for roughly twelve hours,
+# and trivy-action's malicious tags for less than a day. Waiting a week before
+# opening a routine bump means this repository is not the thing that discovers
+# the problem. GitHub's own default is three days; seven is chosen deliberately
+# because nothing here needs a new minor version quickly.
+#
+# This delays *version* updates only. Dependabot security updates — the pull
+# requests raised against a published advisory — are not subject to cooldown at
+# all, by GitHub's design, so a fix for a known vulnerability still arrives
+# immediately. Slowing those down is the opposite of the point.
 updates:
   - package-ecosystem: github-actions
     directory: "/"
@@ -13,6 +26,8 @@ updates:
       day: monday
       time: "07:00"
       timezone: UTC
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
@@ -33,6 +48,8 @@ updates:
       day: monday
       time: "07:00"
       timezone: UTC
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
@@ -57,6 +74,8 @@ updates:
       day: monday
       time: "07:00"
       timezone: UTC
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 3
     commit-message:
       prefix: "docker"
