@@ -343,8 +343,14 @@ func (a *API) handleRefreshFeeds(w http.ResponseWriter, r *http.Request) {
 	}
 	// Downloading every feed takes longer than a browser will wait, so run it
 	// in the background and let the dashboard poll the feeds endpoint.
+	//
+	// r must not be touched once this handler has returned, so the parent is
+	// read here rather than inside the goroutine; detachedContext strips its
+	// cancellation so the refresh outlives the response.
+	parent := r.Context()
 	go func() {
-		ctx := detachedContext()
+		ctx, cancel := detachedContext(parent)
+		defer cancel()
 		if err := a.Feeds.Refresh(ctx); err != nil {
 			a.Log.Error("manual feed refresh failed", "error", err)
 			return
