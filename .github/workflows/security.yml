@@ -102,7 +102,7 @@ jobs:
         uses: github/codeql-action/autobuild@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
 
       - name: Analyze
-        uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
 
   trivy:
     name: Container and filesystem scan
