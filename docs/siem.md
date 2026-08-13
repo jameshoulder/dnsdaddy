@@ -27,7 +27,31 @@ clients looked up. That is browsing history, and writing a second copy of it
 somewhere a shipper will forward off the box is the operator's decision, not a
 default. See [privacy.md](privacy.md).
 
-The file is written 0640 and rotated in place (`findings.jsonl.1`, `.2`, `.3`).
+The file is written `0640`, owned by the service account, and rotated in place
+(`findings.jsonl.1`, `.2`, `.3`).
+
+### Letting your shipper read it
+
+`0640` means the file's **group** can read it. On a stock install that group
+contains only the `dnsdaddy` service account, so in practice it starts out
+equivalent to `0600` — nothing else on the host can read it until you say so.
+
+To let a shipper running as its own user collect the file, add that user to the
+group:
+
+```bash
+sudo usermod -aG dnsdaddy filebeat      # or wazuh, td-agent, vector…
+sudo systemctl restart filebeat
+```
+
+**Do not `chmod` the file instead.** Rotation creates a new file with the mode
+above, so a manual permission change survives until the first rotation and then
+silently stops working — and a shipper that quietly stops collecting security
+findings is worse than one that never started.
+
+Under Docker, the container runs as UID 10001. Bind-mount the data directory
+and match the group on the host, or run the shipper in a sidecar sharing the
+volume.
 
 ## The event format
 

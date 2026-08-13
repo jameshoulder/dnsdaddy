@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -190,11 +191,42 @@ func TestAnalysisHandlesMalformedInput(t *testing.T) {
 					t.Errorf("panic on input %q: %v", truncate(in), r)
 				}
 			}()
-			split(in)
-			shannonEntropy(in)
-			looksEncoded(in)
-			randomnessIndex(in)
-			labelsOf(in)
+
+			// The results are asserted rather than discarded. Calling a pure
+			// function and throwing the answer away is a no-op, and a no-op
+			// cannot demonstrate anything about the input — so as well as not
+			// panicking, each primitive has to stay inside its contract.
+			if parent, sub, ok := split(in); ok {
+				if parent == "" {
+					t.Errorf("split(%q) reported success with an empty parent", truncate(in))
+				}
+				if sub != "" && len(sub)+len(parent)+1 != len(in) {
+					t.Errorf("split(%q) = %q + %q, which does not reconstruct the input",
+						truncate(in), sub, parent)
+				}
+			}
+
+			// Entropy is bounded below by 0 and above by 8 bits per character,
+			// since it is measured over bytes.
+			if h := shannonEntropy(in); h < 0 || h > 8 {
+				t.Errorf("shannonEntropy(%q) = %v, outside 0..8", truncate(in), h)
+			}
+
+			// An encoded-looking label must be within the DNS label limit; a
+			// true result on something longer would mean the length guard had
+			// been lost.
+			if looksEncoded(in) && len(in) > maxLabelLen {
+				t.Errorf("looksEncoded(%q) = true for a %d-byte label", truncate(in), len(in))
+			}
+
+			if r := randomnessIndex(in); r < 0 || r > 1 {
+				t.Errorf("randomnessIndex(%q) = %v, outside 0..1", truncate(in), r)
+			}
+
+			if in != "" && len(labelsOf(in)) == 0 {
+				t.Errorf("labelsOf(%q) returned no labels for a non-empty name", truncate(in))
+			}
+
 			isTXTInfrastructure(in)
 			ex.Excluded(in)
 		}()
@@ -215,7 +247,7 @@ func TestDetectorsHandleMalformedInput(t *testing.T) {
 		}
 	}
 	// Evaluating must not panic either.
-	e.evaluate(nil, now.Add(time.Hour)) //nolint:staticcheck // nil ctx is only passed to sinks, and there is no sink here
+	e.evaluate(context.Background(), now.Add(time.Hour))
 }
 
 func truncate(s string) string {

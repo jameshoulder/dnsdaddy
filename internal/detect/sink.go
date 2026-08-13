@@ -87,11 +87,33 @@ type FileSinkOptions struct {
 	Keep int
 }
 
+// findingsFileMode is the permission the NDJSON findings file is created with.
+//
+// 0640, not 0600, and the difference is load-bearing rather than lax.
+//
+// Findings contain client IPs and the names those clients looked up — this is
+// browsing history and is treated as such. But the file exists to be read by a
+// log shipper, which conventionally runs as its own user. The standard Unix
+// answer to "one process writes, another reads" is a group, and it is exactly
+// how /var/log works.
+//
+// In the shipped deployment this is equivalent to 0600: the process runs as a
+// dedicated service account whose primary group contains only itself, so
+// nothing else can read the file until an operator deliberately adds the
+// shipper's user to that group. That deliberate act is the documented
+// mechanism (docs/siem.md), and it is a decision an operator makes once.
+//
+// 0600 would force the alternative — chmod the file after creation — and that
+// breaks silently on the first rotation, because rotation creates a new file
+// with the mode below. A shipper that stops collecting security findings
+// without saying so is a worse outcome than a group-readable file on a host
+// where the only member of that group is the writer.
+const findingsFileMode = 0o640
+
 // NewFileSink opens the findings file, creating it if necessary.
 //
-// The file is opened 0640 and the process runs as a dedicated service account:
-// findings contain client IPs and the names those clients looked up, so this
-// is browsing history and is treated as such. See docs/privacy.md.
+// See findingsFileMode for why the file is group-readable, and docs/privacy.md
+// for what is in it.
 func NewFileSink(o FileSinkOptions) (*FileSink, error) {
 	if o.Path == "" {
 		return nil, fmt.Errorf("findings file path is empty")
@@ -105,9 +127,11 @@ func NewFileSink(o FileSinkOptions) (*FileSink, error) {
 	if err := os.MkdirAll(filepath.Dir(o.Path), 0o750); err != nil {
 		return nil, fmt.Errorf("create findings directory: %w", err)
 	}
-	// #nosec G304 -- the path is derived from the operator's configured data
-	// directory, not from any request.
-	f, err := os.OpenFile(o.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	// #nosec G304,G302 -- G304: the path comes from the operator's configured
+	// data directory, never from a request. G302: 0640 is deliberate and the
+	// reasoning is on findingsFileMode; it is equivalent to 0600 until an
+	// operator adds a shipper to the service account's group on purpose.
+	f, err := os.OpenFile(o.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, findingsFileMode)
 	if err != nil {
 		return nil, fmt.Errorf("open findings file: %w", err)
 	}
@@ -164,8 +188,10 @@ func (s *FileSink) rotate() error {
 		return fmt.Errorf("rotate findings file: %w", err)
 	}
 
-	// #nosec G304 -- operator-configured path, as above.
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	// #nosec G304,G302 -- operator-configured path and deliberate mode, as
+	// above. Rotation must recreate the file with the same permissions, or a
+	// shipper reading it would stop at the first rotation.
+	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, findingsFileMode)
 	if err != nil {
 		return fmt.Errorf("reopen findings file: %w", err)
 	}
