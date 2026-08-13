@@ -1,0 +1,21 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/jameshoulder/dnsdaddy/security/advisories/new
+    about: >-
+      Please do NOT open a public issue for anything security-sensitive. Use
+      GitHub's private vulnerability reporting instead. See SECURITY.md for
+      what to include and what to expect.
+
+  - name: A detection fired on something harmless
+    url: https://github.com/jameshoulder/dnsdaddy/issues/new?template=false-positive.yml
+    about: >-
+      This is the single most useful report this project can receive. Every
+      behavioural detector is experimental precisely because nobody has
+      measured its false-positive rate on a real network.
+
+  - name: Documentation and concepts
+    url: https://github.com/jameshoulder/dnsdaddy/tree/main/docs
+    about: >-
+      Start with docs/capabilities.md — it states what is implemented, what is
+      experimental, and what is only planned.
