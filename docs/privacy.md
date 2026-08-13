@@ -47,6 +47,7 @@ One row per DNS question, when query logging is on:
 | `action` | `blocked` | |
 | `reason` | `Domain is on a phishing list` | |
 | `category`, `source` | `phishing`, `Phishing Army` | |
+| `dnssec` | `validated` | The upstream's validation verdict |
 | `proto`, `elapsed_ms`, `cached` | | |
 
 This is the sensitive table. `qname` plus `client_ip` is a browsing history.
@@ -68,6 +69,47 @@ Because aggregates are separate from the raw log, you can cut query-log
 retention to a day and keep your charts and reports for three months. That is
 the single most useful privacy dial in the product.
 
+### Behavioural findings — `findings`
+
+One row per security finding raised by the detection engine.
+
+| Field | Example | Notes |
+|---|---|---|
+| `event_type`, `severity`, `confidence` | `dns_tunnel_suspected`, `high`, `0.87` | |
+| `client_ip`, `client_name` | `10.0.4.23`, `laptop-07` | Empty if `log_client_ip: false` |
+| `domain` | `example.com` | **The registered domain involved** |
+| `summary` | `laptop-07 queried 187 distinct subdomains of…` | |
+| `detail` | *(JSON)* | The full finding, including example names in its evidence |
+
+**This is sensitive, and in one respect more so than the query log.** A finding
+is a condensed, pre-analysed statement about a named device's behaviour —
+exactly the shape of thing that is useful to an investigator and awkward in a
+subject access request. The `detail` JSON also contains example domain names
+drawn from the traffic.
+
+**Default retention: 30 days** (`detection.retention_days`), deliberately
+longer than the query log, because "has this host done this before?" is a
+months-scale question and a finding is a few kilobytes where the traffic behind
+it was thousands of rows.
+
+Findings inherit the `log_client_ip` switch: with device attribution off, they
+are attributed to the network rather than the device, and the finding says so
+instead of quietly carrying an address you chose not to record.
+
+### The findings file — `findings.jsonl`
+
+**Off by default.** When `detection.findings_file` is set, every finding is
+*also* written as newline-delimited JSON for a log shipper to collect.
+
+That is a second copy of browsing-history-derived data, in a place designed to
+be forwarded off the box. It is off by default for exactly that reason: sending
+it to a SIEM should be a decision somebody makes, not something that happens
+because a config file had a sensible-looking default. The file is written 0640
+and rotated in place.
+
+Whatever consumes it inherits the retention question. Your SIEM's retention
+policy, not `detection.retention_days`, governs the copy it holds.
+
 ### Configuration
 
 Networks, policies, allow and block lists, feed settings, hashed API tokens, and
@@ -80,6 +122,9 @@ the bcrypt hash of the admin password. No plaintext secrets.
 - Anything about the traffic that follows a lookup. It sees the question, not
   the connection.
 - Cached answers are in memory only and disappear on restart.
+- Behavioural detection state. The detectors hold counters and bounded sets in
+  memory for a few minutes at a time and never write them to disk; only the
+  resulting findings are persisted.
 
 ## Turning it down
 
@@ -131,6 +176,25 @@ For a single device, before deleting:
 
 ```sql
 DELETE FROM query_log WHERE client_ip = '10.0.4.23';
+```
+
+### Turn off behavioural detection entirely
+
+```yaml
+detection:
+  enabled: false
+```
+
+Nothing is analysed and no findings are stored. Blocking and query logging are
+unaffected — detection is a separate, alert-only layer.
+
+A middle setting keeps the detection but stores less of it:
+
+```yaml
+detection:
+  min_severity: high     # only the strongest findings are kept
+  retention_days: 7      # matching the query log
+  findings_file: ""      # no second copy for a shipper
 ```
 
 ## Subject access and erasure

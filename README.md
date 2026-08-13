@@ -2,10 +2,12 @@
 
 # DNS Daddy
 
-**An experimental, self-hosted protective DNS resolver.**
+**A free, open-source, self-hosted protective DNS project — designed to give
+people visibility and control over what their networks resolve.**
 
-Block malware, phishing, and command-and-control at the resolver. See which
-device asked for what, and why it was stopped.
+Block malware, phishing and command-and-control at the resolver. See which
+device asked for what, and why it was stopped. Then look at the traffic itself
+and see what reputation feeds cannot tell you.
 
 **Free & Open Source · No Account · No Trial · No Subscription**
 
@@ -78,8 +80,58 @@ laptops carry different policies.
 | **Instant allow-listing** | Clear a false positive from the dashboard. It applies on the next query — the answer cache is purged, so no waiting for a TTL. |
 | **Encrypted upstream** | Forwards over DNS-over-TLS by default, so your ISP cannot read or tamper with what DNS Daddy passes on. |
 | **DoH and DoT** | Serves RFC 8484 DNS-over-HTTPS and DNS-over-TLS as well as plain DNS. |
+| **Behavioural detection** | Six experimental detectors — DNS tunnelling, beaconing, NXDOMAIN bursts, unusual TXT, DGA-like domains, resolution failures. They alert and explain; they never block. |
+| **Findings you can check** | Every detection publishes the measurements behind it, with bands and weights, so the score can be reproduced on paper. |
+| **DNSSEC visibility** | Records the upstream's validation verdict per query. Not local validation — and the docs say so. |
+| **SIEM-ready** | Newline-delimited JSON with a documented, versioned schema. Wazuh, Elastic, Splunk and Sentinel configurations included. |
 | **Reports you can forward** | A Markdown summary written for someone who does not run the network. |
 | **Open by construction** | Documented OpenAPI spec, Prometheus metrics, every threat feed listed by URL in [`internal/catalog`](internal/catalog/catalog.go). |
+
+## See it working
+
+The fastest way to understand what this does is to run the lab. It brings up an
+isolated network with its own resolver, its own upstream and seven synthetic
+clients, and produces findings in about a minute:
+
+```bash
+git clone https://github.com/jameshoulder/dnsdaddy.git
+cd dnsdaddy
+docker compose --profile lab up --build
+# dashboard: http://127.0.0.1:8081   password: dnsdaddy-lab-demo-password
+```
+
+```
+$ dnsdaddy-lab -scenario all -speed 10
+▶ dns-tunnelling — 384 queries over 6m0s (replayed in ~36s)
+▶ nxdomain-anomaly — 719 queries over 6m0s
+▶ normal-dns — 117 queries over 6m0s
+▶ high-entropy-subdomains — 522 queries over 6m0s
+...
+
+normal-dns                 172.30.0.31  no findings
+dns-tunnelling             172.30.0.32  dns_tunnel_suspected (high)
+high-entropy-subdomains    172.30.0.33  no findings
+nxdomain-anomaly           172.30.0.34  nxdomain_burst (medium)
+suspicious-txt             172.30.0.35  txt_activity_anomaly (medium)
+dga-simulation             172.30.0.36  dga_like_domains (medium)
+beaconing                  172.30.0.37  dns_beaconing_suspected (medium)
+```
+
+Nothing leaves the machine. Every name is under `.example` or `.test`, and the
+upstream is a synthetic responder that ships with the lab — there is no
+malicious infrastructure involved because there is none to involve.
+
+The two `no findings` lines are the interesting ones.
+[`high-entropy-subdomains`](labs/high-entropy-subdomains.md) generates labels
+that are genuinely random — indistinguishable from a tunnel's payload by
+entropy alone — and asserts that nothing fires.
+
+Everything is seeded, so the same command produces the same traffic every time.
+See [labs/README.md](labs/README.md).
+
+> **Screenshots welcome.** There are none in this repository yet, and a
+> pull request adding a few of the dashboard would be a genuinely useful
+> contribution.
 
 ## Install
 
@@ -178,6 +230,79 @@ Go 1.25.12+, no cgo, no npm. The dashboard is embedded in the binary.
 Setup instructions for pfSense, OPNsense, UniFi, FortiGate, Windows Server, and
 roaming clients are in **[docs/integrations.md](docs/integrations.md)**.
 
+## Detection, and what it deliberately does not do
+
+Blocking a domain because it is on a threat feed is a solved problem, and DNS
+Daddy does it. The more interesting question is what you can tell from the
+traffic itself when no feed has heard of the domain yet.
+
+Six detectors watch the query stream and raise explainable findings:
+
+| | Looks for |
+|---|---|
+| `dns_tunnel` | DNS being used as a data carrier |
+| `dga_like` | Algorithmically generated rendezvous domains |
+| `nxdomain_anomaly` | A host working through a list of names that do not exist |
+| `txt_anomaly` | TXT records used for something other than mail policy |
+| `dns_beaconing` | Queries arriving on a machine's schedule, not a person's |
+| `resolution_failure` | Domains that have stopped resolving upstream |
+
+**None of them block anything, and that is the design rather than an unfinished
+feature.** These are heuristics that infer intent from traffic shape. They have
+false positives — that is inherent, not a tuning problem — and a false positive
+turned into a block is a working service silently broken at a time nobody chose.
+Blocking stays with the threat feeds, where a human established the domain was
+malicious. Detection observes, scores, explains and alerts.
+
+**All six are experimental.** Their thresholds are calibrated against synthetic
+traffic, not a production network, and nobody has yet measured a real
+false-positive rate. Every finding says so, in a `maturity` field.
+
+A finding is not "suspicious DNS traffic". It is the measurements:
+
+```
+Possible DNS tunnelling — high, confidence 0.98
+
+  127.0.0.3 queried 384 distinct subdomains of tunnel.example across 384
+  lookups in 5m0s. Mean label entropy 4.45 bits/char, mean name length 113
+  characters, 100% encoded-looking labels, 100% payload-capable record types,
+  0% NXDOMAIN.
+
+  signal                    measured    band         weight  contributed
+  unique_subdomains              384    20 – 200       0.28         0.28
+  mean_subdomain_entropy        4.45    3.2 – 4.2      0.18         0.18
+  mean_qname_length              113    45 – 100       0.14         0.14
+  max_label_length                55    30 – 63        0.10         0.08
+  encoded_label_ratio           1.00    0.25 – 0.85    0.12         0.12
+  payload_qtype_ratio           1.00    0.10 – 0.60    0.10         0.10
+  nxdomain_ratio                0.00    0.20 – 0.80    0.08         0.00
+                                                        score        0.90
+```
+
+*(Real output from the `dns-tunnelling` lab scenario, below — not a mock-up.)*
+
+The contributions sum to the score, so an analyst can check the arithmetic.
+**No single measurement can raise a finding** — the tunnelling detector requires
+at least three of seven signals, which is the concrete answer to "high entropy
+means malicious". It does not.
+
+**See it happen, offline, in about a minute:**
+
+```bash
+docker compose --profile lab up --build
+# dashboard: http://127.0.0.1:8081   password: dnsdaddy-lab-demo-password
+```
+
+Seven scenarios on an isolated network, with their own synthetic upstream.
+Nothing leaves the machine and no malicious infrastructure is involved — every
+name is under `.example` or `.test`. Two of the seven are designed to produce
+**no** findings, and they are the useful ones: a detection demo that only ever
+shows detections teaches you nothing about the false positives you will actually
+spend your time on.
+
+Full detail: **[docs/detection/README.md](docs/detection/README.md)** ·
+**[labs/README.md](labs/README.md)**
+
 ## Will it run on a $5 box?
 
 Yes — that is the design target. A 1 GB / 1 vCPU Nanode is the reference
@@ -228,20 +353,40 @@ curl -H "Authorization: Bearer dnsd_…" https://dns.example.co.uk/api/v1/overvi
 # This month's evidence pack, ready to forward
 curl -H "Authorization: Bearer dnsd_…" \
   'https://dns.example.co.uk/api/v1/reports/summary?days=30&format=markdown'
+
+# Behavioural findings as NDJSON, for a SIEM
+curl -H "Authorization: Bearer dnsd_…" \
+  'https://dns.example.co.uk/api/v1/findings/export?hours=24'
+
+# What this build says about its own detectors — generated from the running
+# code, so it cannot drift from what it does
+curl -H "Authorization: Bearer dnsd_…" https://dns.example.co.uk/api/v1/detectors
 ```
 
 Prometheus metrics are at `/metrics`.
 
 ## Documentation
 
+**[docs/](docs/) is a growing DNS-security knowledge base**, not just operating
+instructions — the concepts as well as the configuration, because a control you
+do not understand is one you cannot judge.
+
 | | |
 |---|---|
+| **[docs/capabilities.md](docs/capabilities.md)** | **Available / experimental / planned. Start here.** |
+| [docs/threat-model.md](docs/threat-model.md) | Assets, boundaries, actors, threats, mitigations, residual risk |
+| [docs/detection/](docs/detection/) | Detection engineering, the finding schema, ATT&CK policy, tunnelling in depth |
+| [docs/threat-hunting/](docs/threat-hunting/) | Six hunts you can run against telemetry this actually produces |
+| [docs/dns-security/](docs/dns-security/) | Protective DNS, DNSSEC, DoH/DoT and bypass |
+| [labs/](labs/) | The offline lab and its seven scenarios |
+| [docs/siem.md](docs/siem.md) | Wazuh, Elastic, Splunk, Sentinel |
+| [docs/roadmap.md](docs/roadmap.md) | What might come next, and what would have to be true first |
 | [docs/deploy.md](docs/deploy.md) | Nanode walkthrough, TLS, firewalling, backups, upgrades |
 | [docs/integrations.md](docs/integrations.md) | pfSense, OPNsense, UniFi, FortiGate, Windows, roaming clients, blocking DoH bypass |
 | [docs/threat-intel.md](docs/threat-intel.md) | Every default feed, where it comes from, and how to handle a false positive |
 | [docs/privacy.md](docs/privacy.md) | What is stored, for how long, and how to store less |
 | [docs/architecture.md](docs/architecture.md) | How a query flows through the system, and why it is built this way |
-| [SECURITY.md](SECURITY.md) | Threat model and vulnerability disclosure |
+| [SECURITY.md](SECURITY.md) | Vulnerability disclosure |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup and house style |
 
 ## Where the blocking comes from
@@ -263,8 +408,16 @@ Full detail, including how to handle a false positive: **[docs/threat-intel.md](
 Worth knowing before you rely on this:
 
 - **Forwarding, not recursive.** DNS Daddy forwards to upstream resolvers
-  rather than walking the root zone itself. It does not validate DNSSEC — it
-  passes signatures through and relies on the upstream to validate.
+  rather than walking the root zone itself.
+- **It does not validate DNSSEC.** It asks the upstream for its verdict and
+  records it per query, which is a strictly weaker statement — a lying upstream
+  will happily claim an answer was validated. Local validation is on the
+  roadmap. [docs/dns-security/dnssec.md](docs/dns-security/dnssec.md) is
+  explicit about what the telemetry is and is not worth.
+- **Behavioural detection is experimental and alert-only.** The thresholds come
+  from synthetic traffic. Nothing is blocked on a heuristic, and a slow tunnel
+  or a word-list DGA will not be caught at all —
+  [docs/capabilities.md](docs/capabilities.md) lists what each detector misses.
 - **Browser DoH bypasses it.** Any device can resolve over HTTPS directly to a
   public resolver and skip you entirely. Mitigations are real but need
   configuring; see [docs/integrations.md](docs/integrations.md#stopping-doh-bypass).
@@ -273,8 +426,17 @@ Worth knowing before you rely on this:
 - **No SSO, RBAC, or multi-tenancy.** A single admin password plus API tokens.
 - **`safeSearch` is accepted by the API but not yet enforced.** It is in the
   policy model; the resolver does not act on it.
+- **No per-client rate limiting.** One authorised client can saturate the
+  resolver.
+- **DNS rebinding is not mitigated.** Private addresses are not filtered out of
+  upstream answers.
 
-Tracked in [issues](https://github.com/jameshoulder/dnsdaddy/issues).
+**[docs/capabilities.md](docs/capabilities.md) is the full picture** — what is
+available, what is experimental, and what is only planned. If you find a claim
+anywhere in this repository that page does not support, that is a bug worth
+reporting.
+
+Also tracked in [issues](https://github.com/jameshoulder/dnsdaddy/issues).
 
 ## Security testing and review
 
@@ -351,6 +513,25 @@ every bit as appreciated — genuinely more so, if you have security experience
 and are willing to
 [poke holes in it](#contributing-and-security-review). Code, bug reports and
 coffee, all gratefully accepted.
+
+## Project status
+
+**Actively developed, experimental, unaudited, and free — permanently.**
+
+| | |
+|---|---|
+| Maintained by | One person, in spare time |
+| Licence | Apache-2.0, no commercial edition planned or possible |
+| Independent security review | **None.** This is the caveat that qualifies every other line. |
+| Core DNS resolution | Stable. Tested, fuzzed, and unchanged in shape since the first release. |
+| Behavioural detection | **Experimental.** Thresholds from synthetic traffic; no measured false-positive rate. |
+| API | Versioned at `/api/v1`, with an OpenAPI spec served by each build |
+| Finding schema | Version 1.0. Additive changes only within 1.x. |
+| Breaking changes | Recorded in [CHANGELOG.md](CHANGELOG.md) |
+
+What would most improve this project is not a feature. It is somebody running
+the detectors on a real network and reporting what fired and whether it was
+real. See [docs/roadmap.md](docs/roadmap.md).
 
 ## Licence
 
