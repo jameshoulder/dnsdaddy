@@ -25,6 +25,8 @@ type Config struct {
 	Log     Logging `yaml:"log"`
 	Cache   Cache   `yaml:"cache"`
 	Feeds   Feeds   `yaml:"feeds"`
+	// Detection is the behavioural detection engine. It is alert-only.
+	Detection Detection `yaml:"detection"`
 }
 
 // DNS holds the resolver-side settings: what we listen on and where we forward.
@@ -57,6 +59,96 @@ type DNS struct {
 	// RefuseANY answers ANY queries per RFC 8482 instead of forwarding them.
 	// ANY responses are large and are a standard DNS amplification lever.
 	RefuseANY bool `yaml:"refuse_any"`
+
+	// DNSSECTelemetry sets the AD bit on outgoing queries so a validating
+	// upstream reports whether it authenticated each answer (RFC 6840 §5.7).
+	//
+	// This is not DNSSEC validation. DNS Daddy forwards rather than validating
+	// locally, and this records the upstream's verdict — a weaker statement,
+	// made honestly. It does not request DNSSEC records, so response sizes are
+	// unchanged, and the AD bit is stripped again for clients that did not ask
+	// for it. On by default because it costs nothing and turns an untestable
+	// claim about upstream configuration into a measurement.
+	DNSSECTelemetry bool `yaml:"dnssec_telemetry"`
+}
+
+// Detection controls the behavioural detection engine (internal/detect).
+//
+// Nothing in this section can block a query. The engine observes, scores,
+// explains and alerts; enforcement stays with the reputation and policy
+// engine, which is driven by curated threat intelligence rather than by
+// inference. See docs/detection/README.md.
+type Detection struct {
+	// Enabled turns the whole engine on or off. On by default: it is
+	// alert-only, bounded in memory, and off the resolution path.
+	Enabled bool `yaml:"enabled"`
+
+	// BufferSize bounds the observation queue handed over by the DNS path.
+	// When it is full, observations are dropped and counted rather than
+	// making a lookup wait.
+	BufferSize int `yaml:"buffer_size"`
+
+	// EvalInterval is how often closed observation windows are scored.
+	EvalInterval Duration `yaml:"eval_interval"`
+
+	// Cooldown suppresses repeat findings for the same subject and event type.
+	// Without it an ongoing problem produces one alert per window until
+	// somebody stops reading them.
+	Cooldown Duration `yaml:"cooldown"`
+
+	// MinSeverity drops findings below this level before they are stored or
+	// exported: info, low, medium, high.
+	MinSeverity string `yaml:"min_severity"`
+
+	// RetentionDays is how long findings are kept. They outlive the raw query
+	// log by default because "has this host done this before?" is a
+	// months-scale question and a finding is a few kilobytes where the traffic
+	// behind it was thousands of rows.
+	RetentionDays int `yaml:"retention_days"`
+
+	// ExcludedDomains adds to the built-in list of parent domains that are
+	// exempt from behavioural findings — reputation services, CDNs and the
+	// like, whose normal operation is shaped exactly like the behaviour these
+	// detectors hunt for. Matching is suffix-based.
+	ExcludedDomains []string `yaml:"excluded_domains"`
+
+	// DisableDefaultExclusions removes the built-in exclusions entirely.
+	//
+	// Supported because a lab wants detections to fire on traffic the defaults
+	// would suppress, and because an operator running no mail or endpoint
+	// security on the monitored network may want the tightest possible net.
+	// On a normal network the defaults are what make the detectors usable, so
+	// this is off.
+	DisableDefaultExclusions bool `yaml:"disable_default_exclusions"`
+
+	// FindingsFile writes findings as newline-delimited JSON for a log
+	// shipper to tail. Relative paths are resolved inside data_dir. Empty
+	// disables the file. See docs/siem.md.
+	FindingsFile string `yaml:"findings_file"`
+
+	// FindingsFileMaxBytes triggers rotation of the NDJSON file.
+	FindingsFileMaxBytes int64 `yaml:"findings_file_max_bytes"`
+
+	// FindingsFileKeep is how many rotated NDJSON files to retain.
+	FindingsFileKeep int `yaml:"findings_file_keep"`
+
+	// WindowScale multiplies every detector's observation window.
+	//
+	// 1.0 is production and is what the thresholds were calibrated against.
+	// Lower values exist for demonstrations: the lab profile pairs
+	// window_scale 0.1 with `dnsdaddy-lab -speed 10` so a scenario produces a
+	// finding in under a minute instead of after five.
+	//
+	// The two must move together. Scaling the window without scaling the
+	// traffic puts a tenth as many queries in each window, which drops most
+	// scenarios below the detectors' minimum-volume gates and produces
+	// silence — the opposite of what a demonstration wants. Scaling the
+	// traffic without scaling the window is harmless but pointless.
+	//
+	// Not a tuning knob for a real deployment. Shortening the window makes
+	// every rate-based signal noisier without making the detectors more
+	// sensitive, because the volume gates do not scale with it.
+	WindowScale float64 `yaml:"window_scale"`
 }
 
 // HTTP holds the management API and dashboard settings.
@@ -183,6 +275,7 @@ func Default() Config {
 			// Opening it up is a deliberate edit, not the fallback.
 			AllowedClientCIDRs: append([]string(nil), DefaultAllowedClientCIDRs...),
 			RefuseANY:          true,
+			DNSSECTelemetry:    true,
 		},
 		HTTP: HTTP{
 			Listen:        ":8080",
@@ -208,6 +301,23 @@ func Default() Config {
 			RefreshOnStart:  true,
 			HTTPTimeout:     Duration(90 * time.Second),
 			MaxFeedBytes:    128 << 20,
+		},
+		Detection: Detection{
+			Enabled:      true,
+			BufferSize:   4096,
+			EvalInterval: Duration(30 * time.Second),
+			Cooldown:     Duration(15 * time.Minute),
+			// Info-level findings are telemetry rather than alerts, and
+			// storing them on a busy network would bury the rest.
+			MinSeverity:   "low",
+			RetentionDays: 30,
+			// Off by default: an operator who wants findings shipped to a SIEM
+			// should say so, because the file is browsing history in a second
+			// place and that is their decision to make, not a default.
+			FindingsFile:         "",
+			FindingsFileMaxBytes: 32 << 20,
+			FindingsFileKeep:     3,
+			WindowScale:          1,
 		},
 	}
 }
@@ -261,6 +371,9 @@ func applyEnv(cfg *Config) error {
 	envStr("DNSDADDY_BASE_URL", &cfg.HTTP.BaseURL)
 	envStr("DNSDADDY_SECURE_COOKIES", &cfg.HTTP.SecureCookies)
 	envStr("DNSDADDY_LOCAL_FEED_DIR", &cfg.Feeds.LocalFeedDir)
+	envStr("DNSDADDY_DETECTION_MIN_SEVERITY", &cfg.Detection.MinSeverity)
+	envStr("DNSDADDY_DETECTION_FINDINGS_FILE", &cfg.Detection.FindingsFile)
+	envList("DNSDADDY_DETECTION_EXCLUDED_DOMAINS", &cfg.Detection.ExcludedDomains)
 	envList("DNSDADDY_TRUSTED_PROXY_CIDRS", &cfg.HTTP.TrustedProxyCIDRs)
 	envList("DNSDADDY_ALLOWED_CLIENT_CIDRS", &cfg.DNS.AllowedClientCIDRs)
 
@@ -279,6 +392,15 @@ func applyEnv(cfg *Config) error {
 	for _, step := range []func() error{
 		func() error { return envBool("DNSDADDY_ALLOW_PUBLIC_RESOLVER", &cfg.DNS.AllowPublicResolver) },
 		func() error { return envBool("DNSDADDY_REFUSE_ANY", &cfg.DNS.RefuseANY) },
+		func() error { return envBool("DNSDADDY_DNSSEC_TELEMETRY", &cfg.DNS.DNSSECTelemetry) },
+		func() error { return envBool("DNSDADDY_DETECTION_ENABLED", &cfg.Detection.Enabled) },
+		func() error {
+			return envBool("DNSDADDY_DETECTION_DISABLE_DEFAULT_EXCLUSIONS", &cfg.Detection.DisableDefaultExclusions)
+		},
+		func() error { return envInt("DNSDADDY_DETECTION_RETENTION_DAYS", &cfg.Detection.RetentionDays) },
+		func() error { return envDur("DNSDADDY_DETECTION_EVAL_INTERVAL", &cfg.Detection.EvalInterval) },
+		func() error { return envDur("DNSDADDY_DETECTION_COOLDOWN", &cfg.Detection.Cooldown) },
+		func() error { return envFloat("DNSDADDY_DETECTION_WINDOW_SCALE", &cfg.Detection.WindowScale) },
 		func() error { return envBool("DNSDADDY_ALLOW_UNTOKENIZED_DOH", &cfg.HTTP.AllowUntokenizedDoH) },
 		func() error { return envBool("DNSDADDY_QUERY_LOG", &cfg.Log.QueryLog) },
 		func() error { return envBool("DNSDADDY_LOG_CLIENT_IP", &cfg.Log.LogClientIP) },
@@ -340,6 +462,19 @@ func envInt(key string, dst *int) error {
 		return fmt.Errorf("%s=%q is not a valid integer: %w", key, v, err)
 	}
 	*dst = n
+	return nil
+}
+
+func envFloat(key string, dst *float64) error {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		return fmt.Errorf("%s=%q is not a valid number: %w", key, v, err)
+	}
+	*dst = f
 	return nil
 }
 
@@ -407,6 +542,23 @@ func (c *Config) validate() error {
 	}
 	if _, err := parsePrefixes(c.DNS.AllowedClientCIDRs); err != nil {
 		return fmt.Errorf("dns.allowed_client_cidrs: %w", err)
+	}
+
+	switch strings.ToLower(c.Detection.MinSeverity) {
+	case "", "info", "low", "medium", "high":
+	default:
+		return fmt.Errorf("detection.min_severity must be info, low, medium, or high, got %q",
+			c.Detection.MinSeverity)
+	}
+	if c.Detection.RetentionDays < 0 {
+		return fmt.Errorf("detection.retention_days must not be negative")
+	}
+	if c.Detection.EvalInterval.D() > 0 && c.Detection.EvalInterval.D() < time.Second {
+		return fmt.Errorf("detection.eval_interval must be at least 1s")
+	}
+	if c.Detection.WindowScale != 0 && (c.Detection.WindowScale < 0.01 || c.Detection.WindowScale > 10) {
+		return fmt.Errorf("detection.window_scale must be between 0.01 and 10, got %v",
+			c.Detection.WindowScale)
 	}
 
 	return c.validateNotAnOpenResolver()
@@ -499,3 +651,17 @@ func (c *Config) DBPath() string { return filepath.Join(c.DataDir, "dnsdaddy.db"
 
 // SecretPath returns the location of the generated cookie-signing secret.
 func (c *Config) SecretPath() string { return filepath.Join(c.DataDir, "session.key") }
+
+// FindingsFilePath resolves detection.findings_file against the data
+// directory, so a relative path lands beside the database rather than wherever
+// the process happens to have been started from. Empty means no file sink.
+func (c *Config) FindingsFilePath() string {
+	p := strings.TrimSpace(c.Detection.FindingsFile)
+	if p == "" {
+		return ""
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(c.DataDir, p)
+}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
@@ -24,15 +25,18 @@ import (
 
 // Deps are everything the API needs to serve.
 type Deps struct {
-	Config    config.Config
-	Store     *store.Store
-	Engine    *policy.Engine
-	Feeds     *blocklist.Manager
-	Lists     *blocklist.Holder
-	Resolver  *resolver.Resolver
-	DNS       *dnsserver.Handler
-	DoH       *dnsserver.DoHHandler
-	QueryLog  *querylog.Logger
+	Config   config.Config
+	Store    *store.Store
+	Engine   *policy.Engine
+	Feeds    *blocklist.Manager
+	Lists    *blocklist.Holder
+	Resolver *resolver.Resolver
+	DNS      *dnsserver.Handler
+	DoH      *dnsserver.DoHHandler
+	QueryLog *querylog.Logger
+	// Detector is the behavioural detection engine, or nil when detection is
+	// switched off. Every handler that touches it must tolerate nil.
+	Detector  *detect.Engine
 	Auth      *Auth
 	Log       *slog.Logger
 	StartedAt time.Time
@@ -87,6 +91,14 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/resolvers", a.handleResolvers)
 	api.HandleFunc("GET /api/v1/settings", a.handleSettings)
 	api.HandleFunc("GET /api/v1/reports/summary", a.handleReportSummary)
+
+	// Behavioural findings. Read-only: there is nothing to configure here
+	// because these detectors do not enforce anything.
+	api.HandleFunc("GET /api/v1/findings", a.handleListFindings)
+	api.HandleFunc("GET /api/v1/findings/summary", a.handleFindingsSummary)
+	api.HandleFunc("GET /api/v1/findings/export", a.handleExportFindings)
+	api.HandleFunc("GET /api/v1/findings/{id}", a.handleGetFinding)
+	api.HandleFunc("GET /api/v1/detectors", a.handleDetectors)
 
 	api.HandleFunc("GET /api/v1/networks", a.handleListNetworks)
 	api.HandleFunc("POST /api/v1/networks", a.handleCreateNetwork)

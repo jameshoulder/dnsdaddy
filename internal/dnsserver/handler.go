@@ -14,6 +14,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
@@ -30,6 +31,11 @@ type Handler struct {
 	lists    *blocklist.Holder
 	qlog     *querylog.Logger
 	log      *slog.Logger
+
+	// detector receives a copy of every query for behavioural analysis. It is
+	// nil-safe and never blocks: detect.Engine drops observations rather than
+	// delaying a lookup. Nothing it produces can change this handler's answer.
+	detector *detect.Engine
 
 	logClientIP     bool
 	queryLogEnabled bool
@@ -62,6 +68,9 @@ type HandlerOptions struct {
 	// RefuseANY answers ANY queries locally per RFC 8482 rather than
 	// forwarding them.
 	RefuseANY bool
+	// Detector, when set, receives an observation per query. Alert-only: see
+	// Handler.observe.
+	Detector *detect.Engine
 }
 
 // NewHandler wires the resolution path together.
@@ -87,6 +96,7 @@ func NewHandler(
 		queryLogEnabled: o.QueryLogEnabled,
 		refuseANY:       o.RefuseANY,
 		allowedClients:  o.AllowedClients,
+		detector:        o.Detector,
 		timeout:         timeout,
 	}
 }
@@ -265,7 +275,9 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		event.Action = store.ActionBlocked
 		event.ElapsedMS = int(time.Since(start).Milliseconds())
 		h.qlog.Record(event, persist)
-		return blockResponse(req, decision.BlockMode)
+		resp := blockResponse(req, decision.BlockMode)
+		h.observe(event, meta, resp.Rcode, 0, false, true)
+		return resp
 	}
 
 	rctx, cancel := context.WithTimeout(ctx, h.timeout)
@@ -278,18 +290,72 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		h.errors.Add(1)
 		event.Action = store.ActionError
 		event.Reason = "Upstream resolution failed: " + err.Error()
+		// Every upstream failing is not the same event as an upstream saying
+		// SERVFAIL, but from a client's seat the two are indistinguishable and
+		// the resolution-failure detector wants to see both.
+		event.DNSSEC = store.DNSSECServfail
 		h.qlog.Record(event, persist)
+		h.observe(event, meta, dns.RcodeServerFailure, 0, false, false)
 		h.log.Debug("resolution failed", "domain", normalized, "error", err)
 		return errorResponse(req, dns.RcodeServerFailure)
 	}
 
 	event.Action = store.ActionAllowed
 	event.Cached = res.Cached
+	event.DNSSEC = dnssecStatus(res.Rcode, res.Validated)
 	if event.Reason == "" {
 		event.Reason = "Resolved"
 	}
 	h.qlog.Record(event, persist)
+	h.observe(event, meta, res.Rcode, res.MinTTL, res.Validated, false)
 	return res.Msg
+}
+
+// dnssecStatus maps an upstream outcome onto the recorded DNSSEC status.
+//
+// The naming is deliberately cautious. "unvalidated" means no AD bit came
+// back, which covers an unsigned zone and an upstream that does not validate
+// equally — a forwarder cannot tell those apart. Calling it "insecure" would
+// borrow DNSSEC's specific meaning of "provably unsigned", which is a stronger
+// claim than this measurement supports.
+func dnssecStatus(rcode int, validated bool) string {
+	switch {
+	case rcode == dns.RcodeServerFailure:
+		return store.DNSSECServfail
+	case validated:
+		return store.DNSSECValidated
+	default:
+		return store.DNSSECUnvalidated
+	}
+}
+
+// observe hands a copy of the query to the detection engine.
+//
+// Deliberately the last thing done on every path, after the response is
+// already decided. Behavioural detection must not be able to influence what a
+// client is told: it exists to explain traffic after the fact, and giving a
+// heuristic a vote on an answer is how a false positive becomes an outage.
+//
+// detect.Engine.Observe is nil-safe and non-blocking, so this costs one struct
+// copy and a channel send that gives up immediately when the queue is full.
+func (h *Handler) observe(e store.QueryEvent, meta requestMeta, rcode int, minTTL uint32, validated, blocked bool) {
+	if h.detector == nil {
+		return
+	}
+	h.detector.Observe(detect.Observation{
+		Time:              e.Time,
+		ClientIP:          e.ClientIP,
+		ClientName:        e.ClientName,
+		NetworkID:         e.NetworkID,
+		QName:             e.Domain,
+		QType:             e.QType,
+		Proto:             meta.proto,
+		Rcode:             dns.RcodeToString[rcode],
+		Blocked:           blocked,
+		Cached:            e.Cached,
+		AnswerTTL:         minTTL,
+		AuthenticatedData: validated,
+	})
 }
 
 // Stats reports handler counters.

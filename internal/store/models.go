@@ -89,7 +89,29 @@ type QueryEvent struct {
 	Proto      string    `json:"proto"`
 	ElapsedMS  int       `json:"elapsedMs"`
 	Cached     bool      `json:"cached"`
+	// DNSSEC is the validation status the upstream reported. DNS Daddy
+	// forwards rather than validating locally, so this is the upstream's
+	// conclusion, not ours. See the DNSSEC* constants.
+	DNSSEC string `json:"dnssec,omitempty"`
 }
+
+// DNSSEC validation statuses recorded against a query.
+//
+// These describe what the *upstream* resolver concluded, because that is the
+// only thing a forwarder can observe. In particular DNSSECUnvalidated does not
+// mean "provably unsigned" — it means no AD bit came back, which covers an
+// unsigned zone and an upstream that does not validate equally. Claiming to
+// distinguish them would be claiming to do validation we do not do.
+const (
+	// DNSSECValidated: the upstream set the AD bit, having validated the
+	// answer against the chain of trust.
+	DNSSECValidated = "validated"
+	// DNSSECUnvalidated: an answer came back without the AD bit.
+	DNSSECUnvalidated = "unvalidated"
+	// DNSSECServfail: the upstream returned SERVFAIL. A failed DNSSEC
+	// validation is one cause among several; see internal/detect.
+	DNSSECServfail = "servfail"
+)
 
 // Client is an operator-assigned friendly name for a device IP.
 type Client struct {

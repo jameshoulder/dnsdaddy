@@ -84,6 +84,25 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metric(&b, "dnsdaddy_querylog_dropped_total", "Events dropped because the buffer was full", "counter",
 		fmt.Sprintf("dnsdaddy_querylog_dropped_total %d", dropped))
 
+	// Detection engine. dnsdaddy_detection_dropped_total is the one to alert
+	// on: it counts observations the engine never saw because its queue was
+	// full, which means a detection gap rather than an absence of findings.
+	if lines := detectionStatsLines(a.Detector); len(lines) > 0 {
+		metric(&b, "dnsdaddy_detection_observations_total",
+			"Queries handed to the behavioural detection engine", "counter", lines...)
+
+		var findingLines []string
+		for _, c := range a.Detector.Counts() {
+			findingLines = append(findingLines,
+				fmt.Sprintf("dnsdaddy_detection_finding_events_total{event_type=%q,severity=%q} %d",
+					c.EventType, string(c.Severity), c.Count))
+		}
+		if len(findingLines) > 0 {
+			metric(&b, "dnsdaddy_detection_finding_events_total",
+				"Findings emitted, by event type and severity", "counter", findingLines...)
+		}
+	}
+
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	metric(&b, "dnsdaddy_memory_bytes", "Memory obtained from the OS", "gauge",
