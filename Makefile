@@ -13,6 +13,22 @@ help: ## Show this help
 build: ## Build the binary for this machine
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/dnsdaddy ./cmd/dnsdaddy
 
+.PHONY: build-lab
+build-lab: ## Build the lab traffic generator and synthetic responder
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/dnsdaddy-lab ./cmd/dnsdaddy-lab
+
+.PHONY: lab
+lab: ## Start the isolated demo lab in Docker (dashboard on :8081)
+	docker compose --profile lab up --build -d
+	@echo
+	@echo "  Lab running. Dashboard:  http://127.0.0.1:8081"
+	@echo "  Password:                dnsdaddy-lab-demo-password"
+	@echo "  Findings appear after about a minute; see labs/README.md"
+
+.PHONY: lab-down
+lab-down: ## Stop the lab and delete its data (does not touch a production deployment)
+	docker compose --profile lab down -v
+
 .PHONY: run
 run: ## Run locally on high ports with data in ./tmp (no root needed)
 	@mkdir -p tmp

@@ -70,6 +70,20 @@ dns:
   # them. ANY replies are large and are the classic DNS amplification lever.
   refuse_any: true
 
+  # Set the AD bit on outgoing queries so a validating upstream reports whether
+  # it authenticated each answer (RFC 6840 s5.7), recorded per query as
+  # validated / unvalidated / servfail.
+  #
+  # This is NOT DNSSEC validation. DNS Daddy forwards rather than validating
+  # locally, so what this records is the upstream's verdict — a weaker
+  # statement, made honestly. It does not request DNSSEC records, so response
+  # sizes are unchanged, and the AD bit is stripped again before answering a
+  # client that did not ask for it (RFC 4035 s3.2.3).
+  #
+  # See docs/dns-security/dnssec.md for what each status can and cannot tell
+  # you, and why "unvalidated" is not the same as "insecure".
+  dnssec_telemetry: true
+
 http:
   # Dashboard and management API. Bind to loopback and put a reverse proxy in
   # front if this server faces the internet.
@@ -166,3 +180,94 @@ feeds:
   #
   #   local_feed_dir: /etc/dnsdaddy/feeds.d
   local_feed_dir: ""
+
+# ---------------------------------------------------------------------------
+# Behavioural detection
+# ---------------------------------------------------------------------------
+#
+# The detection engine watches query behaviour and raises explainable findings:
+# DNS tunnelling, beaconing, NXDOMAIN bursts, unusual TXT activity, DGA-like
+# domains, and persistent resolution failures.
+#
+# NOTHING HERE BLOCKS ANYTHING. These are heuristics. They observe, score,
+# explain and alert; enforcement stays with the policy and threat-feed engine,
+# which is driven by curated intelligence rather than inference. A false
+# positive turned into a block is a working service silently broken, and no
+# confidence score makes that a good trade.
+#
+# Every detector is currently EXPERIMENTAL: the thresholds are calibrated
+# against the synthetic corpora in internal/detect, not against a production
+# network. See docs/detection/README.md.
+detection:
+  # Alert-only, bounded in memory, and off the resolution path, so this is on
+  # by default.
+  enabled: true
+
+  # Observation queue between the DNS path and the engine. When it is full,
+  # observations are dropped and counted (dnsdaddy_detection_dropped_total)
+  # rather than making a lookup wait. Alert on that metric: it means a
+  # detection gap, not an absence of findings.
+  buffer_size: 4096
+
+  # How often closed observation windows are scored.
+  eval_interval: 30s
+
+  # Suppress repeat findings for the same subject and event type. Without it,
+  # an ongoing problem produces one alert per window until somebody stops
+  # reading them.
+  cooldown: 15m
+
+  # Drop findings below this level: info, low, medium, high.
+  min_severity: low
+
+  # Findings outlive the raw query log, because "has this host done this
+  # before?" is a months-scale question and a finding is a few kilobytes where
+  # the traffic behind it was thousands of rows.
+  retention_days: 30
+
+  # Write findings as newline-delimited JSON for a log shipper to tail. A
+  # relative path lands inside data_dir. Empty disables it.
+  #
+  # Off by default: this is browsing history in a second place, and that is the
+  # operator's decision rather than a default. See docs/siem.md for Wazuh,
+  # Elastic, Splunk and Sentinel configurations.
+  findings_file: ""
+  findings_file_max_bytes: 33554432
+  findings_file_keep: 3
+
+  # Parent domains exempt from behavioural findings, in addition to the
+  # built-in list.
+  #
+  # Some services legitimately do exactly what these detectors hunt for.
+  # Anti-spam blocklists and endpoint file-reputation services encode the thing
+  # being checked into a DNS label — thousands of unique, high-entropy names an
+  # hour — which is a DNS tunnel's exact traffic profile, performed honestly.
+  # CDNs issue per-request hostnames. IPv6 reverse DNS is 32 hex labels per
+  # lookup.
+  #
+  # The built-in list (internal/detect/exclusions.go) covers the common
+  # providers and .arpa. Add your own mail gateway, endpoint vendor or SaaS
+  # provider here. Matching is suffix-based, so an entry covers everything
+  # beneath it.
+  #
+  # This changes whether a FINDING is raised. It never changes whether a domain
+  # resolves — it is not an allow-list for blocking.
+  excluded_domains: []
+  #   - "reputation.your-av-vendor.example"
+  #   - "gateway.your-mail-filter.example"
+
+  # Remove the built-in exclusions entirely. Supported for labs, where you want
+  # detections to fire on traffic the defaults would suppress, and for networks
+  # running no mail or endpoint security at all. On a normal network the
+  # defaults are what make the detectors usable.
+  disable_default_exclusions: false
+
+  # Multiply every detector's observation window. 1.0 is production.
+  #
+  # DEMONSTRATION SETTING, NOT A TUNING KNOB. The lab pairs 0.1 with traffic
+  # generated ten times faster so a scenario produces findings in under a
+  # minute. The two must move together: the detectors' minimum-volume gates do
+  # not scale with the window, so compressing one without the other produces
+  # silence. Shortening the window on a real deployment makes rate-based
+  # signals noisier without making anything more sensitive.
+  window_scale: 1.0

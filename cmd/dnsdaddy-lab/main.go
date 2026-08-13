@@ -74,6 +74,7 @@ func run() error {
 		seed     = flag.Int64("seed", 1, "PRNG seed; the same seed reproduces the same traffic exactly")
 		speed    = flag.Float64("speed", 1, "time compression: 20 replays a 10-minute scenario in 30 seconds")
 		client   = flag.String("client", "", "source address to bind, overriding the scenario's own")
+		noBind   = flag.Bool("no-bind", false, "do not bind a source address; use when the container or host already provides a distinct client IP")
 		dry      = flag.Bool("dry-run", false, "print the queries without sending them")
 		quiet    = flag.Bool("quiet", false, "suppress per-query output")
 		sink     = flag.String("sink", "", "instead of generating traffic, run the lab's authoritative responder on this address")
@@ -104,6 +105,12 @@ func run() error {
 		src := sc.Client
 		if *client != "" {
 			src = *client
+		}
+		if *noBind {
+			// In a container the address is assigned from outside, so binding
+			// a loopback address would fail. The compose lab gives each
+			// scenario its own container with its own IP instead.
+			src = ""
 		}
 		if err := play(sc, *server, src, *seed, *speed, *dry, *quiet); err != nil {
 			return fmt.Errorf("scenario %s: %w", name, err)
