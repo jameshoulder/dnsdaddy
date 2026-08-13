@@ -491,7 +491,12 @@ func listScenarios() {
 func play(sc scenario, server, client string, seed int64, speed float64, dry, quiet bool) error {
 	// A fixed seed per scenario name keeps scenarios independent: adding one
 	// does not change the traffic any other scenario produces.
-	r := rand.New(rand.NewSource(seed + int64(len(sc.Name)))) //nolint:gosec // synthetic traffic, not security-sensitive
+	// #nosec G404 -- math/rand is the right choice here, not a compromise.
+	// Reproducibility is the requirement: the same seed must produce the same
+	// traffic so a demonstration recorded today can be reproduced next year and
+	// a CI assertion is not flaky. A cryptographic generator would make that
+	// impossible. Nothing here is a secret or a security decision.
+	r := rand.New(rand.NewSource(seed + int64(len(sc.Name))))
 	queries := sc.Build(r)
 
 	fmt.Printf("▶ %s — %d queries over %s", sc.Name, len(queries), sc.Duration)

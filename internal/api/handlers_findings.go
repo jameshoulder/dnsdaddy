@@ -164,6 +164,22 @@ func (a *API) handleExportFindings(w http.ResponseWriter, r *http.Request) {
 			// parsing line by line.
 			continue
 		}
+		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
+		// NDJSON, not HTML. The body is written a record at a time rather than
+		// marshalled as one array because that is the point of the format — a
+		// consumer processes a line at a time instead of buffering everything.
+		//
+		// Each line was produced by encoding/json in the detection engine and
+		// is re-checked with json.Valid above, so any domain name inside it is
+		// already JSON-escaped. Running it through html/template would corrupt
+		// the JSON rather than protect anyone. Content-Type is
+		// application/x-ndjson with nosniff, so a browser cannot be talked into
+		// reinterpreting it as markup.
+		//
+		// Consumers must still escape these values before rendering them: a
+		// domain name in a finding is an attacker-chosen string, and a SIEM
+		// dashboard that renders it as HTML has the problem this rule is about.
+		// Documented in docs/threat-model.md (T17).
 		if _, err := w.Write([]byte(line)); err != nil {
 			return
 		}
