@@ -111,6 +111,84 @@ expected, what happened, and the relevant log lines.
 For anything security-sensitive, use [SECURITY.md](SECURITY.md) instead — do not
 open a public issue.
 
+## The most useful thing you could contribute
+
+Not code.
+
+Every behavioural detector in this project is marked **experimental** because
+its thresholds are calibrated against synthetic traffic written from the same
+understanding of the problem that produced the detectors. That tests internal
+consistency. It says nothing about what they do on a real network with a mail
+gateway, an endpoint agent and four hundred laptops.
+
+**If a detector fires on something harmless on your network, that report is
+worth more than any feature.** There is
+[an issue template](https://github.com/jameshoulder/dnsdaddy/issues/new?template=false-positive.yml)
+for it. Naming the vendor or product is especially useful, because it may
+belong on the shipped exclusion list where everyone benefits.
+
+Second most useful: finding a design flaw. This sits in the resolution path of
+every lookup on a network and has had no independent security review. See
+[SECURITY.md](SECURITY.md) for anything sensitive.
+
+## Working on detection
+
+`internal/detect` has house rules that matter more than the code, and a PR that
+ignores them will get the same comments every time:
+
+**Write the benign corpus first.** For every pattern worth detecting there is
+legitimate traffic sharing its most obvious property — a CDN against a tunnel,
+a mail server against a TXT channel, a stale search suffix against an NXDOMAIN
+burst. If you cannot construct that corpus, you do not yet understand the false
+positives, and you are about to ship an alert somebody will mute.
+
+**No single signal may raise a finding**, or the detector must gate on the one
+signal that defines it. The tunnel detector requires three of seven; the
+beaconing detector gates on regularity itself.
+
+**Publish the bands.** A score that cannot be reproduced on paper from the
+numbers in the finding is not explainable, and an unexplainable finding is not
+actionable.
+
+**Bound the state.** This code is fed directly by untrusted network traffic.
+Use `newTracker`; never a plain map that grows with input.
+
+**Attach ATT&CK only with a rationale**, and mark hypotheses as hypotheses. No
+mapping is better than a decorative one — see
+[docs/detection/mitre.md](docs/detection/mitre.md).
+
+**Nothing blocks.** `Enforces` is false everywhere and a test asserts it.
+Changing that is a separate discussion that requires a measured false-positive
+rate first, not confidence.
+
+Full detail: [docs/detection/README.md](docs/detection/README.md#extending-it).
+
+## Claims discipline
+
+The rule the whole project runs on:
+
+> **Do not describe planned functionality in the present tense.**
+
+A security tool that overstates is worse than one that does less, because
+somebody will rely on the missing part.
+[docs/capabilities.md](docs/capabilities.md) is the source of truth, and a PR
+adding a capability updates it. A PR adding a *sentence* claiming a capability
+that does not exist will be asked to remove the sentence.
+
+## The lab
+
+```bash
+make build-lab
+bin/dnsdaddy-lab -sink 127.0.0.1:5300      # synthetic upstream
+bin/dnsdaddy-lab -scenario all -speed 10   # traffic
+```
+
+Or `make lab` for the Docker version. It is entirely offline and uses reserved
+domains, so demonstrating a detection never requires touching anyone else's
+infrastructure — and it is the fastest way to check that a change to a detector
+did what you meant. Two scenarios are supposed to produce nothing; if they
+start producing findings, you have introduced a false positive.
+
 ## Scope
 
 This project is meant to stay focused on a single organisation running a

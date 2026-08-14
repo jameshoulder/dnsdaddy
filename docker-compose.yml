@@ -154,5 +154,177 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ===========================================================================
+  # DNS Daddy Lab — docker compose --profile lab up
+  # ===========================================================================
+  #
+  # A completely isolated demonstration environment. It runs its own resolver,
+  # its own upstream, and its own synthetic clients on a private network, and
+  # touches nothing outside it: no query leaves the machine, and no malicious
+  # infrastructure is contacted, because there is none to contact.
+  #
+  #   docker compose --profile lab up --build
+  #   open http://127.0.0.1:8081        (password: dnsdaddy-lab-demo-password)
+  #
+  # Findings start appearing after about a minute. Tear it down with
+  # `docker compose --profile lab down -v`, which is safe: the lab keeps its
+  # own volume and never touches the production one.
+  #
+  # Why a second resolver rather than the main one:
+  #
+  #   The lab compresses detection windows (detection.window_scale) so that a
+  #   demonstration produces findings in a minute rather than five. That is a
+  #   demo setting, not a tuning knob, and it has no business being applied to
+  #   the instance answering a real network's DNS. Keeping them separate means
+  #   you can run the lab on the same box as a live deployment.
+
+  lab-sink:
+    profiles: [lab]
+    build:
+      context: .
+      target: lab
+    container_name: dnsdaddy-lab-sink
+    # Serves the synthetic zone the scenarios query. The attacker's domains
+    # resolve — a tunnel domain has to, or the tunnel does not work — and
+    # everything else answers NXDOMAIN, which is what a DGA's candidate list
+    # actually looks like from a resolver's seat.
+    command: ["-sink", "0.0.0.0:5300"]
+    networks:
+      lab:
+        ipv4_address: 172.30.0.10
+    restart: unless-stopped
+
+  lab-resolver:
+    profiles: [lab]
+    build:
+      context: .
+    container_name: dnsdaddy-lab-resolver
+    depends_on:
+      - lab-sink
+    environment:
+      # The lab's only upstream. Plain UDP to a container on a private
+      # network, which would be wrong for a real deployment and is exactly
+      # right here: it keeps the lab offline and removes TLS from the picture.
+      DNSDADDY_UPSTREAMS: "udp://172.30.0.10:5300"
+      DNSDADDY_ALLOWED_CLIENT_CIDRS: "172.30.0.0/16,127.0.0.0/8"
+      DNSDADDY_ADMIN_PASSWORD: "dnsdaddy-lab-demo-password"
+
+      # No feed downloads: the lab demonstrates behavioural detection, and
+      # pulling half a million domains would only slow the demo down.
+      DNSDADDY_FEED_REFRESH_ON_START: "false"
+
+      DNSDADDY_DETECTION_ENABLED: "true"
+      DNSDADDY_DETECTION_MIN_SEVERITY: "low"
+      DNSDADDY_DETECTION_EVAL_INTERVAL: "5s"
+      DNSDADDY_DETECTION_COOLDOWN: "2m"
+      DNSDADDY_DETECTION_FINDINGS_FILE: "findings.jsonl"
+
+      # Detection windows at a tenth of production, paired with traffic
+      # generated ten times faster below. The two must move together: the
+      # detectors' minimum-volume gates do not scale, so compressing the
+      # window without compressing the traffic produces silence.
+      DNSDADDY_DETECTION_WINDOW_SCALE: "0.1"
+
+      DNSDADDY_LOG_LEVEL: "info"
+      TZ: "${TZ:-UTC}"
+    ports:
+      # Loopback only, like the production service. Different ports so the lab
+      # can run alongside a real deployment on the same host.
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:5354:5353/udp"
+    volumes:
+      - dnsdaddy-lab-data:/var/lib/dnsdaddy
+    networks:
+      lab:
+        ipv4_address: 172.30.0.20
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  # --- synthetic clients -----------------------------------------------------
+  #
+  # One container per scenario, each with its own address, because most of the
+  # detectors are client-scoped: run every scenario from one IP and they blend
+  # into a single host doing everything at once, which is not what any of them
+  # is meant to show.
+  #
+  # Two of these are supposed to produce nothing. That is the point — a
+  # detection demo that only ever shows detections teaches you nothing about
+  # false positives.
+
+  lab-normal:
+    profiles: [lab]
+    build: { context: ., target: lab }
+    depends_on: [lab-resolver]
+    command: ["-server", "172.30.0.20:5353", "-scenario", "normal-dns", "-speed", "10", "-no-bind", "-quiet"]
+    networks: { lab: { ipv4_address: 172.30.0.31 } }
+    restart: on-failure:3
+
+  lab-tunnelling:
+    profiles: [lab]
+    build: { context: ., target: lab }
+    depends_on: [lab-resolver]
+    command: ["-server", "172.30.0.20:5353", "-scenario", "dns-tunnelling", "-speed", "10", "-no-bind", "-quiet"]
+    networks: { lab: { ipv4_address: 172.30.0.32 } }
+    restart: on-failure:3
+
+  lab-high-entropy:
+    profiles: [lab]
+    build: { context: ., target: lab }
+    depends_on: [lab-resolver]
+    command: ["-server", "172.30.0.20:5353", "-scenario", "high-entropy-subdomains", "-speed", "10", "-no-bind", "-quiet"]
+    networks: { lab: { ipv4_address: 172.30.0.33 } }
+    restart: on-failure:3
+
+  lab-nxdomain:
+    profiles: [lab]
+    build: { context: ., target: lab }
+    depends_on: [lab-resolver]
+    command: ["-server", "172.30.0.20:5353", "-scenario", "nxdomain-anomaly", "-speed", "10", "-no-bind", "-quiet"]
+    networks: { lab: { ipv4_address: 172.30.0.34 } }
+    restart: on-failure:3
+
+  lab-txt:
+    profiles: [lab]
+    build: { context: ., target: lab }
+    depends_on: [lab-resolver]
+    command: ["-server", "172.30.0.20:5353", "-scenario", "suspicious-txt", "-speed", "10", "-no-bind", "-quiet"]
+    networks: { lab: { ipv4_address: 172.30.0.35 } }
+    restart: on-failure:3
+
+  lab-dga:
+    profiles: [lab]
+    build: { context: ., target: lab }
+    depends_on: [lab-resolver]
+    command: ["-server", "172.30.0.20:5353", "-scenario", "dga-simulation", "-speed", "10", "-no-bind", "-quiet"]
+    networks: { lab: { ipv4_address: 172.30.0.36 } }
+    restart: on-failure:3
+
+  lab-beaconing:
+    profiles: [lab]
+    build: { context: ., target: lab }
+    depends_on: [lab-resolver]
+    command: ["-server", "172.30.0.20:5353", "-scenario", "beaconing", "-speed", "10", "-no-bind", "-quiet"]
+    networks: { lab: { ipv4_address: 172.30.0.37 } }
+    restart: on-failure:3
+
 volumes:
   dnsdaddy-data:
+  dnsdaddy-lab-data:
+
+networks:
+  # Static addressing, so each scenario has a stable identity in the dashboard
+  # and in findings rather than whatever address Docker happened to hand out.
+  #
+  # Not marked `internal`. What keeps the lab offline is that lab-resolver's
+  # only upstream is the synthetic responder on this network — no synthetic
+  # query has anywhere else to go. Cutting the network off from the host as
+  # well would also cut off the published dashboard port, which is the one
+  # thing the lab exists to show you.
+  lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16

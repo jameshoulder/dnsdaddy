@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: no cgo, so the binary stays static
@@ -67,12 +68,49 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	s := &Store{db: db}
 	if err := s.seed(context.Background()); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("seed defaults: %w", err)
 	}
 	return s, nil
+}
+
+// addedColumns are columns introduced after the initial release.
+//
+// schema.sql is applied with CREATE TABLE IF NOT EXISTS, which does exactly
+// the right thing for a new table and nothing at all for a new column on a
+// table that already exists. SQLite has no ADD COLUMN IF NOT EXISTS, so the
+// statement is run unconditionally and the "duplicate column" error is treated
+// as success.
+//
+// Deliberately the whole migration story: every column added here has a
+// default, so an upgrade is a no-op for existing rows and a downgrade to the
+// previous binary still reads the database. That is a lot cheaper to keep
+// correct on a self-hosted tool than a versioned migration runner, and it
+// means an operator can roll back a bad release by swapping the binary.
+var addedColumns = []struct{ table, column, definition string }{
+	// DNSSEC validation status as reported by the upstream. See
+	// docs/dnssec.md for what each value can and cannot tell you.
+	{"query_log", "dnssec", "TEXT NOT NULL DEFAULT ''"},
+}
+
+func migrate(db *sql.DB) error {
+	for _, c := range addedColumns {
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.definition)
+		if _, err := db.Exec(stmt); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				continue // already applied
+			}
+			return fmt.Errorf("migrate %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
 }
 
 // Close releases the database handle.

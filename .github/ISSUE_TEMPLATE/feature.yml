@@ -1,0 +1,75 @@
+name: Feature request or idea
+description: Something DNS Daddy should do, or a design you disagree with
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things worth reading first, because they will save you time:
+
+        - **[docs/roadmap.md](https://github.com/jameshoulder/dnsdaddy/blob/main/docs/roadmap.md)**
+          — several obvious ideas are already there, along with what would have
+          to be true before they could happen. Most are blocked on evidence
+          rather than on code.
+        - **[docs/capabilities.md](https://github.com/jameshoulder/dnsdaddy/blob/main/docs/capabilities.md)**
+          — includes a list of things this project will deliberately never do.
+
+        Disagreeing with a design decision is a legitimate use of this form.
+        "You are wrong to make behavioural detections alert-only, and here is
+        why" is a better issue than most feature requests.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: >-
+        The problem, not the solution. What are you unable to do today, and
+        what happens as a result?
+      placeholder: >-
+        When a detection fires overnight I do not find out until the morning,
+        because the only place findings surface is the dashboard.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: >-
+        Existing options that nearly work are useful signal — either the
+        feature is unnecessary, or an existing one is not discoverable enough.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the project?
+      options:
+        - DNS resolution and filtering
+        - Behavioural detection
+        - Dashboard and API
+        - Deployment and operations
+        - Logging, telemetry, SIEM
+        - Documentation
+        - The lab
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      description: >-
+        This project stays focused on one organisation running one self-hosted
+        resolver. Multi-tenancy, billing and white-labelling are out of scope —
+        not because they are bad ideas, but because they pull in a direction
+        that would make this worse for the person self-hosting it.
+      options:
+        - label: >-
+            I have read the roadmap and this is not already on it (or I think
+            it should be ordered differently, and have said why).

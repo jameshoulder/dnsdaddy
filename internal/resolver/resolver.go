@@ -24,6 +24,10 @@ type Resolver struct {
 	cache     *Cache
 	log       *slog.Logger
 
+	// requestAD sets the AD bit on outgoing queries so a validating upstream
+	// reports what it concluded. See forward.
+	requestAD bool
+
 	// inflight collapses identical concurrent questions into one upstream
 	// query. A single machine spraying the same lookup — which is exactly what
 	// a beaconing implant looks like — costs us one query, not hundreds.
@@ -63,11 +67,12 @@ func New(cfg config.DNS, cacheCfg config.Cache, log *slog.Logger) (*Resolver, er
 	}
 
 	r := &Resolver{
-		mode:     cfg.UpstreamMode,
-		timeout:  timeout,
-		log:      log,
-		inflight: map[string]*call{},
-		sem:      make(chan struct{}, maxInflight),
+		mode:      cfg.UpstreamMode,
+		timeout:   timeout,
+		log:       log,
+		requestAD: cfg.DNSSECTelemetry,
+		inflight:  map[string]*call{},
+		sem:       make(chan struct{}, maxInflight),
 		cache: NewCache(CacheOptions{
 			Enabled:     cacheCfg.Enabled,
 			MaxEntries:  cacheCfg.MaxEntries,
@@ -109,6 +114,19 @@ type Result struct {
 	Cached bool
 	// Upstream is the spec of the forwarder that answered, empty on a cache hit.
 	Upstream string
+	// Rcode is the response code the upstream returned.
+	Rcode int
+	// Validated reports that the upstream set the AD bit, meaning it validated
+	// the answer against the DNSSEC chain of trust.
+	//
+	// This is read from the upstream's response before the AD bit is stripped
+	// for clients that did not ask for it, so the telemetry is complete even
+	// though the wire response stays RFC-conformant. See reattach.
+	Validated bool
+	// MinTTL is the smallest TTL in the answer section, or 0 when there is no
+	// answer. The beaconing detector uses it to tell a client polling on its
+	// own clock from one re-resolving because its cache expired.
+	MinTTL uint32
 }
 
 // Resolve answers a question, consulting the cache first. generation is the
@@ -123,14 +141,26 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, generation uint64)
 	// reattach rather than SetReply: SetReply forces RcodeSuccess, which would
 	// turn a cached NXDOMAIN into a NOERROR/no-answer response.
 	if cached := r.cache.Get(key, generation); cached != nil {
-		return Result{Msg: reattach(cached, req), Cached: true}, nil
+		return Result{
+			Msg:       reattach(cached, req),
+			Cached:    true,
+			Rcode:     cached.Rcode,
+			Validated: cached.AuthenticatedData,
+			MinTTL:    minAnswerTTL(cached),
+		}, nil
 	}
 
 	msg, upstream, err := r.forwardOnce(ctx, key, req, generation)
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Msg: reattach(msg, req), Upstream: upstream}, nil
+	return Result{
+		Msg:       reattach(msg, req),
+		Upstream:  upstream,
+		Rcode:     msg.Rcode,
+		Validated: msg.AuthenticatedData,
+		MinTTL:    minAnswerTTL(msg),
+	}, nil
 }
 
 // forwardOnce performs the upstream query, collapsing duplicate concurrent
@@ -186,6 +216,22 @@ func (r *Resolver) forward(ctx context.Context, req *dns.Msg) (*dns.Msg, string,
 	// state; send a clean copy.
 	out := req.Copy()
 	out.Id = dns.Id()
+
+	// Ask the upstream to report its DNSSEC verdict.
+	//
+	// RFC 6840 §5.7 defines the AD bit in a *query* as the requester saying it
+	// understands and wants the AD bit in the response. Crucially this is not
+	// the DO bit: it does not ask for DNSSEC records to be included, so
+	// responses do not grow and nothing about the answer changes. It costs one
+	// bit and turns "we forward to validating resolvers" from a claim in the
+	// documentation into a per-query measurement.
+	//
+	// DNS Daddy still does not validate anything itself. What this records is
+	// the upstream's conclusion, which is a weaker statement, and the
+	// documentation and the finding text both say so.
+	if r.requestAD {
+		out.AuthenticatedData = true
+	}
 
 	if r.mode == "race" {
 		return r.race(ctx, out)
@@ -297,7 +343,50 @@ func reattach(msg *dns.Msg, req *dns.Msg) *dns.Msg {
 	out.Response = true
 	out.RecursionDesired = req.RecursionDesired
 	out.RecursionAvailable = true
+
+	// RFC 4035 §3.2.3: do not set AD unless the client asked for it, by
+	// setting DO or AD in its own query.
+	//
+	// Because we now set AD on every upstream query for telemetry, the
+	// upstream's verdict comes back on answers no client requested it for —
+	// including answers served from cache to a different client than the one
+	// that populated it. Passing that through would tell a client its answer
+	// was authenticated when it never asked us to check, which is precisely
+	// the assurance the AD bit is not allowed to give.
+	if !clientWantsAD(req) {
+		out.AuthenticatedData = false
+	}
 	return out
+}
+
+// clientWantsAD reports whether the client signalled interest in the AD bit,
+// by setting DO in EDNS0 or AD in the query header.
+func clientWantsAD(req *dns.Msg) bool {
+	if req == nil {
+		return false
+	}
+	if req.AuthenticatedData {
+		return true
+	}
+	if opt := req.IsEdns0(); opt != nil {
+		return opt.Do()
+	}
+	return false
+}
+
+// minAnswerTTL returns the smallest TTL in the answer section, or 0 when there
+// is none.
+func minAnswerTTL(msg *dns.Msg) uint32 {
+	if msg == nil || len(msg.Answer) == 0 {
+		return 0
+	}
+	min := msg.Answer[0].Header().Ttl
+	for _, rr := range msg.Answer[1:] {
+		if t := rr.Header().Ttl; t < min {
+			min = t
+		}
+	}
+	return min
 }
 
 func dnssecRequested(m *dns.Msg) bool {

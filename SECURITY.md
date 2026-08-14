@@ -29,10 +29,44 @@ while rather than leaving you wondering.
 We do not run a paid bug bounty. We will not threaten you for reporting in good
 faith.
 
+## What this project is, before you rely on it
+
+**DNS Daddy is an experimental, unaudited, AI-assisted personal project.** It
+has had no independent adversarial security review. Automated scanning runs in
+CI, and a clean scanner run is evidence of very little — tools find the bugs
+they have rules for, and design flaws are not among them.
+
+It sits in the resolution path of every lookup on a network, which is a
+position that deserves more scrutiny than one person can give it. That is the
+main reason it is public.
+
+What that means practically:
+
+- Treat "no known vulnerabilities" as "nobody qualified has looked hard",
+  because that is what it is.
+- The behavioural detectors are **experimental** and **alert-only**. They are
+  not a control to depend on.
+- [docs/capabilities.md](docs/capabilities.md) is the authoritative statement of
+  what is implemented. If anything in this repository claims more than that
+  page supports, that is a bug worth reporting.
+
+If you have security review experience and are willing to spend an hour
+attacking this, that is the most valuable thing anyone could contribute.
+
 ## Supported versions
 
-The latest release. This project is young; if you are more than one minor
-version behind, upgrade before reporting.
+| Version | Supported |
+|---|---|
+| Latest release | Yes |
+| Anything older | No — upgrade before reporting |
+| `main` | Yes, and reports against it are welcome |
+
+Only the latest release gets fixes. This is a one-person project: maintaining
+backports would mean fixing things more slowly, and there is no version of that
+trade where the older branch wins.
+
+Fixes ship as a new release. There is no long-term-support line, and promising
+one would be a promise nobody could keep.
 
 ## In scope
 
@@ -45,6 +79,16 @@ version behind, upgrade before reporting.
 - Blocklist bypass: a listed domain resolving when policy says it should not
 - Stored or reflected XSS in the dashboard
 - Secrets written to logs, or to disk in recoverable form
+- **Behavioural findings or query-log data reachable without authentication**
+- **A crafted DNS name that causes unbounded memory or CPU use in the detection
+  engine.** Its state is bounded deliberately; a way around that is a
+  vulnerability, not a tuning issue
+- **A detection finding that changes a DNS answer.** Behavioural detection is
+  alert-only by design, and anything that makes it affect resolution is a bug
+  of the most serious kind
+- **The AD bit being set on a response to a client that did not request it**,
+  which would assert an authenticity guarantee the client never asked us to
+  check
 
 ## Out of scope
 
@@ -54,9 +98,21 @@ version behind, upgrade before reporting.
 - **Running an open resolver.** If you expose port 53 to the internet without a
   firewall you will be abused for amplification. Documented in
   [deploy.md](docs/deploy.md#4-never-run-an-open-resolver).
-- **Missing DNSSEC validation.** DNS Daddy forwards signatures and relies on the
-  upstream to validate. Stated in the README; validating locally is a feature
-  request, not a vulnerability.
+- **Missing DNSSEC validation.** DNS Daddy forwards rather than validating, and
+  records the upstream's verdict. This is documented at length in
+  [docs/dns-security/dnssec.md](docs/dns-security/dnssec.md), including the
+  point that a lying upstream will set the AD bit happily. Local validation is
+  a feature request, not a vulnerability.
+- **False positives from behavioural detectors.** Every one is marked
+  *experimental* and none of them block anything. A detector firing on your
+  mail gateway is expected, wanted as a report, and is
+  [its own issue template](https://github.com/jameshoulder/dnsdaddy/issues/new?template=false-positive.yml)
+  rather than a security issue.
+- **Evading a behavioural detector.** A slow tunnel, a word-list DGA, or a
+  tunnel through an excluded domain will not be detected.
+  [docs/capabilities.md](docs/capabilities.md) and each detector's own
+  documentation say what they miss. Detection gaps that are documented are
+  limitations; undocumented ones are worth telling us about.
 - **False positives and negatives in third-party feeds.** Report those upstream;
   see [threat-intel.md](docs/threat-intel.md).
 - **Someone with the admin password doing admin things.**
@@ -64,6 +120,10 @@ version behind, upgrade before reporting.
   without a working proof of concept.
 
 ## Threat model
+
+A full threat model — assets, trust boundaries, actors, twenty threats, and the
+**residual risk left after each mitigation** — is in
+[docs/threat-model.md](docs/threat-model.md). In summary:
 
 **Assumed trusted:** the host, the operator, and anyone holding the admin
 password or an API token.

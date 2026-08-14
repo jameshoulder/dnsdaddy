@@ -85,7 +85,12 @@ CREATE TABLE IF NOT EXISTS query_log (
     source      TEXT    NOT NULL DEFAULT '',
     proto       TEXT    NOT NULL DEFAULT '',
     elapsed_ms  INTEGER NOT NULL DEFAULT 0,
-    cached      INTEGER NOT NULL DEFAULT 0
+    cached      INTEGER NOT NULL DEFAULT 0,
+    -- DNSSEC validation status reported by the upstream resolver:
+    -- 'validated', 'unvalidated', 'servfail', or '' where no upstream was
+    -- consulted. DNS Daddy forwards rather than validating locally, so this
+    -- records what the upstream concluded. See docs/dnssec.md.
+    dnssec      TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS query_log_ts_idx        ON query_log (ts DESC);
@@ -124,3 +129,33 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     created_at   INTEGER NOT NULL,
     last_used_at INTEGER
 );
+
+-- Behavioural security findings from internal/detect.
+--
+-- The full finding document is stored as JSON in `detail` and the fields worth
+-- filtering on are lifted into columns. That keeps the schema stable as the
+-- finding format grows: adding a signal or a piece of evidence changes the
+-- JSON and needs no migration, while the columns an operator actually queries
+-- on stay indexed.
+CREATE TABLE IF NOT EXISTS findings (
+    id          TEXT PRIMARY KEY,
+    ts          INTEGER NOT NULL,
+    event_type  TEXT    NOT NULL,
+    severity    TEXT    NOT NULL,
+    confidence  REAL    NOT NULL DEFAULT 0,
+    score       REAL    NOT NULL DEFAULT 0,
+    client_ip   TEXT    NOT NULL DEFAULT '',
+    client_name TEXT    NOT NULL DEFAULT '',
+    network_id  TEXT    NOT NULL DEFAULT '',
+    domain      TEXT    NOT NULL DEFAULT '',
+    qtype       TEXT    NOT NULL DEFAULT '',
+    detector    TEXT    NOT NULL DEFAULT '',
+    title       TEXT    NOT NULL DEFAULT '',
+    summary     TEXT    NOT NULL DEFAULT '',
+    detail      TEXT    NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS findings_ts_idx       ON findings (ts DESC);
+CREATE INDEX IF NOT EXISTS findings_severity_idx ON findings (severity, ts DESC);
+CREATE INDEX IF NOT EXISTS findings_type_idx     ON findings (event_type, ts DESC);
+CREATE INDEX IF NOT EXISTS findings_client_idx   ON findings (client_ip, ts DESC);

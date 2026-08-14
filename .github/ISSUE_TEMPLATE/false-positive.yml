@@ -1,0 +1,98 @@
+name: False positive — a detection fired on something harmless
+description: A behavioural detector raised a finding on legitimate traffic
+labels: ["false-positive", "detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Thank you — this is the most useful report this project can receive.**
+
+        Every behavioural detector is marked *experimental* for exactly one
+        reason: their thresholds are calibrated against synthetic traffic, and
+        nobody has measured what they do on a real network with a mail server,
+        an endpoint agent and a few hundred laptops on it.
+
+        A handful of "this fires constantly on X" reports is worth more than
+        any amount of further tuning in the dark.
+
+        **Before you post:** a finding contains domain names and client IPs
+        from your network. Redact anything you would not put in a public issue
+        — the shape of the traffic is what matters, not the actual names.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`dnsdaddy -version`"
+      placeholder: "v0.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: detector
+    attributes:
+      label: Which detector fired?
+      options:
+        - dns_tunnel (Possible DNS tunnelling)
+        - dga_like (Algorithmically generated domains)
+        - nxdomain_anomaly (Burst of failed lookups)
+        - txt_anomaly (Unusual TXT record activity)
+        - dns_beaconing (Regular DNS check-in pattern)
+        - resolution_failure (Domain failing to resolve upstream)
+        - More than one
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-it-really-was
+    attributes:
+      label: What was the traffic actually?
+      description: >-
+        The important part. A mail gateway? An endpoint security agent? A SaaS
+        provider using generated hostnames? Naming the vendor or product is
+        more useful than describing the traffic, because it may belong on the
+        shipped exclusion list where everyone benefits.
+      placeholder: |
+        Our endpoint agent (Vendor X) looks up file hashes as
+        <hash>.reputation.vendor.example — thousands an hour, every name
+        unique. It is doing exactly what a DNS tunnel does, legitimately.
+    validations:
+      required: true
+
+  - type: textarea
+    id: finding
+    attributes:
+      label: The finding
+      description: >-
+        Paste the JSON, redacted. The `signals` array is the part that matters:
+        it shows which measurements pushed it over. From the dashboard, expand
+        the finding; or `GET /api/v1/findings/<id>`.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: frequency
+    attributes:
+      label: How often does it fire, and on how many clients?
+      placeholder: "Every 15 minutes, on our two mail gateways only."
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Anything you did about it
+      description: >-
+        Added the domain to `detection.excluded_domains`? Turned the detector
+        off? Nothing yet? All useful to know.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: >-
+            I have redacted anything from my network I would not want public.
+          required: true
+        - label: >-
+            I checked whether the domain is already on the built-in exclusion
+            list in `internal/detect/exclusions.go`.

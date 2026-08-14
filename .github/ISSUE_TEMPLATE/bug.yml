@@ -1,0 +1,87 @@
+name: Bug report
+description: Something does not work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues do not belong here.** Use
+        [private vulnerability reporting](https://github.com/jameshoulder/dnsdaddy/security/advisories/new)
+        instead — see [SECURITY.md](https://github.com/jameshoulder/dnsdaddy/blob/main/SECURITY.md).
+
+        **A detector firing on harmless traffic** has its own template, and is
+        genuinely wanted rather than merely tolerated.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`dnsdaddy -version`, or the image tag"
+      placeholder: "v0.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is it installed?
+      options:
+        - Docker Compose
+        - Docker, hand-run
+        - systemd (deploy/install.sh)
+        - Built from source
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: >-
+        The `dig` command, API call, or dashboard action. A DNS problem is
+        usually reproducible in one line — if it is, that line is the most
+        useful thing in this report.
+      placeholder: |
+        1. dig @192.168.1.1 example.com
+        2. Returns NXDOMAIN
+        3. Expected NOERROR — the domain is on no block-list
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >-
+        `docker compose logs dnsdaddy` or `journalctl -u dnsdaddy`. Restarting
+        with `-log-level debug` usually helps. **Log lines can contain domain
+        names from your network — redact as needed.**
+      render: shell
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: >-
+        The section involved. **Remove `admin_password`, API tokens and any
+        DoH network tokens** — a DoH token grants that network's policy to
+        anyone who has it.
+      render: yaml
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        OS: Debian 12
+        Host: Linode Nanode 1 GB
+        Upstreams: Quad9 + Cloudflare over DoT
+        Clients: ~40 devices, one VLAN

@@ -63,6 +63,7 @@ tags:
   - name: Policies
   - name: Feeds
   - name: Reports
+  - name: Detections
   - name: Administration
 
 paths:
@@ -668,6 +669,137 @@ paths:
             text/plain:
               schema: { type: string }
 
+  /api/v1/findings:
+    get:
+      tags: [Detections]
+      summary: Behavioural security findings, newest first
+      description: |
+        Findings produced by the behavioural detection engine.
+
+        **These do not block anything.** They are heuristics that observe,
+        score and explain; enforcement is done by the policy and threat-feed
+        engine from curated intelligence. Every response repeats
+        `enforcement: none` so a consumer never has to infer it.
+
+        Every detector is currently **experimental**: thresholds are calibrated
+        against synthetic traffic rather than a production network.
+      parameters:
+        - { name: severity, in: query, schema: { type: string, enum: [info, low, medium, high] } }
+        - { name: type, in: query, schema: { type: string }, description: "Event type, e.g. dns_tunnel_suspected" }
+        - { name: client, in: query, schema: { type: string }, description: Exact client IP }
+        - { name: domain, in: query, schema: { type: string }, description: Substring match }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 8760 } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+        - name: detail
+          in: query
+          schema: { type: string, enum: ["true"] }
+          description: Include the full finding document with each row. Off by default; a document is several kilobytes.
+      responses:
+        "200":
+          description: Matching findings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  findings:
+                    type: array
+                    items: { $ref: "#/components/schemas/FindingSummaryRow" }
+                  count: { type: integer }
+                  enforcement: { type: string, enum: [none] }
+
+  /api/v1/findings/summary:
+    get:
+      tags: [Detections]
+      summary: Finding counts by event type and severity
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 7, minimum: 1, maximum: 365 } }
+      responses:
+        "200":
+          description: Grouped counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  days: { type: integer }
+                  total: { type: integer, format: int64 }
+                  enabled: { type: boolean }
+                  byType:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        eventType: { type: string }
+                        severity: { type: string }
+                        count: { type: integer, format: int64 }
+
+  /api/v1/findings/export:
+    get:
+      tags: [Detections]
+      summary: Stream findings as newline-delimited JSON
+      description: |
+        One complete finding document per line, oldest first, so a consumer can
+        append to its own store in time order and process a record at a time
+        rather than buffering the whole response.
+
+        This is the SIEM integration path. See `docs/siem.md` for shipper
+        configurations. The same documents are also written to
+        `detection.findings_file` when that is configured, which is usually the
+        better option for continuous ingestion.
+      parameters:
+        - { name: severity, in: query, schema: { type: string, enum: [info, low, medium, high] } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, default: 24, minimum: 1, maximum: 8760 } }
+        - { name: limit, in: query, schema: { type: integer, default: 1000, maximum: 1000 } }
+      responses:
+        "200":
+          description: NDJSON stream
+          content:
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/Finding" }
+
+  /api/v1/findings/{id}:
+    get:
+      tags: [Detections]
+      summary: One finding, with its full detail
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The finding
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FindingSummaryRow" }
+        "404":
+          description: No such finding
+
+  /api/v1/detectors:
+    get:
+      tags: [Detections]
+      summary: What the detection engine is looking for
+      description: |
+        The detector catalogue, generated from the running detectors rather
+        than from a document. Each entry states its maturity, the signals it
+        measures, the benign traffic known to look like it, its ATT&CK
+        mappings, and whether it can enforce anything — which, for every
+        behavioural detector, is `false`.
+      responses:
+        "200":
+          description: Catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+                  enforcement: { type: string, enum: [none] }
+                  description: { type: string }
+                  schemaVersion: { type: string, example: "1.0" }
+                  detectors:
+                    type: array
+                    items: { $ref: "#/components/schemas/DetectorInfo" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -765,6 +897,26 @@ components:
         proto: { type: string, enum: [udp, tcp, dot, doh] }
         elapsedMs: { type: integer }
         cached: { type: boolean }
+        dnssec:
+          type: string
+          enum: ["", validated, unvalidated, servfail]
+          description: |
+            DNSSEC validation status **as reported by the upstream resolver**.
+            DNS Daddy forwards rather than validating locally, so this records
+            the upstream's conclusion.
+
+            `validated` — the upstream set the AD bit, having authenticated the
+            answer against the chain of trust.
+
+            `unvalidated` — no AD bit came back. This covers an unsigned zone
+            *and* an upstream that does not validate; a forwarder cannot
+            distinguish them, which is why it is not called "insecure".
+
+            `servfail` — the upstream could not answer. Failed DNSSEC
+            validation is one cause among several.
+
+            Empty when no upstream was consulted, for example on a blocked
+            query.
 
     Category:
       type: object
@@ -993,3 +1145,148 @@ components:
               category: { type: string }
               domains: { type: integer }
               lastRefreshedAt: { type: [string, "null"], format: date-time }
+
+    FindingSummaryRow:
+      type: object
+      description: A finding as the REST API returns it. `detail` is the complete document.
+      properties:
+        id: { type: string }
+        time: { type: string, format: date-time }
+        eventType: { type: string, example: dns_tunnel_suspected }
+        severity: { type: string, enum: [info, low, medium, high] }
+        confidence: { type: number, format: double, minimum: 0, maximum: 1 }
+        score: { type: number, format: double, minimum: 0, maximum: 1 }
+        clientIp: { type: string }
+        clientName: { type: string }
+        networkId: { type: string }
+        domain: { type: string }
+        qtype: { type: string }
+        detector: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        detail: { $ref: "#/components/schemas/Finding" }
+
+    Finding:
+      type: object
+      description: |
+        The structured security finding. This is the integration contract: the
+        same document appears here, in the NDJSON export, and in
+        `detection.findings_file`.
+
+        Within a major `schemaVersion`, fields may be added but never removed
+        or repurposed.
+      properties:
+        schemaVersion: { type: string, example: "1.0" }
+        id: { type: string }
+        time: { type: string, format: date-time }
+        eventType:
+          type: string
+          enum:
+            - dns_tunnel_suspected
+            - dns_beaconing_suspected
+            - nxdomain_burst
+            - txt_activity_anomaly
+            - dga_like_domains
+            - resolution_failure_burst
+        severity: { type: string, enum: [info, low, medium, high] }
+        confidence:
+          type: number
+          format: double
+          description: |
+            How strongly the evidence supports the conclusion, 0..1. Derived
+            from the score and then damped by sample size — the same score over
+            40 queries is less trustworthy than over 400.
+        score:
+          type: number
+          format: double
+          description: Weighted signal total before sample-size damping.
+        client:
+          type: object
+          properties:
+            ip: { type: string }
+            name: { type: string }
+            networkId: { type: string }
+        domain: { type: string }
+        qtype: { type: string }
+        title: { type: string }
+        summary: { type: string, description: One sentence stating the conclusion and its basis. }
+        signals:
+          type: array
+          description: |
+            The measurements behind the score. Contributions sum to `score`, so
+            the arithmetic can be checked by hand.
+          items:
+            type: object
+            properties:
+              name: { type: string, example: unique_subdomains }
+              description: { type: string }
+              value: { type: number, format: double }
+              floor: { type: number, format: double, description: Value at which this signal starts contributing }
+              ceiling: { type: number, format: double, description: Value at which it contributes fully }
+              normalised: { type: number, format: double }
+              weight: { type: number, format: double }
+              contribution: { type: number, format: double }
+        evidence:
+          type: object
+          additionalProperties: true
+          description: Detector-specific measurements, e.g. unique_subdomains, average_entropy.
+        window:
+          type: object
+          properties:
+            start: { type: string, format: date-time }
+            end: { type: string, format: date-time }
+            queries: { type: integer }
+        mitre:
+          type: array
+          description: |
+            ATT&CK mappings. Each carries a rationale; a technique attached
+            without one would be decoration. `hypothesis: true` marks a mapping
+            that describes what the behaviour *would* be if the finding is a
+            true positive, rather than something the evidence establishes.
+          items:
+            type: object
+            properties:
+              id: { type: string, example: T1071.004 }
+              name: { type: string }
+              tactic: { type: string }
+              url: { type: string, format: uri }
+              rationale: { type: string }
+              hypothesis: { type: boolean }
+        falsePositives:
+          type: array
+          items: { type: string }
+          description: Benign traffic known to produce this shape.
+        nextSteps:
+          type: array
+          items: { type: string }
+        detector: { type: string }
+        maturity:
+          type: string
+          enum: [available, experimental]
+          description: |
+            `experimental` means the logic is tested but its thresholds have
+            not been validated against enough real-world traffic to promise a
+            false-positive rate. Every detector is currently experimental.
+
+    DetectorInfo:
+      type: object
+      properties:
+        name: { type: string }
+        eventType: { type: string }
+        title: { type: string }
+        description: { type: string }
+        maturity: { type: string, enum: [available, experimental] }
+        maxSeverity: { type: string, enum: [info, low, medium, high] }
+        window: { type: string, example: 5m0s }
+        mitre:
+          type: array
+          items: { type: object }
+        signals:
+          type: array
+          items: { type: string }
+        falsePositives:
+          type: array
+          items: { type: string }
+        enforces:
+          type: boolean
+          description: Whether the detector can block. False for every behavioural detector.

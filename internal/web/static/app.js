@@ -460,6 +460,26 @@ pages.threats = {
   },
 };
 
+/*
+ * DNSSEC status as reported by the upstream resolver.
+ *
+ * Deliberately cautious wording. DNS Daddy forwards rather than validating
+ * locally, so "validated" means the upstream said so, and "unvalidated" covers
+ * both an unsigned zone and an upstream that does not validate — a forwarder
+ * cannot tell those apart. See docs/dnssec.md.
+ */
+function dnssecBadge(status) {
+  const map = {
+    validated: ['ok', 'validated', 'The upstream resolver validated this answer against the DNSSEC chain of trust.'],
+    unvalidated: ['', 'unvalidated', 'No AD bit came back: either the zone is unsigned or the upstream does not validate.'],
+    servfail: ['bad', 'servfail', 'The upstream could not answer. A failed DNSSEC validation is one possible cause among several.'],
+  };
+  const entry = map[status];
+  if (!entry) return html`<span class="muted">—</span>`;
+  const [cls, text, title] = entry;
+  return html`<span class="badge ${cls}" title="${title}">${text}</span>`;
+}
+
 function queryTable(queries) {
   if (!queries || !queries.length) {
     return emptyState('No queries recorded', 'Query logging may be disabled, or nothing has resolved through DNS Daddy yet.');
@@ -470,7 +490,7 @@ function queryTable(queries) {
         <thead>
           <tr>
             <th>Time</th><th>Domain</th><th>Type</th><th>Client</th>
-            <th>Action</th><th>Reason</th>
+            <th>Action</th><th>DNSSEC</th><th>Reason</th>
           </tr>
         </thead>
         <tbody>
@@ -490,6 +510,7 @@ function queryTable(queries) {
                           ? html`<span class="badge warn">Error</span>`
                           : html`<span class="badge ok">Allowed</span>`
                     )}</td>
+                    <td>${raw(dnssecBadge(q.dnssec))}</td>
                     <td class="muted">${q.reason || '—'}${raw(q.cached ? ' <span class="badge info">cached</span>' : '')}</td>
                   </tr>
                 `
@@ -569,6 +590,231 @@ pages.queries = {
     });
     $('#q-more').addEventListener('click', () => load(true));
     await load(false);
+  },
+};
+
+/* ---------- detections -------------------------------------------------- */
+
+const SEVERITY_CLASS = { high: 'bad', medium: 'warn', low: 'info', info: '' };
+
+function severityBadge(sev) {
+  const cls = SEVERITY_CLASS[sev] !== undefined ? SEVERITY_CLASS[sev] : '';
+  return html`<span class="badge ${cls}">${sev || 'unknown'}</span>`;
+}
+
+/**
+ * Signal table for one finding.
+ *
+ * The point of showing floor, ceiling and contribution rather than just a
+ * score is that an analyst can check the arithmetic. A number nobody can
+ * reproduce is a number nobody should act on.
+ */
+function signalTable(signals) {
+  if (!signals || !signals.length) return '';
+  return html`
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Signal</th><th class="num">Measured</th><th class="num">Band</th><th class="num">Weight</th><th class="num">Contributed</th></tr>
+        </thead>
+        <tbody>
+          ${raw(
+            signals
+              .map(
+                (s) => html`<tr>
+                  <td><span class="mono">${s.name}</span><div class="muted small">${s.description}</div></td>
+                  <td class="num mono">${s.value}</td>
+                  <td class="num muted mono nowrap">${s.floor} – ${s.ceiling}</td>
+                  <td class="num muted mono">${s.weight}</td>
+                  <td class="num mono">${s.contribution}</td>
+                </tr>`
+              )
+              .join('')
+          )}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function evidenceList(evidence) {
+  if (!evidence) return '';
+  return html`
+    <dl class="kv">
+      ${raw(
+        Object.entries(evidence)
+          .map(([k, v]) => {
+            const rendered = Array.isArray(v) ? v.join(', ') : v === null ? '—' : typeof v === 'object' ? JSON.stringify(v) : v;
+            return html`<div><dt class="mono">${k}</dt><dd class="mono">${rendered}</dd></div>`;
+          })
+          .join('')
+      )}
+    </dl>
+  `;
+}
+
+function mitreList(techniques) {
+  if (!techniques || !techniques.length) {
+    return html`<p class="muted small">No ATT&amp;CK mapping. Not every finding describes adversary
+      behaviour, and attaching a technique anyway would be decoration.</p>`;
+  }
+  return html`
+    <ul class="stack">
+      ${raw(
+        techniques
+          .map(
+            (t) => html`<li>
+              <a href="${t.url}" target="_blank" rel="noopener noreferrer"><span class="mono">${t.id}</span></a>
+              ${t.name} · <span class="muted">${t.tactic}</span>
+              ${raw(t.hypothesis ? html`<span class="badge warn">hypothesis</span>` : '')}
+              <div class="muted small">${t.rationale}</div>
+            </li>`
+          )
+          .join('')
+      )}
+    </ul>
+  `;
+}
+
+function bulletList(items) {
+  if (!items || !items.length) return '';
+  return html`<ul class="stack small muted">${raw(items.map((i) => html`<li>${i}</li>`).join(''))}</ul>`;
+}
+
+function findingDetail(detail) {
+  if (!detail) return html`<p class="muted">No detail stored for this finding.</p>`;
+  return html`
+    <div class="stack">
+      <div>
+        <h4>Why this was raised</h4>
+        ${raw(signalTable(detail.signals))}
+      </div>
+      <div>
+        <h4>Evidence</h4>
+        ${raw(evidenceList(detail.evidence))}
+      </div>
+      <div>
+        <h4>MITRE ATT&amp;CK</h4>
+        ${raw(mitreList(detail.mitre))}
+      </div>
+      <div>
+        <h4>Before you escalate — benign causes that look like this</h4>
+        ${raw(bulletList(detail.falsePositives))}
+      </div>
+      <div>
+        <h4>How to investigate</h4>
+        ${raw(bulletList(detail.nextSteps))}
+      </div>
+    </div>
+  `;
+}
+
+pages.detections = {
+  title: 'Detections',
+  subtitle: 'Behavioural findings. Observed and explained, never blocked.',
+  async render() {
+    const [catalogue, findings, summary] = await Promise.all([
+      apiGet('/detectors'),
+      apiGet('/findings?limit=100&detail=true'),
+      apiGet('/findings/summary?days=7'),
+    ]);
+
+    if (!catalogue.enabled) {
+      return html`
+        <div class="card">
+          <div class="card-head"><div><h2>Behavioural detection is switched off</h2></div></div>
+          <p class="muted">Set <code>detection.enabled: true</code> in the configuration file, or
+            <code>DNSDADDY_DETECTION_ENABLED=true</code>, and restart.</p>
+        </div>
+      `;
+    }
+
+    const bySeverity = { high: 0, medium: 0, low: 0, info: 0 };
+    for (const row of summary.byType || []) {
+      if (bySeverity[row.severity] !== undefined) bySeverity[row.severity] += row.count;
+    }
+
+    return html`
+      <div class="card notice">
+        <p><strong>These findings do not block anything.</strong> They are behavioural
+          heuristics: they score traffic, explain the score, and alert. Blocking is done by the
+          policy and threat-feed engine, from curated intelligence rather than inference. Every
+          detector below is <strong>experimental</strong> — the thresholds are calibrated against
+          synthetic traffic, not a production network.</p>
+      </div>
+
+      <div class="section grid grid-4">
+        ${raw(metricCard({ label: 'High', value: num(bySeverity.high), sub: 'Last 7 days', tone: bySeverity.high ? 'bad' : '' }))}
+        ${raw(metricCard({ label: 'Medium', value: num(bySeverity.medium), sub: 'Last 7 days' }))}
+        ${raw(metricCard({ label: 'Low', value: num(bySeverity.low), sub: 'Last 7 days' }))}
+        ${raw(metricCard({ label: 'Detectors', value: num(catalogue.detectors.length), sub: 'All alert-only' }))}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div><h2>Recent findings</h2><p>Newest first. Expand one to see the
+          measurements behind it.</p></div></div>
+        ${raw(
+          findings.findings.length
+            ? findings.findings
+                .map(
+                  (f) => html`
+                    <details class="finding">
+                      <summary>
+                        ${raw(severityBadge(f.severity))}
+                        <span class="mono">${f.eventType}</span>
+                        <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
+                        <span class="muted small nowrap">confidence ${f.confidence}</span>
+                        <span class="muted small nowrap">${relTime(f.time)}</span>
+                      </summary>
+                      <div class="finding-body">
+                        <p>${f.summary}</p>
+                        <p class="muted small">
+                          Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> ·
+                          Detector: <span class="mono">${f.detector}</span> ·
+                          Score: <span class="mono">${f.score}</span>
+                        </p>
+                        ${raw(findingDetail(f.detail))}
+                      </div>
+                    </details>
+                  `
+                )
+                .join('')
+            : emptyState(
+                'No findings yet',
+                'Either nothing has behaved unusually, or not enough traffic has passed through yet. ' +
+                  'The lab in labs/ generates traffic that will trigger these detectors safely.'
+              )
+        )}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div><h2>What is being looked for</h2><p>Straight from the running
+          detectors, so this cannot drift from what the code does.</p></div></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Detector</th><th>Maturity</th><th>Window</th><th>Max severity</th><th>Blocks?</th></tr></thead>
+            <tbody>
+              ${raw(
+                catalogue.detectors
+                  .map(
+                    (d) => html`<tr>
+                      <td>
+                        <span class="mono">${d.name}</span>
+                        <div class="muted small">${d.description}</div>
+                      </td>
+                      <td><span class="badge warn">${d.maturity}</span></td>
+                      <td class="muted mono nowrap">${d.window}</td>
+                      <td>${raw(severityBadge(d.maxSeverity))}</td>
+                      <td class="muted">${d.enforces ? 'yes' : 'no'}</td>
+                    </tr>`
+                  )
+                  .join('')
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
   },
 };
 

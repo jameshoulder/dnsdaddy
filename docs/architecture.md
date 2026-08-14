@@ -37,11 +37,18 @@ vCPU, while sitting in the latency path of every page load on the network.
 │                                     └── upstream DoT │      │
 │                                               │      │      │
 │  5. record (never blocking)   querylog.Record ◄──────┘      │
+│     observe (never blocking)  detect.Observe                │
 └─────────────────────────────────────────────────────────────┘
-                                     │
-                       buffered channel, batched writer
-                                     ▼
-                    SQLite: query_log + hourly rollups
+                    │                        │
+      buffered channel, batched writer   buffered channel
+                    ▼                        ▼
+     SQLite: query_log + hourly rollups   detection engine
+                                             │
+                                    enrich → detectors →
+                                    score → Finding
+                                             │
+                                   SQLite: findings
+                                   log · findings.jsonl
 ```
 
 Steps 1–4 touch no disk and no database. Every decision is served from
@@ -60,12 +67,18 @@ in-memory snapshots that are swapped atomically when configuration changes.
 | `internal/policy` | Client → network → policy matching, and the block decision |
 | `internal/resolver` | Answer cache, request collapsing, upstream transports |
 | `internal/querylog` | Buffered, batched writes so the hot path never waits on disk |
+| `internal/detect` | Behavioural detection: enrichment, detectors, findings, sinks |
 | `internal/dnsserver` | UDP/TCP/DoT listeners and the DoH endpoint |
 | `internal/api` | REST API, auth, metrics, OpenAPI |
 | `internal/web` | The embedded dashboard |
 
 Dependencies point one way: `dnsserver` → `policy` → `blocklist`/`store`.
 Nothing in the resolution path imports `api`.
+
+`detect` sits beside `querylog` rather than inside the resolution path: the
+handler hands it a value and moves on. Nothing `detect` produces can reach back
+into a DNS answer, which is a property worth keeping deliberately rather than
+by habit — see below.
 
 ## Decisions worth explaining
 
@@ -128,6 +141,31 @@ lookup on the network is not.
 
 Batching also collapses work: a 256-event batch typically becomes a handful of
 rollup upserts rather than 256 of them.
+
+### Detection cannot touch the answer
+
+`detect.Engine` is fed the same way the query log is: a plain value onto a
+buffered channel, dropped and counted if the buffer is full. The call sits
+*after* the response has been decided on every path, including the error and
+blocked ones.
+
+That ordering is the whole design. Behavioural heuristics infer intent from
+traffic shape, they have false positives, and giving one a vote on an answer is
+how a false positive becomes an outage. The detectors observe, score, explain
+and alert; blocking stays with the policy engine, which acts on curated
+intelligence.
+
+The property is enforced by a test rather than by convention: 200 queries are
+driven through a handler whose detection queue is full and whose only detector
+panics if it is ever reached, asserting that resolution neither stalls nor
+changes.
+
+Detector state is bounded per key with O(1) approximate-LRU eviction —
+sampling a handful of entries and evicting the oldest of those, rather than
+scanning for the true oldest. Scanning would hand an attacker quadratic work
+per query and turn the detector into the amplifier. Eviction means missed
+detections rather than exhausted memory, and it is reported through
+`dnsdaddy_detection_dropped_total` rather than hidden.
 
 ### Statistics that outlive the query log
 
@@ -219,3 +257,9 @@ constant. Keep it forgiving: skip bad lines, never abort a load.
 **A new API endpoint** — add the route in `api.Handler()`, the handler beside
 its neighbours, and the schema to `internal/api/openapi.yaml`. The spec is
 served to clients; letting it drift defeats the point.
+
+**A new detector** — implement `detect.Detector` and register it in
+`buildDetector`. The house rules — bound the state, gate on volume, require
+more than one signal, publish the bands, and write the *benign* corpus first —
+are in [detection/README.md](detection/README.md#extending-it), and they matter
+more than the code.

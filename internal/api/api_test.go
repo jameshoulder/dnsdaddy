@@ -19,6 +19,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
@@ -29,10 +30,11 @@ import (
 const testPassword = "correct-horse-battery-staple"
 
 type harness struct {
-	t      *testing.T
-	server *httptest.Server
-	store  *store.Store
-	client *http.Client
+	t        *testing.T
+	server   *httptest.Server
+	store    *store.Store
+	client   *http.Client
+	detector *detect.Engine
 }
 
 func newHarness(t *testing.T) *harness {
@@ -80,8 +82,21 @@ func newHarness(t *testing.T) *harness {
 		qlog.Wait()
 	})
 
+	// The detection engine is wired in so the findings endpoints are exercised
+	// against a real engine rather than a stub. It is not Run() here: the tests
+	// that need findings insert them directly, which keeps them deterministic
+	// rather than dependent on an evaluation tick.
+	detector := detect.New(
+		[]detect.Detector{detect.NewTunnelDetector(detect.DefaultTunnelConfig())},
+		detect.NewStoreSink(st),
+		detect.NewExclusions(nil, false),
+		detect.Options{},
+		log,
+	)
+
 	dnsHandler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		QueryLogEnabled: true,
+		Detector:        detector,
 	})
 
 	auth, err := NewAuth(st, dir, AuthOptions{})
@@ -106,6 +121,7 @@ func newHarness(t *testing.T) *harness {
 			AllowUntokenized: true,
 		}),
 		QueryLog:  qlog,
+		Detector:  detector,
 		Auth:      auth,
 		Log:       log,
 		StartedAt: time.Now(),
@@ -115,7 +131,7 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(srv.Close)
 
 	jar := &cookieJar{cookies: map[string]*http.Cookie{}}
-	return &harness{t: t, server: srv, store: st, client: &http.Client{Jar: jar}}
+	return &harness{t: t, server: srv, store: st, client: &http.Client{Jar: jar}, detector: detector}
 }
 
 // cookieJar is a minimal same-origin jar; net/http/cookiejar needs a

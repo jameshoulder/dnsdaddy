@@ -539,3 +539,63 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .feed-error { color: var(--danger); }
 
 .token-reveal { border-color: var(--primary); margin-bottom: 14px; }
+
+/* ---------- detections -------------------------------------------------- */
+
+/* A standing caveat rather than a dismissible banner: these findings are
+   experimental heuristics and the page should keep saying so. */
+.card.notice {
+  border-left: 3px solid var(--warn, #ffb45a);
+}
+.card.notice p { margin: 0; }
+
+.finding {
+  border-top: 1px solid var(--line, #2a313b);
+  padding: 4px 0;
+}
+.finding:first-of-type { border-top: 0; }
+
+.finding > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px;
+  cursor: pointer;
+  list-style: none;
+}
+.finding > summary::-webkit-details-marker { display: none; }
+.finding > summary::before {
+  content: "\25B8";
+  color: var(--muted, #a3acba);
+  transition: transform 0.15s ease;
+}
+.finding[open] > summary::before { transform: rotate(90deg); }
+.finding > summary:hover { background: rgb(255 255 255 / 0.02); }
+.finding > summary > span:nth-child(3) { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
+
+.finding-body {
+  padding: 4px 2px 18px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.finding-body h4 {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #a3acba);
+}
+
+/* Key/value grid for the evidence block. Two columns on a desktop, stacked on
+   a phone, with long values wrapping rather than forcing a horizontal scroll. */
+.kv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; margin: 0; }
+.kv > div { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.kv dt { color: var(--muted, #a3acba); flex: 0 0 auto; }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 720px) {
+  .kv { grid-template-columns: 1fr; }
+  .finding-body { padding-left: 8px; }
+}

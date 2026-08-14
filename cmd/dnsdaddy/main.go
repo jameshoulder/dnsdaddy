@@ -23,6 +23,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/api"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
@@ -128,6 +129,25 @@ func run() error {
 
 	go qlog.Run(ctx)
 
+	// --- detection engine ---------------------------------------------------
+	// Built before the listeners open so that no query is served while the
+	// engine is half-constructed, and so a bad detection configuration is a
+	// startup error rather than a surprise at the first query.
+	detector, findingsFile, err := buildDetector(cfg, st, log)
+	if err != nil {
+		return err
+	}
+	if detector != nil {
+		go detector.Run(ctx)
+		defer func() {
+			if findingsFile != nil {
+				if err := findingsFile.Close(); err != nil {
+					log.Warn("close findings file", "error", err)
+				}
+			}
+		}()
+	}
+
 	// --- DNS listeners ------------------------------------------------------
 	trustedProxies, err := httpx.ParseTrustedProxies(cfg.HTTP.TrustedProxyCIDRs)
 	if err != nil {
@@ -149,6 +169,7 @@ func run() error {
 		Timeout:         cfg.DNS.Timeout.D() + time.Second,
 		AllowedClients:  allowedClients,
 		RefuseANY:       cfg.DNS.RefuseANY,
+		Detector:        detector,
 	})
 
 	dnsSrv, err := dnsserver.NewServer(cfg.DNS, handler, log)
@@ -192,6 +213,7 @@ func run() error {
 		DNS:            handler,
 		DoH:            doh,
 		QueryLog:       qlog,
+		Detector:       detector,
 		Auth:           auth,
 		Log:            log,
 		StartedAt:      time.Now(),
@@ -257,9 +279,120 @@ func run() error {
 	// The query logger drains on ctx cancellation; wait so the last few
 	// seconds of activity are not lost on a restart.
 	qlog.Wait()
+	if detector != nil {
+		detector.Wait()
+	}
 
 	log.Info("stopped")
 	return nil
+}
+
+// buildDetector assembles the behavioural detection engine from configuration.
+//
+// It returns a nil engine when detection is switched off, which every caller
+// handles: detect.Engine's Observe and Wait are nil-safe precisely so that
+// turning the feature off needs no branching on the query path.
+func buildDetector(cfg config.Config, st *store.Store, log *slog.Logger) (*detect.Engine, *detect.FileSink, error) {
+	if !cfg.Detection.Enabled {
+		log.Info("behavioural detection is disabled")
+		return nil, nil, nil
+	}
+
+	exclusions := detect.NewExclusions(cfg.Detection.ExcludedDomains, cfg.Detection.DisableDefaultExclusions)
+	if cfg.Detection.DisableDefaultExclusions {
+		log.Warn("built-in detection exclusions are disabled; expect findings from reputation " +
+			"services, CDNs and reverse DNS, whose normal traffic is shaped like the behaviour " +
+			"these detectors look for")
+	}
+
+	// Sinks, in order of how much an operator relies on them. The database is
+	// what the dashboard reads; the log is what a `docker logs` shows; the
+	// NDJSON file is what a SIEM tails.
+	sinks := detect.MultiSink{
+		detect.NewStoreSink(st),
+		detect.LogSink{Log: log},
+	}
+
+	var fileSink *detect.FileSink
+	if path := cfg.FindingsFilePath(); path != "" {
+		fs, err := detect.NewFileSink(detect.FileSinkOptions{
+			Path:     path,
+			MaxBytes: cfg.Detection.FindingsFileMaxBytes,
+			Keep:     cfg.Detection.FindingsFileKeep,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("detection findings file: %w", err)
+		}
+		fileSink = fs
+		sinks = append(sinks, fs)
+		log.Info("writing findings as NDJSON", "path", path)
+	}
+
+	minSeverity, ok := detect.ParseSeverity(cfg.Detection.MinSeverity)
+	if !ok {
+		minSeverity = detect.SeverityLow
+	}
+
+	// window_scale compresses every detector's observation window. It exists
+	// for demonstrations and must be paired with proportionally faster traffic
+	// — see config.Detection.WindowScale.
+	scale := cfg.Detection.WindowScale
+	if scale <= 0 {
+		scale = 1
+	}
+	scaleWindow := func(d time.Duration) time.Duration {
+		scaled := time.Duration(float64(d) * scale)
+		if scaled < time.Second {
+			scaled = time.Second
+		}
+		return scaled
+	}
+
+	tunnelCfg := detect.DefaultTunnelConfig()
+	tunnelCfg.Window = scaleWindow(tunnelCfg.Window)
+	beaconCfg := detect.DefaultBeaconConfig()
+	beaconCfg.Window = scaleWindow(beaconCfg.Window)
+	beaconCfg.MinInterval = scaleWindow(beaconCfg.MinInterval)
+	beaconCfg.MaxInterval = scaleWindow(beaconCfg.MaxInterval)
+	nxCfg := detect.DefaultNXDomainConfig()
+	nxCfg.Window = scaleWindow(nxCfg.Window)
+	dgaCfg := detect.DefaultDGAConfig()
+	dgaCfg.Window = scaleWindow(dgaCfg.Window)
+	txtCfg := detect.DefaultTXTConfig()
+	txtCfg.Window = scaleWindow(txtCfg.Window)
+	resCfg := detect.DefaultResolutionFailureConfig()
+	resCfg.Window = scaleWindow(resCfg.Window)
+
+	if scale != 1 {
+		log.Warn("detection windows are compressed; this is a demonstration setting, "+
+			"not a tuning knob — the detectors' volume gates do not scale with it, so "+
+			"traffic must be sped up by the same factor for findings to appear",
+			"window_scale", scale)
+	}
+
+	detectors := []detect.Detector{
+		detect.NewTunnelDetector(tunnelCfg),
+		detect.NewBeaconDetector(beaconCfg),
+		detect.NewNXDomainDetector(nxCfg),
+		detect.NewDGADetector(dgaCfg),
+		detect.NewTXTDetector(txtCfg),
+		detect.NewResolutionFailureDetector(resCfg),
+	}
+
+	engine := detect.New(detectors, sinks, exclusions, detect.Options{
+		BufferSize:   cfg.Detection.BufferSize,
+		EvalInterval: cfg.Detection.EvalInterval.D(),
+		Cooldown:     cfg.Detection.Cooldown.D(),
+		MinSeverity:  minSeverity,
+	}, log)
+
+	log.Info("behavioural detection active",
+		"detectors", len(detectors),
+		"min_severity", string(minSeverity),
+		"exclusions", exclusions.Len(),
+		"enforcement", "none (alert-only)")
+
+	return engine, fileSink, nil
 }
 
 // runRetention prunes the query log on a timer, honouring the configured
@@ -277,6 +410,18 @@ func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *
 		if removed > 0 {
 			log.Info("pruned expired query-log rows",
 				"rows", removed, "retention_days", cfg.Log.RetentionDays)
+		}
+
+		// Findings have their own, longer retention: they are small, and the
+		// question they answer is a months-scale one.
+		findings, err := st.PruneFindings(pctx, cfg.Detection.RetentionDays)
+		if err != nil {
+			log.Error("findings prune failed", "error", err)
+			return
+		}
+		if findings > 0 {
+			log.Info("pruned expired findings",
+				"rows", findings, "retention_days", cfg.Detection.RetentionDays)
 		}
 	}
 

@@ -45,6 +45,33 @@ jobs:
       - name: Test with race detector
         run: go test -race ./...
 
+      # The documentation cross-references itself heavily and is the main way
+      # anyone judges what this project does. A dead link is a small thing that
+      # makes the whole set look unmaintained.
+      - name: Check documentation links
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, sys
+          broken = []
+          files = [p for p in pathlib.Path('.').rglob('*.md') if '.git' not in p.parts]
+          for f in files:
+              text = f.read_text()
+              targets = [m.group(2) for m in re.finditer(r'\[([^\]]*)\]\(([^)\s]+)\)', text)]
+              targets += [m.group(2) for m in re.finditer(r'^\[([^\]]+)\]:\s*(\S+)$', text, re.M)]
+              for t in targets:
+                  if t.startswith(('http://', 'https://', 'mailto:', '#')):
+                      continue
+                  path = t.partition('#')[0]
+                  if path and not (f.parent / path).resolve().exists():
+                      broken.append(f"{f}: {t}")
+          if broken:
+              print("Broken relative links:")
+              for b in sorted(set(broken)):
+                  print("  ", b)
+              sys.exit(1)
+          print(f"{len(files)} markdown files checked, all relative links resolve")
+          PY
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
@@ -69,7 +96,12 @@ jobs:
           CGO_ENABLED: 0
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags="-s -w" -o /dev/null ./cmd/dnsdaddy
+        run: |
+          go build -trimpath -ldflags="-s -w" -o /dev/null ./cmd/dnsdaddy
+          # The lab tools ship in their own image but live in this module; if
+          # they stop compiling, the lab stops working and nobody notices until
+          # somebody tries to run a demo.
+          go build -trimpath -ldflags="-s -w" -o /dev/null ./cmd/dnsdaddy-lab
 
   smoke:
     name: End-to-end smoke test
@@ -103,6 +135,15 @@ jobs:
             # file:// feeds are confined to this directory and disabled
             # without it; the smoke test loads its fixture from here.
             local_feed_dir: /tmp/dd
+          detection:
+            enabled: true
+            eval_interval: 2s
+            # Compressed so a finding appears inside a CI run rather than five
+            # minutes into one. Paired with fast traffic below, as the docs
+            # require — the volume gates do not scale with the window.
+            window_scale: 0.1
+            cooldown: 30s
+            findings_file: findings.jsonl
           EOF
           ./dnsdaddy -config /tmp/dd/config.yaml &
           for i in $(seq 1 40); do
@@ -189,7 +230,91 @@ jobs:
             -X POST http://127.0.0.1:18080/api/v1/feeds)
           [ "$code" = "400" ] || { echo "expected 400 for a file:// feed outside local_feed_dir, got $code"; exit 1; }
 
+          echo "--- the detector catalogue must be served and claim no enforcement ---"
+          catalogue=$(curl -sf -b /tmp/dd/jar http://127.0.0.1:18080/api/v1/detectors)
+          echo "$catalogue" | jq -e '.enabled == true' > /dev/null \
+            || { echo "detection is not enabled"; exit 1; }
+          echo "$catalogue" | jq -e '.enforcement == "none"' > /dev/null \
+            || { echo "the catalogue does not report enforcement: none"; exit 1; }
+          # Behavioural detection is alert-only by design. A detector claiming
+          # otherwise is a design regression, not a configuration change.
+          echo "$catalogue" | jq -e '[.detectors[] | select(.enforces == true)] | length == 0' > /dev/null \
+            || { echo "a detector claims to enforce policy"; exit 1; }
+          # Every detector must publish its maturity, so nothing is presented
+          # with more authority than it has earned.
+          echo "$catalogue" | jq -e '[.detectors[] | select(.maturity == null or .maturity == "")] | length == 0' > /dev/null \
+            || { echo "a detector publishes no maturity"; exit 1; }
+
           echo "all smoke assertions passed"
+
+      - name: A tunnel must be detected, and normal traffic must not be
+        run: |
+          go build -o /tmp/dd/dnsdaddy-lab ./cmd/dnsdaddy-lab
+
+          # The synthetic upstream, so the scenarios resolve realistically and
+          # nothing leaves the runner.
+          /tmp/dd/dnsdaddy-lab -sink 127.0.0.1:15300 &
+          sleep 2
+
+          cat > /tmp/dd/lab.yaml <<EOF
+          data_dir: /tmp/dd/labdata
+          dns:
+            listen_udp: "127.0.0.1:15363"
+            listen_tcp: "127.0.0.1:15363"
+            upstreams: ["udp://127.0.0.1:15300"]
+          http:
+            listen: "127.0.0.1:18090"
+            admin_password: "ci-test-password-longer-than-twelve"
+          feeds:
+            refresh_on_start: false
+          detection:
+            enabled: true
+            eval_interval: 2s
+            window_scale: 0.1
+            cooldown: 30s
+            findings_file: findings.jsonl
+          EOF
+          ./dnsdaddy -config /tmp/dd/lab.yaml &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:18090/api/v1/health && break
+            sleep 0.5
+          done
+
+          # Window scale 0.1 with traffic at 10x keeps the queries-per-window
+          # the same as production, which is what makes this meaningful.
+          /tmp/dd/dnsdaddy-lab -server 127.0.0.1:15363 -scenario dns-tunnelling -speed 10 -quiet
+          /tmp/dd/dnsdaddy-lab -server 127.0.0.1:15363 -scenario normal-dns -speed 10 -quiet
+          /tmp/dd/dnsdaddy-lab -server 127.0.0.1:15363 -scenario high-entropy-subdomains -speed 10 -quiet
+          sleep 45
+
+          findings=/tmp/dd/labdata/findings.jsonl
+          [ -s "$findings" ] || { echo "no findings were written at all"; exit 1; }
+          cat "$findings" | jq -r '"\(.severity)\t\(.eventType)\t\(.client.ip)"'
+
+          echo "--- the tunnelling client must be detected ---"
+          jq -e -s '[.[] | select(.eventType == "dns_tunnel_suspected" and .client.ip == "127.0.0.3")] | length > 0' \
+            "$findings" > /dev/null \
+            || { echo "the tunnel was not detected"; exit 1; }
+
+          echo "--- ordinary browsing must produce nothing ---"
+          jq -e -s '[.[] | select(.client.ip == "127.0.0.2")] | length == 0' "$findings" > /dev/null \
+            || { echo "normal browsing produced a finding"; exit 1; }
+
+          echo "--- high entropy alone must produce nothing ---"
+          # This is the multi-signal gate. Genuinely random labels, and the
+          # detector must stay silent because nothing else about the traffic
+          # looks like a channel. If this ever fails, the concrete answer to
+          # "high entropy means malicious" has stopped being true.
+          jq -e -s '[.[] | select(.client.ip == "127.0.0.4" and .eventType == "dns_tunnel_suspected")] | length == 0' \
+            "$findings" > /dev/null \
+            || { echo "high entropy alone raised a tunnelling finding"; exit 1; }
+
+          echo "--- every finding must be a complete, parseable document ---"
+          jq -e -s 'all(.[]; .schemaVersion != null and .signals != null and .maturity != null)' \
+            "$findings" > /dev/null \
+            || { echo "a finding is missing required fields"; exit 1; }
+
+          echo "detection assertions passed"
 
       - name: An open resolver configuration must refuse to start
         run: |
@@ -219,3 +344,20 @@ jobs:
         run: docker build --build-arg VERSION=ci -t dnsdaddy:ci .
       - name: The binary must start and report a version
         run: docker run --rm dnsdaddy:ci -version
+
+      # The runtime stage is deliberately last in the Dockerfile so that a
+      # plain `docker build .` produces the resolver. Assert that, because
+      # reordering the stages would silently change what everyone ships.
+      - name: The default build target must be the resolver, not the lab
+        run: |
+          entrypoint=$(docker inspect -f '{{json .Config.Entrypoint}}' dnsdaddy:ci)
+          echo "$entrypoint"
+          echo "$entrypoint" | grep -q '/usr/local/bin/dnsdaddy"' \
+            || { echo "default image entrypoint is not the resolver"; exit 1; }
+
+      - name: The lab image must build and list its scenarios
+        run: |
+          docker build --target lab -t dnsdaddy-lab:ci .
+          docker run --rm dnsdaddy-lab:ci | tee /tmp/scenarios.txt
+          grep -q 'dns-tunnelling' /tmp/scenarios.txt
+          grep -q 'normal-dns' /tmp/scenarios.txt
