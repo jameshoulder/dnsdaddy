@@ -976,7 +976,16 @@ components:
           type: array
           items: { type: string }
         blockMode: { type: string, enum: [nxdomain, zeroip, refused] }
-        safeSearch: { type: boolean }
+        safeSearch:
+          type: boolean
+          deprecated: true
+          description: >-
+            Not enforced. The value is stored on the policy and echoed back
+            here, but the resolver does not act on it and no search engine is
+            rewritten. Setting it true changes nothing about how queries are
+            answered. Do not use it as a signal that safe search is in effect.
+            Tracked in docs/roadmap.md; this field will start behaving as its
+            name suggests only when enforcement lands.
         logQueries:
           type: boolean
           description: When false, statistics are still recorded but no per-query rows are stored.
@@ -1000,7 +1009,12 @@ components:
           type: array
           items: { type: string }
         blockMode: { type: string, enum: [nxdomain, zeroip, refused] }
-        safeSearch: { type: boolean }
+        safeSearch:
+          type: boolean
+          deprecated: true
+          description: >-
+            Accepted and stored, but not enforced — see the note on
+            Policy.safeSearch. Sending it has no effect on resolution.
         logQueries: { type: boolean }
         allowDomains:
           type: array

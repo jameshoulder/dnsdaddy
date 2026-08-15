@@ -82,6 +82,36 @@ normalisation fails, and feed, network, location and policy names are free text
 set through the management API. The comment now describes the real data flow,
 and the escaping it now claims actually exists.
 
+## Follow-up — 2026-08-15
+
+The tool was re-run locally during an audit of the repository, and the result
+changed two of this document's conclusions.
+
+**Three of the suppressions above were not suppressing anything.** Semgrep
+honours `// nosemgrep:` only on the matched line or the line immediately above
+it. Both annotations in `internal/api/auth.go` sat six lines above their
+`http.SetCookie` call, separated from it by the `#nosec` explanation, so
+`cookie-missing-secure` was still firing on both. The table said "Narrow, on
+the assignment only" and that was true of the intent, not of the effect. Both
+are now the last line before the statement, with a comment saying why the
+position matters.
+
+**One new finding, in code written after this review.**
+`go.lang.security.audit.crypto.math_random.math-random-used` on
+`cmd/dnsdaddy-lab`'s `math/rand` import. Classified **contextual false
+positive**: the lab exists to generate *reproducible* synthetic traffic, and
+`TestScenariosAreDeterministic` asserts that the same seed produces the same
+queries. A cryptographic generator would make that impossible, and nothing the
+lab generates is a secret. Every generator in the resolver, the API and the
+store already uses `crypto/rand`. Suppressed narrowly on the import, with the
+reasoning at both the import and the call site in `play()`.
+
+**Semgrep now runs in CI** (`.github/workflows/security.yml`), with `--error`,
+against `p/golang`, `p/github-actions` and `p/secrets`. That is the real lesson
+of this round: the suppressions and this document described a control that
+nothing re-ran, so nothing noticed when three of them stopped working. The tree
+is at **0 findings** as of this follow-up.
+
 ## Residual risk
 
 The report escape neutralises Markdown table structure and raw HTML. It does

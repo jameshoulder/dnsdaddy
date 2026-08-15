@@ -176,7 +176,12 @@ lines are counted and skipped rather than aborting the load.
 
 ## Memory
 
-Roughly 55 bytes per unique domain. About 30 MB for a 500,000-domain index.
+Roughly 165–215 bytes per unique domain, measured rather than estimated — about
+80–105 MB for a 500,000-domain index. It is a range because the index stores the
+names themselves, so a feed of long third-level names costs about a quarter more
+per entry than a feed of short registrable ones. See
+[architecture.md](architecture.md#an-exact-match-blocklist-index) for where
+that goes and why it is larger than it needs to be.
 
 Enabling the ads and adult feeds roughly doubles the index. On a 1 GB box that
 is still fine, but if you are running 512 MB, enable them one at a time and
@@ -185,7 +190,7 @@ watch `dnsdaddy_blocklist_domains` and `dnsdaddy_memory_bytes`.
 The index is an exact-match map rather than a Bloom filter or a hash-only set.
 That costs more memory than the alternatives and buys a guarantee: there is no
 possibility of a hash collision silently blocking a legitimate domain. One
-unexplained block of a supplier's website costs more trust than 30 MB costs
+unexplained block of a supplier's website costs more trust than the memory costs
 money.
 
 ## Attribution

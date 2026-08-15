@@ -11,7 +11,7 @@ and see what reputation feeds cannot tell you.
 
 **Free & Open Source · No Account · No Trial · No Subscription**
 
-[![Go](https://img.shields.io/badge/Go-1.25.12+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.25.13+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-Apache--2.0-BFED6D)](LICENSE)
 [![CI](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml)
 
@@ -209,7 +209,7 @@ make build          # → bin/dnsdaddy
 make run            # local dev on 127.0.0.1:5353, data in ./tmp
 ```
 
-Go 1.25.12+, no cgo, no npm. The dashboard is embedded in the binary.
+Go 1.25.13+, no cgo, no npm. The dashboard is embedded in the binary.
 
 ## First 30 minutes
 
@@ -310,8 +310,8 @@ deployment.
 
 | | |
 |---|---|
-| Binary | ~18 MB, static, no cgo |
-| Memory | ~35 MB idle; roughly **55 bytes per blocked domain**, so a 500,000-domain index costs about 30 MB. Budget 150 MB total. |
+| Binary | ~13 MB, static, no cgo |
+| Memory | ~14 MB before any feed loads; roughly **165–215 bytes per blocked domain** depending on how long the names in your feeds are, so a 500,000-domain index costs somewhere around 80–105 MB. Budget 250 MB total. |
 | Disk | Query logs at ~100 bytes a row. 1M queries/day at the default 7-day retention is about 700 MB. |
 | Load | The hot path does no database work and no allocation on a blocklist miss. |
 
@@ -424,8 +424,11 @@ Worth knowing before you rely on this:
 - **One server is one server.** Nothing here does clustering or anycast. Run
   two and give clients both addresses.
 - **No SSO, RBAC, or multi-tenancy.** A single admin password plus API tokens.
-- **`safeSearch` is accepted by the API but not yet enforced.** It is in the
-  policy model; the resolver does not act on it.
+- **`safeSearch` is accepted by the API but not enforced.** It is stored on the
+  policy and returned again; the resolver never reads it, so setting it changes
+  nothing. It is marked `deprecated` in the OpenAPI schema and says so in its
+  own description, rather than being removed — see
+  [docs/roadmap.md](docs/roadmap.md#safesearch-enforcement).
 - **No per-client rate limiting.** One authorised client can saturate the
   resolver.
 - **DNS rebinding is not mitigated.** Private addresses are not filtered out of
@@ -452,6 +455,7 @@ judge it for yourself rather than take a badge on trust.
 | | |
 |---|---|
 | [CodeQL](https://codeql.github.com/) | `security-extended` query set |
+| [Semgrep](https://semgrep.dev/) | `p/golang`, `p/github-actions`, `p/secrets`; a finding fails the build |
 | [gosec](https://github.com/securego/gosec) | Go security linter, medium severity and above |
 | [govulncheck](https://go.dev/blog/govulncheck) | Advisories actually reachable from this code, standard library included |
 | [Trivy](https://trivy.dev/) | Container image and filesystem scanning |
@@ -463,21 +467,39 @@ seven-day cooldown on routine version bumps so a freshly poisoned release is
 not pulled in on the day it lands. Security updates are exempt from that
 cooldown and still arrive immediately.
 
-**Semgrep static analysis** — run as a point-in-time review, *not* in CI.
-DNS Daddy has been scanned with [Semgrep](https://semgrep.dev/) and the findings
-manually triaged against the actual code and data flow rather than the rule
-name. The review produced real fixes, most notably remediation of a **Markdown
-injection** issue in generated reports: feed, network, location and policy names
-reached the rendered report unescaped. It also produced contextual false
-positives — binary DNS wire responses, Prometheus text output and a static
-embedded OpenAPI document are all flagged by an HTML-escaping rule that does not
-apply to them, and escaping any of the three would corrupt the protocol rather
-than protect anyone. Those are documented with narrow, line-specific
-suppressions naming the exact rule and the tests that justify it; no rule is
-disabled repository-wide.
+**One advisory is knowingly outstanding.** Run `govulncheck ./...` yourself and
+it will report *"1 vulnerability in modules you require, but your code doesn't
+appear to call"*. That is
+[GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) — `golang.org/x/crypto/openpgp`
+is unmaintained and unsafe by design, and it has no fixed version. DNS Daddy
+requires `golang.org/x/crypto` for `bcrypt`, which is what hashes the admin
+password; it never imports `openpgp`, so the vulnerable code is not built into
+the binary. It is listed here rather than left for you to find, because "zero
+findings" that quietly excludes a category is worse than a number with an
+explanation.
 
-The full triage — every finding, its classification, what was changed, and the
-residual risk that was *not* fixed — is in
+**Semgrep findings are triaged, not just counted.** DNS Daddy has been scanned
+with [Semgrep](https://semgrep.dev/) and the findings assessed against the
+actual code and data flow rather than the rule name. The review produced real
+fixes, most notably remediation of a **Markdown injection** issue in generated
+reports: feed, network, location and policy names reached the rendered report
+unescaped. It also produced contextual false positives — binary DNS wire
+responses, Prometheus text output and a static embedded OpenAPI document are all
+flagged by an HTML-escaping rule that does not apply to them, and escaping any of
+the three would corrupt the protocol rather than protect anyone. Those are
+documented with narrow, line-specific suppressions naming the exact rule and the
+tests that justify it; no rule is disabled repository-wide.
+
+That review was originally a point-in-time scan, which turned out to be its own
+lesson. When the tool was re-run during a later audit, **three of the
+suppressions were no longer suppressing anything** — Semgrep honours the
+annotation only on the matched line or the one immediately above it, and an
+intervening comment had quietly disabled two of them. Nothing noticed, because
+nothing re-ran the tool. Semgrep is now in CI for exactly that reason.
+
+The full triage — every finding, its classification, what was changed, what was
+found to be wrong on re-inspection, and the residual risk that was *not* fixed
+— is in
 [docs/security/semgrep-triage-2026-07-29.md](docs/security/semgrep-triage-2026-07-29.md).
 It is kept in the repository for scrutiny, on the view that showing the
 reasoning is worth more than treating a green scanner as proof of security.

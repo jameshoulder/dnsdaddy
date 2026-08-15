@@ -98,8 +98,31 @@ with `cp`.
 
 ### An exact-match blocklist index
 
-`map[string]Entry`, consulted with a suffix walk. Roughly 55 bytes per domain:
-about 30 MB for 500,000 domains.
+`map[string]Entry`, consulted with a suffix walk.
+
+**Roughly 165–215 bytes per domain — about 80–105 MB for 500,000.** That is
+measured rather than estimated: `TestIndexMemoryPerDomainStaysWithinBudget` in
+`internal/blocklist` builds a 500,000-domain index at three different name
+lengths and reports the heap each costs, so the figures have a source of truth
+and cannot drift silently.
+
+It is a range rather than a number because the map stores the names' own bytes,
+so the cost moves with the length of what is in your feeds: 167 bytes per
+domain for short registrable names, 183 for a typical malware-feed entry, 215
+for the long third-level names a DGA or tracking feed is full of. Quote the top
+of the range when sizing a box.
+
+The cost is dominated by the representation rather than by the names. `Entry`
+holds three strings — category, feed ID, feed name — which is 48 bytes of
+headers before a single character of anything, and the map stores that value
+inline against a 16-byte key header plus the key's own bytes.
+
+Interning those three fields would remove most of it: they are drawn from a
+handful of distinct values across the whole index, so an index into a small
+table would replace 48 bytes with a few. That is a worthwhile optimisation and
+is deliberately not done yet — it changes the hot-path lookup structure, and it
+deserves its own change with its own benchmarks rather than being folded into
+unrelated work.
 
 A Bloom filter or a 64-bit-hash set would use a fraction of that. Both admit
 false positives. A false positive here means silently blocking a legitimate

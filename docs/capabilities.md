@@ -140,7 +140,7 @@ how likely it is to happen — see [roadmap.md](roadmap.md) for the reasoning.
 |---|---|
 | **Local DNSSEC validation** | Requires trust-anchor management, negative-proof handling and a considered failure mode. Getting it wrong means silently accepting forged answers, which is worse than not claiming it. |
 | **Policy enforcement from behavioural findings** | Needs a measured false-positive rate first. Blocking on a heuristic with an unknown FP rate is not a feature. |
-| **`safeSearch` enforcement** | The flag is accepted by the API and stored on the policy. The resolver does not act on it. This has been a known gap since the first release. |
+| **`safeSearch` enforcement** | The flag is accepted by the API and stored on the policy. The resolver does not act on it, and setting it changes nothing about how queries are answered. A known gap since the first release; the field is marked `deprecated` in the OpenAPI schema with that stated in the description, so a generated client cannot present it as a working control. |
 | **Webhook and syslog sinks** | The NDJSON file plus a log shipper covers the same ground today without a bespoke client per vendor. |
 | **Sigma rule export / detection-as-code** | Research. The finding schema was designed with it in mind. |
 | **Behavioural baselining** | "Unusual *for this network*" needs a learned baseline, which needs a considered answer to poisoning during the learning window. |
