@@ -91,10 +91,19 @@ bin/dnsdaddy-lab -sink 127.0.0.1:5300
 
 # Point a DNS Daddy instance at it, then in another terminal:
 bin/dnsdaddy-lab -server 127.0.0.1:5353 -scenario dns-tunnelling -speed 10
-bin/dnsdaddy-lab -scenario all -speed 10          # every scenario in turn
-bin/dnsdaddy-lab                                   # list them
+bin/dnsdaddy-lab                                   # list the scenarios
 bin/dnsdaddy-lab -scenario dga-simulation -dry-run # see the names, send nothing
 ```
+
+> **Never aim this at a live resolver.** The generator defaults to
+> `127.0.0.1:5354` — the port the compose lab publishes — specifically *not*
+> port 53. On a host running DNS Daddy, port 53 is the production service, and
+> pointing the generator at it would write synthetic attack findings into real
+> telemetry and send reserved-TLD lookups to the real upstream. It prints a
+> warning if you target port 53 anyway.
+>
+> The examples above pass `-server 127.0.0.1:5353` because that is the port
+> `make run` uses for a local development instance.
 
 Each scenario binds a different `127.0.0.x` source address so it appears as its
 own client. On macOS and Windows only `127.0.0.1` is normally bound; pass

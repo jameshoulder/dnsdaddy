@@ -43,8 +43,11 @@
 // Usage:
 //
 //	dnsdaddy-lab -sink 127.0.0.1:5300
-//	dnsdaddy-lab -server 127.0.0.1:53 -scenario dns-tunnelling
-//	dnsdaddy-lab -server 127.0.0.1:53 -scenario all -speed 10
+//	dnsdaddy-lab -scenario dns-tunnelling
+//	dnsdaddy-lab -scenario all -speed 10
+//
+// The default target is the lab resolver, not port 53. See defaultLabResolver
+// for why that matters on a host that is actually running DNS Daddy.
 package main
 
 import (
@@ -69,7 +72,7 @@ func main() {
 
 func run() error {
 	var (
-		server   = flag.String("server", "127.0.0.1:53", "resolver address to send queries to")
+		server   = flag.String("server", defaultLabResolver, "resolver address to send queries to")
 		scenario = flag.String("scenario", "", "scenario to run, or 'all'; omit to list them")
 		seed     = flag.Int64("seed", 1, "PRNG seed; the same seed reproduces the same traffic exactly")
 		speed    = flag.Float64("speed", 1, "time compression: 20 replays a 10-minute scenario in 30 seconds")
@@ -91,6 +94,7 @@ func run() error {
 	if *speed <= 0 {
 		return fmt.Errorf("-speed must be positive")
 	}
+	warnIfProductionTarget(*server)
 
 	names := []string{*scenario}
 	if *scenario == "all" {
@@ -117,6 +121,38 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+// defaultLabResolver is the address the compose lab publishes, deliberately
+// chosen as the default instead of the conventional 127.0.0.1:53.
+//
+// On a host running DNS Daddy, port 53 IS the production resolver. A bare
+// `dnsdaddy-lab -scenario dns-tunnelling` defaulting there would fire
+// synthetic attack traffic at the live service: it would raise real findings
+// in the production database, attribute them to loopback addresses that mean
+// nothing to the operator, and send reserved-TLD lookups out to the real
+// upstream. Making the safe target the default costs a flag on the rare
+// occasion someone genuinely wants a different port.
+const defaultLabResolver = "127.0.0.1:5354"
+
+// productionDNSPort is the port a real resolver serves on. Aiming the
+// generator at it is legitimate on a throwaway box and a mistake on any other,
+// so it warns rather than refuses.
+const productionDNSPort = "53"
+
+// warnIfProductionTarget prints a warning when the generator is aimed at
+// something that looks like a live resolver.
+func warnIfProductionTarget(server string) {
+	_, port, err := net.SplitHostPort(server)
+	if err != nil || port != productionDNSPort {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"WARNING: sending synthetic attack traffic to %s, which is the standard DNS port.\n"+
+			"         If that is a live DNS Daddy instance, this will write real findings into\n"+
+			"         its database and send reserved-TLD lookups to its real upstream.\n"+
+			"         The lab resolver is normally %s — see labs/README.md.\n\n",
+		server, defaultLabResolver)
 }
 
 // labZones are the registered domains the lab's responder treats as existing.
@@ -484,7 +520,9 @@ func listScenarios() {
 		fmt.Printf("  %-26s client %s · %s · expects %s\n\n", "", sc.Client, sc.Duration, detects)
 	}
 	fmt.Println("Run one with:")
-	fmt.Println("  dnsdaddy-lab -server 127.0.0.1:53 -scenario dns-tunnelling -speed 20")
+	fmt.Printf("  dnsdaddy-lab -scenario dns-tunnelling -speed 10\n\n")
+	fmt.Printf("Traffic goes to %s by default — the lab resolver, not port 53.\n", defaultLabResolver)
+	fmt.Println("Aiming this at a live resolver writes synthetic findings into real telemetry.")
 }
 
 // play sends a scenario's queries on its schedule.

@@ -11,7 +11,7 @@ and see what reputation feeds cannot tell you.
 
 **Free & Open Source · No Account · No Trial · No Subscription**
 
-[![Go](https://img.shields.io/badge/Go-1.25.12+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.25.13+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-Apache--2.0-BFED6D)](LICENSE)
 [![CI](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml)
 
@@ -209,7 +209,7 @@ make build          # → bin/dnsdaddy
 make run            # local dev on 127.0.0.1:5353, data in ./tmp
 ```
 
-Go 1.25.12+, no cgo, no npm. The dashboard is embedded in the binary.
+Go 1.25.13+, no cgo, no npm. The dashboard is embedded in the binary.
 
 ## First 30 minutes
 
@@ -310,8 +310,8 @@ deployment.
 
 | | |
 |---|---|
-| Binary | ~18 MB, static, no cgo |
-| Memory | ~35 MB idle; roughly **55 bytes per blocked domain**, so a 500,000-domain index costs about 30 MB. Budget 150 MB total. |
+| Binary | ~13 MB, static, no cgo |
+| Memory | ~14 MB before any feed loads; roughly **180 bytes per blocked domain**, so a 500,000-domain index costs about 87 MB. Budget 250 MB total. |
 | Disk | Query logs at ~100 bytes a row. 1M queries/day at the default 7-day retention is about 700 MB. |
 | Load | The hot path does no database work and no allocation on a blocklist miss. |
 

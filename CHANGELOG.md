@@ -22,6 +22,53 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Security
+
+- **Go toolchain raised to 1.25.13**, fixing five standard-library
+  vulnerabilities that `govulncheck` reports as reachable from this code:
+  [GO-2026-6218] (`net/url`), [GO-2026-6090] (`crypto/tls`), [GO-2026-6089] and
+  [GO-2026-5026] (`net/http`), and [GO-2026-5972] (`encoding/asn1`).
+
+  Every one of those packages is on a path that handles untrusted input here:
+  `crypto/tls` terminates DoT and verifies upstream certificates, `net/http`
+  serves the management API and downloads threat feeds, `net/url` parses
+  operator- and API-supplied feed URLs, and `encoding/asn1` parses
+  certificates. The pin is raised in `go.mod`, the Dockerfile, both workflows,
+  and the documentation.
+
+  Found by re-running `govulncheck` during an audit; the advisories were
+  published after the previous CI run passed.
+
+### Fixed
+
+- `dnsdaddy-lab` no longer defaults to `127.0.0.1:53`. On a host running DNS
+  Daddy that is the production resolver, so a bare
+  `dnsdaddy-lab -scenario dns-tunnelling` would have written synthetic attack
+  findings into real telemetry and sent reserved-TLD lookups to the real
+  upstream. The default is now the lab resolver's port, and targeting port 53
+  prints a warning.
+- `go.mod` had every direct dependency marked `// indirect`, which misrepresents
+  the dependency surface and skews how Dependabot prioritises updates. Tidied,
+  with a CI check so it cannot silently recur. No dependency versions changed.
+
+### Documentation
+
+- **Corrected the blocklist capacity figures**, which understated memory use by
+  roughly 3×. The index was documented at "roughly 55 bytes per blocked domain,
+  about 30 MB for 500,000" in README, `docs/architecture.md` and
+  `docs/threat-intel.md`. Measured: **180 bytes per domain, 87 MB for 500,000**.
+
+  The old figure was not achievable by the data structure — `Entry` holds three
+  strings and is 48 bytes before the key or any of its bytes. A new test,
+  `TestIndexMemoryPerDomainStaysWithinBudget`, measures it and fails above a
+  250-byte ceiling, so the published number now has a source of truth.
+
+  Container limits (`GOMEMLIMIT=512MiB`, `mem_limit: 640m`) remain correct — a
+  full deployment lands near 130 MB steady state. Only the documentation was
+  wrong.
+- Binary size corrected from "~18 MB" to ~13 MB, and idle memory from "~35 MB"
+  to ~14 MB before any feed loads. Both previously overstated.
+
 ### Added
 
 **Behavioural detection engine** (`internal/detect`) — experimental.
@@ -189,3 +236,8 @@ First public release: a single Go binary and one SQLite file.
 [RFC 4035]: https://www.rfc-editor.org/rfc/rfc4035
 [RFC 6761]: https://www.rfc-editor.org/rfc/rfc6761
 [RFC 6840]: https://www.rfc-editor.org/rfc/rfc6840
+[GO-2026-5026]: https://pkg.go.dev/vuln/GO-2026-5026
+[GO-2026-5972]: https://pkg.go.dev/vuln/GO-2026-5972
+[GO-2026-6089]: https://pkg.go.dev/vuln/GO-2026-6089
+[GO-2026-6090]: https://pkg.go.dev/vuln/GO-2026-6090
+[GO-2026-6218]: https://pkg.go.dev/vuln/GO-2026-6218

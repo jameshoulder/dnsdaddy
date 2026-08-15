@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.25.13"
           cache: true
 
       - name: Check formatting
@@ -32,6 +32,22 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      # go.mod shipped with every direct dependency mislabelled `// indirect`,
+      # which misleads anyone reading the manifest to understand the dependency
+      # surface and skews how Dependabot prioritises updates. Cheap to check,
+      # easy to reintroduce.
+      - name: go.mod and go.sum must be tidy
+        run: |
+          cp go.mod /tmp/go.mod.orig
+          cp go.sum /tmp/go.sum.orig
+          go mod tidy
+          if ! diff -q /tmp/go.mod.orig go.mod || ! diff -q /tmp/go.sum.orig go.sum; then
+            echo "go.mod/go.sum are not tidy. Run 'go mod tidy' and commit the result."
+            diff -u /tmp/go.mod.orig go.mod || true
+            diff -u /tmp/go.sum.orig go.sum || true
+            exit 1
+          fi
 
       - name: Test
         run: go test ./... -coverprofile=coverage.out
@@ -88,7 +104,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.25.13"
           cache: true
 
       - name: Build
@@ -111,7 +127,7 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.25.13"
           cache: true
 
       - name: Build

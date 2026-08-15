@@ -33,6 +33,20 @@ func seedFinding(t *testing.T, h *harness, id, eventType, severity, clientIP, do
 		Maturity:      detect.MaturityExperimental,
 		MITRE:         []detect.Technique{{ID: "T1071.004", Rationale: "test"}},
 		Evidence:      map[string]any{"unique_subdomains": 187},
+		// Shaped like a real finding, signals included. A fixture missing the
+		// fields the dashboard reads would let a contract regression pass.
+		Signals: []detect.Signal{{
+			Name:         "unique_subdomains",
+			Description:  "Distinct names seen below this registered domain.",
+			Value:        187,
+			Floor:        20,
+			Ceiling:      200,
+			Normalised:   0.93,
+			Weight:       0.28,
+			Contribution: 0.26,
+		}},
+		FalsePositives: []string{"Reputation lookups look like this."},
+		NextSteps:      []string{"Identify the parent domain's owner."},
 	}
 	raw, err := json.Marshal(detail)
 	if err != nil {
@@ -336,4 +350,43 @@ func (h *harness) getJSON(path string, dst any) {
 	if err := json.Unmarshal(body, dst); err != nil {
 		h.t.Fatalf("decode %s: %v (body: %s)", path, err, body)
 	}
+}
+
+// insertQueryWithDNSSEC writes a query-log row directly, so DNSSEC surfacing
+// can be tested without depending on a reachable upstream.
+func insertQueryWithDNSSEC(t *testing.T, h *harness, domain, status string) {
+	t.Helper()
+	if err := h.store.InsertQueryBatch(context.Background(), []store.QueryEvent{{
+		Time:   time.Now(),
+		Domain: domain,
+		QType:  "A",
+		Action: store.ActionAllowed,
+		Reason: "Resolved",
+		DNSSEC: status,
+	}}, true); err != nil {
+		t.Fatalf("InsertQueryBatch: %v", err)
+	}
+}
+
+// insertRawFinding stores a finding with an arbitrary detail blob, so the
+// malformed-detail path can be exercised.
+func insertRawFinding(t *testing.T, h *harness, id, detail string) {
+	t.Helper()
+	if err := h.store.InsertFindings(context.Background(), []store.Finding{{
+		ID: id, Time: time.Now(), EventType: "dns_tunnel_suspected",
+		Severity: "high", Detail: detail,
+	}}); err != nil {
+		t.Fatalf("InsertFindings: %v", err)
+	}
+}
+
+// splitLines splits an NDJSON body into non-empty lines.
+func splitLines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
 }

@@ -330,3 +330,7 @@ func feed(d Detector, ex *Exclusions, corpus []Observation, at time.Time) []Find
 func windowEnd(window time.Duration) time.Time {
 	return baseTime.Add(window + time.Second)
 }
+
+// newTestRand returns a seeded generator, so probe tests that need many
+// distinct names stay reproducible.
+func newTestRand(seed int64) *rand.Rand { return rand.New(rand.NewSource(seed)) }
