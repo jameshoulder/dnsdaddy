@@ -30,11 +30,22 @@ type Policy struct {
 	Description string    `json:"description"`
 	Categories  []string  `json:"categories"`
 	BlockMode   BlockMode `json:"blockMode"`
-	SafeSearch  bool      `json:"safeSearch"`
-	LogQueries  bool      `json:"logQueries"`
-	IsDefault   bool      `json:"isDefault"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+
+	// SafeSearch is stored and returned but never read by the resolver: no
+	// search engine is rewritten and nothing about resolution changes when it
+	// is true. It is deliberately kept rather than deleted — the REST API
+	// promises fields are never removed within v1, and dropping the column
+	// would break the "downgrade is a binary swap" migration guarantee — but
+	// it is marked deprecated in the OpenAPI schema so a client reading only
+	// the specification cannot mistake it for a working control.
+	//
+	// Deprecated: not enforced. See docs/roadmap.md.
+	SafeSearch bool `json:"safeSearch"`
+
+	LogQueries bool      `json:"logQueries"`
+	IsDefault  bool      `json:"isDefault"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 
 	// Populated by ListPolicies / GetPolicy.
 	AllowDomains []string `json:"allowDomains"`

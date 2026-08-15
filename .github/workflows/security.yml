@@ -78,6 +78,49 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@latest
           gosec -severity medium -confidence low ./...
 
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Semgrep is here for one specific reason rather than as a fourth opinion
+      # on the same code. This repository already carries `// nosemgrep:`
+      # suppressions and a triage write-up in docs/security/ from a hosted scan,
+      # and nothing in CI re-ran the tool — so nothing checked that those
+      # suppressions still matched anything, or that a change had not
+      # reintroduced a finding they were written for. Three of them had in fact
+      # stopped working: Semgrep honours the annotation only on the matched line
+      # or the one immediately above, and an intervening comment line had
+      # silently disabled them. A suppression nobody re-runs is not a decision,
+      # it is a note.
+      #
+      # Installed rather than run through the vendor's action: one fewer
+      # third-party action in the supply chain, and it matches how govulncheck,
+      # gosec and staticcheck are installed in the jobs above. The rulesets are
+      # fetched from the Semgrep registry at run time, which is a deliberate
+      # trade — the rules stay current, at the cost of a network dependency
+      # this job cannot pin.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: pip install --disable-pip-version-check semgrep
+
+      # --error makes a finding fail the build. That is only reasonable because
+      # the tree is at zero findings today; every suppression names its exact
+      # rule on its exact line and says why, and they are listed in
+      # docs/security/semgrep-triage-2026-07-29.md.
+      - name: semgrep
+        run: |
+          semgrep scan \
+            --config=p/golang \
+            --config=p/github-actions \
+            --config=p/secrets \
+            --metrics=off \
+            --error
+
   codeql:
     name: CodeQL
     runs-on: ubuntu-latest

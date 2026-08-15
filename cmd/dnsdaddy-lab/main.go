@@ -53,8 +53,19 @@ package main
 import (
 	"flag"
 	"fmt"
+	// The lab generates reproducible synthetic traffic, and reproducibility is
+	// the whole point: the same seed must produce the same queries so a
+	// demonstration can be repeated and TestScenariosAreDeterministic is not
+	// flaky. Nothing here is a secret or a security decision. Every generator in
+	// the resolver, the API and the store uses crypto/rand; see the rationale at
+	// the call site in play().
+	//
+	// The suppression has to be the last line before the import, because Semgrep
+	// only honours it on the matched line or the one immediately above it.
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"math/rand"
 	"net"
+	"net/netip"
 	"os"
 	"sort"
 	"strings"
@@ -72,15 +83,17 @@ func main() {
 
 func run() error {
 	var (
-		server   = flag.String("server", defaultLabResolver, "resolver address to send queries to")
-		scenario = flag.String("scenario", "", "scenario to run, or 'all'; omit to list them")
-		seed     = flag.Int64("seed", 1, "PRNG seed; the same seed reproduces the same traffic exactly")
-		speed    = flag.Float64("speed", 1, "time compression: 20 replays a 10-minute scenario in 30 seconds")
-		client   = flag.String("client", "", "source address to bind, overriding the scenario's own")
-		noBind   = flag.Bool("no-bind", false, "do not bind a source address; use when the container or host already provides a distinct client IP")
-		dry      = flag.Bool("dry-run", false, "print the queries without sending them")
-		quiet    = flag.Bool("quiet", false, "suppress per-query output")
-		sink     = flag.String("sink", "", "instead of generating traffic, run the lab's authoritative responder on this address")
+		server    = flag.String("server", defaultLabResolver, "resolver address to send queries to")
+		scenario  = flag.String("scenario", "", "scenario to run, or 'all'; omit to list them")
+		seed      = flag.Int64("seed", 1, "PRNG seed; the same seed reproduces the same traffic exactly")
+		speed     = flag.Float64("speed", 1, "time compression: 20 replays a 10-minute scenario in 30 seconds")
+		client    = flag.String("client", "", "source address to bind, overriding the scenario's own")
+		noBind    = flag.Bool("no-bind", false, "do not bind a source address; use when the container or host already provides a distinct client IP")
+		dry       = flag.Bool("dry-run", false, "print the queries without sending them")
+		quiet     = flag.Bool("quiet", false, "suppress per-query output")
+		sink      = flag.String("sink", "", "instead of generating traffic, run the lab's authoritative responder on this address")
+		allowProd = flag.Bool("allow-production-target", false,
+			"permit sending synthetic attack traffic to a standard DNS port (53/853); refused by default")
 	)
 	flag.Parse()
 
@@ -94,7 +107,9 @@ func run() error {
 	if *speed <= 0 {
 		return fmt.Errorf("-speed must be positive")
 	}
-	warnIfProductionTarget(*server)
+	if err := checkTarget(*server, *allowProd); err != nil {
+		return err
+	}
 
 	names := []string{*scenario}
 	if *scenario == "all" {
@@ -135,24 +150,49 @@ func run() error {
 // occasion someone genuinely wants a different port.
 const defaultLabResolver = "127.0.0.1:5354"
 
-// productionDNSPort is the port a real resolver serves on. Aiming the
-// generator at it is legitimate on a throwaway box and a mistake on any other,
-// so it warns rather than refuses.
-const productionDNSPort = "53"
+// productionDNSPorts are the ports a live resolver serves on: 53 for plain DNS
+// and 853 for DNS-over-TLS.
+var productionDNSPorts = map[string]bool{"53": true, "853": true}
 
-// warnIfProductionTarget prints a warning when the generator is aimed at
-// something that looks like a live resolver.
-func warnIfProductionTarget(server string) {
-	_, port, err := net.SplitHostPort(server)
-	if err != nil || port != productionDNSPort {
-		return
+// checkTarget refuses to generate traffic against something that looks like a
+// live resolver, unless the operator has said so explicitly.
+//
+// This refuses rather than warns, and the distinction is deliberate. A warning
+// on stderr is advisory: it is missed under -quiet, missed in a script, and
+// missed by anyone who has seen it once. The side effect it is guarding
+// against is not cosmetic — pointing this at a live DNS Daddy writes synthetic
+// attack findings into a real security database, where they are
+// indistinguishable from genuine detections, and sends reserved-TLD lookups to
+// a real upstream.
+//
+// Undoing that means hand-deleting rows from someone's findings table while
+// trying to work out which were real. Making the rare legitimate case pass one
+// extra flag is a much smaller cost, so the default is a refusal.
+func checkTarget(server string, allowProduction bool) error {
+	host, port, err := net.SplitHostPort(server)
+	if err != nil {
+		return fmt.Errorf("invalid -server %q: %w", server, err)
 	}
-	fmt.Fprintf(os.Stderr,
-		"WARNING: sending synthetic attack traffic to %s, which is the standard DNS port.\n"+
-			"         If that is a live DNS Daddy instance, this will write real findings into\n"+
-			"         its database and send reserved-TLD lookups to its real upstream.\n"+
-			"         The lab resolver is normally %s — see labs/README.md.\n\n",
-		server, defaultLabResolver)
+
+	if productionDNSPorts[port] && !allowProduction {
+		return fmt.Errorf(
+			"refusing to send synthetic attack traffic to %s: port %s is a standard DNS port,\n"+
+				"and if that is a live DNS Daddy it will write synthetic findings into a real\n"+
+				"security database and send reserved-TLD lookups to a real upstream.\n\n"+
+				"  The lab resolver normally listens on %s (see labs/README.md).\n"+
+				"  If you genuinely mean to target this host, pass -allow-production-target",
+			server, port, defaultLabResolver)
+	}
+
+	// A non-loopback target is not necessarily wrong — the compose lab and a
+	// throwaway VM both qualify — but it is worth saying out loud, because it
+	// is the other way this ends up pointed somewhere real.
+	if ip, err := netip.ParseAddr(host); err == nil && !ip.IsLoopback() {
+		fmt.Fprintf(os.Stderr,
+			"note: target %s is not a loopback address; make sure it is a lab instance\n\n",
+			server)
+	}
+	return nil
 }
 
 // labZones are the registered domains the lab's responder treats as existing.
@@ -522,7 +562,8 @@ func listScenarios() {
 	fmt.Println("Run one with:")
 	fmt.Printf("  dnsdaddy-lab -scenario dns-tunnelling -speed 10\n\n")
 	fmt.Printf("Traffic goes to %s by default — the lab resolver, not port 53.\n", defaultLabResolver)
-	fmt.Println("Aiming this at a live resolver writes synthetic findings into real telemetry.")
+	fmt.Println("Targeting a standard DNS port (53/853) is refused unless you pass")
+	fmt.Println("-allow-production-target, because that writes synthetic findings into real telemetry.")
 }
 
 // play sends a scenario's queries on its schedule.

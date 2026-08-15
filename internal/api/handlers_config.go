@@ -146,11 +146,14 @@ func (a *API) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 type policyBody struct {
-	Name         *string   `json:"name"`
-	Description  *string   `json:"description"`
-	Categories   *[]string `json:"categories"`
-	BlockMode    *string   `json:"blockMode"`
-	SafeSearch   *bool     `json:"safeSearch"`
+	Name        *string   `json:"name"`
+	Description *string   `json:"description"`
+	Categories  *[]string `json:"categories"`
+	BlockMode   *string   `json:"blockMode"`
+
+	// Deprecated: stored but not enforced. See store.Policy.SafeSearch.
+	SafeSearch *bool `json:"safeSearch"`
+
 	LogQueries   *bool     `json:"logQueries"`
 	AllowDomains *[]string `json:"allowDomains"`
 	BlockDomains *[]string `json:"blockDomains"`

@@ -80,6 +80,29 @@ variants, which is straightforward but touches the answer path — the one place
 where a bug is a visible outage. It has stayed on the list because the risk is
 not zero and the benefit is modest.
 
+**Why the field is still there.** Carrying a property that looks like a control
+and is not one is a real hazard: somebody reads the API, sets it, and believes a
+protection is in place. Three ways out were considered.
+
+*Implement it now.* Rejected for this change. It is a resolution-path change
+that needs its own review, its own tests and a decision about what to do for
+engines with no safe-search variant. That is a feature, not a tidy-up.
+
+*Remove the field.* Rejected. `/api/v1` promises fields are added and never
+removed within v1, and the migration story promises a downgrade is a binary
+swap — dropping the column breaks the second, and dropping the JSON property
+breaks the first. Breaking two published promises to delete a boolean is a worse
+trade than the boolean.
+
+*Say clearly that it does nothing.* Taken. The field stays, and the OpenAPI
+schema now marks it `deprecated` with a description that states the resolver
+does not act on it — so a generated client shows it struck through, and anyone
+reading only the specification is told. `TestSafeSearchIsMarkedNotEnforcedInTheSpec`
+in `internal/api` fails if that wording is dropped, and a second test pins the
+value still round-tripping so an existing operator's setting is not silently
+discarded. When enforcement lands, both tests are the reminder that the
+documentation changes with it.
+
 ---
 
 ## Medium — worth doing, needs design

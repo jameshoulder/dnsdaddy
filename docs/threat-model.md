@@ -356,8 +356,8 @@ roadmap.
 **Mitigations.** Few dependencies, all pinned with checksums in `go.sum`.
 Dependabot with a seven-day cooldown on routine bumps, so a freshly poisoned
 release is not pulled in on the day it lands; security updates are exempt.
-GitHub Actions pinned to commit SHAs. CodeQL, gosec, govulncheck, Trivy and a
-CycloneDX SBOM in CI. Feeds are public URLs listed in the source, downloaded
+GitHub Actions pinned to commit SHAs. CodeQL, Semgrep, gosec, govulncheck, Trivy
+and a CycloneDX SBOM in CI. Feeds are public URLs listed in the source, downloaded
 over verified TLS to a temp file and renamed, so an interrupted transfer cannot
 leave a truncated list that parses as a shorter, silently weaker one.
 

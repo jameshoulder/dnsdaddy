@@ -100,10 +100,17 @@ with `cp`.
 
 `map[string]Entry`, consulted with a suffix walk.
 
-**Roughly 180 bytes per domain — about 87 MB for 500,000.** That is measured
-rather than estimated: `TestIndexMemoryPerDomainStaysWithinBudget` in
-`internal/blocklist` builds a 500,000-domain index and reports the heap it
-costs, so the figure has a source of truth and cannot drift silently.
+**Roughly 165–215 bytes per domain — about 80–105 MB for 500,000.** That is
+measured rather than estimated: `TestIndexMemoryPerDomainStaysWithinBudget` in
+`internal/blocklist` builds a 500,000-domain index at three different name
+lengths and reports the heap each costs, so the figures have a source of truth
+and cannot drift silently.
+
+It is a range rather than a number because the map stores the names' own bytes,
+so the cost moves with the length of what is in your feeds: 167 bytes per
+domain for short registrable names, 183 for a typical malware-feed entry, 215
+for the long third-level names a DGA or tracking feed is full of. Quote the top
+of the range when sizing a box.
 
 The cost is dominated by the representation rather than by the names. `Entry`
 holds three strings — category, feed ID, feed name — which is 48 bytes of

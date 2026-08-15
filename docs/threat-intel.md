@@ -176,8 +176,10 @@ lines are counted and skipped rather than aborting the load.
 
 ## Memory
 
-Roughly 180 bytes per unique domain, measured rather than estimated — about
-87 MB for a 500,000-domain index. See
+Roughly 165–215 bytes per unique domain, measured rather than estimated — about
+80–105 MB for a 500,000-domain index. It is a range because the index stores the
+names themselves, so a feed of long third-level names costs about a quarter more
+per entry than a feed of short registrable ones. See
 [architecture.md](architecture.md#an-exact-match-blocklist-index) for where
 that goes and why it is larger than it needs to be.
 
