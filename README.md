@@ -38,6 +38,8 @@ size as a side project, but it also means it has **not** had the kind of
 independent, adversarial security review that production security software
 needs before you should trust it with anything that matters.
 
+<img width="180" height="116" alt="Untitled - 13 August 2026 at 15 41 55 (3)" src="https://github.com/user-attachments/assets/76a546d7-2b94-438d-a573-d9a3836c8638" />
+
 **This is not currently represented as a finished, audited, or
 enterprise-ready product.** It is free, open source (Apache-2.0), and
 self-hosted only — there is no paid tier, no account, no trial, and no
