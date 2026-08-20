@@ -22,10 +22,11 @@ const indexDomains = 500000
 // between Go versions does not fail the build, but a change that made entries
 // substantially fatter would.
 //
-// Cutting these figures is a real optimisation and is tracked as future work:
-// Category, FeedID and FeedName are drawn from a handful of distinct values,
-// so interning them and storing indices instead of three string headers per
-// entry would remove most of the 48-byte Entry.
+// These figures were cut roughly fourfold by interning: Category, FeedID and
+// FeedName are drawn from a handful of distinct values, so the map stores a
+// 4-byte index into a table of distinct Entry values rather than three string
+// headers per domain. What remains is the map's own structure and the names'
+// own bytes, which is the irreducible part.
 var indexBudgets = []struct {
 	name    string
 	pattern string
@@ -36,12 +37,12 @@ var indexBudgets = []struct {
 	maxBytesPerDomain float64
 }{
 	// Short names — a domains-only feed of registrable names.
-	{"short", "h%08d.co", 200},
+	{"short", "h%08d.co", 90},
 	// The typical shape of a malware feed entry.
-	{"typical", "malware-host%08d.example.com", 220},
+	{"typical", "malware-host%08d.example.com", 105},
 	// Long third-level names, which is what a DGA or tracking feed looks like.
 	// This is the case that sets the top of the published range.
-	{"long", "a-rather-long-malicious-subdomain-%08d.tracking.example.net", 270},
+	{"long", "a-rather-long-malicious-subdomain-%08d.tracking.example.net", 145},
 }
 
 // The index is the largest thing DNS Daddy holds in memory, and its cost per
@@ -52,12 +53,17 @@ func TestIndexMemoryPerDomainStaysWithinBudget(t *testing.T) {
 		t.Skip("allocates ~110 MB per case")
 	}
 
-	// Three string headers, before the key or any of the bytes. This is why
-	// the per-domain cost cannot be small with the current representation, and
-	// it is asserted so that a change to Entry is a deliberate one.
+	// Entry is still three string headers, but the index no longer stores one
+	// per domain — it stores a uint32 into a table holding one Entry per feed.
+	// Asserting the stored width is what keeps the capacity figures honest: a
+	// change that put Entry back into the map would be a fourfold regression.
 	if got := unsafe.Sizeof(Entry{}); got != 48 {
-		t.Errorf("sizeof(Entry) = %d, expected 48; the capacity figures in "+
-			"README.md and docs/architecture.md are derived from this", got)
+		t.Errorf("sizeof(Entry) = %d, expected 48", got)
+	}
+	var storedWidth uint32
+	if got := unsafe.Sizeof(storedWidth); got != 4 {
+		t.Errorf("index stores %d bytes per domain, expected 4; the capacity "+
+			"figures in README.md and docs/architecture.md derive from this", got)
 	}
 
 	for _, tc := range indexBudgets {

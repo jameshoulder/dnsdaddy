@@ -153,3 +153,54 @@ func randomDomain(i int) string {
 	}
 	return string(buf) + ".example"
 }
+
+// The index stores an index into a table of distinct entries rather than the
+// entry itself, so the way this can go wrong is no longer "the entry is
+// missing" but "the domain resolves to the wrong feed". A domain attributed to
+// the wrong source puts a false reason in the query log, which is the one thing
+// the block reason exists to get right.
+func TestInternedEntriesResolveToTheirOwnFeed(t *testing.T) {
+	feeds := []Entry{
+		{Category: "malware", FeedID: "f_malware", FeedName: "URLhaus"},
+		{Category: "phishing", FeedID: "f_phishing", FeedName: "Phishing Army"},
+		{Category: "c2", FeedID: "f_c2", FeedName: "Feodo"},
+		{Category: "ads", FeedID: "f_ads", FeedName: "StevenBlack"},
+	}
+
+	// Interleaved rather than grouped by feed, so a bug that happened to work
+	// when each feed's domains are contiguous still fails here.
+	b := NewBuilder(64)
+	want := map[string]Entry{}
+	for i := 0; i < 40; i++ {
+		e := feeds[i%len(feeds)]
+		domain := e.Category + "-" + string(rune('a'+i)) + ".example"
+		if !b.Add(domain, e) {
+			t.Fatalf("Add(%q) reported the domain was already present", domain)
+		}
+		want[domain] = e
+	}
+	ix := b.Build()
+
+	for domain, expected := range want {
+		got, ok := ix.Lookup(domain)
+		if !ok {
+			t.Errorf("Lookup(%q) missed", domain)
+			continue
+		}
+		if got != expected {
+			t.Errorf("Lookup(%q) = %+v, want %+v", domain, got, expected)
+		}
+	}
+
+	// One table slot per distinct feed, however many domains reference it.
+	if len(ix.entries) != len(feeds) {
+		t.Errorf("entry table holds %d entries, want %d — interning is not "+
+			"de-duplicating and the memory budget does not hold",
+			len(ix.entries), len(feeds))
+	}
+	for _, e := range feeds {
+		if got := ix.CountsByFeed()[e.FeedID]; got != 10 {
+			t.Errorf("CountsByFeed()[%q] = %d, want 10", e.FeedID, got)
+		}
+	}
+}

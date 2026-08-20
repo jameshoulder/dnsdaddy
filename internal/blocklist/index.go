@@ -5,14 +5,26 @@
 // "evil.com" also blocks "login.evil.com".
 //
 // An exact map rather than a Bloom filter or hash-only set is a deliberate
-// trade. Roughly 55 bytes per domain means a 500,000-domain index costs about
-// 30 MB — comfortable on a 1 GB box — and in exchange there is no possibility
-// of a hash collision silently blocking a legitimate domain. For NEO, one
-// unexplained block of the MD's supplier costs more trust than 30 MB costs
-// money.
+// trade: there is no possibility of a hash collision silently blocking a
+// legitimate domain. For NEO, one unexplained block of the MD's supplier costs
+// more trust than the memory costs money.
+//
+// The map stores a 4-byte index into a small table of distinct Entry values
+// rather than the Entry itself. Category, feed ID and feed name are drawn from
+// as many distinct values as there are feeds — around ten — so storing three
+// string headers (48 bytes) against every one of millions of domains spent
+// most of the index's memory restating the same handful of strings. Interning
+// them cuts the per-domain cost by roughly a factor of four.
+//
+// That is not a micro-optimisation. A refresh builds the replacement index
+// while the current one is still serving queries, so peak memory is both
+// indexes at once; at the old cost, a default install exceeded the 640 MB
+// container limit during refresh and was OOM-killed. See
+// docs/baseline-validation.md.
 package blocklist
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -28,7 +40,12 @@ type Entry struct {
 
 // Index is an immutable snapshot of every enabled feed's domains.
 type Index struct {
-	domains map[string]Entry
+	// domains maps a normalised name to its position in entries. A uint32
+	// index rather than the Entry itself is what keeps the index affordable;
+	// see the package comment.
+	domains map[string]uint32
+	// entries holds the distinct Entry values, one per feed in practice.
+	entries []Entry
 	// counts per category, for the dashboard.
 	byCategory map[string]int
 	feeds      map[string]int
@@ -37,7 +54,7 @@ type Index struct {
 // NewIndex returns an empty index.
 func NewIndex() *Index {
 	return &Index{
-		domains:    map[string]Entry{},
+		domains:    map[string]uint32{},
 		byCategory: map[string]int{},
 		feeds:      map[string]int{},
 	}
@@ -54,8 +71,8 @@ func (ix *Index) Lookup(domain string) (Entry, bool) {
 		ok    bool
 	)
 	domainutil.Suffixes(domain, func(suffix string) bool {
-		if e, hit := ix.domains[suffix]; hit {
-			found, ok = e, true
+		if idx, hit := ix.domains[suffix]; hit {
+			found, ok = ix.entries[idx], true
 			return true
 		}
 		return false
@@ -103,6 +120,10 @@ func (ix *Index) CountsByFeed() map[string]int {
 // reason in the query log trustworthy.
 type Builder struct {
 	ix *Index
+	// intern maps a distinct Entry to its position in ix.entries. Entry is
+	// comparable and there are only as many distinct values as feeds, so this
+	// map stays tiny however many domains pass through.
+	intern map[Entry]uint32
 }
 
 // NewBuilder returns a Builder with capacity hinted for n domains.
@@ -110,11 +131,14 @@ func NewBuilder(n int) *Builder {
 	if n < 1024 {
 		n = 1024
 	}
-	return &Builder{ix: &Index{
-		domains:    make(map[string]Entry, n),
-		byCategory: map[string]int{},
-		feeds:      map[string]int{},
-	}}
+	return &Builder{
+		ix: &Index{
+			domains:    make(map[string]uint32, n),
+			byCategory: map[string]int{},
+			feeds:      map[string]int{},
+		},
+		intern: map[Entry]uint32{},
+	}
 }
 
 // Add inserts a normalised domain. It returns true if the domain was new.
@@ -125,7 +149,19 @@ func (b *Builder) Add(domain string, e Entry) bool {
 	if _, exists := b.ix.domains[domain]; exists {
 		return false
 	}
-	b.ix.domains[domain] = e
+	idx, seen := b.intern[e]
+	if !seen {
+		// Guarded rather than assumed: the index is addressed by uint32, and
+		// silently wrapping would point domains at the wrong feed. In practice
+		// there is one Entry per feed, so this is unreachable short of a bug.
+		if len(b.ix.entries) >= math.MaxUint32 {
+			return false
+		}
+		idx = uint32(len(b.ix.entries))
+		b.ix.entries = append(b.ix.entries, e)
+		b.intern[e] = idx
+	}
+	b.ix.domains[domain] = idx
 	b.ix.byCategory[e.Category]++
 	b.ix.feeds[e.FeedID]++
 	return true

@@ -100,29 +100,35 @@ with `cp`.
 
 `map[string]Entry`, consulted with a suffix walk.
 
-**Roughly 165–215 bytes per domain — about 80–105 MB for 500,000.** That is
+**Roughly 72–120 bytes per domain — about 36–60 MB for 500,000.** That is
 measured rather than estimated: `TestIndexMemoryPerDomainStaysWithinBudget` in
 `internal/blocklist` builds a 500,000-domain index at three different name
 lengths and reports the heap each costs, so the figures have a source of truth
 and cannot drift silently.
 
 It is a range rather than a number because the map stores the names' own bytes,
-so the cost moves with the length of what is in your feeds: 167 bytes per
-domain for short registrable names, 183 for a typical malware-feed entry, 215
-for the long third-level names a DGA or tracking feed is full of. Quote the top
-of the range when sizing a box.
+so the cost moves with the length of what is in your feeds: 72 bytes per domain
+for short registrable names, 88 for a typical malware-feed entry, 120 for the
+long third-level names a DGA or tracking feed is full of. Quote the top of the
+range when sizing a box.
 
-The cost is dominated by the representation rather than by the names. `Entry`
-holds three strings — category, feed ID, feed name — which is 48 bytes of
-headers before a single character of anything, and the map stores that value
-inline against a 16-byte key header plus the key's own bytes.
+What remains is the map's own structure and the names themselves, which is the
+irreducible part. The map used to store `Entry` inline — three strings, so 48
+bytes of headers before a single character of anything — against every domain.
+Category, feed ID and feed name are drawn from as many distinct values as there
+are feeds, so the index now holds a table of distinct `Entry` values and stores
+a 4-byte index into it. That cut the per-domain cost by roughly half and the
+resident set of a default install by 42%.
 
-Interning those three fields would remove most of it: they are drawn from a
-handful of distinct values across the whole index, so an index into a small
-table would replace 48 bytes with a few. That is a worthwhile optimisation and
-is deliberately not done yet — it changes the hot-path lookup structure, and it
-deserves its own change with its own benchmarks rather than being folded into
-unrelated work.
+**Sizing is driven by the refresh, not the steady state.** A refresh builds the
+replacement index while the current one is still answering queries, so both
+exist at once and peak live heap is close to double the steady state. A
+container limit that fits the steady state but not the peak does not degrade —
+it is OOM-killed mid-refresh, and under `restart: always` that is a restart
+loop rather than a visible failure. `docker-compose.yml` therefore sets
+`GOMEMLIMIT` as well as `mem_limit`: the Go runtime does not read the
+container's limit and will otherwise size its heap against the host's RAM. See
+docs/baseline-validation.md for the measurements behind both figures.
 
 A Bloom filter or a 64-bit-hash set would use a fraction of that. Both admit
 false positives. A false positive here means silently blocking a legitimate

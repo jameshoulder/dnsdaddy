@@ -109,8 +109,16 @@ services:
       # render in your local time. Defaults to UTC.
       TZ: "${TZ:-UTC}"
 
-      # Go's heap target. Keeps the resolver well inside a 1 GB box even with
-      # a large blocklist, at the cost of slightly more GC work.
+      # Go's heap target. The runtime does not read the container's memory
+      # limit, so without this it sizes the heap against the host's RAM and
+      # grows straight past mem_limit below.
+      #
+      # Sized for the refresh, not the steady state: the replacement blocklist
+      # index is built while the current one is still answering queries, so
+      # both exist at once and peak heap is close to double. A limit that fits
+      # the steady state but not the peak is not a slow degradation — it is an
+      # OOM-kill mid-refresh, which under `restart: always` is a restart loop.
+      # See docs/baseline-validation.md.
       GOMEMLIMIT: "512MiB"
 
     volumes:
@@ -137,6 +145,10 @@ services:
     # Modest caps so a runaway process cannot take the whole VPS with it.
     # mem_limit applies under plain `docker compose`; the deploy block is
     # honoured by Swarm. Both are set so either path is bounded.
+    #
+    # If you raise these, raise GOMEMLIMIT above in step: it is the Go
+    # runtime's view of the same budget, and leaving it behind would keep the
+    # heap capped at the old figure.
     mem_limit: 640m
     deploy:
       resources:

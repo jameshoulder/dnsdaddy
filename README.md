@@ -311,7 +311,7 @@ deployment.
 | | |
 |---|---|
 | Binary | ~13 MB, static, no cgo |
-| Memory | ~14 MB before any feed loads; roughly **165–215 bytes per blocked domain** depending on how long the names in your feeds are, so a 500,000-domain index costs somewhere around 80–105 MB. Budget 250 MB total. |
+| Memory | ~14 MB before any feed loads; roughly **72–120 bytes per blocked domain** depending on how long the names in your feeds are, so a 500,000-domain index costs somewhere around 36–60 MB. A refresh briefly holds two indexes, so size for double the steady state: budget 250 MB total for a 500,000-domain install. |
 | Disk | Query logs at ~100 bytes a row. 1M queries/day at the default 7-day retention is about 700 MB. |
 | Load | The hot path does no database work and no allocation on a blocklist miss. |
 
