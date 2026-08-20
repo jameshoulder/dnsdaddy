@@ -142,6 +142,49 @@ curl -H "Authorization: Bearer dnsd_…" \
 That gives you everything needed to answer the user, evaluate whether the
 listing is right, and go upstream if it is not.
 
+### How many sources agree
+
+`source` names the feed that decided the block. It is not necessarily the only
+feed that listed the name, because the first claim wins so that the block
+reason is the most severe classification available.
+
+To see all of them:
+
+```bash
+curl -H "Authorization: Bearer dnsd_…" \
+  'https://dns.example.co.uk/api/v1/intelligence?domain=login.example.com'
+```
+
+```json
+{
+  "domain": "login.example.com",
+  "matchedName": "example.com",
+  "listed": true,
+  "category": "phishing",
+  "independentSources": 2,
+  "sources": [
+    { "feed": "Phishing Army (extended)", "category": "phishing", "deciding": true },
+    { "feed": "abuse.ch URLhaus", "category": "malware", "deciding": false }
+  ],
+  "assessment": "Two independent feeds list this name, which is stronger evidence than any single list…"
+}
+```
+
+Two things in that response matter when you are deciding whether to trust a
+block:
+
+- **`matchedName`** is the name that actually carries the listing. Here the
+  listing is on `example.com`, so every name under it is blocked. A block you
+  were about to dispute on `login.example.com` may be a listing on the parent.
+- **`independentSources`** is corroboration. One feed is a lead; two
+  independent feeds agreeing is materially stronger. Independence is the
+  catch — several public lists republish each other, so read the feed names
+  rather than trusting the count.
+
+An unlisted name comes back `listed: false` with an assessment saying so. That
+is an absence of evidence, not a clean bill of health: DNS Daddy knows only
+what the feeds you have enabled contain.
+
 ## Adding your own feed
 
 **Threat feeds → Add a custom feed.** Any URL serving one of:
@@ -176,16 +219,21 @@ lines are counted and skipped rather than aborting the load.
 
 ## Memory
 
-Roughly 165–215 bytes per unique domain, measured rather than estimated — about
-80–105 MB for a 500,000-domain index. It is a range because the index stores the
-names themselves, so a feed of long third-level names costs about a quarter more
-per entry than a feed of short registrable ones. See
+Roughly 72–120 bytes per unique domain, measured rather than estimated — about
+36–60 MB for a 500,000-domain index. It is a range because the index stores the
+names themselves, so a feed of long third-level names costs about two thirds
+more per entry than a feed of short registrable ones. See
 [architecture.md](architecture.md#an-exact-match-blocklist-index) for where
-that goes and why it is larger than it needs to be.
+that goes.
 
-Enabling the ads and adult feeds roughly doubles the index. On a 1 GB box that
-is still fine, but if you are running 512 MB, enable them one at a time and
-watch `dnsdaddy_blocklist_domains` and `dnsdaddy_memory_bytes`.
+**Size for a refresh, not for the steady state.** The replacement index is
+built while the current one is still answering queries, so both exist at once
+and peak memory is close to double. A limit that fits the steady state but not
+the peak does not degrade gracefully — the container is OOM-killed mid-refresh.
+
+Enabling the ads and adult feeds roughly doubles the index. If you are running
+close to a memory limit, enable them one at a time and watch
+`dnsdaddy_blocklist_domains` and `dnsdaddy_memory_bytes`.
 
 The index is an exact-match map rather than a Bloom filter or a hash-only set.
 That costs more memory than the alternatives and buys a guarantee: there is no

@@ -99,6 +99,7 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/findings/export", a.handleExportFindings)
 	api.HandleFunc("GET /api/v1/findings/{id}", a.handleGetFinding)
 	api.HandleFunc("GET /api/v1/detectors", a.handleDetectors)
+	api.HandleFunc("GET /api/v1/intelligence", a.handleDomainIntelligence)
 
 	api.HandleFunc("GET /api/v1/networks", a.handleListNetworks)
 	api.HandleFunc("POST /api/v1/networks", a.handleCreateNetwork)

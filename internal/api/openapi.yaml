@@ -800,6 +800,71 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/DetectorInfo" }
 
+  /api/v1/intelligence:
+    get:
+      tags: [Detections]
+      summary: What threat intelligence is held for a name, and how strong it is
+      description: |
+        Reports every feed that lists a name, which one decides the block
+        reason, and whether anything corroborates it. Read from the same
+        in-memory index the resolver consults, so the answer cannot drift from
+        what would happen to a real query. Performs no network I/O.
+
+        This is evidence, not a verdict. Two independent feeds are stronger
+        than one, but feeds that republish each other are not independent, so
+        the sources are listed rather than only counted. An unlisted name is
+        reported as an absence of evidence, never as safe: DNS Daddy knows only
+        what the enabled feeds contain.
+
+        A listing on a parent name covers every name beneath it, and is
+        attributed to the parent — `matchedName` states which name actually
+        carries it.
+      parameters:
+        - in: query
+          name: domain
+          required: true
+          schema: { type: string, maxLength: 512 }
+          description: The name to explain.
+      responses:
+        "200":
+          description: What is known about the name
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domain: { type: string }
+                  matchedName:
+                    type: string
+                    description: The indexed name that carries the listing, which may be a parent.
+                  listed: { type: boolean }
+                  category: { type: string }
+                  reason: { type: string }
+                  independentSources:
+                    type: integer
+                    description: How many distinct feeds list the name. Two or more is corroboration.
+                  assessment:
+                    type: string
+                    description: The strength of the evidence, in words.
+                  caveat:
+                    type: string
+                    description: What this answer does not establish. Always populated.
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        feed: { type: string }
+                        feedId: { type: string }
+                        category: { type: string }
+                        deciding:
+                          type: boolean
+                          description: Whether this claim sets the block reason.
+        "400":
+          description: Missing, overlong, or unparseable domain
+        "401":
+          description: Not authenticated
+
 components:
   securitySchemes:
     bearerAuth:

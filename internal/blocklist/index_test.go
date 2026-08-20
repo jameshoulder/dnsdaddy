@@ -303,3 +303,55 @@ func TestSourcesOnUnknownAndNilIndex(t *testing.T) {
 		t.Errorf("CorroboratedDomains() on a nil index = %d, want 0", got)
 	}
 }
+
+// A block on a parent must be reported against the parent. Lookup walks
+// parents and answers "is this covered", so using it to ask *which* name
+// carries the listing returns the queried name every time — which reads as
+// though the queried name were itself on a feed. That is a misrepresentation
+// of the evidence, and it is the bug this pins.
+func TestMatchedNameReportsTheListedParentNotTheQueriedName(t *testing.T) {
+	ix := buildIndex(t, map[string]string{"evil.com": "malware"})
+
+	cases := map[string]string{
+		"evil.com":       "evil.com",
+		"login.evil.com": "evil.com",
+		"a.b.c.evil.com": "evil.com",
+	}
+	for query, want := range cases {
+		got, ok := ix.MatchedName(query)
+		if !ok {
+			t.Errorf("MatchedName(%q) reported no match", query)
+			continue
+		}
+		if got != want {
+			t.Errorf("MatchedName(%q) = %q, want %q", query, got, want)
+		}
+	}
+
+	if _, ok := ix.MatchedName("harmless.example"); ok {
+		t.Error("MatchedName reported a match for an unindexed name")
+	}
+	var nilIndex *Index
+	if _, ok := nilIndex.MatchedName("evil.com"); ok {
+		t.Error("MatchedName on a nil index reported a match")
+	}
+}
+
+// Corroboration is recorded against the listed name, so it must survive being
+// reached through a child.
+func TestSourcesThroughAParentKeepCorroboration(t *testing.T) {
+	malware := Entry{Category: "malware", FeedID: "f_urlhaus", FeedName: "URLhaus"}
+	c2 := Entry{Category: "c2", FeedID: "f_feodo", FeedName: "Feodo"}
+	b := NewBuilder(4)
+	b.Add("evil.com", malware)
+	b.Add("evil.com", c2)
+	ix := b.Build()
+
+	got := ix.Sources("deep.sub.evil.com")
+	if len(got) != 2 {
+		t.Fatalf("Sources() through a child returned %d sources, want 2: %+v", len(got), got)
+	}
+	if got[0] != malware {
+		t.Errorf("Sources()[0] = %+v, want the deciding entry %+v", got[0], malware)
+	}
+}

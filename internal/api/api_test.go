@@ -52,6 +52,11 @@ func newHarness(t *testing.T) *harness {
 	lists := blocklist.NewHolder()
 	b := blocklist.NewBuilder(4)
 	b.Add("evil.com", blocklist.Entry{Category: "malware", FeedID: "f_test", FeedName: "Test feed"})
+	// A second name carrying two independent claims, so the intelligence
+	// endpoint can be exercised against real corroboration. evil.com stays
+	// single-sourced because other tests assert on its block reason.
+	b.Add("corroborated.example", blocklist.Entry{Category: "malware", FeedID: "f_test", FeedName: "Test feed"})
+	b.Add("corroborated.example", blocklist.Entry{Category: "c2", FeedID: "f_other", FeedName: "Other feed"})
 	lists.Store(b.Build())
 
 	cfg := config.Default()
@@ -274,8 +279,11 @@ func TestSessionFlow(t *testing.T) {
 	}
 
 	overview := decode[Overview](t, raw)
-	if overview.BlocklistDomains != 1 {
-		t.Errorf("blocklistDomains = %d, want 1", overview.BlocklistDomains)
+	// The fixture indexes evil.com and corroborated.example. The second
+	// carries two claims but is one domain, which is the distinction the
+	// count has to keep: corroboration is evidence, not extra coverage.
+	if overview.BlocklistDomains != 2 {
+		t.Errorf("blocklistDomains = %d, want 2", overview.BlocklistDomains)
 	}
 	if overview.ProtectedNetworks != 1 {
 		t.Errorf("protectedNetworks = %d, want the seeded network", overview.ProtectedNetworks)
@@ -499,7 +507,7 @@ func TestMetricsExposition(t *testing.T) {
 	body := string(raw)
 	for _, want := range []string{
 		"# TYPE dnsdaddy_queries_total counter",
-		"dnsdaddy_blocklist_domains 1",
+		"dnsdaddy_blocklist_domains 2",
 		"dnsdaddy_build_info",
 	} {
 		if !strings.Contains(body, want) {

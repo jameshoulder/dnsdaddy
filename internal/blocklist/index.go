@@ -98,6 +98,33 @@ func (ix *Index) Lookup(domain string) (Entry, bool) {
 	return found, ok
 }
 
+// MatchedName returns the indexed name a lookup for domain would hit: domain
+// itself, or the nearest parent that is listed.
+//
+// This is not the same question as Lookup, and the difference matters when
+// reporting a block. Lookup walks parents and answers "is this covered", so
+// asking it about a name tells you nothing about *which* name carries the
+// listing. Blocking "login.evil.com" because "evil.com" is listed is correct
+// behaviour, and showing it as though "login.evil.com" were itself on a feed
+// misrepresents the evidence to whoever has to act on it.
+func (ix *Index) MatchedName(domain string) (string, bool) {
+	if ix == nil || len(ix.domains) == 0 {
+		return "", false
+	}
+	var (
+		matched string
+		found   bool
+	)
+	domainutil.Suffixes(domain, func(suffix string) bool {
+		if _, hit := ix.domains[suffix]; hit {
+			matched, found = suffix, true
+			return true
+		}
+		return false
+	})
+	return matched, found
+}
+
 // Sources returns every feed that listed the name matched for domain, with the
 // entry that decides the block reason first.
 //
@@ -113,15 +140,8 @@ func (ix *Index) Sources(domain string) []Entry {
 	if ix == nil || len(ix.domains) == 0 {
 		return nil
 	}
-	var matched string
-	domainutil.Suffixes(domain, func(suffix string) bool {
-		if _, hit := ix.domains[suffix]; hit {
-			matched = suffix
-			return true
-		}
-		return false
-	})
-	if matched == "" {
+	matched, ok := ix.MatchedName(domain)
+	if !ok {
 		return nil
 	}
 
