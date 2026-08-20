@@ -204,3 +204,102 @@ func TestInternedEntriesResolveToTheirOwnFeed(t *testing.T) {
 		}
 	}
 }
+
+func TestSourcesReportsASingleFeedWithoutCorroboration(t *testing.T) {
+	b := NewBuilder(4)
+	b.Add("evil.com", Entry{Category: "malware", FeedID: "f_urlhaus", FeedName: "URLhaus"})
+	ix := b.Build()
+
+	// The overwhelmingly common case, and the one the sparse table is sized
+	// against: nothing is stored for it at all.
+	for _, domain := range []string{"evil.com", "login.evil.com"} {
+		got := ix.Sources(domain)
+		if len(got) != 1 {
+			t.Fatalf("Sources(%q) returned %d sources, want 1: %+v", domain, len(got), got)
+		}
+		if got[0].FeedName != "URLhaus" {
+			t.Errorf("Sources(%q)[0].FeedName = %q, want URLhaus", domain, got[0].FeedName)
+		}
+	}
+	if n := ix.CorroboratedDomains(); n != 0 {
+		t.Errorf("CorroboratedDomains() = %d, want 0 — a single-source domain "+
+			"must cost nothing in the sparse table", n)
+	}
+}
+
+func TestSourcesReportsEveryFeedThatListedTheDomain(t *testing.T) {
+	malware := Entry{Category: "malware", FeedID: "f_urlhaus", FeedName: "URLhaus"}
+	phishing := Entry{Category: "phishing", FeedID: "f_army", FeedName: "Phishing Army"}
+	c2 := Entry{Category: "c2", FeedID: "f_feodo", FeedName: "Feodo"}
+
+	b := NewBuilder(4)
+	b.Add("evil.com", malware)
+	b.Add("evil.com", phishing)
+	b.Add("evil.com", c2)
+	ix := b.Build()
+
+	got := ix.Sources("evil.com")
+	if len(got) != 3 {
+		t.Fatalf("Sources() returned %d sources, want 3: %+v", len(got), got)
+	}
+	// The first claim decides the block reason, so it has to lead.
+	if got[0] != malware {
+		t.Errorf("Sources()[0] = %+v, want the first claim %+v", got[0], malware)
+	}
+	names := map[string]bool{}
+	for _, e := range got {
+		names[e.FeedName] = true
+	}
+	for _, want := range []string{"URLhaus", "Phishing Army", "Feodo"} {
+		if !names[want] {
+			t.Errorf("Sources() omitted %q: %+v", want, got)
+		}
+	}
+
+	// Corroboration is evidence only. It must not disturb the block decision
+	// or the per-feed dedup counts.
+	if entry, _ := ix.Lookup("evil.com"); entry != malware {
+		t.Errorf("Lookup() = %+v, want the first claim %+v — corroboration "+
+			"changed the block reason", entry, malware)
+	}
+	if ix.Len() != 1 {
+		t.Errorf("Len() = %d, want 1", ix.Len())
+	}
+	if got := ix.CountsByFeed()["f_army"]; got != 0 {
+		t.Errorf("CountsByFeed()[f_army] = %d, want 0 — a corroborating feed "+
+			"was credited with a domain it did not contribute first", got)
+	}
+}
+
+// A feed listing the same name twice is a duplicate line, not a second
+// opinion. Counting it would manufacture agreement out of one source, which is
+// the failure mode corroboration most needs to avoid.
+func TestRepeatedClaimFromOneFeedIsNotCorroboration(t *testing.T) {
+	e := Entry{Category: "malware", FeedID: "f_urlhaus", FeedName: "URLhaus"}
+	b := NewBuilder(4)
+	b.Add("evil.com", e)
+	b.Add("evil.com", e)
+	b.Add("evil.com", e)
+	ix := b.Build()
+
+	if got := ix.Sources("evil.com"); len(got) != 1 {
+		t.Errorf("Sources() returned %d sources, want 1: %+v", len(got), got)
+	}
+	if n := ix.CorroboratedDomains(); n != 0 {
+		t.Errorf("CorroboratedDomains() = %d, want 0", n)
+	}
+}
+
+func TestSourcesOnUnknownAndNilIndex(t *testing.T) {
+	ix := buildIndex(t, map[string]string{"evil.com": "malware"})
+	if got := ix.Sources("harmless.example"); got != nil {
+		t.Errorf("Sources() on an unindexed domain = %+v, want nil", got)
+	}
+	var nilIndex *Index
+	if got := nilIndex.Sources("evil.com"); got != nil {
+		t.Errorf("Sources() on a nil index = %+v, want nil", got)
+	}
+	if got := nilIndex.CorroboratedDomains(); got != 0 {
+		t.Errorf("CorroboratedDomains() on a nil index = %d, want 0", got)
+	}
+}

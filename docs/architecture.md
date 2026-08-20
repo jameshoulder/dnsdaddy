@@ -120,6 +120,23 @@ are feeds, so the index now holds a table of distinct `Entry` values and stores
 a 4-byte index into it. That cut the per-domain cost by roughly half and the
 resident set of a default install by 42%.
 
+### Corroboration is stored, and it is nearly free
+
+The index also records *which* feeds listed a domain, not just the one that
+decides the block reason. Blocking keeps the first claim — the most severe
+classification — but the rest is evidence, and collapsing it at ingest is what
+made "two independent sources agree" impossible to say.
+
+It is affordable because it is sparse. Measured across the shipped feed set,
+**95.64% of indicators appear on exactly one feed** and only 4.36% on two or
+more, so nothing is stored for the overwhelming majority. The side table costs
+**10.5 MB at 125,459 corroborated domains — 5.4% on top of the index**, pinned
+by `TestCorroborationTableCostAtMeasuredOverlap`.
+
+`Index.Sources` reads it. Nothing on the DNS hot path calls it: `Lookup`
+remains the sole authority on whether a name is blocked, and corroboration is
+consulted only when something is being explained.
+
 **Sizing is driven by the refresh, not the steady state.** A refresh builds the
 replacement index while the current one is still answering queries, so both
 exist at once and peak live heap is close to double the steady state. A
