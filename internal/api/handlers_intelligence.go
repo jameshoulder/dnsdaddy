@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 )
 
@@ -46,6 +47,12 @@ type intelligenceResponse struct {
 	// populated: intelligence is a claim by a third party at a point in time,
 	// and presenting it without that framing is how a listing becomes a fact.
 	Caveat string `json:"caveat"`
+	// NameAnalysis is what the name looks like on its own, independent of any
+	// listing. It is computed from the name alone — no state, no lookups — and
+	// is the weakest evidence here by a wide margin. Reported for every name,
+	// listed or not, because "not on a feed" is the case where how a name
+	// looks is the only thing there is to go on.
+	NameAnalysis detect.NameAssessment `json:"nameAnalysis"`
 }
 
 // handleDomainIntelligence explains what threat intelligence DNS Daddy holds
@@ -85,6 +92,7 @@ func (a *API) handleDomainIntelligence(w http.ResponseWriter, r *http.Request) {
 		resp.Assessment = "No threat intelligence in the enabled feeds mentions this name. " +
 			"That is an absence of evidence, not evidence that the name is safe: " +
 			"DNS Daddy only knows what the feeds you have enabled contain."
+		resp.NameAnalysis = detect.AssessName(domain)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -105,6 +113,7 @@ func (a *API) handleDomainIntelligence(w http.ResponseWriter, r *http.Request) {
 	resp.IndependentSources = len(sources)
 	resp.MatchedName, _ = ix.MatchedName(domain)
 	resp.Assessment = assessment(len(sources), resp.MatchedName, domain)
+	resp.NameAnalysis = detect.AssessName(domain)
 
 	writeJSON(w, http.StatusOK, resp)
 }

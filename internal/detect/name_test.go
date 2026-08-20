@@ -1,0 +1,192 @@
+package detect
+
+import (
+	"strings"
+	"testing"
+)
+
+// benignCorpus is traffic a real network makes constantly. Several of these
+// names are machine-generated and look exactly like what this assessment is
+// built to notice, which is the point: they are the population that a lexical
+// heuristic gets wrong, and they vastly outnumber malicious names in practice.
+var benignCorpus = []string{
+	"github.com", "www.microsoft.com", "cloudflare.com", "google.com",
+	"login.microsoftonline.com", "outlook.office365.com",
+	"registry.npmjs.org", "deb.debian.org", "security.ubuntu.com",
+	"pypi.org", "files.pythonhosted.org",
+	"objects.githubusercontent.com", "raw.githubusercontent.com",
+	"dl.google.com", "s3-eu-west-1.amazonaws.com",
+	"telemetry.mozilla.org", "incoming.telemetry.mozilla.org",
+	"v10.events.data.microsoft.com", "settings-win.data.microsoft.com",
+	// Deliberately awkward: random-looking CDN, shard and build identifiers.
+	"e4478.dscb.akamaiedge.net",
+	"d1vg5xiq7qffdj.cloudfront.net",
+	"prod-elastic-cache-01.eu-west-2.amazonaws.com",
+	"api-5f8c2a1b.stripe.com",
+	"cdn-3a7f9c2e1d.example-service.net",
+	"scontent-lhr8-1.xx.fbcdn.net",
+	"my-really-long-but-perfectly-ordinary-company-blog.example.com",
+}
+
+// dgaLikeCorpus is synthetic. No live malicious infrastructure is used or
+// contacted anywhere in these tests.
+var dgaLikeCorpus = []string{
+	"kq3v9z7x2m1p8w4t.example",
+	"xj4k2n8fq7wd3mz9.badsite.xyz",
+	"a7f3e91b2c8d4056.evil.example",
+	"mfrggzdfmztwq2lk.tunnel.example",
+	"nbswy3dpfqqho33snrscc.exfil.example",
+	"zzxqvwjhkbnmfgptrs.example",
+}
+
+// benignScoreCeiling is the false-positive budget. Ordinary traffic — including
+// the machine-generated hostnames that look worst — must stay well under the
+// cap, or the assessment is noise on a real network.
+const benignScoreCeiling = 8.0
+
+func TestBenignTrafficStaysBelowTheFalsePositiveCeiling(t *testing.T) {
+	var worst float64
+	var worstName string
+	for _, name := range benignCorpus {
+		a := AssessName(name)
+		if a.Score > worst {
+			worst, worstName = a.Score, name
+		}
+		if a.Score > benignScoreCeiling {
+			t.Errorf("%s scored %.1f, above the %.0f benign ceiling (signals: %v)",
+				name, a.Score, benignScoreCeiling, signalNames(a))
+		}
+	}
+	t.Logf("worst benign: %s at %.1f of a %.0f ceiling (cap %.0f)",
+		worstName, worst, benignScoreCeiling, MaxNameScore)
+}
+
+func TestDGALikeNamesScoreAboveOrdinaryOnes(t *testing.T) {
+	var lowest = MaxNameScore + 1
+	for _, name := range dgaLikeCorpus {
+		a := AssessName(name)
+		if a.Score < lowest {
+			lowest = a.Score
+		}
+		if a.Score <= benignScoreCeiling {
+			t.Errorf("%s scored %.1f, not separated from ordinary traffic (signals: %v)",
+				name, a.Score, signalNames(a))
+		}
+		if len(a.Signals) < 2 {
+			t.Errorf("%s scored on %d signal(s); a name should not stand out on one "+
+				"property alone", name, len(a.Signals))
+		}
+	}
+	t.Logf("weakest DGA-like score: %.1f, against a benign ceiling of %.0f",
+		lowest, benignScoreCeiling)
+}
+
+// Entropy is the signal most likely to be over-trusted, and on its own it
+// measures very little. This pins that it cannot carry a name on its own.
+func TestEntropyAloneCannotProduceAHighScore(t *testing.T) {
+	weight := NameSignalWeights["label_entropy"]
+	if weight > 0.25 {
+		t.Errorf("label_entropy carries %.2f of the assessment; entropy alone is "+
+			"weak evidence and must not dominate", weight)
+	}
+	if max := weight * MaxNameScore; max > 6 {
+		t.Errorf("entropy alone could contribute %.1f, which is too much of the "+
+			"%.0f cap", max, MaxNameScore)
+	}
+}
+
+// The whole assessment is capped well below a blocking threshold: how a name
+// looks must never be enough to block on its own.
+func TestScoreNeverExceedsTheCap(t *testing.T) {
+	worst := AssessName(strings.Repeat("x7f3q9z2m8k4w1p6", 15) + ".example")
+	if worst.Score > MaxNameScore {
+		t.Errorf("score %.1f exceeds the %.0f cap", worst.Score, MaxNameScore)
+	}
+	if worst.Confidence > 0.75 {
+		t.Errorf("confidence %.2f — a lexical heuristic must not claim near-certainty",
+			worst.Confidence)
+	}
+	var total float64
+	for _, w := range NameSignalWeights {
+		total += w
+	}
+	if total < 0.999 || total > 1.001 {
+		t.Errorf("signal weights sum to %.3f, want 1", total)
+	}
+}
+
+// "Measured and ordinary" and "could not be measured" are different answers,
+// and collapsing them turns an absence of evidence into a clean bill of health.
+func TestUnmeasurableNamesAreReportedAsUnavailableNotClean(t *testing.T) {
+	t.Run("short labels", func(t *testing.T) {
+		a := AssessName("ab.cd.example.com")
+		if a.Score != 0 {
+			t.Errorf("score = %.1f, want 0", a.Score)
+		}
+		if len(a.Unavailable) == 0 {
+			t.Error("no label was long enough to judge, but nothing was reported " +
+				"as unavailable — this reads as 'checked and ordinary'")
+		}
+	})
+
+	t.Run("punycode", func(t *testing.T) {
+		a := AssessName("xn--80ak6aa92e.example")
+		if len(a.Unavailable) == 0 {
+			t.Error("punycode labels are machine-generated by definition and " +
+				"cannot be scored; that must be stated, not scored as clean")
+		}
+		for _, s := range a.Signals {
+			if s.Name == "dga_like_characteristics" && s.Contribution > 0 {
+				t.Error("punycode was scored for randomness")
+			}
+		}
+	})
+
+	t.Run("ordinary name still lists what was checked", func(t *testing.T) {
+		a := AssessName("www.microsoft.com")
+		if len(a.NotObserved) == 0 {
+			t.Error("nothing recorded as looked-for-and-not-found")
+		}
+		if !strings.Contains(a.Summary, "not evidence that the domain is safe") {
+			t.Errorf("a clean result implied safety: %q", a.Summary)
+		}
+	})
+}
+
+// The register the product speaks in is a feature, not decoration: a lexical
+// measurement must not be phrased as a determination about malware.
+func TestSummaryLanguageMatchesTheStrengthOfTheEvidence(t *testing.T) {
+	a := AssessName("kq3v9z7x2m1p8w4t.example")
+	if !strings.Contains(a.Summary, "DGA-like") {
+		t.Errorf("summary did not use the hedged form: %q", a.Summary)
+	}
+	for _, forbidden := range []string{"malware", "malicious", "confirmed", "is a DGA"} {
+		if strings.Contains(strings.ToLower(a.Summary), forbidden) {
+			t.Errorf("summary claims more than lexical evidence supports (%q): %q",
+				forbidden, a.Summary)
+		}
+	}
+	if len(a.Limitations) == 0 {
+		t.Error("limitations were not stated")
+	}
+}
+
+func TestAssessNameHandlesDegenerateInput(t *testing.T) {
+	for _, name := range []string{"", ".", "localhost", "a", "example.com"} {
+		a := AssessName(name)
+		if a.Score < 0 || a.Score > MaxNameScore {
+			t.Errorf("AssessName(%q) scored %.1f, outside 0..%.0f", name, a.Score, MaxNameScore)
+		}
+		if a.Summary == "" {
+			t.Errorf("AssessName(%q) produced no summary", name)
+		}
+	}
+}
+
+func signalNames(a NameAssessment) []string {
+	out := make([]string, 0, len(a.Signals))
+	for _, s := range a.Signals {
+		out = append(out, s.Name)
+	}
+	return out
+}

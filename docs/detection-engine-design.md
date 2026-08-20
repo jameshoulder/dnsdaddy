@@ -262,10 +262,11 @@ forever, and indicators are deduplicated.
 | Behavioural detectors (tunnel, beacon, NXDOMAIN, DGA cluster, TXT, resolution) | **Stable-ish, experimental maturity, shipped** |
 | Finding model with per-signal evidence | **Shipped** |
 | Alert-only enforcement posture | **Shipped** |
-| Feed provenance and corroboration | **In progress** — §5 |
+| Feed provenance and corroboration | **Shipped** — §5, `GET /api/v1/intelligence` |
+| Per-name lexical assessment (entropy, DGA-like, digits, length, encoding, hyphens) | **Shipped**, capped at 25/100 — see docs/false-positives.md |
 | Per-query verdict object | **Planned** — §3 |
-| First-seen-locally | **Planned** |
-| Lexical / entropy / TLD per-query detectors | **Planned** |
+| First-seen-locally | **Planned**, and costed: it is the first detector needing per-domain persistent state, so it ships with a bounded table and a sweep or not at all |
+| TLD context | **Planned** |
 | Score calibration against a benign corpus | **Planned, blocking any enforcement mode** |
 | Infrastructure/ASN enrichment | **Deferred** — §4.4 |
 

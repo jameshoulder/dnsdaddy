@@ -144,3 +144,56 @@ func TestIntelligenceRequiresAuthentication(t *testing.T) {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
+
+// Name analysis is reported for every name, listed or not. An unlisted name is
+// precisely the case where how the name looks is the only evidence there is.
+func TestIntelligenceIncludesNameAnalysisForUnlistedNames(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	status, got := getIntelligence(t, h, "kq3v9z7x2m1p8w4t.example")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if got.Listed {
+		t.Fatal("listed = true, want false")
+	}
+	if got.NameAnalysis.Score <= 0 {
+		t.Errorf("nameAnalysis.score = %.1f, want a positive score for a "+
+			"random-looking name", got.NameAnalysis.Score)
+	}
+	if len(got.NameAnalysis.Signals) == 0 {
+		t.Error("nameAnalysis returned no signals")
+	}
+	// The arithmetic has to be checkable by hand from what is returned.
+	for _, s := range got.NameAnalysis.Signals {
+		if s.Weight == 0 {
+			t.Errorf("signal %q published no weight", s.Name)
+		}
+		want := s.Normalised * s.Weight
+		if diff := s.Contribution - want; diff > 1e-9 || diff < -1e-9 {
+			t.Errorf("signal %q: contribution %.6f != normalised %.6f x weight %.6f",
+				s.Name, s.Contribution, s.Normalised, s.Weight)
+		}
+	}
+	if len(got.NameAnalysis.Limitations) == 0 {
+		t.Error("nameAnalysis stated no limitations")
+	}
+}
+
+func TestIntelligenceNameAnalysisStaysQuietOnOrdinaryNames(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	status, got := getIntelligence(t, h, "www.microsoft.com")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if got.NameAnalysis.Score != 0 {
+		t.Errorf("nameAnalysis.score = %.1f for ordinary traffic, want 0",
+			got.NameAnalysis.Score)
+	}
+	if !strings.Contains(got.NameAnalysis.Summary, "not evidence that the domain is safe") {
+		t.Errorf("a quiet result implied safety: %q", got.NameAnalysis.Summary)
+	}
+}
