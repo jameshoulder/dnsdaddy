@@ -40,6 +40,9 @@ intention, and everything else here is expected to agree with it.
 | [detection/README.md](detection/README.md) | The pipeline, design principles, finding schema, and every detector |
 | [detection/dns-tunnelling.md](detection/dns-tunnelling.md) | The tunnelling detector in depth |
 | [detection/mitre.md](detection/mitre.md) | ATT&CK mapping policy, every mapping, and the ones deliberately left off |
+| [detection-engine-design.md](detection-engine-design.md) | The target architecture: what ships today, what is in progress, what is deferred and why |
+| [false-positives.md](false-positives.md) | What triggers each heuristic, what legitimately looks the same, and the measured separation margin |
+| [baseline-validation.md](baseline-validation.md) | The pre-extension audit: tests, Docker, DNS correctness, security, and measured performance |
 | [threat-hunting/README.md](threat-hunting/README.md) | Six hunts you can run against telemetry this produces |
 
 ## DNS security concepts
