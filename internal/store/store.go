@@ -98,6 +98,11 @@ var addedColumns = []struct{ table, column, definition string }{
 	// DNSSEC validation status as reported by the upstream. See
 	// docs/dnssec.md for what each value can and cannot tell you.
 	{"query_log", "dnssec", "TEXT NOT NULL DEFAULT ''"},
+	// When a feed last downloaded successfully, as opposed to when it was last
+	// attempted. last_refreshed_at moves on a failure too, so on its own it
+	// cannot answer the question an operator actually asks of a feed that is
+	// erroring: how old is the intelligence still being enforced.
+	{"feeds", "last_success_at", "INTEGER"},
 }
 
 func migrate(db *sql.DB) error {

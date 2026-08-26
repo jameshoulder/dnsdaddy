@@ -104,6 +104,11 @@ services:
       DNSDADDY_RETENTION_DAYS: "7"
       DNSDADDY_ROLLUP_DAYS: "90"
 
+      # ---- Threat feeds ---------------------------------------------------
+      # Our own DNS Daddy Threat Observatory ships in the catalog DISABLED, so
+      # nothing here fetches from a server we run until you turn it on from the
+      # Threat feeds page. docs/threat-intel.md says what that exposes.
+
       DNSDADDY_LOG_LEVEL: "info"
       # Set your own IANA timezone (e.g. UTC) so report timestamps
       # render in your local time. Defaults to UTC.

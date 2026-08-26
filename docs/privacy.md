@@ -28,6 +28,18 @@ There is no telemetry, no analytics, no licence check, and no call home. Set
 `feeds.refresh_interval` to `0` and configure a `file://` feed and it will run
 with no outbound HTTP at all. You can verify this with `tcpdump` — please do.
 
+**On the one DNS Daddy-operated feed.** The catalog includes our own DNS Daddy
+Threat Observatory, and it ships **disabled** precisely so that the paragraph
+above stays true out of the box. Every URL a stock install fetches belongs to
+somebody else.
+
+If you enable it, that becomes an outbound HTTPS request from your server to
+ours on each refresh, and we see what any feed provider sees: your server's IP
+address, its `dnsdaddy/<version>` User-Agent, and the refresh cadence. We do
+not see your queries, your clients, or which indicators matched — the feed is a
+file download and matching happens on your server. Disabling the feed ends it.
+See [threat-intel.md](threat-intel.md#the-dns-daddy-threat-observatory).
+
 ## What is written to disk
 
 Everything lives in one SQLite database in your data directory.

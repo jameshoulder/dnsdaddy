@@ -240,3 +240,84 @@ func TestPruneFindingsRespectsRetention(t *testing.T) {
 		t.Errorf("PruneFindings(0) = %d, %v; want 0, nil (retention disabled)", n, err)
 	}
 }
+
+// oldFeedsSchema is the feeds table as it shipped before last_success_at.
+const oldFeedsSchema = `
+CREATE TABLE feeds (
+    id                TEXT PRIMARY KEY,
+    name              TEXT    NOT NULL,
+    url               TEXT    NOT NULL,
+    category          TEXT    NOT NULL,
+    format            TEXT    NOT NULL DEFAULT 'auto',
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    builtin           INTEGER NOT NULL DEFAULT 0,
+    domain_count      INTEGER NOT NULL DEFAULT 0,
+    last_refreshed_at INTEGER,
+    last_status       TEXT    NOT NULL DEFAULT '',
+    last_error        TEXT    NOT NULL DEFAULT '',
+    etag              TEXT    NOT NULL DEFAULT '',
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);`
+
+// An operator upgrading into the version that added last_success_at has feeds
+// with refresh history and, crucially, an enabled/disabled choice per feed.
+// Losing either would either re-enable a feed somebody deliberately turned off
+// or make every working feed look like it had never downloaded.
+func TestUpgradeFromPreLastSuccessDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-feeds.db")
+
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := raw.Exec(oldFeedsSchema); err != nil {
+		t.Fatalf("apply old feeds schema: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	// A built-in feed the operator had switched on before the upgrade.
+	if _, err := raw.Exec(`
+		INSERT INTO feeds (id, name, url, category, format, enabled, builtin,
+		                   domain_count, last_refreshed_at, last_status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 1, 1, 42, ?, 'ok', ?, ?)`,
+		"legacy-feed", "Legacy feed", "https://example.org/list.txt", "malware", "hosts",
+		now, now, now); err != nil {
+		t.Fatalf("seed legacy feed: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on a pre-upgrade database failed: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	f, err := st.GetFeed(ctx, "legacy-feed")
+	if err != nil {
+		t.Fatalf("GetFeed after upgrade: %v", err)
+	}
+	if !f.Enabled {
+		t.Error("the operator's enabled choice was lost during upgrade")
+	}
+	if f.DomainCount != 42 {
+		t.Errorf("DomainCount = %d, want 42", f.DomainCount)
+	}
+	if f.LastSuccess != nil {
+		t.Errorf("LastSuccess = %v on a row written before the column existed, want nil", f.LastSuccess)
+	}
+
+	// The first refresh after the upgrade fills it in.
+	if err := st.RecordFeedRefresh(ctx, "legacy-feed", FeedResult{Status: "ok", DomainCount: 43}); err != nil {
+		t.Fatalf("RecordFeedRefresh: %v", err)
+	}
+	f, err = st.GetFeed(ctx, "legacy-feed")
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if f.LastSuccess == nil {
+		t.Error("the new column is not written after an upgrade")
+	}
+}

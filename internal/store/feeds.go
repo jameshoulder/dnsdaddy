@@ -14,7 +14,8 @@ import (
 func (s *Store) ListFeeds(ctx context.Context) ([]Feed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, url, category, format, enabled, builtin, domain_count,
-		       last_refreshed_at, last_status, last_error, etag, created_at, updated_at
+		       last_refreshed_at, last_success_at, last_status, last_error, etag,
+		       created_at, updated_at
 		FROM feeds ORDER BY category, name`)
 	if err != nil {
 		return nil, err
@@ -24,13 +25,14 @@ func (s *Store) ListFeeds(ctx context.Context) ([]Feed, error) {
 	var out []Feed
 	for rows.Next() {
 		var (
-			f                Feed
-			enabled, builtin int
-			refreshed        *int64
-			created, updated int64
+			f                  Feed
+			enabled, builtin   int
+			refreshed, succeed *int64
+			created, updated   int64
 		)
 		if err := rows.Scan(&f.ID, &f.Name, &f.URL, &f.Category, &f.Format, &enabled, &builtin,
-			&f.DomainCount, &refreshed, &f.LastStatus, &f.LastError, &f.ETag, &created, &updated); err != nil {
+			&f.DomainCount, &refreshed, &succeed, &f.LastStatus, &f.LastError, &f.ETag,
+			&created, &updated); err != nil {
 			return nil, err
 		}
 		f.Enabled = enabled == 1
@@ -38,6 +40,10 @@ func (s *Store) ListFeeds(ctx context.Context) ([]Feed, error) {
 		if refreshed != nil {
 			t := fromUnixMilli(*refreshed)
 			f.LastRefresh = &t
+		}
+		if succeed != nil {
+			t := fromUnixMilli(*succeed)
+			f.LastSuccess = &t
 		}
 		f.CreatedAt = fromUnixMilli(created)
 		f.UpdatedAt = fromUnixMilli(updated)
@@ -129,8 +135,10 @@ func (s *Store) UpdateFeed(ctx context.Context, id string, in FeedInput) (Feed, 
 		if err := s.validateFeedURL(*in.URL); err != nil {
 			return Feed{}, err
 		}
-		// A changed source invalidates the cached ETag and counts.
-		sets = append(sets, "url = ?", "etag = ''", "domain_count = 0")
+		// A changed source invalidates the cached ETag and counts, and with
+		// them the claim that this feed has ever downloaded successfully —
+		// that was the old URL's record, not this one's.
+		sets = append(sets, "url = ?", "etag = ''", "domain_count = 0", "last_success_at = NULL")
 		args = append(args, strings.TrimSpace(*in.URL))
 	}
 	if in.Category != nil {
@@ -184,13 +192,20 @@ type FeedResult struct {
 }
 
 // RecordFeedRefresh stores the outcome of a feed fetch.
+//
+// last_refreshed_at moves on every attempt, successful or not; last_success_at
+// moves only when the attempt produced content this server can enforce. On a
+// failure the second one is deliberately left alone, because it is what says
+// how old the intelligence still in the index is.
 func (s *Store) RecordFeedRefresh(ctx context.Context, id string, r FeedResult) error {
 	now := unixMilli(time.Now())
-	// A "not modified" response leaves the previous domain count intact.
+	// A "not modified" response leaves the previous domain count intact. It is
+	// still a success: the provider confirmed the cached copy is current.
 	if r.Status == "not-modified" {
-		_, err := s.db.ExecContext(ctx,
-			"UPDATE feeds SET last_refreshed_at = ?, last_status = ?, last_error = '', updated_at = ? WHERE id = ?",
-			now, r.Status, now, id)
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE feeds SET last_refreshed_at = ?, last_success_at = ?, last_status = ?,
+			                 last_error = '', updated_at = ? WHERE id = ?`,
+			now, now, r.Status, now, id)
 		return err
 	}
 	if r.Error != "" {
@@ -200,9 +215,9 @@ func (s *Store) RecordFeedRefresh(ctx context.Context, id string, r FeedResult) 
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE feeds SET domain_count = ?, last_refreshed_at = ?, last_status = ?,
-		                 last_error = '', etag = ?, updated_at = ? WHERE id = ?`,
-		r.DomainCount, now, r.Status, r.ETag, now, id)
+		UPDATE feeds SET domain_count = ?, last_refreshed_at = ?, last_success_at = ?,
+		                 last_status = ?, last_error = '', etag = ?, updated_at = ? WHERE id = ?`,
+		r.DomainCount, now, now, r.Status, r.ETag, now, id)
 	return err
 }
 
@@ -244,10 +259,10 @@ func (s *Store) validateFeedURL(raw string) error {
 
 func validateFeedFormat(f string) error {
 	switch f {
-	case "auto", "hosts", "domains", "adblock":
+	case "auto", "hosts", "domains", "adblock", "observatory":
 		return nil
 	}
-	return fmt.Errorf("feed format must be auto, hosts, domains, or adblock, got %q", f)
+	return fmt.Errorf("feed format must be auto, hosts, domains, adblock, or observatory, got %q", f)
 }
 
 func truncate(s string, n int) string {

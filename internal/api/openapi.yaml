@@ -507,6 +507,13 @@ paths:
                     items: { $ref: "#/components/schemas/Feed" }
                   refreshing: { type: boolean }
                   totalIndexedDomains: { type: integer }
+                  observatoryFeedId:
+                    type: string
+                    example: dnsdaddy-observatory
+                    description: >-
+                      The ID of the built-in DNS Daddy Threat Observatory row, so a
+                      client can find it without hardcoding the slug.
+
     post:
       tags: [Feeds]
       summary: Add a custom feed
@@ -559,6 +566,27 @@ paths:
           description: Refresh started
         "409":
           description: A refresh is already running
+
+  /api/v1/feeds/{id}/refresh:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Feeds]
+      summary: Download one feed and rebuild the index
+      description: |
+        The same download, validation, caching and index-rebuild path as a full
+        refresh, scoped to a single feed, so switching a feed on can be verified
+        in seconds rather than after a full refresh of every source.
+
+        Returns immediately; the refresh runs in the background. Poll
+        `GET /api/v1/feeds` and watch `refreshing` to know when it has finished,
+        then read `lastStatus`, `lastError` and `lastSuccessAt` on the row.
+      responses:
+        "202":
+          description: Refresh started
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The feed is disabled, or a refresh is already running
 
   /api/v1/clients:
     get:
@@ -1030,14 +1058,34 @@ components:
         name: { type: string }
         url: { type: string }
         category: { type: string }
-        format: { type: string, enum: [auto, hosts, domains, adblock] }
+        format: { type: string, enum: [auto, hosts, domains, adblock, observatory] }
         enabled: { type: boolean }
         builtin: { type: boolean }
         domainCount: { type: integer }
         indexedDomains:
           type: integer
           description: Domains this feed contributes after de-duplication against higher-priority feeds.
-        lastRefreshedAt: { type: [string, "null"], format: date-time }
+        loaded:
+          type: boolean
+          description: >-
+            Whether this feed's cached copy is in the index answering queries right
+            now. This, not lastSuccessAt, is what says a feed is protecting anything:
+            a feed whose cached file has gone missing or will not parse is skipped at
+            every rebuild while its row still shows a healthy refresh.
+        loadError:
+          type: string
+          description: Why the cached copy could not be loaded, when it could not. Empty otherwise.
+        lastRefreshedAt:
+          type: [string, "null"]
+          format: date-time
+          description: When this feed was last attempted, successfully or not.
+        lastSuccessAt:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            When this feed last downloaded usable content. Null means it never has.
+            While a feed is erroring this is what says how old the intelligence
+            still in the index is.
         lastStatus: { type: string }
         lastError: { type: string }
         createdAt: { type: string, format: date-time }
@@ -1049,7 +1097,7 @@ components:
         name: { type: string }
         url: { type: string }
         category: { type: string }
-        format: { type: string, enum: [auto, hosts, domains, adblock] }
+        format: { type: string, enum: [auto, hosts, domains, adblock, observatory] }
         enabled: { type: boolean }
 
     Client:

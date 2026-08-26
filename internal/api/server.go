@@ -120,6 +120,7 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("PATCH /api/v1/feeds/{id}", a.handleUpdateFeed)
 	api.HandleFunc("DELETE /api/v1/feeds/{id}", a.handleDeleteFeed)
 	api.HandleFunc("POST /api/v1/feeds/refresh", a.handleRefreshFeeds)
+	api.HandleFunc("POST /api/v1/feeds/{id}/refresh", a.handleRefreshFeed)
 
 	api.HandleFunc("GET /api/v1/clients", a.handleListClients)
 	api.HandleFunc("PUT /api/v1/clients", a.handleSetClient)

@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS feeds (
     builtin           INTEGER NOT NULL DEFAULT 0,
     domain_count      INTEGER NOT NULL DEFAULT 0,
     last_refreshed_at INTEGER,
+    last_success_at   INTEGER,
     last_status       TEXT    NOT NULL DEFAULT '',
     last_error        TEXT    NOT NULL DEFAULT '',
     etag              TEXT    NOT NULL DEFAULT '',

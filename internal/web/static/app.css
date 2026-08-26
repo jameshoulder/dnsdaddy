@@ -242,6 +242,11 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* Some actions are links rather than buttons — "View details" goes to the
+   feeds page — and should still read as a button. */
+a.btn { display: inline-block; text-decoration: none; color: var(--foreground); }
+a.btn.btn-primary { color: var(--primary-foreground); }
+
 .btn-primary { background: var(--primary); color: var(--primary-foreground); }
 .btn-primary:hover:not(:disabled) { opacity: 0.9; }
 
@@ -599,3 +604,83 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .kv { grid-template-columns: 1fr; }
   .finding-body { padding-left: 8px; }
 }
+
+/* ---------- threat observatory ------------------------------------------ */
+
+/*
+ * The activation card. Given a lime edge because it is the one card on the
+ * page that asks the operator for a decision — not because the Observatory is
+ * better intelligence than the independent feeds it sits alongside.
+ */
+.observatory {
+  border-left: 3px solid var(--primary);
+}
+
+.observatory p { margin: 0 0 8px; }
+.observatory .card-head { margin-bottom: 12px; }
+
+.obs-cats {
+  font-family: var(--font-display);
+  color: var(--muted-foreground);
+  letter-spacing: 0.01em;
+}
+
+.obs-count {
+  font-family: var(--font-display);
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+.obs-count strong { font-weight: 700; }
+.obs-count.small { font-size: 14px; }
+
+.obs-actions { margin-top: 14px; }
+
+.obs-privacy { margin: 14px 0 0; max-width: 52ch; }
+
+.obs-progress-lead { color: var(--muted-foreground); }
+
+/* An indeterminate bar: the download reports no byte count, so a percentage
+   would be invented. This says "working", which is the honest amount. */
+.obs-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+  margin: 10px 0 12px;
+}
+.obs-progress > span {
+  display: block;
+  width: 35%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+  animation: obs-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes obs-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .obs-progress > span { animation: none; width: 100%; opacity: 0.6; }
+}
+
+.obs-error { margin-top: 6px; }
+.obs-error-text { overflow-wrap: anywhere; margin: 0 2px 10px 22px; }
+
+/* ---------- threat intelligence panel ----------------------------------- */
+
+.intel-list { display: flex; flex-direction: column; }
+
+.intel-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.intel-row:first-child { border-top: 0; }
+
+.intel-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.intel-status { flex: 0 0 auto; }

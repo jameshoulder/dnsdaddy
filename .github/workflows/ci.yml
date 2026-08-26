@@ -61,6 +61,17 @@ jobs:
       - name: Test with race detector
         run: go test -race ./...
 
+      # The dashboard is hand-written JavaScript with no build step, which is
+      # exactly why it needs pinning: a wrong branch in the Threat Observatory
+      # card tells an operator they are protected when nothing has downloaded,
+      # and no Go test would notice. Node's built-in runner, no packages.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Dashboard tests
+        run: node --test internal/web/app.test.js
+
       # The documentation cross-references itself heavily and is the main way
       # anyone judges what this project does. A dead link is a small thing that
       # makes the whole set look unmaintained.
