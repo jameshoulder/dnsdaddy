@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -454,7 +455,8 @@ func TestRefreshIndexesObservatoryPerIndicatorCategories(t *testing.T) {
 	    {"value": "c2.example", "type": "domain", "severity": "critical", "categories": ["c2"]},
 	    {"value": "phish.example", "type": "domain", "severity": "high", "categories": ["phishing"]},
 	    {"value": "miner.example", "type": "domain", "severity": "medium", "categories": ["cryptojacking"]},
-	    {"value": "odd.example", "type": "domain", "severity": "low", "categories": ["never-heard-of-it"]}
+	    {"value": "odd.example", "type": "domain", "severity": "low", "categories": ["never-heard-of-it"]},
+	    {"value": "multi.example", "type": "domain", "severity": "critical", "categories": ["c2", "ransomware"]}
 	  ]
 	}`
 	var accept atomic.Value
@@ -497,6 +499,25 @@ func TestRefreshIndexesObservatoryPerIndicatorCategories(t *testing.T) {
 		if entry.FeedName != "Observatory" {
 			t.Errorf("%s feed name = %q, want Observatory", domain, entry.FeedName)
 		}
+		// Each domain is reachable by the one category it carries, and by no
+		// other — the feed row's category does not leak onto every indicator.
+		if _, ok := ix.LookupEnabled(domain, map[string]bool{category: true}); !ok {
+			t.Errorf("%s is not blocked by a %s-only policy", domain, category)
+		}
+	}
+
+	// The multi-label indicator is filed under both of its categories, so a
+	// policy enabling either one blocks it.
+	if got := ix.Categories("multi.example"); !slices.Equal(got, []string{"malware", "c2"}) {
+		t.Errorf("multi.example categories = %v, want [malware c2]", got)
+	}
+	for _, only := range []string{"malware", "c2"} {
+		if _, ok := ix.LookupEnabled("multi.example", map[string]bool{only: true}); !ok {
+			t.Errorf("multi.example is not blocked by a %s-only policy", only)
+		}
+	}
+	if _, ok := ix.LookupEnabled("multi.example", map[string]bool{"ads": true}); ok {
+		t.Error("multi.example was blocked by a policy enabling neither of its categories")
 	}
 
 	// Subdomains match, as for any other feed.
@@ -511,57 +532,121 @@ func TestRefreshIndexesObservatoryPerIndicatorCategories(t *testing.T) {
 	if stored.LastStatus != "ok" || stored.LastError != "" {
 		t.Errorf("feed status = %q, error = %q", stored.LastStatus, stored.LastError)
 	}
-	if stored.DomainCount != 4 {
-		t.Errorf("DomainCount = %d, want 4", stored.DomainCount)
+	// Five distinct domains, though six claims were made across them.
+	if stored.DomainCount != 5 {
+		t.Errorf("DomainCount = %d, want 5", stored.DomainCount)
 	}
 }
 
-func TestRefreshObservatoryHonoursMinSeverity(t *testing.T) {
-	body := `{"indicators": [
-	  {"value": "critical.example", "type": "domain", "severity": "critical", "categories": ["c2"]},
-	  {"value": "low.example", "type": "domain", "severity": "low", "categories": ["malware"]}
-	]}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, body)
-	}))
-	defer srv.Close()
-
-	h := newManagerHarness(t, func(c *config.Feeds) { c.ObservatoryMinSeverity = "high" })
-	h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
-
-	if err := h.mgr.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-
-	ix := h.holder.Load()
-	if _, ok := ix.Lookup("critical.example"); !ok {
-		t.Error("a critical indicator was dropped by a high floor")
-	}
-	if _, ok := ix.Lookup("low.example"); ok {
-		t.Error("a low indicator survived a high floor")
-	}
-}
-
-func TestRefreshObservatoryKeepsPartialAfterTruncation(t *testing.T) {
-	// A download cut off mid-document still carries real intelligence up to the
-	// cut. Throwing it away would leave the operator less protected than the
-	// broken download did.
-	body := `{"indicators": [
+func TestTruncatedObservatoryNeverReplacesLastKnownGood(t *testing.T) {
+	// The regression this exists to prevent: a feed that downloads cleanly, then
+	// comes back truncated on the next refresh, must not take the intelligence
+	// from the first download with it. A partial feed is not a smaller feed —
+	// it is thousands of malicious domains quietly becoming resolvable again.
+	good := `{"generated_at": "2026-08-26T09:15:00Z", "indicators": [
 	  {"value": "first.example", "type": "domain", "categories": ["c2"]},
-	  {"value": "second.example", "type": "domain", "categ`
+	  {"value": "second.example", "type": "domain", "categories": ["phishing"]},
+	  {"value": "third.example", "type": "domain", "categories": ["malware"]}
+	]}`
+	truncated := `{"generated_at": "2026-08-26T21:15:00Z", "indicators": [
+	  {"value": "first.example", "type": "domain", "categ`
+
+	var serveTruncated atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, body)
+		if serveTruncated.Load() {
+			io.WriteString(w, truncated)
+			return
+		}
+		io.WriteString(w, good)
 	}))
 	defer srv.Close()
 
 	h := newManagerHarness(t)
-	h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+	ctx := context.Background()
 
-	if err := h.mgr.Refresh(context.Background()); err != nil {
+	if err := h.mgr.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if _, ok := h.holder.Load().Lookup("first.example"); !ok {
-		t.Error("indicators read before the truncation were discarded")
+	if got := h.holder.Load().Len(); got != 3 {
+		t.Fatalf("indexed %d domains after the good download, want 3", got)
+	}
+	cached, err := os.ReadFile(h.mgr.cachePath(f.ID))
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+
+	// The provider now serves a truncated body with a perfectly good HTTP 200.
+	serveTruncated.Store(true)
+	if err := h.mgr.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	// Every domain from the last known good dataset is still blocking.
+	ix := h.holder.Load()
+	if ix.Len() != 3 {
+		t.Errorf("indexed %d domains after the truncated download, want all 3 retained", ix.Len())
+	}
+	for _, d := range []string{"first.example", "second.example", "third.example"} {
+		if _, ok := ix.Lookup(d); !ok {
+			t.Errorf("%s stopped being blocked after a truncated refresh", d)
+		}
+	}
+
+	// The cache on disk was not replaced, so a restart still recovers it.
+	after, err := os.ReadFile(h.mgr.cachePath(f.ID))
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+	if string(after) != string(cached) {
+		t.Error("the truncated download overwrote the cached copy")
+	}
+
+	// And the failure is reported against that feed rather than passing as ok.
+	stored, err := h.store.GetFeed(ctx, f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if stored.LastStatus != "error" {
+		t.Errorf("feed status = %q, want error", stored.LastStatus)
+	}
+	if stored.LastError == "" {
+		t.Error("a truncated download recorded no error for the operator to see")
+	}
+}
+
+func TestObservatoryRejectsNonFeedBodyServedAs200(t *testing.T) {
+	// A proxy or a captive portal answering with an HTML page and status 200 is
+	// a complete document that is not a feed. It must not replace the cache
+	// either — the failure mode is identical.
+	var serveHTML atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveHTML.Load() {
+			io.WriteString(w, "<!DOCTYPE html><html><body>Sign in to continue</body></html>")
+			return
+		}
+		io.WriteString(w, `{"indicators": [{"value": "evil.example", "type": "domain", "categories": ["c2"]}]}`)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+	ctx := context.Background()
+
+	if err := h.mgr.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	serveHTML.Store(true)
+	if err := h.mgr.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	if _, ok := h.holder.Load().Lookup("evil.example"); !ok {
+		t.Error("an HTML error page served as 200 wiped the blocklist")
+	}
+	stored, _ := h.store.GetFeed(ctx, f.ID)
+	if stored.LastStatus != "error" {
+		t.Errorf("feed status = %q, want error", stored.LastStatus)
 	}
 }
 

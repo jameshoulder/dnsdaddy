@@ -398,10 +398,10 @@ abuse.ch URLhaus, Phishing Army, The Block List Project, HaGeZi, and
 CoinBlockerLists. You can disable any of them and add your own.
 
 Our own [DNS Daddy Threat Observatory](https://threats.dnsdaddy.dev) is in the
-catalog too, and ships **disabled**. Its indicators carry their own categories,
-so enabling it feeds malware, phishing, C2 and cryptomining at once through the
-same policy and block-reason machinery as everything else. It is opt-in so that
-a stock install still depends on nothing we operate —
+catalog too, and ships **disabled**. Its indicators carry their own categories —
+one domain can be both malware and C2, and a policy enabling either blocks it —
+feeding the same policy and block-reason machinery as everything else. It is
+opt-in so that a stock install still depends on nothing we operate:
 [what enabling it means](docs/threat-intel.md#the-dns-daddy-threat-observatory).
 
 Downloaded feeds are cached to disk, so a restart rebuilds the index locally in

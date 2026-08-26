@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
@@ -280,4 +281,168 @@ func benchDomain(i int) string {
 		n /= 26
 	}
 	return string(buf) + ".example"
+}
+
+// newEngineMultiCategory returns an engine whose index holds the given
+// domain→categories claims, each attributed to a named feed.
+func newEngineMultiCategory(t *testing.T, claims map[string]map[string]string) (*Engine, *store.Store) {
+	t.Helper()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	holder := blocklist.NewHolder()
+	b := blocklist.NewBuilder(8)
+	for domain, byCategory := range claims {
+		for category, feed := range byCategory {
+			b.Add(domain, blocklist.Entry{Category: category, FeedID: "f_" + feed, FeedName: feed})
+		}
+	}
+	holder.Store(b.Build())
+
+	e := NewEngine(st, holder)
+	if err := e.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	return e, st
+}
+
+// policyWith creates a policy enabling exactly the given categories.
+func policyWith(t *testing.T, st *store.Store, e *Engine, name string, categories []string) string {
+	t.Helper()
+	p, err := st.CreatePolicy(context.Background(), store.PolicyInput{
+		Name: &name, Categories: &categories,
+	})
+	if err != nil {
+		t.Fatalf("CreatePolicy(%s): %v", name, err)
+	}
+	if err := e.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	return p.ID
+}
+
+func TestMultiCategoryIndicatorBlocksUnderEitherCategory(t *testing.T) {
+	// One Observatory indicator tagged both malware and C2. A policy enabling
+	// either one has to block it: the operator ticking "C2" has no idea the
+	// domain is also on a malware list, and should not need to.
+	e, st := newEngineMultiCategory(t, map[string]map[string]string{
+		"evil.example": {"malware": "Observatory", "c2": "Observatory"},
+	})
+
+	cases := []struct {
+		name       string
+		categories []string
+		want       bool
+		wantReason string
+	}{
+		{"malware only", []string{"malware"}, true, "malware"},
+		{"c2 only", []string{"c2"}, true, "c2"},
+		{"both", []string{"malware", "c2"}, true, "malware"},
+		{"neither", []string{"phishing", "gambling"}, false, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := policyWith(t, st, e, "p "+tc.name, tc.categories)
+			d := e.Evaluate(id, "evil.example")
+			if d.Blocked != tc.want {
+				t.Fatalf("Blocked = %v, want %v", d.Blocked, tc.want)
+			}
+			if !tc.want {
+				return
+			}
+			// The reason names a category the operator actually enabled —
+			// reporting "malware" to someone who only enabled C2 would be a
+			// block they cannot account for.
+			if d.Category != tc.wantReason {
+				t.Errorf("Category = %q, want %q", d.Category, tc.wantReason)
+			}
+			if !slices.Contains(tc.categories, d.Category) {
+				t.Errorf("blocked under %q, which this policy does not enable", d.Category)
+			}
+			if d.Reason == "" {
+				t.Error("no plain-English reason recorded")
+			}
+		})
+	}
+}
+
+func TestDisagreeingFeedsBothBlock(t *testing.T) {
+	// URLhaus calls it malware; the Observatory calls it C2. Both claims are
+	// real, and a policy enabling either one blocks the domain — with the
+	// reason and the source naming the feed that made the claim it matched.
+	e, st := newEngineMultiCategory(t, map[string]map[string]string{
+		"shared.example": {"malware": "URLhaus", "c2": "Observatory"},
+	})
+
+	malwareOnly := policyWith(t, st, e, "malware only", []string{"malware"})
+	c2Only := policyWith(t, st, e, "c2 only", []string{"c2"})
+
+	d := e.Evaluate(malwareOnly, "shared.example")
+	if !d.Blocked || d.Category != "malware" {
+		t.Errorf("malware-only policy: Blocked=%v Category=%q, want true/malware", d.Blocked, d.Category)
+	}
+	if d.Source != "URLhaus" {
+		t.Errorf("malware-only policy: Source = %q, want URLhaus", d.Source)
+	}
+
+	d = e.Evaluate(c2Only, "shared.example")
+	if !d.Blocked || d.Category != "c2" {
+		t.Errorf("c2-only policy: Blocked=%v Category=%q, want true/c2", d.Blocked, d.Category)
+	}
+	if d.Source != "Observatory" {
+		t.Errorf("c2-only policy: Source = %q, want Observatory", d.Source)
+	}
+
+	// Subdomains inherit whichever claim the policy enables.
+	if d := e.Evaluate(c2Only, "login.shared.example"); !d.Blocked {
+		t.Error("a subdomain was not blocked under the c2 claim")
+	}
+}
+
+func TestAllowListStillBeatsEveryClaim(t *testing.T) {
+	// The escape hatch has to keep working no matter how many categories claim
+	// a domain, or a false positive becomes unclearable.
+	e, st := newEngineMultiCategory(t, map[string]map[string]string{
+		"supplier.example": {"malware": "Observatory", "c2": "Observatory", "phishing": "Phishing Army"},
+	})
+	id := policyWith(t, st, e, "everything", []string{"malware", "c2", "phishing"})
+
+	if d := e.Evaluate(id, "supplier.example"); !d.Blocked {
+		t.Fatal("precondition: the domain should be blocked before allow-listing")
+	}
+	if err := st.AddPolicyRule(context.Background(), id, "allow", "supplier.example", "false positive"); err != nil {
+		t.Fatalf("AddPolicyRule: %v", err)
+	}
+	if err := e.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	if d := e.Evaluate(id, "supplier.example"); d.Blocked {
+		t.Error("the allow list did not beat a multi-category claim")
+	}
+}
+
+func TestParentClaimIsNotShadowedByAnUnenabledChildListing(t *testing.T) {
+	// evil.example is malware; login.evil.example turns up on an ads list too.
+	// A malware-only policy must still block the child — "blocking evil.example
+	// blocks login.evil.example" cannot depend on which other lists the child
+	// happens to appear on.
+	e, st := newEngineMultiCategory(t, map[string]map[string]string{
+		"evil.example":       {"malware": "URLhaus"},
+		"login.evil.example": {"ads": "StevenBlack"},
+	})
+	id := policyWith(t, st, e, "malware only", []string{"malware"})
+
+	d := e.Evaluate(id, "login.evil.example")
+	if !d.Blocked {
+		t.Fatal("an ads listing on the child shadowed the parent's malware listing")
+	}
+	if d.Category != "malware" {
+		t.Errorf("Category = %q, want malware", d.Category)
+	}
 }

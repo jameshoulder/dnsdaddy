@@ -13,6 +13,7 @@
 package blocklist
 
 import (
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -48,8 +49,21 @@ type Entry struct {
 }
 
 // Index is an immutable snapshot of every enabled feed's domains.
+//
+// A domain can be claimed under more than one category — the Observatory files
+// a single indicator as both malware and C2, and two feeds routinely disagree
+// about which category a domain belongs to. Every one of those claims decides
+// whether some policy blocks the domain, so every one of them is kept.
+//
+// They are stored in two parts. domains holds the primary claim: the most
+// severe category on that name, which is what the query log reports and what
+// per-feed counts are attributed to. extra holds any further claims, and is
+// empty for the overwhelming majority of domains, which are claimed once. That
+// split is what keeps a multi-category index costing the same per domain as a
+// single-category one, and keeps the blocked path to a single map lookup.
 type Index struct {
 	domains map[string]Entry
+	extra   map[string][]Entry
 	// counts per category, for the dashboard.
 	byCategory map[string]int
 	feeds      map[string]int
@@ -59,13 +73,20 @@ type Index struct {
 func NewIndex() *Index {
 	return &Index{
 		domains:    map[string]Entry{},
+		extra:      map[string][]Entry{},
 		byCategory: map[string]int{},
 		feeds:      map[string]int{},
 	}
 }
 
-// Lookup reports the closest matching blocklist entry for a domain, walking
-// from the full name up through its parents. It performs no allocation.
+// Lookup reports the primary claim on a domain — the most severe category any
+// feed filed it under — walking from the full name up through its parents. It
+// performs no allocation.
+//
+// This answers "is this domain listed, and as what". It is NOT the function to
+// decide whether a policy blocks the domain: a domain listed as both malware
+// and C2 reports malware here, and a C2-only policy still has to block it.
+// Use LookupEnabled for that.
 func (ix *Index) Lookup(domain string) (Entry, bool) {
 	if ix == nil || len(ix.domains) == 0 {
 		return Entry{}, false
@@ -84,6 +105,76 @@ func (ix *Index) Lookup(domain string) (Entry, bool) {
 	return found, ok
 }
 
+// LookupEnabled reports the claim that justifies blocking a domain under the
+// given set of enabled categories, walking from the full name up through its
+// parents. The returned entry names the category and feed to report, so the
+// query log gives the reason the operator actually enabled.
+//
+// A domain claimed under several categories is blocked if a policy enables any
+// one of them. That is the whole point of keeping every claim: a domain filed
+// as both malware and C2 must be blocked by a malware-only policy and by a
+// C2-only policy alike, and neither operator should have to know the other
+// category exists.
+//
+// The walk stops at the most specific name carrying an enabled claim. A name
+// listed only under categories this policy does not enable does not shadow a
+// parent that is enabled — "blocking evil.com blocks login.evil.com" has to
+// hold even when login.evil.com turns up on an ad list as well.
+func (ix *Index) LookupEnabled(domain string, enabled map[string]bool) (Entry, bool) {
+	if ix == nil || len(ix.domains) == 0 || len(enabled) == 0 {
+		return Entry{}, false
+	}
+	var (
+		found Entry
+		ok    bool
+	)
+	domainutil.Suffixes(domain, func(suffix string) bool {
+		e, hit := ix.domains[suffix]
+		if !hit {
+			return false
+		}
+		// The primary claim is the most severe on this name, so when the policy
+		// enables it there is nothing better to find and no second map to
+		// consult. This is the path every blocked query takes.
+		if enabled[e.Category] {
+			found, ok = e, true
+			return true
+		}
+		// Otherwise fall back to the name's other claims, most severe first.
+		for _, c := range ix.extra[suffix] {
+			if !enabled[c.Category] {
+				continue
+			}
+			if !ok || rankOf(c.Category) < rankOf(found.Category) {
+				found, ok = c, true
+			}
+		}
+		return ok
+	})
+	return found, ok
+}
+
+// Categories returns every category a domain is claimed under, most severe
+// first, for the exact name only. It exists for diagnostics — "why is this
+// blocked" — not for the hot path.
+func (ix *Index) Categories(domain string) []string {
+	if ix == nil {
+		return nil
+	}
+	e, ok := ix.domains[domain]
+	if !ok {
+		return nil
+	}
+	out := []string{e.Category}
+	for _, c := range ix.extra[domain] {
+		out = append(out, c.Category)
+	}
+	// The primary is already the most severe; the rest are in the order they
+	// were claimed, which is not the order a reader expects to see them in.
+	slices.SortFunc(out[1:], func(a, b string) int { return rankOf(a) - rankOf(b) })
+	return out
+}
+
 // Len returns the number of indexed domains.
 func (ix *Index) Len() int {
 	if ix == nil {
@@ -92,7 +183,11 @@ func (ix *Index) Len() int {
 	return len(ix.domains)
 }
 
-// CountsByCategory returns per-category domain counts.
+// CountsByCategory returns, per category, how many domains enabling that
+// category would block. A domain claimed under two categories counts once
+// under each, so these totals can sum to more than Len() — that is the honest
+// answer to "what does ticking this box cost me", which is the question the
+// number is on screen to answer.
 func (ix *Index) CountsByCategory() map[string]int {
 	out := map[string]int{}
 	if ix == nil {
@@ -104,7 +199,11 @@ func (ix *Index) CountsByCategory() map[string]int {
 	return out
 }
 
-// CountsByFeed returns per-feed domain counts, after de-duplication across feeds.
+// CountsByFeed returns per-feed domain counts, after de-duplication across
+// feeds: how many domains in the index this feed is the primary source for.
+// A feed whose claim on a domain was superseded by a more severe one is not
+// credited with it, even though its claim is still live and can still block.
+// These totals sum to Len().
 func (ix *Index) CountsByFeed() map[string]int {
 	out := map[string]int{}
 	if ix == nil {
@@ -140,41 +239,71 @@ func NewBuilder(n int) *Builder {
 		n = 1024
 	}
 	return &Builder{ix: &Index{
-		domains:    make(map[string]Entry, n),
+		domains: make(map[string]Entry, n),
+		// Not sized from n: domains claimed under more than one category are a
+		// small minority, and pre-allocating for all of them would waste more
+		// memory than the claims themselves cost.
+		extra:      map[string][]Entry{},
 		byCategory: map[string]int{},
 		feeds:      map[string]int{},
 	}}
 }
 
-// Add inserts a normalised domain, reporting whether this entry now owns it —
-// either because the domain was new, or because it displaced a less severe
-// classification. A domain already held at the same or a higher severity keeps
-// what it has, and Add returns false.
+// Add records a claim on a normalised domain and reports whether this entry
+// became its primary claim — because the domain was new, or because this claim
+// is more severe than the one it held.
 //
-// The return value is what per-feed contribution counts are derived from, so
-// "owns it" rather than "was new" keeps those counts equal to what the finished
-// index actually attributes to each feed.
+// No claim is ever discarded for being less severe. A claim under a category
+// the domain is not already held at is kept alongside the primary one, so a
+// policy enabling only that category still blocks the domain. What severity
+// decides is which claim is reported in the query log and which feed is
+// credited with the domain, not whether the other claims survive.
+//
+// A second claim under a category the domain already carries changes nothing:
+// the first feed to list it keeps the attribution.
 func (b *Builder) Add(domain string, e Entry) bool {
 	if domain == "" {
 		return false
 	}
-	if prev, exists := b.ix.domains[domain]; exists {
-		if rankOf(e.Category) >= rankOf(prev.Category) {
-			return false
-		}
-		// A more severe claim takes the domain over, and the previous holder
-		// stops being credited with it.
-		b.ix.byCategory[prev.Category]--
-		b.ix.feeds[prev.FeedID]--
+
+	prev, exists := b.ix.domains[domain]
+	if !exists {
 		b.ix.domains[domain] = e
 		b.ix.byCategory[e.Category]++
 		b.ix.feeds[e.FeedID]++
 		return true
 	}
-	b.ix.domains[domain] = e
+
+	if e.Category == prev.Category || b.hasClaim(domain, e.Category) {
+		return false
+	}
+
+	if rankOf(e.Category) < rankOf(prev.Category) {
+		// A more severe claim takes over as primary. The one it displaces is
+		// kept as a further claim — it can still be the reason some other
+		// policy blocks this domain — but stops being credited with the domain.
+		b.ix.feeds[prev.FeedID]--
+		b.ix.feeds[e.FeedID]++
+		b.ix.domains[domain] = e
+		b.ix.extra[domain] = append(b.ix.extra[domain], prev)
+		b.ix.byCategory[e.Category]++
+		return true
+	}
+
+	b.ix.extra[domain] = append(b.ix.extra[domain], e)
 	b.ix.byCategory[e.Category]++
-	b.ix.feeds[e.FeedID]++
-	return true
+	return false
+}
+
+// hasClaim reports whether a domain already carries a claim under a category,
+// beyond its primary one.
+func (b *Builder) hasClaim(domain, category string) bool {
+	for _, c := range b.ix.extra[domain] {
+		if c.Category == category {
+			return true
+		}
+	}
+	return false
 }
 
 // Build returns the finished index.

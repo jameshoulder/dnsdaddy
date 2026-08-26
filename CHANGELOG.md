@@ -41,16 +41,22 @@ should be swapping a binary, not restoring a backup.
   document. It is the first non-line-based format and the first whose entries
   carry **their own categories**, so one feed row contributes to malware,
   phishing, C2 and cryptomining at once and a policy still gets exactly the
-  categories it enabled. An indicator with several labels resolves to one
-  category by the same ordering that decides which feed claims a domain listed
-  on two of them; an unrecognised label falls back to the feed's own category
+  categories it enabled. An indicator keeps every category it names, so one
+  tagged both malware and C2 is blocked by a malware-only policy and a C2-only
+  policy alike. An unrecognised label falls back to the feed's own category
   rather than losing the block to a vocabulary mismatch. IP indicators are
   skipped — there is no name to block.
 
-  Parsing is streamed and as forgiving as the line-based parsers: unknown
-  fields are skipped so the Observatory can add metadata without deployed
-  resolvers rejecting the file, a malformed indicator costs that indicator, and
-  a document truncated mid-download keeps every indicator read before the cut.
+  Individual indicators are parsed forgivingly — unknown fields skipped, a
+  malformed entry costing only itself — but the document is not. A response
+  that is not complete and well-formed is refused before it can replace the
+  cached copy; see **Fixed** below.
+
+  There is no per-feed filtering knob. The Observatory decides what belongs in
+  `feed.json`; your policies decide what gets blocked. Indicator fields DNS
+  Daddy does not act on (`severity`, `family`, `last_seen`) are parsed past and
+  ignored. Wanting a subset is a question for the feed URL, not for DNS Daddy's
+  configuration.
 
   The format is not reserved for our URL — point a custom feed at your own
   Observatory-shaped JSON, including over `file://`.
@@ -60,29 +66,50 @@ should be swapping a binary, not restoring a backup.
   enabling the feed records an HTTP 404 against that feed and changes nothing
   else, which is one more reason it is off.
 
-- **`feeds.observatory_min_severity`** (`DNSDADDY_OBSERVATORY_MIN_SEVERITY`)
-  drops Observatory indicators below `low`, `medium`, `high`, or `critical`.
-  Empty — the default — indexes everything. An indicator that declares no
-  severity is always kept: losing intelligence to a missing field is the wrong
-  failure mode for a blocking control.
+### Fixed
+
+- **A domain listed under several categories is now blocked by a policy
+  enabling any one of them.** The index previously kept a single category per
+  domain and discarded the rest, so a domain claimed as both malware and C2 was
+  invisible to a C2-only policy. Two feeds disagreeing about a domain hit the
+  same defect.
+
+  This was reachable before the Observatory — two feeds have always been able
+  to classify a domain differently — but the Observatory makes it routine,
+  because one indicator can name several categories at once.
+
+  `Index` now keeps every claim: the most severe one is primary, and the rest
+  live in a second map that is empty for the overwhelming majority of domains,
+  which are claimed once. Policy evaluation goes through `LookupEnabled`, which
+  returns the claim the policy actually enabled, so the query-log reason always
+  names a category the operator ticked. A domain claimed once costs exactly
+  what it did before; a second claim costs about 7 bytes.
+
+  A related fail-open goes with it: a name listed only under categories a
+  policy does not enable no longer shadows a parent it does. If `evil.com` is
+  on a malware list, `login.evil.com` is blocked by a malware-enabling policy
+  even when it also appears on an ad list.
+
+- **A truncated or malformed Observatory download can no longer replace a
+  working blocklist.** The cache was written atomically but never checked, so a
+  body that stopped halfway — or an HTML error page served with status 200 —
+  would be renamed over a good feed and silently unblock everything it carried.
+
+  Downloads are now validated as complete, well-formed documents before the
+  rename that installs them. A bad response leaves the previous copy in use,
+  records the error against that one feed, and leaves every other feed alone —
+  the same behaviour as a provider being unreachable. Cached files are
+  re-validated when loaded, so a copy damaged on disk cannot half-populate the
+  index either.
+
+  This applies to the `observatory` format only. Every prefix of a hosts file
+  is a valid hosts file, so there is nothing there to check.
 
 ### Changed
 
-- **The blocklist index now files a domain under the most severe category
-  claiming it**, rather than relying on feeds being read in category-priority
-  order to produce that outcome. Feed order was a sound proxy while every feed
-  had one category; an Observatory feed contributes domains at several
-  severities at once, so the rule is now enforced in `Builder.Add` directly.
-
-  Without it, enabling the Observatory could stop a domain being blocked: a
-  policy that enables malware but not cryptomining would have missed a domain
-  the Observatory called cryptomining and URLhaus called malware. Feeds are
-  still read in priority order, which keeps the common case a single map
-  lookup.
-
-  Per-feed contribution counts are read back off the finished index for the
-  same reason, so a feed that loses a domain to a more severe claim is no
-  longer credited with it.
+- **Per-feed contribution counts are read back off the finished index**, rather
+  than tallied while each feed loads, so a feed whose claim on a domain is
+  superseded by a more severe one is no longer credited with it.
 
 ### Security
 

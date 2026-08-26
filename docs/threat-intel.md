@@ -119,38 +119,37 @@ does for any other source:
 }
 ```
 
-Three rules govern how an indicator is filed:
+Two rules govern how an indicator is filed:
 
-- **An indicator with several labels gets one category**, chosen by the same
-  ordering that decides which feed claims a domain listed on two of them
-  (malware, then phishing, then C2, then cryptomining). A domain has one
-  category whichever path it took into the index.
+- **An indicator keeps every category it names.** A domain tagged both
+  `malware` and `c2` is filed under both, so a malware-only policy blocks it
+  *and* a C2-only policy blocks it. Neither operator has to know the other
+  category exists. The query log names whichever category their policy actually
+  enabled, so the reason always matches the box they ticked.
 - **An unrecognised label falls back to the feed's own category**, malware.
   The Observatory lists a domain because it wants it blocked, and losing that
   to a vocabulary mismatch would be the wrong failure. The mapping from
   Observatory labels to DNS Daddy categories is in
   [`internal/catalog/observatory.go`](../internal/catalog/observatory.go) — a
   new label is a one-line change there.
-- **IP indicators are ignored.** There is no name for a resolver to block. The
-  same goes for URL and hash indicators; those belong to the richer endpoints
-  below, not to DNS filtering.
 
-### Filtering by severity
+**IP indicators are ignored.** There is no name for a resolver to block. The
+same goes for URL and hash indicators; those belong to the richer endpoints
+below, not to DNS filtering.
 
-Indicators carry a severity. To index only the high-confidence end:
+### What the Observatory does not decide
 
-```yaml
-feeds:
-  observatory_min_severity: high   # low | medium | high | critical
-```
+The Observatory decides what belongs in `feed.json`. Your policies decide what
+gets blocked. There is no third mechanism and no per-feed filtering knob: an
+indicator reaches the index, and from there the ordinary category machinery
+applies, exactly as it does for URLhaus.
 
-Empty — the default — indexes everything the Observatory lists. An indicator
-that declares **no** severity is always kept regardless of the floor: losing
-intelligence because a field was missing is the wrong way round for a blocking
-control.
-
-The setting applies only to the Observatory format, because it is the only
-format whose entries carry a severity.
+If you want only part of what the Observatory publishes, that is a question for
+the feed URL rather than for DNS Daddy's configuration — add a custom feed
+pointing at a filtered endpoint (say
+`…/api/v1/feed.json?min_severity=high`, once the Observatory offers it) and
+disable the built-in one. The indicator fields DNS Daddy does not act on —
+`severity`, `family`, `last_seen` — are parsed past and ignored.
 
 ### The endpoint contract
 
@@ -185,20 +184,37 @@ The blocking feed. Served as `application/json`, and it should honour `ETag` /
 | `source` | no | Logged, not trusted. TLS is what says who served the file. |
 | `indicators[].value` | **yes** | The domain. `domain` is accepted as an alias. |
 | `indicators[].type` | no | `domain`, `hostname`, `host`, `fqdn`, or absent. Anything else (`ip`, `url`, `hash`) is skipped. |
-| `indicators[].severity` | no | `low`, `medium`, `high`, `critical`. Absent means "unrated", which is kept. |
+| `indicators[].severity` | no | Parsed past and ignored: what gets blocked is a policy question, not a feed one. |
 | `indicators[].categories` | no | Array of labels. A bare string is accepted, as is a singular `category` field. |
-| `indicators[].family` | no | Free text, e.g. a malware family. |
+| `indicators[].family` | no | Free text, e.g. a malware family. Ignored for blocking. |
 | `indicators[].last_seen` | no | Not used for blocking. |
 
-**Parsing is deliberately forgiving**, for the same reason the line-based
-parsers are. Unknown top-level fields are skipped, so the Observatory can add
-metadata without every deployed resolver rejecting the file. A malformed
-indicator costs that indicator, not the feed. A document truncated mid-download
-keeps every indicator read before the cut — a partial index protects more than
-an empty one, and the failure is logged loudly rather than swallowed.
+**Individual indicators are parsed forgivingly; the document is not.**
 
-Feeds are streamed rather than buffered, and `feeds.max_feed_bytes` caps the
-download like any other.
+Unknown top-level fields are skipped, so the Observatory can add metadata
+without every deployed resolver rejecting the file, and a malformed indicator
+costs that indicator rather than the feed.
+
+A response that is not a complete, well-formed document is **refused before it
+replaces anything**. This matters more than it sounds: a feed download is
+replacing a dataset that is currently blocking traffic, and a body that stops
+halfway is not a smaller dataset — it is thousands of malicious domains
+silently becoming resolvable again. So a truncated body, or an HTML error page
+served with status 200, is rejected; the previously cached copy stays in use;
+the error is shown against that one feed in the dashboard; and every other feed
+carries on. It is the same behaviour as a provider being unreachable, because
+it is the same kind of failure.
+
+The check is a streaming pass over the downloaded file, made before the atomic
+rename that installs it as the cache, and repeated when a cached file is loaded
+so a copy damaged on disk cannot half-populate the index either. Feeds are
+streamed rather than buffered, and `feeds.max_feed_bytes` caps the download
+like any other.
+
+There is one thing this cannot catch: a feed that is complete and valid but
+suddenly much smaller than last time is accepted, because there is no way to
+tell a shrinking feed from a cleaned-up one. That is true of every feed format,
+not just this one.
 
 #### `GET /api/v1/indicators?hours=24&limit=…` — optional
 
@@ -249,10 +265,20 @@ In order, stopping at the first match:
 Matching is by suffix, so blocking `evil.com` also blocks `login.evil.com`. It
 is not substring matching: `notevil.com` is unaffected.
 
-When a domain appears on several feeds, the most severe category wins. A domain
-on both a malware list and an ad list is reported as malware, so the reason in
-your query log is the one that matters — and so a policy blocking malware but
-not ads still blocks it, whichever feed happened to be read first.
+A domain can be listed under several categories at once — by two feeds that
+disagree, or by one Observatory indicator carrying both. **Every one of those
+claims counts.** A policy blocks the domain if it enables any category claiming
+it, so a malware-only policy and a C2-only policy both block a domain listed as
+both, and neither operator needs to know about the other category.
+
+The reason written to your query log names the category *your* policy enabled,
+and the source names the feed that made that particular claim. When a policy
+enables several of a domain's categories, the most severe one is reported, so
+the reason is the one that matters.
+
+A name listed only under categories you have not enabled does not shadow a
+parent that you have: if `evil.com` is on a malware list, `login.evil.com` is
+blocked by a malware-enabling policy even if it also turns up on an ad list.
 
 ## Refreshing
 
@@ -336,7 +362,8 @@ listing is right, and go upstream if it is not.
 - **auto** — sniffed per line, which handles mixed files
 - **observatory** — DNS Daddy Threat Observatory JSON, described
   [above](#the-dns-daddy-threat-observatory). The only non-line-based format,
-  and the only one whose entries carry their own category.
+  the only one whose entries carry their own categories, and the only one where
+  an incomplete download is rejected rather than parsed as far as it goes.
 
 A `file://` URL works too, for a list you generate yourself:
 
@@ -364,7 +391,9 @@ lines are counted and skipped rather than aborting the load.
 ## Memory
 
 Roughly 165–215 bytes per unique domain, measured rather than estimated — about
-80–105 MB for a 500,000-domain index. It is a range because the index stores the
+80–105 MB for a 500,000-domain index. A domain claimed under more than one
+category costs about 7 bytes more per claim; domains claimed once, which is
+almost all of them, cost exactly what they always did. It is a range because the index stores the
 names themselves, so a feed of long third-level names costs about a quarter more
 per entry than a feed of short registrable ones. See
 [architecture.md](architecture.md#an-exact-match-blocklist-index) for where

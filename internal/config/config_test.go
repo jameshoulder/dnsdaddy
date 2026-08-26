@@ -224,7 +224,6 @@ func TestValidationRejectsBadConfig(t *testing.T) {
 		{"bad client CIDR", func(c *Config) { c.DNS.AllowedClientCIDRs = []string{"192.168.0.0/64"} }},
 		{"bad trusted proxy CIDR", func(c *Config) { c.HTTP.TrustedProxyCIDRs = []string{"not-an-address"} }},
 		{"bad secure_cookies mode", func(c *Config) { c.HTTP.SecureCookies = "sometimes" }},
-		{"bad observatory severity", func(c *Config) { c.Feeds.ObservatoryMinSeverity = "urgent" }},
 		{"TTL over the 32-bit DNS limit", func(c *Config) { c.Cache.MaxTTL = 1 << 32 }},
 		{"negative TTL", func(c *Config) { c.Cache.MinTTL = -1 }},
 	}
@@ -436,20 +435,5 @@ func TestCacheTTLBounds(t *testing.T) {
 func TestLocalFeedDirDefaultsToDisabled(t *testing.T) {
 	if Default().Feeds.LocalFeedDir != "" {
 		t.Error("file:// feeds are enabled by default; they must be opt-in")
-	}
-}
-
-func TestObservatoryMinSeverityDefaultsToNoFloor(t *testing.T) {
-	// Empty means "index everything the Observatory lists". An operator who
-	// wants only the high-confidence end says so.
-	if got := Default().Feeds.ObservatoryMinSeverity; got != "" {
-		t.Errorf("observatory_min_severity defaults to %q, want empty", got)
-	}
-	cfg := Default()
-	for _, s := range []string{"", "low", "medium", "high", "critical", "HIGH", " high "} {
-		cfg.Feeds.ObservatoryMinSeverity = s
-		if err := cfg.validate(); err != nil {
-			t.Errorf("validate() rejected observatory_min_severity %q: %v", s, err)
-		}
 	}
 }

@@ -181,17 +181,6 @@ feeds:
   #   local_feed_dir: /etc/dnsdaddy/feeds.d
   local_feed_dir: ""
 
-  # Minimum severity to index from the DNS Daddy Threat Observatory feed:
-  # low, medium, high, or critical. Empty (the default) indexes everything it
-  # lists. An indicator that declares no severity is always kept — losing
-  # intelligence to a missing field is the wrong way round for a blocking
-  # control.
-  #
-  # This applies only to the "observatory" feed format, which is the only one
-  # whose entries carry a severity. That feed ships DISABLED: everything a
-  # stock install blocks comes from a public source you can fetch yourself,
-  # and ours is opt-in. See docs/threat-intel.md.
-  observatory_min_severity: ""
 
 # ---------------------------------------------------------------------------
 # Behavioural detection

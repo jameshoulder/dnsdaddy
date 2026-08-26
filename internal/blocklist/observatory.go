@@ -11,15 +11,16 @@ import (
 )
 
 // ObservatoryRecord is one indicator from the Threat Observatory, resolved down
-// to what the index needs: a domain and the category to file it under.
+// to what the index needs: a domain and the categories to file it under.
 type ObservatoryRecord struct {
 	Domain string
-	// Category is the DNS Daddy category the indicator's own labels mapped to,
-	// or empty when none of them were recognised. The caller falls back to the
-	// feed's configured category in that case.
-	Category string
-	Severity string
-	Family   string
+	// Categories are the DNS Daddy categories the indicator's own labels mapped
+	// to, most severe first. Empty when none of them was recognised, in which
+	// case the caller falls back to the feed's configured category.
+	//
+	// All of them are kept. An indicator tagged both malware and C2 is blocked
+	// by a malware-only policy and by a C2-only policy alike.
+	Categories []string
 }
 
 // ObservatoryResult reports what a feed document contained.
@@ -33,10 +34,6 @@ type ObservatoryResult struct {
 	// unusable (an IP, a bare TLD, a malformed entry).
 	Accepted int
 	Skipped  int
-	// BelowSeverity counts indicators dropped by the minimum-severity floor.
-	// Kept separate from Skipped so an operator can tell "the feed is full of
-	// junk" from "I asked for critical only".
-	BelowSeverity int
 }
 
 // observatoryIndicator mirrors one entry in the feed document.
@@ -45,12 +42,14 @@ type ObservatoryResult struct {
 // interpreted separately. A feed is a file served by a remote host, and one
 // indicator whose "categories" arrived as a string instead of an array must
 // cost that indicator, not the entire category of protection the feed provides.
+// Fields the Observatory carries but DNS Daddy does not act on — severity,
+// family, last_seen — are deliberately absent. They belong to the Observatory's
+// own judgement about what to publish; what a resolver does with a published
+// indicator is a policy question, answered by the category machinery.
 type observatoryIndicator struct {
 	Value      string          `json:"value"`
 	Domain     string          `json:"domain"`
 	Type       string          `json:"type"`
-	Severity   string          `json:"severity"`
-	Family     string          `json:"family"`
 	Categories json.RawMessage `json:"categories"`
 	Category   json.RawMessage `json:"category"`
 }
@@ -58,17 +57,17 @@ type observatoryIndicator struct {
 // ParseObservatory reads a Threat Observatory feed document and calls emit for
 // every usable domain indicator.
 //
-// Parsing is streaming and deliberately forgiving, for the same reason the
-// line-based parser is: this is a file fetched over the network, and a single
-// malformed indicator must not cost an operator a whole feed's worth of
-// blocking. Unusable indicators are counted and skipped.
+// Parsing is streaming and deliberately forgiving about the shape of an
+// individual indicator, for the same reason the line-based parser is: a single
+// malformed entry must not cost an operator a whole feed's worth of blocking.
+// Unusable indicators are counted and skipped.
 //
-// minSeverity, when non-empty, drops indicators whose declared severity is
-// below it. An indicator with no recognisable severity is always kept — losing
-// intelligence because a field was missing is the wrong failure mode here.
-func ParseObservatory(r io.Reader, minSeverity string, emit func(ObservatoryRecord)) (ObservatoryResult, error) {
+// It is not forgiving about the document as a whole. A truncated or malformed
+// document returns an error with whatever was read before the fault, and the
+// caller is expected to discard it rather than treat a partial feed as a
+// complete one — see ValidateObservatory.
+func ParseObservatory(r io.Reader, emit func(ObservatoryRecord)) (ObservatoryResult, error) {
 	var res ObservatoryResult
-	floor := catalog.SeverityRank(minSeverity)
 
 	dec := json.NewDecoder(r)
 	tok, err := dec.Token()
@@ -82,7 +81,7 @@ func ParseObservatory(r io.Reader, minSeverity string, emit func(ObservatoryReco
 		// A bare array of indicators, with no envelope. Not the documented
 		// shape, but cheap to accept and it keeps a hand-rolled test fixture or
 		// a trimmed-down mirror working.
-		return res, parseIndicatorArray(dec, floor, &res, emit)
+		return res, parseIndicatorArray(dec, &res, emit)
 	case '{':
 	default:
 		return res, fmt.Errorf("observatory feed is not a JSON object or array")
@@ -103,7 +102,7 @@ func ParseObservatory(r io.Reader, minSeverity string, emit func(ObservatoryReco
 			if d, ok := t.(json.Delim); !ok || d != '[' {
 				return res, fmt.Errorf(`observatory feed field "indicators" is not an array`)
 			}
-			if err := parseIndicatorArray(dec, floor, &res, emit); err != nil {
+			if err := parseIndicatorArray(dec, &res, emit); err != nil {
 				return res, err
 			}
 		case "generated_at":
@@ -128,9 +127,61 @@ func ParseObservatory(r io.Reader, minSeverity string, emit func(ObservatoryReco
 	return res, nil
 }
 
+// ValidateObservatory reports whether r holds a complete, well-formed
+// Observatory document. It streams the whole thing and buffers none of it.
+//
+// This is what stands between a bad response and the operator's blocklist. A
+// feed download is replacing a dataset that is currently blocking traffic, and
+// a body that stops halfway is not a smaller dataset — it is thousands of
+// malicious domains silently becoming resolvable again. The same goes for a
+// 200 response carrying an HTML error page, which is a perfectly complete
+// document that happens not to be a feed.
+//
+// So the rule is all or nothing: a document that does not parse from first
+// byte to last is refused before it can replace anything, and the previous
+// copy keeps working.
+func ValidateObservatory(r io.Reader) error {
+	dec := json.NewDecoder(r)
+
+	first, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("observatory feed is not JSON: %w", err)
+	}
+	delim, isDelim := first.(json.Delim)
+	if !isDelim || (delim != '{' && delim != '[') {
+		return fmt.Errorf("observatory feed is not a JSON object or array")
+	}
+
+	depth := 1
+	for depth > 0 {
+		tok, err := dec.Token()
+		if err != nil {
+			if err == io.EOF {
+				return fmt.Errorf("observatory feed ends mid-document: it is truncated")
+			}
+			return fmt.Errorf("observatory feed is malformed: %w", err)
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+	}
+
+	// Anything after the top-level value means this is not one document —
+	// two responses concatenated, or a body with a trailer appended.
+	if dec.More() {
+		return fmt.Errorf("observatory feed has trailing content after the document")
+	}
+	return nil
+}
+
 // parseIndicatorArray consumes indicators until the closing bracket. The
 // opening bracket has already been read.
-func parseIndicatorArray(dec *json.Decoder, floor int, res *ObservatoryResult, emit func(ObservatoryRecord)) error {
+func parseIndicatorArray(dec *json.Decoder, res *ObservatoryResult, emit func(ObservatoryRecord)) error {
 	for dec.More() {
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
@@ -139,16 +190,13 @@ func parseIndicatorArray(dec *json.Decoder, floor int, res *ObservatoryResult, e
 			// before this point stands.
 			return fmt.Errorf("read observatory indicator: %w", err)
 		}
-		rec, ok, belowFloor := decodeIndicator(raw, floor)
-		switch {
-		case ok:
-			emit(rec)
-			res.Accepted++
-		case belowFloor:
-			res.BelowSeverity++
-		default:
+		rec, ok := decodeIndicator(raw)
+		if !ok {
 			res.Skipped++
+			continue
 		}
+		emit(rec)
+		res.Accepted++
 	}
 	// Consume the closing bracket so a caller reading further fields resumes
 	// in the right place.
@@ -158,16 +206,16 @@ func parseIndicatorArray(dec *json.Decoder, floor int, res *ObservatoryResult, e
 	return nil
 }
 
-// decodeIndicator turns one raw indicator into a record. It reports whether the
-// record is usable, and separately whether it was dropped by the severity floor.
-func decodeIndicator(raw json.RawMessage, floor int) (rec ObservatoryRecord, ok bool, belowFloor bool) {
+// decodeIndicator turns one raw indicator into a record, reporting whether it
+// is usable.
+func decodeIndicator(raw json.RawMessage) (rec ObservatoryRecord, ok bool) {
 	var ind observatoryIndicator
 	if err := json.Unmarshal(raw, &ind); err != nil {
-		// A type mismatch on one field (say a numeric "severity") still fills
-		// in the fields that did decode, so fall through and use what we have
-		// rather than discarding an otherwise good indicator.
+		// A type mismatch on one field still fills in the fields that did
+		// decode, so fall through and use what we have rather than discarding
+		// an otherwise good indicator.
 		if _, isType := err.(*json.UnmarshalTypeError); !isType {
-			return rec, false, false
+			return rec, false
 		}
 	}
 
@@ -175,7 +223,7 @@ func decodeIndicator(raw json.RawMessage, floor int) (rec ObservatoryRecord, ok 
 		// IP, URL, and hash indicators are real intelligence, but there is no
 		// name for a DNS resolver to block. The Observatory's richer endpoints
 		// are where those belong; see docs/threat-intel.md.
-		return rec, false, false
+		return rec, false
 	}
 
 	value := ind.Value
@@ -186,23 +234,16 @@ func decodeIndicator(raw json.RawMessage, floor int) (rec ObservatoryRecord, ok 
 	// IPs, no single-label entries that would blackhole a whole TLD.
 	domain, valid := parseDomain(value)
 	if !valid {
-		return rec, false, false
-	}
-
-	if rank := catalog.SeverityRank(ind.Severity); floor > 0 && rank > 0 && rank < floor {
-		return rec, false, true
+		return rec, false
 	}
 
 	labels := decodeStringList(ind.Categories)
 	labels = append(labels, decodeStringList(ind.Category)...)
-	category, _ := catalog.BestObservatoryCategory(labels)
 
 	return ObservatoryRecord{
-		Domain:   domain,
-		Category: category,
-		Severity: ind.Severity,
-		Family:   ind.Family,
-	}, true, false
+		Domain:     domain,
+		Categories: catalog.MapObservatoryCategories(labels),
+	}, true
 }
 
 // observatoryTypeIsDomain reports whether an indicator type names something a

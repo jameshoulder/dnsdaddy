@@ -1,6 +1,9 @@
 package catalog
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // The DNS Daddy Threat Observatory is our own threat-intelligence platform.
 // Unlike every other source in this catalog it is operated by us, which is
@@ -92,29 +95,32 @@ func MapObservatoryCategory(label string) (string, bool) {
 	return "", false
 }
 
-// BestObservatoryCategory picks one category from an indicator's labels, using
-// the canonical Categories ordering — so a domain tagged both "c2" and
-// "malware" is reported as malware.
+// MapObservatoryCategories translates an indicator's labels into the DNS Daddy
+// categories they name, most severe first and without duplicates. It returns
+// nil when none of the labels is one we understand.
 //
-// That is the same ordering that decides which feed claims a domain shared
-// between two lists, and using it here keeps the two consistent: a domain has
-// one category whether it arrived on two feeds or on one indicator with two
-// labels. The block reason in the query log is what an operator reads back to
-// a user over the phone, and it should not depend on which path the domain
-// took to get into the index.
-func BestObservatoryCategory(labels []string) (string, bool) {
-	best := ""
-	bestRank := len(Categories)
+// Every mapped category is returned, not just the most severe one. An indicator
+// tagged both "malware" and "c2" is genuinely both, and a policy enabling
+// either one has to block it — collapsing the two here would decide, on the
+// operator's behalf and invisibly, that one of the categories they ticked does
+// not apply.
+func MapObservatoryCategories(labels []string) []string {
+	var out []string
 	for _, l := range labels {
 		id, ok := MapObservatoryCategory(l)
 		if !ok {
 			continue
 		}
-		if r := CategoryPriority(id); r < bestRank {
-			best, bestRank = id, r
+		if slices.Contains(out, id) {
+			continue
 		}
+		out = append(out, id)
 	}
-	return best, best != ""
+	// Most severe first, so the caller can take the head as the primary claim.
+	slices.SortFunc(out, func(a, b string) int {
+		return CategoryPriority(a) - CategoryPriority(b)
+	})
+	return out
 }
 
 // CategoryPriority returns a category's position in the canonical ordering,
@@ -126,38 +132,4 @@ func CategoryPriority(id string) int {
 		}
 	}
 	return len(Categories)
-}
-
-// Observatory severities, most severe first. These mirror the "severity" field
-// on an indicator.
-var observatorySeverities = []string{"low", "medium", "high", "critical"}
-
-// SeverityRank scores an Observatory severity so a minimum-severity floor can
-// be applied. Higher is more severe; an unrecognised or absent severity scores
-// 0, which callers treat as "unknown" rather than "lowest".
-//
-// That distinction matters. Dropping an indicator because a field we expected
-// was missing would quietly lose protection over a schema gap, which is the
-// wrong way round for a security control.
-func SeverityRank(severity string) int {
-	s := strings.ToLower(strings.TrimSpace(severity))
-	for i, name := range observatorySeverities {
-		if s == name {
-			return i + 1
-		}
-	}
-	return 0
-}
-
-// ValidSeverity reports whether s names an Observatory severity. The empty
-// string is valid and means "no floor".
-func ValidSeverity(s string) bool {
-	return strings.TrimSpace(s) == "" || SeverityRank(s) > 0
-}
-
-// SeverityNames returns the recognised severities, least severe first.
-func SeverityNames() []string {
-	out := make([]string, len(observatorySeverities))
-	copy(out, observatorySeverities)
-	return out
 }

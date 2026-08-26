@@ -254,7 +254,11 @@ func (e *Engine) Evaluate(policyID, domain string) Decision {
 	}
 
 	if len(p.categories) > 0 {
-		if entry, ok := e.lists.Load().Lookup(domain); ok && p.categories[entry.Category] {
+		// LookupEnabled, not Lookup: a domain can be claimed under several
+		// categories, and this policy blocks it if it enables any one of them.
+		// Asking for the domain's primary category and comparing it here would
+		// miss a C2 domain that a malware feed also lists.
+		if entry, ok := e.lists.Load().LookupEnabled(domain, p.categories); ok {
 			d.Blocked = true
 			d.Category = entry.Category
 			d.Source = entry.FeedName

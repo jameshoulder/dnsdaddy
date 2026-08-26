@@ -1,6 +1,9 @@
 package catalog
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestMapObservatoryCategory(t *testing.T) {
 	cases := map[string]string{
@@ -40,32 +43,32 @@ func TestMappedCategoriesAllExist(t *testing.T) {
 	}
 }
 
-func TestBestObservatoryCategoryFollowsCanonicalOrder(t *testing.T) {
-	// The same ordering that decides which feed claims a domain shared between
-	// two lists decides which of an indicator's labels wins, so a domain has one
-	// category whichever path it took into the index.
+func TestMapObservatoryCategoriesKeepsEveryMappedLabel(t *testing.T) {
+	// Every category an indicator names is kept, most severe first. Collapsing
+	// them would silently decide that one of the categories an operator ticked
+	// does not apply to this domain.
 	cases := []struct {
 		labels []string
-		want   string
+		want   []string
 	}{
-		{[]string{"c2", "malware"}, "malware"},
-		{[]string{"malware", "c2"}, "malware"},
-		{[]string{"cryptojacking", "phishing"}, "phishing"},
-		{[]string{"never-heard-of-it", "botnet"}, "c2"},
-		{[]string{"ads", "ransomware"}, "malware"},
+		{[]string{"c2", "malware"}, []string{"malware", "c2"}},
+		{[]string{"malware", "c2"}, []string{"malware", "c2"}},
+		{[]string{"cryptojacking", "phishing"}, []string{"phishing", "cryptomining"}},
+		{[]string{"never-heard-of-it", "botnet"}, []string{"c2"}},
+		{[]string{"ads", "ransomware"}, []string{"malware", "ads"}},
+		// Two labels that mean the same thing are one category, not two.
+		{[]string{"c2", "botnet", "cnc"}, []string{"c2"}},
 	}
 	for _, c := range cases {
-		got, ok := BestObservatoryCategory(c.labels)
-		if !ok || got != c.want {
-			t.Errorf("BestObservatoryCategory(%v) = %q, %v; want %q, true", c.labels, got, ok, c.want)
+		if got := MapObservatoryCategories(c.labels); !slices.Equal(got, c.want) {
+			t.Errorf("MapObservatoryCategories(%v) = %v, want %v", c.labels, got, c.want)
 		}
 	}
 
-	if got, ok := BestObservatoryCategory([]string{"spam", "unknown"}); ok {
-		t.Errorf("BestObservatoryCategory of unknown labels = %q, true; want no match", got)
-	}
-	if got, ok := BestObservatoryCategory(nil); ok {
-		t.Errorf("BestObservatoryCategory(nil) = %q, true; want no match", got)
+	for _, labels := range [][]string{{"spam", "unknown"}, nil, {}} {
+		if got := MapObservatoryCategories(labels); len(got) != 0 {
+			t.Errorf("MapObservatoryCategories(%v) = %v, want none", labels, got)
+		}
 	}
 }
 
@@ -77,38 +80,6 @@ func TestCategoryPriorityMatchesCatalogOrder(t *testing.T) {
 	}
 	if got := CategoryPriority("not-a-category"); got != len(Categories) {
 		t.Errorf("an unknown category sorted at %d, want last (%d)", got, len(Categories))
-	}
-}
-
-func TestSeverityRank(t *testing.T) {
-	if !(SeverityRank("low") < SeverityRank("medium") &&
-		SeverityRank("medium") < SeverityRank("high") &&
-		SeverityRank("high") < SeverityRank("critical")) {
-		t.Error("severities do not rank in order")
-	}
-	if SeverityRank("CRITICAL ") != SeverityRank("critical") {
-		t.Error("severity ranking is not case- and space-insensitive")
-	}
-	// Unknown ranks 0, which callers read as "no severity declared" rather than
-	// "lowest" — the difference between keeping an indicator and losing it.
-	for _, s := range []string{"", "urgent", "3"} {
-		if got := SeverityRank(s); got != 0 {
-			t.Errorf("SeverityRank(%q) = %d, want 0", s, got)
-		}
-	}
-}
-
-func TestValidSeverity(t *testing.T) {
-	// Empty means "no floor", so config validation must accept it.
-	for _, s := range append(SeverityNames(), "", "  ", "HIGH") {
-		if !ValidSeverity(s) {
-			t.Errorf("ValidSeverity(%q) = false, want true", s)
-		}
-	}
-	for _, s := range []string{"urgent", "info", "none"} {
-		if ValidSeverity(s) {
-			t.Errorf("ValidSeverity(%q) = true, want false", s)
-		}
 	}
 }
 

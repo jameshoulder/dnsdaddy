@@ -224,10 +224,47 @@ func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
 		return store.FeedResult{Status: "error", Error: "feed returned an empty body"}
 	}
 
+	if err := m.verifyDownload(f, tmpName); err != nil {
+		return store.FeedResult{Status: "error", Error: err.Error()}
+	}
+
 	if err := os.Rename(tmpName, m.cachePath(f.ID)); err != nil {
 		return store.FeedResult{Status: "error", Error: err.Error()}
 	}
 	return store.FeedResult{Status: "ok", ETag: resp.Header.Get("ETag")}
+}
+
+// verifyDownload checks a freshly downloaded file before it is allowed to
+// replace the cached copy.
+//
+// The rename is atomic, so the cache is never half-written — but atomic is not
+// the same as correct. A response can arrive complete as far as HTTP is
+// concerned and still be a truncated document or an HTML error page served
+// with status 200, and renaming that over a good feed would silently unblock
+// everything the old copy carried. Refusing it here leaves the previous copy
+// in place and surfaces the error against that one feed, which is exactly what
+// happens when a provider is unreachable.
+//
+// Only formats that can actually be checked are checked. There is no way to
+// tell a truncated hosts file from a short one — every prefix of a hosts file
+// is a valid hosts file — so those keep the behaviour they have always had.
+func (m *Manager) verifyDownload(f store.Feed, path string) error {
+	if Format(f.Format) != FormatObservatory {
+		return nil
+	}
+
+	// #nosec G304 -- path is the temp file this manager just created inside its
+	// own cache directory.
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if err := ValidateObservatory(file); err != nil {
+		return fmt.Errorf("rejected download, keeping the previous copy: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) copyLocal(f store.Feed) store.FeedResult {
@@ -360,53 +397,58 @@ func (m *Manager) loadInto(b *Builder, f store.Feed) (int, error) {
 
 // loadObservatoryInto indexes a Threat Observatory document.
 //
-// Unlike a line-based feed, every indicator carries its own category, so a
+// Unlike a line-based feed, every indicator carries its own categories, so a
 // single Observatory feed contributes to malware, phishing, C2 and
-// cryptomining at once. Indicators whose labels we do not recognise fall back
-// to the feed's configured category: the Observatory lists a domain because it
-// wants it blocked, and dropping one over an unfamiliar label would lose
-// protection to a vocabulary mismatch.
-func (m *Manager) loadObservatoryInto(b *Builder, f store.Feed, r io.Reader) (int, error) {
+// cryptomining at once — and one indicator tagged twice is filed under both,
+// so a policy enabling either category blocks it. Indicators whose labels we
+// do not recognise fall back to the feed's configured category: the
+// Observatory lists a domain because it wants it blocked, and dropping one
+// over an unfamiliar label would lose protection to a vocabulary mismatch.
+//
+// The document is validated before a single domain is indexed. A cached copy
+// should already be complete — download refuses to replace the cache with
+// anything else — so this is the second line of that same guarantee, covering
+// a file damaged on disk. A partial document contributes nothing rather than
+// silently indexing half a feed.
+func (m *Manager) loadObservatoryInto(b *Builder, f store.Feed, r io.ReadSeeker) (int, error) {
+	if err := ValidateObservatory(r); err != nil {
+		return 0, err
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+
 	fallback := f.Category
 	if !catalog.ValidCategory(fallback) {
 		fallback = "malware"
 	}
 
 	added := 0
-	res, err := ParseObservatory(r, m.cfg.ObservatoryMinSeverity, func(rec ObservatoryRecord) {
-		category := rec.Category
-		if category == "" {
-			category = fallback
+	res, err := ParseObservatory(r, func(rec ObservatoryRecord) {
+		categories := rec.Categories
+		if len(categories) == 0 {
+			categories = []string{fallback}
 		}
-		if b.Add(rec.Domain, Entry{Category: category, FeedID: f.ID, FeedName: f.Name}) {
-			added++
+		for _, category := range categories {
+			if b.Add(rec.Domain, Entry{Category: category, FeedID: f.ID, FeedName: f.Name}) {
+				added++
+			}
 		}
 	})
-
 	if err != nil {
-		// A truncated or corrupt document stops the parse partway. Everything
-		// read before that point is real intelligence already in the builder,
-		// and throwing it away would leave the operator less protected than the
-		// broken download did. Keep it, and say so loudly.
-		if added > 0 {
-			m.log.Warn("observatory feed ended badly, keeping the indicators read so far",
-				"feed", f.ID, "indexed", added, "error", err)
-			return added, nil
-		}
-		return 0, err
+		// Validation passed, so reaching here means the document changed under
+		// us mid-read. Report it rather than keeping a partial index.
+		return added, err
 	}
 
-	if res.Skipped > 0 || res.BelowSeverity > 0 {
+	if res.Skipped > 0 {
 		m.log.Debug("observatory feed had unusable indicators",
-			"feed", f.ID,
-			"accepted", res.Accepted,
-			"skipped", res.Skipped,
-			"below_min_severity", res.BelowSeverity)
+			"feed", f.ID, "accepted", res.Accepted, "skipped", res.Skipped)
 	}
 	m.log.Info("observatory feed indexed",
 		"feed", f.ID,
 		"indicators", res.Accepted,
-		"indexed", added,
+		"domains", added,
 		"generated_at", res.GeneratedAt,
 		"source", res.Source)
 	return added, nil
