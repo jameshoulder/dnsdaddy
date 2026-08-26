@@ -24,6 +24,31 @@ should be swapping a binary, not restoring a backup.
 
 ### Security
 
+- **`golang.org/x/mod` raised to v0.40.0**, clearing [CVE-2026-56864] (a
+  malicious `GOSUMDB` able to serve arbitrary module content) and
+  [CVE-2026-56865] (`x/mod/sumdb/tlog` transparency-log tile verification
+  bypass), both HIGH.
+
+  Neither is reachable from anything DNS Daddy ships. `x/mod` is a module-graph
+  requirement inherited from `miekg/dns` and `modernc.org/libc` build tooling —
+  `go version -m` confirms it is linked into neither the resolver binary nor
+  the lab binary, and `govulncheck`, which resolves by symbol, never reported
+  it. Trivy reads `go.mod` declaratively, so it flagged the requirement
+  regardless, and a HIGH finding sitting in CI indefinitely is its own cost.
+
+  It cannot be raised alone. `x/mod` and `x/tools` require each other, so
+  minimum version selection drags a chain: `x/mod v0.40.0` requires
+  `x/tools v0.49.0`, which requires `x/net v0.58.0` and `x/sync v0.22.0`, and
+  `x/net v0.58.0` requires `x/crypto v0.55.0`. All five move together or none
+  does. `x/sys` already satisfied the new floor and is unchanged, as is every
+  non-`x/` dependency.
+
+  Of the five, only two contribute compiled code here: `x/crypto/bcrypt`, which
+  hashes the admin password, and `x/net/publicsuffix`, which resolves eTLD+1 for
+  the detection engine. DNS-over-TLS is stdlib `crypto/tls` and `miekg/dns`, and
+  neither moves. Public-suffix results were diffed across both `x/net` versions
+  over a 30-name corpus and are identical.
+
 - **Go toolchain raised to 1.25.13**, fixing five standard-library
   vulnerabilities that `govulncheck` reports as reachable from this code:
   [GO-2026-6218] (`net/url`), [GO-2026-6090] (`crypto/tls`), [GO-2026-6089] and
@@ -282,4 +307,6 @@ First public release: a single Go binary and one SQLite file.
 [GO-2026-5972]: https://pkg.go.dev/vuln/GO-2026-5972
 [GO-2026-6089]: https://pkg.go.dev/vuln/GO-2026-6089
 [GO-2026-6090]: https://pkg.go.dev/vuln/GO-2026-6090
+[CVE-2026-56864]: https://avd.aquasec.com/nvd/cve-2026-56864
+[CVE-2026-56865]: https://avd.aquasec.com/nvd/cve-2026-56865
 [GO-2026-6218]: https://pkg.go.dev/vuln/GO-2026-6218
