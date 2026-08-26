@@ -66,6 +66,40 @@ should be swapping a binary, not restoring a backup.
   enabling the feed records an HTTP 404 against that feed and changes nothing
   else, which is one more reason it is off.
 
+- **One-click activation for the Threat Observatory.** A card on **Threats**,
+  and a compact **Threat intelligence** panel on the **Dashboard**, turn the
+  feed on without a trip to the advanced feeds page. One click enables the
+  built-in feed row, downloads it immediately rather than waiting up to twelve
+  hours for the scheduler, validates and indexes it through the ordinary feed
+  machinery, and reports what actually came back.
+
+  The card is careful about the difference between enabled and working. It
+  reads **Active** only once a download has validated; an enabled feed that has
+  never succeeded says so plainly, and one that succeeded and is now failing
+  shows how old the intelligence it is still enforcing is. A 404 — the state
+  the Observatory's endpoint is in today — is explained as the endpoint not
+  being live yet rather than shown as an HTTP status.
+
+  Activation changes no policy. The card names which of malware, phishing, C2
+  and cryptomining the operator's own policies enforce, and which Observatory
+  indicators are therefore indexed but not blocked. Disable turns off that one
+  feed, rebuilds the index so its domains stop being blocked straight away, and
+  leaves every other feed and the built-in row itself intact.
+
+  The Observatory stays an ordinary row on **Threat feeds** — URL, domain
+  count, refresh status, last refresh, errors — and stays disabled by default.
+
+- **`POST /api/v1/feeds/{id}/refresh`** refreshes a single feed, using the same
+  download, validation, caching and index rebuild as a full refresh. Switching
+  a feed on can now be verified in seconds rather than after a download of
+  every third-party list.
+
+- **`lastSuccessAt` on every feed row** (`feeds.last_success_at`), recording the
+  last download that produced usable content. `lastRefreshedAt` moves on every
+  attempt including failures, so on its own it could not answer the question an
+  erroring feed actually raises: how old is the intelligence still being
+  enforced. Existing rows read `null` until their first refresh after upgrade.
+
 ### Fixed
 
 - **A domain listed under several categories is now blocked by a policy
@@ -106,6 +140,11 @@ should be swapping a binary, not restoring a backup.
   is a valid hosts file, so there is nothing there to check.
 
 ### Changed
+
+- **Enabling or disabling a feed now rebuilds the block index immediately**,
+  from the local cache and without any network access. Previously a disabled
+  feed kept blocking until the next scheduled refresh, up to twelve hours
+  later.
 
 - **Per-feed contribution counts are read back off the finished index**, rather
   than tallied while each feed loads, so a feed whose claim on a domain is

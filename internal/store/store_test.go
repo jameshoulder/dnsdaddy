@@ -556,3 +556,67 @@ func TestClientNaming(t *testing.T) {
 		t.Error("SetClientName accepted an invalid IP")
 	}
 }
+
+func TestRecordFeedRefreshTracksLastSuccessSeparately(t *testing.T) {
+	// A feed that has been failing since Tuesday has a refresh timestamp of a
+	// minute ago and intelligence three days old. The dashboard needs both
+	// numbers to say "could not be refreshed; still enforcing what we had".
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	name, url, category, format := "Test", "https://example.org/list.txt", "malware", "hosts"
+	f, err := st.CreateFeed(ctx, FeedInput{Name: &name, URL: &url, Category: &category, Format: &format})
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+	if f.LastSuccess != nil {
+		t.Error("a brand new feed claims a successful download")
+	}
+
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "ok", DomainCount: 10, ETag: `"v1"`}); err != nil {
+		t.Fatalf("record success: %v", err)
+	}
+	good, err := st.GetFeed(ctx, f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if good.LastSuccess == nil {
+		t.Fatal("a successful refresh recorded no success time")
+	}
+
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "error", Error: "HTTP 404 from https://example.org/list.txt"}); err != nil {
+		t.Fatalf("record failure: %v", err)
+	}
+	after, err := st.GetFeed(ctx, f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if after.LastSuccess == nil || !after.LastSuccess.Equal(*good.LastSuccess) {
+		t.Errorf("LastSuccess = %v after a failure, want the earlier %v", after.LastSuccess, good.LastSuccess)
+	}
+	if after.LastRefresh == nil || after.LastRefresh.Before(*good.LastSuccess) {
+		t.Error("LastRefresh did not move on a failed attempt")
+	}
+	if after.LastError == "" {
+		t.Error("the failure was not recorded")
+	}
+
+	// "Not modified" is a success: the provider confirmed the cached copy is
+	// current, so the intelligence is not stale.
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "not-modified", ETag: `"v1"`}); err != nil {
+		t.Fatalf("record not-modified: %v", err)
+	}
+	fresh, err := st.GetFeed(ctx, f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if fresh.LastSuccess == nil || fresh.LastSuccess.Before(*good.LastSuccess) {
+		t.Error("a not-modified response did not count as a successful refresh")
+	}
+	if fresh.LastError != "" {
+		t.Errorf("LastError = %q after a not-modified response, want empty", fresh.LastError)
+	}
+	if fresh.DomainCount != 10 {
+		t.Errorf("DomainCount = %d, want the previous 10 kept", fresh.DomainCount)
+	}
+}

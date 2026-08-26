@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -284,6 +285,11 @@ func (a *API) handleListFeeds(w http.ResponseWriter, r *http.Request) {
 		"feeds":               out,
 		"refreshing":          a.Feeds.Refreshing(),
 		"totalIndexedDomains": a.Lists.Load().Len(),
+		// Which of these rows is the Threat Observatory. The dashboard gives
+		// it a dedicated activation card, and naming the ID here keeps the
+		// catalog the single source of truth rather than hardcoding the slug
+		// in JavaScript where nothing would notice it drifting.
+		"observatoryFeedId": catalog.ObservatoryFeedID,
 	})
 }
 
@@ -323,12 +329,45 @@ func (a *API) handleUpdateFeed(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	// Read first, so the reindex below can be skipped when the request does
+	// not actually change whether this feed contributes to the index.
+	before, err := a.Store.GetFeed(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	f, err := a.Store.UpdateFeed(r.Context(), r.PathValue("id"), body.toInput())
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	if f.Enabled != before.Enabled {
+		a.reindexFromCache(r)
+	}
 	writeJSON(w, http.StatusOK, f)
+}
+
+// reindexFromCache rebuilds the blocklist index from the cached feed files
+// after a feed was switched on or off.
+//
+// Without this, disabling a feed does nothing to traffic until the next
+// scheduled refresh — up to twelve hours of a feed the operator has just
+// turned off still blocking domains. The rebuild is local: it reads the same
+// cache directory a restart reads and touches no network, so a feed that has
+// a cached copy starts contributing the moment it is enabled, and one that
+// does not is simply skipped, exactly as at boot.
+//
+// It runs in the background because a rebuild over a few hundred thousand
+// domains takes a second or two, and the write itself has already succeeded.
+func (a *API) reindexFromCache(r *http.Request) {
+	parent := r.Context()
+	go func() {
+		ctx, cancel := detachedContext(parent)
+		defer cancel()
+		if err := a.Feeds.LoadFromCache(ctx); err != nil {
+			a.Log.Error("rebuild index after feed change", "error", err)
+		}
+	}()
 }
 
 func (a *API) handleDeleteFeed(w http.ResponseWriter, r *http.Request) {
@@ -363,6 +402,48 @@ func (a *API) handleRefreshFeeds(w http.ResponseWriter, r *http.Request) {
 		a.Log.Info("manual feed refresh complete", "domains", a.Lists.Load().Len())
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "refreshing"})
+}
+
+// handleRefreshFeed refreshes a single feed rather than all of them.
+//
+// Enabling a feed and then waiting up to twelve hours for the scheduler, or
+// several minutes for a full refresh of every third-party list, is the wrong
+// answer to "did that work?". This runs the same download, validation, cache
+// and index-rebuild path as a full refresh, scoped to one feed, so the answer
+// arrives in seconds.
+func (a *API) handleRefreshFeed(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	f, err := a.Store.GetFeed(r.Context(), id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !f.Enabled {
+		writeError(w, http.StatusConflict, "feed is disabled; enable it before refreshing")
+		return
+	}
+
+	// The slot is claimed here, synchronously, so that a dashboard polling the
+	// moment this response lands already sees refreshing = true.
+	run, err := a.Feeds.BeginRefreshFeed(id)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	// As with a full refresh: r must not be touched once this handler returns,
+	// so the parent context is read here and detached from the response.
+	parent := r.Context()
+	go func() {
+		ctx, cancel := detachedContext(parent)
+		defer cancel()
+		if err := run(ctx); err != nil {
+			a.Log.Warn("feed refresh failed", "feed", id, "error", err)
+			return
+		}
+		a.Log.Info("feed refreshed", "feed", id, "domains", a.Lists.Load().Len())
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "refreshing", "feed": id})
 }
 
 // --- clients ---------------------------------------------------------------

@@ -35,6 +35,12 @@ type harness struct {
 	store    *store.Store
 	client   *http.Client
 	detector *detect.Engine
+	// lists is the live blocklist index the API and DNS handler share, so a
+	// test can assert what a refresh actually made blockable.
+	lists *blocklist.Holder
+	// dir is the data directory, kept so a test can reopen the database and
+	// check that a setting survived a restart.
+	dir string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -131,7 +137,23 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(srv.Close)
 
 	jar := &cookieJar{cookies: map[string]*http.Cookie{}}
-	return &harness{t: t, server: srv, store: st, client: &http.Client{Jar: jar}, detector: detector}
+	return &harness{
+		t: t, server: srv, store: st, client: &http.Client{Jar: jar},
+		detector: detector, lists: lists, dir: dir,
+	}
+}
+
+// reopen opens a second store over the same database file, which is what a
+// restart amounts to: the schema is reapplied and the defaults are re-seeded.
+// Anything the operator chose has to survive that.
+func (h *harness) reopen(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(h.dir, "test.db"))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
 }
 
 // cookieJar is a minimal same-origin jar; net/http/cookiejar needs a

@@ -76,10 +76,11 @@ func (m *Manager) LoadFromCache(ctx context.Context) error {
 // to download fall back to their cached copy, so a single unreachable provider
 // degrades one category rather than the whole blocklist.
 func (m *Manager) Refresh(ctx context.Context) error {
-	if !m.refreshing.CompareAndSwap(false, true) {
-		return errors.New("a feed refresh is already running")
+	release, err := m.beginRefresh()
+	if err != nil {
+		return err
 	}
-	defer m.refreshing.Store(false)
+	defer release()
 
 	feeds, err := m.store.ListFeeds(ctx)
 	if err != nil {
@@ -107,6 +108,103 @@ func (m *Manager) Refresh(ctx context.Context) error {
 
 	m.lastRefresh.Store(time.Now().UnixMilli())
 	return m.rebuild(ctx, feeds, results)
+}
+
+// beginRefresh claims the single refresh slot, returning the function that
+// gives it back. Refreshes are serialised because they all end in a full index
+// rebuild, and two rebuilds racing would have one of them swap in an index
+// built from a half-updated cache directory.
+func (m *Manager) beginRefresh() (func(), error) {
+	if !m.refreshing.CompareAndSwap(false, true) {
+		return nil, errors.New("a feed refresh is already running")
+	}
+	return func() { m.refreshing.Store(false) }, nil
+}
+
+// RefreshFeed downloads one feed and rebuilds the index, leaving every other
+// feed's cached copy exactly as it was.
+//
+// This is the same download, validation, caching and index-rebuild path
+// Refresh uses — it just narrows what is fetched. It exists because a full
+// refresh pulls a dozen third-party lists and takes minutes, which is the
+// wrong thing to make an operator sit through when they have just switched one
+// feed on and want to know whether it works.
+func (m *Manager) RefreshFeed(ctx context.Context, feedID string) error {
+	run, err := m.BeginRefreshFeed(feedID)
+	if err != nil {
+		return err
+	}
+	return run(ctx)
+}
+
+// BeginRefreshFeed claims the refresh slot for one feed and returns the
+// function that performs the refresh and releases the slot again.
+//
+// Splitting the claim from the work lets a caller answer an HTTP request
+// immediately and do the download in the background, while still guaranteeing
+// that a status poll issued the moment that response lands already reports a
+// refresh in progress. Refreshing() flipping true only once the goroutine got
+// scheduled would let the dashboard read "idle" and paint a stale card.
+//
+// The returned function must be called exactly once, and the slot stays
+// claimed until it returns.
+func (m *Manager) BeginRefreshFeed(feedID string) (func(context.Context) error, error) {
+	release, err := m.beginRefresh()
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) error {
+		defer release()
+		return m.refreshOne(ctx, feedID)
+	}, nil
+}
+
+// refreshOne downloads feedID and rebuilds the index. The caller holds the
+// refresh slot.
+func (m *Manager) refreshOne(ctx context.Context, feedID string) error {
+	feeds, err := m.store.ListFeeds(ctx)
+	if err != nil {
+		return err
+	}
+
+	var target *store.Feed
+	for i := range feeds {
+		if feeds[i].ID == feedID {
+			target = &feeds[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("unknown feed %q", feedID)
+	}
+	if !target.Enabled {
+		return fmt.Errorf("feed %q is disabled", feedID)
+	}
+
+	res := m.download(ctx, *target)
+	if err := m.store.RecordFeedRefresh(ctx, target.ID, res); err != nil {
+		m.log.Warn("record feed refresh", "feed", target.ID, "error", err)
+	}
+	if res.Error != "" {
+		m.log.Warn("feed download failed, using cached copy if present",
+			"feed", target.ID, "url", target.URL, "error", res.Error)
+	}
+
+	// The rebuild reads every enabled feed's cached file, so the other feeds
+	// keep contributing exactly what they contributed before. Only this feed's
+	// cache changed, and only if the download succeeded.
+	//
+	// Deliberately not touching m.lastRefresh: that is "when were the feeds
+	// refreshed", and one feed is not the feeds. Reporting a full refresh on
+	// the dashboard because a single feed was fetched would be a lie of
+	// exactly the kind the freshness figure exists to prevent.
+	if err := m.rebuild(ctx, feeds, map[string]store.FeedResult{target.ID: res}); err != nil {
+		return err
+	}
+	if res.Error != "" {
+		return fmt.Errorf("refresh %s: %s", target.ID, res.Error)
+	}
+	return nil
 }
 
 // Refreshing reports whether a refresh is currently running.

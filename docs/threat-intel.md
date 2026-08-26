@@ -86,17 +86,72 @@ If that trade is not one you want to make, leave it off. Nothing else changes.
 
 ### Turning it on
 
-**Threat feeds → DNS Daddy Threat Observatory → Enabled.** Or:
+**Threats → DNS Daddy Threat Observatory → Enable Threat Observatory.** The
+same card appears in the Threat intelligence panel on the Dashboard, so you do
+not have to find the feeds page first.
+
+One click does four things, in this order:
+
+```text
+enable the built-in Observatory feed
+        ↓
+save that choice           (an ordinary feed row; it survives a restart)
+        ↓
+refresh it immediately     (rather than waiting up to 12 hours for the scheduler)
+        ↓
+validate, cache, re-index  (the same path every other feed takes)
+        ↓
+report what actually happened
+```
+
+The card then shows one of three things, and the distinction between them is
+the point:
+
+| Card says | Means |
+|---|---|
+| **Active**, with a domain count and an update time | A complete document downloaded, validated and indexed. |
+| **Attention**, with the age of the last good copy | The refresh failed. The previous copy is still indexed and still blocking. |
+| Enabled, not downloaded yet | It has never successfully downloaded. Nothing from this feed is being enforced. |
+
+An enabled feed is never described as active until something has actually
+downloaded — which matters right now, because the endpoint is not live yet and
+enabling it today lands in the third row.
+
+Disable puts it back: that feed stops contributing, the index is rebuilt
+without it, and every other feed and every policy is untouched. The built-in
+row is disabled, never deleted.
+
+The same thing over the API:
 
 ```bash
+# enable
 curl -X PATCH -H "Authorization: Bearer dnsd_…" \
   -H 'Content-Type: application/json' \
   -d '{"enabled":true}' \
   https://dns.example.co.uk/api/v1/feeds/dnsdaddy-observatory
+
+# and download it now rather than at the next scheduled refresh
+curl -X POST -H "Authorization: Bearer dnsd_…" \
+  https://dns.example.co.uk/api/v1/feeds/dnsdaddy-observatory/refresh
+
+# then read the outcome off the row: lastStatus, lastError, lastSuccessAt
+curl -H "Authorization: Bearer dnsd_…" \
+  https://dns.example.co.uk/api/v1/feeds
 ```
 
-It refreshes on the same schedule, caches to the same directory, and is
-disabled again the same way.
+`POST /api/v1/feeds/{id}/refresh` is not Observatory-specific: it refreshes any
+single feed, using the same download, validation, caching and index rebuild as
+a full refresh. It exists so that switching a feed on can be verified in
+seconds instead of after a download of every third-party list.
+
+`lastRefreshedAt` moves on every attempt; `lastSuccessAt` moves only when a
+download produced content this server can enforce. A feed that has been
+failing since Tuesday has a recent `lastRefreshedAt` and a three-day-old
+`lastSuccessAt`, and it is the second number that dates the intelligence
+actually in the index.
+
+Once enabled it refreshes on the same schedule as everything else, caches to
+the same directory, and is disabled again the same way.
 
 ### What makes it different from the other feeds
 

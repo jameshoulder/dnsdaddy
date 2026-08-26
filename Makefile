@@ -46,6 +46,10 @@ test: ## Run the test suite
 test-race: ## Run tests with the race detector
 	go test -race ./...
 
+.PHONY: test-ui
+test-ui: ## Run the dashboard's JavaScript tests (needs node; no packages to install)
+	node --test internal/web/app.test.js
+
 .PHONY: cover
 cover: ## Run tests and open a coverage report
 	go test -coverprofile=coverage.out ./...

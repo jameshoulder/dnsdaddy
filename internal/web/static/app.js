@@ -315,6 +315,401 @@ function copyBlock(text) {
   `;
 }
 
+/* ---------- DNS Daddy Threat Observatory --------------------------------- */
+
+/*
+ * The Observatory is an ordinary built-in feed: the same row in the same
+ * table, refreshed, cached, validated and indexed by the same machinery as
+ * URLhaus. What it gets that the others do not is this card, because it is the
+ * one source an operator has to opt into, and burying that behind the advanced
+ * feeds page means most installs never get it.
+ *
+ * Everything below reads the state the feeds endpoint already reports. There
+ * is no Observatory-specific state anywhere, on the server or here, and no
+ * separate blocking mode — enabling it is a PATCH on a feed row followed by a
+ * refresh of that row.
+ */
+
+const OBSERVATORY_CATEGORIES = 'Malware · Phishing · C2 · Cryptomining';
+
+// The categories Observatory indicators are filed under, for the note about
+// which of them the operator's policies actually enforce.
+const OBSERVATORY_CATEGORY_IDS = ['malware', 'phishing', 'c2', 'cryptomining'];
+
+/**
+ * Which state the card is in, derived entirely from the feed row.
+ *
+ * The important line is the last one: "active" requires a successful download,
+ * not merely an enabled feed. A feed switched on thirty seconds ago against an
+ * endpoint that 404s is enabled, has a recent lastRefreshedAt, and is
+ * protecting nobody — saying "Active" there would be the single most
+ * misleading thing this card could do.
+ */
+function observatoryState(feed, refreshing) {
+  if (!feed) return 'missing';
+  if (!feed.enabled) return 'off';
+  if (refreshing) return 'connecting';
+  if (feed.lastError) return feed.lastSuccessAt ? 'stale' : 'unavailable';
+  if (!feed.lastSuccessAt) return 'pending';
+  return 'active';
+}
+
+/**
+ * A plain-English summary of a feed error, with the raw text still available
+ * behind "View error".
+ *
+ * The 404 case is called out by name because it is the expected answer until
+ * the Observatory's JSON API ships: an operator who enables this today should
+ * be told the endpoint is not live yet, not left reading an HTTP status.
+ */
+function observatoryErrorSummary(error) {
+  if (!error) return '';
+  if (/HTTP 404/.test(error)) return 'The Observatory feed endpoint is not available yet.';
+  if (/HTTP 401|HTTP 403/.test(error)) return 'The Observatory refused the request.';
+  if (/HTTP 5\d\d/.test(error)) return 'The Observatory is having server trouble.';
+  if (/rejected download/.test(error)) return 'The Observatory served a feed DNS Daddy could not trust, so the previous copy was kept.';
+  if (/timeout|deadline|no such host|connection refused/i.test(error)) return 'The Observatory could not be reached from this server.';
+  return 'The Observatory could not be refreshed.';
+}
+
+function observatoryErrorDetails(error) {
+  if (!error) return '';
+  return html`
+    <details class="finding obs-error">
+      <summary>View error</summary>
+      <div class="code obs-error-text">${error}</div>
+    </details>
+  `;
+}
+
+/** The privacy statement. Shown wherever the card offers to turn this on. */
+function observatoryPrivacyNote() {
+  return html`
+    <p class="muted small obs-privacy">
+      DNS Daddy periodically downloads the public threat feed from
+      <span class="mono">threats.dnsdaddy.dev</span>. DNS query logs are not uploaded.
+    </p>
+  `;
+}
+
+/**
+ * Which Observatory categories the operator's policies actually enforce.
+ *
+ * Activation supplies intelligence; it does not tick a single category box.
+ * If somebody has deliberately turned cryptomining off, enabling this feed
+ * must not quietly turn it back on — so the card says plainly what is and is
+ * not being enforced rather than implying four categories of protection it
+ * does not control.
+ */
+function observatoryEnforcement(policies) {
+  if (!policies || !policies.length) return '';
+  const enforced = new Set();
+  for (const p of policies) {
+    for (const c of p.categories || []) enforced.add(c);
+  }
+  const on = OBSERVATORY_CATEGORY_IDS.filter((c) => enforced.has(c));
+  const off = OBSERVATORY_CATEGORY_IDS.filter((c) => !enforced.has(c));
+  const label = (c) => (c === 'c2' ? 'C2' : c.charAt(0).toUpperCase() + c.slice(1));
+
+  if (!off.length) {
+    return html`<p class="muted small">Your policies enforce every category the Observatory files indicators under.</p>`;
+  }
+  return html`
+    <p class="muted small">
+      Your policies enforce ${on.length ? on.map(label).join(', ') : 'none of these categories'}.
+      Indicators tagged ${off.map(label).join(', ')} are indexed but not blocked, because no policy
+      enables ${off.length === 1 ? 'that category' : 'those categories'} —
+      turning this feed on does not change your policies.
+    </p>
+  `;
+}
+
+/**
+ * The activation card. `feed` is the Observatory row from GET /feeds.
+ */
+function observatoryCard(feed, { refreshing = false, policies = null } = {}) {
+  const state = observatoryState(feed, refreshing);
+
+  if (state === 'missing') {
+    return html`
+      <div class="card observatory" id="observatory-card">
+        <div class="card-head"><div><h2>DNS Daddy Threat Observatory</h2></div></div>
+        <p class="muted">
+          The built-in Observatory feed is not in this install's feed list. It is seeded on
+          first run; if it is missing, restart DNS Daddy or add it as a custom feed.
+        </p>
+      </div>
+    `;
+  }
+
+  const badge = {
+    active: html`<span class="badge ok">Active</span>`,
+    connecting: html`<span class="badge info">Connecting…</span>`,
+    stale: html`<span class="badge warn">Attention</span>`,
+    unavailable: html`<span class="badge warn">Attention</span>`,
+    pending: html`<span class="badge warn">Pending</span>`,
+    off: '',
+  }[state];
+
+  const bodies = {
+    off: () => html`
+      <p>Use live DNS threat intelligence published by the DNS Daddy Threat Observatory.</p>
+      <p class="obs-cats">${OBSERVATORY_CATEGORIES}</p>
+      <p class="muted small">No account or API key required.</p>
+      <div class="row obs-actions">
+        <button class="btn btn-primary" id="observatory-enable">Enable Threat Observatory</button>
+      </div>
+      ${raw(observatoryPrivacyNote())}
+    `,
+
+    connecting: () => html`
+      <p class="obs-progress-lead">Connecting to the Observatory…<br>Downloading threat intelligence…</p>
+      <div class="obs-progress" role="progressbar" aria-label="Downloading threat intelligence"><span></span></div>
+      <p class="muted small">
+        Nothing from this feed is enforced until the first download has been validated.
+      </p>
+    `,
+
+    active: () => html`
+      <p class="obs-count"><strong>${num(feed.indexedDomains)}</strong> domains indexed</p>
+      <p class="muted small">Updated ${relTime(feed.lastRefreshedAt)}</p>
+      <p class="obs-cats">${OBSERVATORY_CATEGORIES}</p>
+      <p class="muted small">Threat intelligence is refreshed automatically with your other feeds.</p>
+      ${raw(observatoryEnforcement(policies))}
+      <div class="row obs-actions">
+        <a class="btn btn-ghost" href="#/feeds">View details</a>
+        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
+      </div>
+    `,
+
+    stale: () => html`
+      <p>${observatoryErrorSummary(feed.lastError)}</p>
+      <p class="obs-count small">Last successful intelligence: <strong>${relTime(feed.lastSuccessAt)}</strong></p>
+      <p class="muted small">
+        DNS Daddy is continuing to use the last known good feed —
+        ${num(feed.indexedDomains)} domains from it are still indexed and still blocked.
+      </p>
+      ${raw(observatoryErrorDetails(feed.lastError))}
+      <div class="row obs-actions">
+        <button class="btn btn-primary" id="observatory-retry">Retry</button>
+        <a class="btn btn-ghost" href="#/feeds">View details</a>
+        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
+      </div>
+    `,
+
+    unavailable: () => html`
+      <p>Enabled, but threat intelligence has not been downloaded yet.</p>
+      <p class="muted small">${observatoryErrorSummary(feed.lastError)}</p>
+      ${raw(observatoryErrorDetails(feed.lastError))}
+      <div class="row obs-actions">
+        <button class="btn btn-primary" id="observatory-retry">Retry connection</button>
+        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
+      </div>
+    `,
+
+    pending: () => html`
+      <p>Enabled, but threat intelligence has not been downloaded yet.</p>
+      <div class="row obs-actions">
+        <button class="btn btn-primary" id="observatory-retry">Retry connection</button>
+        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
+      </div>
+    `,
+  };
+
+  return html`
+    <div class="card observatory" id="observatory-card" data-state="${state}">
+      <div class="card-head">
+        <div>
+          <h2>DNS Daddy Threat Observatory</h2>
+          <p>Live DNS threat intelligence from DNS Daddy.</p>
+        </div>
+        <div class="row-end">${raw(badge)}</div>
+      </div>
+      ${raw(bodies[state]())}
+    </div>
+  `;
+}
+
+/**
+ * Wire the card's buttons. Safe to call on a page that has no card.
+ *
+ * Every button is a call to an endpoint that already existed for feeds, or —
+ * in the case of the single-feed refresh — the narrow version of one. None of
+ * it touches policies, categories, or any other feed.
+ */
+function mountObservatoryCard(feedId) {
+  const enable = $('#observatory-enable');
+  if (enable) {
+    enable.addEventListener('click', async () => {
+      enable.disabled = true;
+      enable.textContent = 'Connecting…';
+      try {
+        await apiSend('PATCH', `/feeds/${feedId}`, { enabled: true });
+      } catch (err) {
+        reportError(err);
+        enable.disabled = false;
+        enable.textContent = 'Enable Threat Observatory';
+        return;
+      }
+      await runObservatoryRefresh(feedId);
+    });
+  }
+
+  const retry = $('#observatory-retry');
+  if (retry) {
+    retry.addEventListener('click', async () => {
+      retry.disabled = true;
+      retry.textContent = 'Connecting…';
+      await runObservatoryRefresh(feedId);
+    });
+  }
+
+  const disable = $('#observatory-disable');
+  if (disable) {
+    disable.addEventListener('click', async () => {
+      disable.disabled = true;
+      try {
+        // Only this feed. Every other feed, and every policy, is untouched;
+        // the server rebuilds the index so its domains stop being blocked
+        // without waiting for the next scheduled refresh.
+        await apiSend('PATCH', `/feeds/${feedId}`, { enabled: false });
+        toast('Threat Observatory disabled — your other feeds are unchanged');
+      } catch (err) {
+        reportError(err);
+      }
+      await router.reload();
+    });
+  }
+}
+
+/**
+ * Refresh the Observatory feed now and follow it to a result.
+ *
+ * This is the second half of one-click activation: enabling a feed that then
+ * sits untouched until the next scheduled refresh — up to twelve hours later —
+ * is not an activated feed, it is a promise. So the row is refreshed
+ * immediately through the ordinary feed machinery, the card shows the download
+ * happening, and the operator is told what actually came back.
+ */
+async function runObservatoryRefresh(feedId) {
+  try {
+    await apiSend('POST', `/feeds/${feedId}/refresh`);
+  } catch (err) {
+    // A full refresh already running is not a failure: the poll below picks up
+    // whatever it produces for this feed.
+    if (!(err instanceof ApiError && err.status === 409)) {
+      reportError(err);
+    }
+  }
+
+  const route = router.current;
+  await router.reload(); // paints the connecting state
+
+  const data = await waitForFeedRefresh();
+  const feed = data && (data.feeds || []).find((f) => f.id === feedId);
+  if (feed) {
+    if (feed.lastError) {
+      toast(observatoryErrorSummary(feed.lastError), 'error');
+    } else if (feed.lastSuccessAt) {
+      toast(`Threat Observatory active — ${num(feed.indexedDomains)} domains indexed`);
+    }
+  }
+
+  // Only repaint if the operator is still on the page they clicked from.
+  if (router.current === route) await router.reload();
+}
+
+/** Poll the feeds endpoint until no refresh is running, then return it. */
+function waitForFeedRefresh({ intervalMs = 2000, timeoutMs = 180000 } = {}) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const poll = setInterval(async () => {
+      let data = null;
+      try {
+        data = await apiGet('/feeds');
+      } catch {
+        clearInterval(poll);
+        resolve(null);
+        return;
+      }
+      if (!data.refreshing || Date.now() - started > timeoutMs) {
+        clearInterval(poll);
+        resolve(data);
+      }
+    }, intervalMs);
+  });
+}
+
+/**
+ * One row per feed, for the dashboard's threat-intelligence panel.
+ *
+ * Reuses the feed rows the feeds page already renders rather than keeping a
+ * second notion of feed health anywhere.
+ */
+function feedStatusBadge(feed) {
+  if (!feed.enabled) return html`<span class="badge">Off</span>`;
+  if (feed.lastError) {
+    return feed.lastSuccessAt
+      ? html`<span class="badge warn">Stale</span>`
+      : html`<span class="badge bad">Unavailable</span>`;
+  }
+  if (feed.lastSuccessAt) return html`<span class="badge ok">Active</span>`;
+  return html`<span class="badge warn">Pending</span>`;
+}
+
+/**
+ * Compact threat-intelligence health panel for the dashboard.
+ *
+ * The Observatory sits at the top because it is the one feed that needs a
+ * decision from the operator, and it carries an inline Enable button so the
+ * decision can be made from the page everybody lands on. It is not presented
+ * as better intelligence than the independent sources under it — it is one row
+ * in the same list, with the same badge, from the same endpoint.
+ */
+function threatIntelPanel(data) {
+  const feeds = data.feeds || [];
+  const observatory = feeds.find((f) => f.id === data.observatoryFeedId);
+  const others = feeds.filter((f) => f.id !== data.observatoryFeedId && f.enabled);
+  const offCount = feeds.filter((f) => f.id !== data.observatoryFeedId && !f.enabled).length;
+
+  const row = (feed, extra) => html`
+    <div class="intel-row">
+      <span class="intel-name">${feed.name}</span>
+      <span class="intel-status">${raw(extra || feedStatusBadge(feed))}</span>
+    </div>
+  `;
+
+  const observatoryRow = !observatory
+    ? ''
+    : observatory.enabled
+      ? row(observatory)
+      : row(
+          observatory,
+          html`<button class="btn btn-primary btn-sm" id="observatory-enable">Enable</button>`
+        );
+
+  return html`
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Threat intelligence</h2>
+          <p>${num(data.totalIndexedDomains)} domains indexed across enabled feeds.</p>
+        </div>
+        <div class="row-end"><a class="btn btn-ghost btn-sm" href="#/feeds">Manage</a></div>
+      </div>
+      <div class="intel-list">
+        ${raw(observatoryRow)}
+        ${raw(others.map((f) => row(f)).join(''))}
+      </div>
+      ${raw(
+        offCount
+          ? html`<p class="muted small mt-3">${offCount} further feed${offCount === 1 ? '' : 's'} available but switched off.</p>`
+          : ''
+      )}
+    </div>
+  `;
+}
+
 /* ---------- pages ------------------------------------------------------- */
 
 const pages = {};
@@ -323,12 +718,14 @@ pages.dashboard = {
   title: 'Dashboard',
   subtitle: 'What your network asked for, and what was stopped.',
   async render() {
-    const [overview, activity, categories, top] = await Promise.all([
+    const [overview, activity, categories, top, feeds] = await Promise.all([
       apiGet('/overview'),
       apiGet('/activity/queries?hours=24'),
       apiGet('/threats/categories?hours=24'),
       apiGet('/threats/top-domains?days=7&limit=8'),
+      apiGet('/feeds'),
     ]);
+    this.feeds = feeds;
 
     const catRows = categories.categories.map((c) => ({
       label: c.label,
@@ -398,15 +795,23 @@ pages.dashboard = {
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head"><div><h2>Resolver</h2><p>Uptime and feed freshness.</p></div></div>
-        <div class="grid grid-3">
-          <div><div class="label muted small">STATUS</div><div>${raw(statusBadge(overview.resolverStatus))}</div></div>
-          <div><div class="label muted small">UPTIME</div><div>${duration(overview.uptimeSeconds)}</div></div>
-          <div><div class="label muted small">FEEDS REFRESHED</div><div>${relTime(overview.lastFeedRefresh)}</div></div>
+      <div class="section grid grid-2">
+        ${raw(threatIntelPanel(feeds))}
+        <div class="card">
+          <div class="card-head"><div><h2>Resolver</h2><p>Uptime and feed freshness.</p></div></div>
+          <div class="grid grid-3">
+            <div><div class="label muted small">STATUS</div><div>${raw(statusBadge(overview.resolverStatus))}</div></div>
+            <div><div class="label muted small">UPTIME</div><div>${duration(overview.uptimeSeconds)}</div></div>
+            <div><div class="label muted small">FEEDS REFRESHED</div><div>${relTime(overview.lastFeedRefresh)}</div></div>
+          </div>
         </div>
       </div>
     `;
+  },
+  async mounted() {
+    // The panel's inline Enable button runs exactly the same activation as the
+    // full card on the Threats page.
+    mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
   },
 };
 
@@ -414,16 +819,27 @@ pages.threats = {
   title: 'Threats',
   subtitle: 'Everything blocked, and why.',
   async render() {
-    const [categories, top, recent] = await Promise.all([
+    const [categories, top, recent, feeds, policies] = await Promise.all([
       apiGet('/threats/categories?hours=168'),
       apiGet('/threats/top-domains?days=7&limit=25'),
       apiGet('/queries?action=blocked&limit=50'),
+      apiGet('/feeds'),
+      apiGet('/policies'),
     ]);
+    this.feeds = feeds;
 
     const catRows = categories.categories.map((c) => ({ label: c.label, count: c.count, category: c.category }));
     const total = catRows.reduce((sum, r) => sum + r.count, 0);
+    const observatory = (feeds.feeds || []).find((f) => f.id === feeds.observatoryFeedId);
 
     return html`
+      <div class="section">
+        ${raw(observatoryCard(observatory, {
+          refreshing: feeds.refreshing,
+          policies: policies.policies,
+        }))}
+      </div>
+
       <div class="section grid grid-2">
         <div class="card">
           <div class="card-head"><div><h2>By category</h2><p>Last 7 days · ${num(total)} blocked.</p></div></div>
@@ -457,6 +873,9 @@ pages.threats = {
         ${raw(queryTable(recent.queries))}
       </div>
     `;
+  },
+  async mounted() {
+    mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
   },
 };
 
@@ -1111,16 +1530,14 @@ pages.feeds = {
                         )}
                       </td>
                       <td class="num">${f.enabled ? num(f.indexedDomains) : '—'}</td>
-                      <td class="muted nowrap">${relTime(f.lastRefreshedAt)}</td>
-                      <td>${raw(
-                        !f.enabled
-                          ? html`<span class="badge">Disabled</span>`
-                          : f.lastError
-                            ? html`<span class="badge bad">Error</span>`
-                            : f.lastRefreshedAt
-                              ? html`<span class="badge ok">OK</span>`
-                              : html`<span class="badge warn">Pending</span>`
-                      )}</td>
+                      <td class="muted nowrap">${relTime(f.lastRefreshedAt)}
+                        ${raw(
+                          f.enabled && f.lastError && f.lastSuccessAt
+                            ? html`<div class="small">last good ${relTime(f.lastSuccessAt)}</div>`
+                            : ''
+                        )}
+                      </td>
+                      <td>${raw(feedStatusBadge(f))}</td>
                       <td>
                         <input type="checkbox" data-feed="${f.id}" ${raw(f.enabled ? 'checked' : '')}
                                aria-label="Enable ${f.name}">
@@ -1190,7 +1607,11 @@ pages.feeds = {
       cb.addEventListener('change', async () => {
         try {
           await apiSend('PATCH', `/feeds/${cb.dataset.feed}`, { enabled: cb.checked });
-          toast(cb.checked ? 'Feed enabled — refresh to index it' : 'Feed disabled');
+          toast(
+            cb.checked
+              ? 'Feed enabled — refresh to download it'
+              : 'Feed disabled — its domains are being dropped from the index'
+          );
         } catch (err) {
           reportError(err);
           cb.checked = !cb.checked;
@@ -1686,4 +2107,32 @@ async function boot() {
   }
 }
 
-boot();
+// In a browser this is the entry point. Under `node --test` there is no
+// document to boot against, and the point of loading the file there is to
+// exercise the pure rendering functions below, so the dashboard stays asleep.
+if (typeof document !== 'undefined') {
+  boot();
+}
+
+/*
+ * Test surface.
+ *
+ * The dashboard is a plain script with no build step, and it stays that way:
+ * this is not a module system, it is four lines that let `node --test` require
+ * the file. `module` is undefined in a browser, so the block is inert there.
+ *
+ * Only pure functions are exported — the ones that decide what the Threat
+ * Observatory card claims. That decision is the one place in the UI where
+ * being wrong means telling somebody they are protected when they are not.
+ */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    esc,
+    observatoryState,
+    observatoryErrorSummary,
+    observatoryEnforcement,
+    observatoryCard,
+    feedStatusBadge,
+    threatIntelPanel,
+  };
+}

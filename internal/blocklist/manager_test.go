@@ -752,3 +752,191 @@ func TestObservatoryDoesNotDowngradeAnotherFeedsClaim(t *testing.T) {
 		t.Errorf("malware feed DomainCount = %d, want 1", malStored.DomainCount)
 	}
 }
+
+// --- single-feed refresh ---------------------------------------------------
+//
+// One-click activation of a feed has to answer "did that work?" in seconds.
+// Making the operator sit through a download of every third-party list, or
+// wait out the twelve-hour scheduler, is the difference between a feature
+// somebody turns on and one they abandon halfway.
+
+func TestRefreshFeedFetchesOnlyThatFeed(t *testing.T) {
+	var wantedHits, otherHits atomic.Int32
+	wanted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantedHits.Add(1)
+		io.WriteString(w, "0.0.0.0 evil.com\n")
+	}))
+	defer wanted.Close()
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHits.Add(1)
+		io.WriteString(w, "0.0.0.0 spam.example\n")
+	}))
+	defer other.Close()
+
+	h := newManagerHarness(t)
+	target := h.addFeed(t, "Target", wanted.URL, "malware", "hosts")
+	h.addFeed(t, "Other", other.URL, "phishing", "hosts")
+
+	// Both feeds start indexed, so the rebuild has something to preserve.
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if otherHits.Load() != 1 {
+		t.Fatalf("setup: other feed hit %d times, want 1", otherHits.Load())
+	}
+
+	if err := h.mgr.RefreshFeed(context.Background(), target.ID); err != nil {
+		t.Fatalf("RefreshFeed: %v", err)
+	}
+
+	if wantedHits.Load() != 2 {
+		t.Errorf("target feed hit %d times, want 2 (the full refresh and the targeted one)", wantedHits.Load())
+	}
+	if otherHits.Load() != 1 {
+		t.Errorf("the other feed was downloaded again (%d hits); a single-feed refresh must not touch it", otherHits.Load())
+	}
+
+	// The other feed still contributes: a targeted refresh rebuilds from every
+	// enabled feed's cache, it does not narrow the index to one feed.
+	ix := h.holder.Load()
+	if _, ok := ix.Lookup("spam.example"); !ok {
+		t.Error("the untouched feed's domains fell out of the index")
+	}
+	if _, ok := ix.Lookup("evil.com"); !ok {
+		t.Error("the refreshed feed's domains are not indexed")
+	}
+}
+
+func TestRefreshFeedIndexesImmediatelyWithoutTheScheduler(t *testing.T) {
+	// This is one-click activation's whole promise: a feed enabled now is
+	// enforced now, not at the next tick.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"source":"dnsdaddy-threat-observatory","indicators":[`+
+			`{"value":"c2.example","type":"domain","categories":["c2"]}]}`)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+
+	if err := h.mgr.RefreshFeed(context.Background(), f.ID); err != nil {
+		t.Fatalf("RefreshFeed: %v", err)
+	}
+
+	entry, ok := h.holder.Load().Lookup("c2.example")
+	if !ok {
+		t.Fatal("the indicator is not in the index straight after activation")
+	}
+	if entry.Category != "c2" {
+		t.Errorf("category = %q, want c2 — the indicator's own category, not the feed's fallback", entry.Category)
+	}
+
+	stored, err := h.store.GetFeed(context.Background(), f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if stored.LastSuccess == nil {
+		t.Error("a successful targeted refresh did not record a success time")
+	}
+	if stored.LastError != "" {
+		t.Errorf("LastError = %q, want empty", stored.LastError)
+	}
+}
+
+func TestRefreshFeedReportsFailureAndKeepsLastKnownGood(t *testing.T) {
+	// The failure the Observatory will actually hit until its JSON API ships:
+	// a 404. The feed must stay enabled, keep serving its previous contents,
+	// and say clearly that the refresh failed.
+	var fail atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, `{"indicators":[{"value":"known-bad.example","type":"domain","categories":["malware"]}]}`)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+
+	if err := h.mgr.RefreshFeed(context.Background(), f.ID); err != nil {
+		t.Fatalf("first RefreshFeed: %v", err)
+	}
+	good, err := h.store.GetFeed(context.Background(), f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if good.LastSuccess == nil {
+		t.Fatal("setup: the first refresh recorded no success time")
+	}
+
+	fail.Store(true)
+	if err := h.mgr.RefreshFeed(context.Background(), f.ID); err == nil {
+		t.Error("a 404 refresh returned no error")
+	}
+
+	if _, ok := h.holder.Load().Lookup("known-bad.example"); !ok {
+		t.Error("the last known good intelligence was dropped when the refresh failed")
+	}
+
+	after, err := h.store.GetFeed(context.Background(), f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if !after.Enabled {
+		t.Error("a failed refresh disabled the feed; it must stay enabled and keep serving its cache")
+	}
+	if after.LastError == "" {
+		t.Error("the failure was not recorded against the feed")
+	}
+	if after.LastSuccess == nil || !after.LastSuccess.Equal(*good.LastSuccess) {
+		t.Errorf("LastSuccess = %v, want the earlier success %v — it is what says how old the enforced intelligence is",
+			after.LastSuccess, good.LastSuccess)
+	}
+	if after.LastRefresh == nil || after.LastRefresh.Before(*good.LastSuccess) {
+		t.Error("LastRefresh did not move on the failed attempt")
+	}
+}
+
+func TestRefreshFeedRejectsDisabledAndUnknownFeeds(t *testing.T) {
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Target", "http://127.0.0.1:1/never", "malware", "hosts")
+	if _, err := h.store.UpdateFeed(context.Background(), f.ID, store.FeedInput{Enabled: ptr(false)}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	if err := h.mgr.RefreshFeed(context.Background(), f.ID); err == nil {
+		t.Error("refreshing a disabled feed succeeded; it should not download anything")
+	}
+	if err := h.mgr.RefreshFeed(context.Background(), "no-such-feed"); err == nil {
+		t.Error("refreshing an unknown feed succeeded")
+	}
+}
+
+func TestBeginRefreshFeedClaimsTheSlotBeforeTheWorkStarts(t *testing.T) {
+	// The dashboard polls the moment its activation request is answered. If
+	// the slot were only claimed once the background goroutine got scheduled,
+	// that first poll could read "not refreshing" and paint a stale card as
+	// though the download had already finished.
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Target", "http://127.0.0.1:1/never", "malware", "hosts")
+
+	run, err := h.mgr.BeginRefreshFeed(f.ID)
+	if err != nil {
+		t.Fatalf("BeginRefreshFeed: %v", err)
+	}
+	if !h.mgr.Refreshing() {
+		t.Error("the refresh slot was not claimed before the work was run")
+	}
+	if _, err := h.mgr.BeginRefreshFeed(f.ID); err == nil {
+		t.Error("a second refresh was allowed to start while one was claimed")
+	}
+
+	// The unreachable URL makes this fail, which is fine: the slot must come
+	// back either way.
+	_ = run(context.Background())
+	if h.mgr.Refreshing() {
+		t.Error("the refresh slot was not released after the work finished")
+	}
+}

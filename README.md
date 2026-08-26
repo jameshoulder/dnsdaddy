@@ -410,6 +410,55 @@ request, and a provider being down never leaves a booting server unprotected.
 
 Full detail, including how to handle a false positive: **[docs/threat-intel.md](docs/threat-intel.md)**.
 
+### Enable DNS Daddy Threat Observatory
+
+The Observatory is an optional, built-in source of live security intelligence
+that we publish. It is off until you turn it on, and turning it on is one click:
+
+**Threats → DNS Daddy Threat Observatory → Enable Threat Observatory.**
+The same card sits in the Threat intelligence panel on the Dashboard.
+
+That click enables the built-in feed, downloads it immediately rather than
+waiting for the next scheduled refresh, validates the document, and rebuilds
+the index — then tells you what actually happened. No account, no API key, no
+registration.
+
+From there it is an ordinary feed, and nothing about the way blocking works
+changes:
+
+```text
+Threat Observatory
+      ↓
+DNS Daddy feed ingestion   (download, validate, cache, index)
+      ↓
+normal category policies   (what you ticked, and only that)
+      ↓
+DNS block decision
+```
+
+Two things follow from that diagram and are worth being explicit about:
+
+- **It supplies intelligence; your policies still decide.** Enabling the feed
+  does not tick a single category box. If you have deliberately switched
+  cryptomining off, Observatory cryptomining indicators are indexed and not
+  blocked, and the card says so.
+- **It is one source among several.** DNS Daddy keeps using the independent
+  feeds above whether the Observatory is on or off, and it gets no more trust
+  than they do. If it cannot be downloaded, the last good copy keeps blocking
+  and the card reports the failure against that one feed — the resolver and
+  every other feed carry on.
+
+Enabling it means your server periodically requests
+`https://threats.dnsdaddy.dev/api/v1/feed.json`, so we see your server's public
+IP, its User-Agent, and roughly how often it asks. Your DNS query logs, your
+clients, and which indicators matched are never uploaded — matching happens
+entirely on your server. The full trade-off is in
+[docs/threat-intel.md](docs/threat-intel.md#the-dns-daddy-threat-observatory).
+
+> The Observatory's public feed endpoint is not live yet. Enabling it today
+> reports that the endpoint is not available; the same code works unchanged
+> once it ships.
+
 ## Honest limitations
 
 Worth knowing before you rely on this:
