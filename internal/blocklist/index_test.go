@@ -64,8 +64,8 @@ func TestEmptyIndexNeverMatches(t *testing.T) {
 }
 
 func TestBuilderKeepsFirstClaim(t *testing.T) {
-	// Feeds are added in category-priority order, so the first claim on a
-	// domain is the most severe classification and must not be overwritten.
+	// A domain already held at a more severe category keeps that claim: the
+	// block reason in the query log has to be the one that matters.
 	b := NewBuilder(4)
 	if !b.Add("evil.com", Entry{Category: "malware", FeedID: "f1"}) {
 		t.Fatal("first Add reported the domain was already present")
@@ -152,4 +152,70 @@ func randomDomain(i int) string {
 		n /= 26
 	}
 	return string(buf) + ".example"
+}
+
+func TestBuilderUpgradesToTheMoreSevereClaim(t *testing.T) {
+	// Feed order is an optimisation, not the rule. A feed whose entries carry
+	// their own categories — the Observatory format — contributes domains at
+	// several severities at once, so a later, more severe claim has to win.
+	//
+	// This is not cosmetic. A policy that enables malware but not cryptomining
+	// must still block a domain that one feed called cryptomining and another
+	// called malware.
+	b := NewBuilder(4)
+	if !b.Add("evil.com", Entry{Category: "cryptomining", FeedID: "f_observatory"}) {
+		t.Fatal("first Add reported the domain was already present")
+	}
+	if !b.Add("evil.com", Entry{Category: "malware", FeedID: "f_urlhaus"}) {
+		t.Error("a more severe claim did not take the domain")
+	}
+
+	ix := b.Build()
+	entry, _ := ix.Lookup("evil.com")
+	if entry.Category != "malware" {
+		t.Errorf("category = %q, want malware", entry.Category)
+	}
+	if entry.FeedID != "f_urlhaus" {
+		t.Errorf("feed = %q, want f_urlhaus", entry.FeedID)
+	}
+	if ix.Len() != 1 {
+		t.Errorf("Len() = %d, want 1", ix.Len())
+	}
+
+	// The displaced feed stops being credited, and the counts still add up.
+	if got := ix.CountsByFeed()["f_observatory"]; got != 0 {
+		t.Errorf("the displaced feed is still credited with %d domains", got)
+	}
+	if got := ix.CountsByFeed()["f_urlhaus"]; got != 1 {
+		t.Errorf("the winning feed is credited with %d domains, want 1", got)
+	}
+	if got := ix.CountsByCategory()["cryptomining"]; got != 0 {
+		t.Errorf("cryptomining count = %d, want 0", got)
+	}
+	if got := ix.CountsByCategory()["malware"]; got != 1 {
+		t.Errorf("malware count = %d, want 1", got)
+	}
+}
+
+func TestBuilderTreatsEqualAndUnknownCategoriesAsNoUpgrade(t *testing.T) {
+	// An equal claim changes nothing, and an unrecognised category sorts last
+	// so it can never displace a real one.
+	b := NewBuilder(4)
+	b.Add("evil.com", Entry{Category: "phishing", FeedID: "f1"})
+
+	if b.Add("evil.com", Entry{Category: "phishing", FeedID: "f2"}) {
+		t.Error("an equally severe claim took the domain")
+	}
+	if b.Add("evil.com", Entry{Category: "not-a-category", FeedID: "f3"}) {
+		t.Error("an unknown category displaced a real one")
+	}
+
+	ix := b.Build()
+	entry, _ := ix.Lookup("evil.com")
+	if entry.FeedID != "f1" {
+		t.Errorf("feed = %q, want f1", entry.FeedID)
+	}
+	if ix.CountsByCategory()["phishing"] != 1 {
+		t.Errorf("phishing count = %d, want 1", ix.CountsByCategory()["phishing"])
+	}
 }

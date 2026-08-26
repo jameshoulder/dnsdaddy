@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -439,5 +440,230 @@ func TestConcurrentRefreshIsRejected(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatalf("first Refresh: %v", err)
+	}
+}
+
+func TestRefreshIndexesObservatoryPerIndicatorCategories(t *testing.T) {
+	// The point of the Observatory format: one feed row contributes to several
+	// categories at once, so a policy that enables phishing but not cryptomining
+	// blocks the phishing indicators and nothing else.
+	body := `{
+	  "generated_at": "2026-08-26T09:15:00Z",
+	  "source": "dnsdaddy-threat-observatory",
+	  "indicators": [
+	    {"value": "c2.example", "type": "domain", "severity": "critical", "categories": ["c2"]},
+	    {"value": "phish.example", "type": "domain", "severity": "high", "categories": ["phishing"]},
+	    {"value": "miner.example", "type": "domain", "severity": "medium", "categories": ["cryptojacking"]},
+	    {"value": "odd.example", "type": "domain", "severity": "low", "categories": ["never-heard-of-it"]}
+	  ]
+	}`
+	var accept atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept.Store(r.Header.Get("Accept"))
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	if got, _ := accept.Load().(string); got != "application/json" {
+		t.Errorf("Accept header = %q, want application/json", got)
+	}
+
+	ix := h.holder.Load()
+	want := map[string]string{
+		"c2.example":    "c2",
+		"phish.example": "phishing",
+		"miner.example": "cryptomining",
+		// An unrecognised label falls back to the feed's own category rather
+		// than losing the block to a vocabulary mismatch.
+		"odd.example": "malware",
+	}
+	for domain, category := range want {
+		entry, ok := ix.Lookup(domain)
+		if !ok {
+			t.Errorf("%s was not indexed", domain)
+			continue
+		}
+		if entry.Category != category {
+			t.Errorf("%s category = %q, want %q", domain, entry.Category, category)
+		}
+		if entry.FeedName != "Observatory" {
+			t.Errorf("%s feed name = %q, want Observatory", domain, entry.FeedName)
+		}
+	}
+
+	// Subdomains match, as for any other feed.
+	if _, ok := ix.Lookup("login.phish.example"); !ok {
+		t.Error("a subdomain of an Observatory indicator does not match")
+	}
+
+	stored, err := h.store.GetFeed(context.Background(), f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if stored.LastStatus != "ok" || stored.LastError != "" {
+		t.Errorf("feed status = %q, error = %q", stored.LastStatus, stored.LastError)
+	}
+	if stored.DomainCount != 4 {
+		t.Errorf("DomainCount = %d, want 4", stored.DomainCount)
+	}
+}
+
+func TestRefreshObservatoryHonoursMinSeverity(t *testing.T) {
+	body := `{"indicators": [
+	  {"value": "critical.example", "type": "domain", "severity": "critical", "categories": ["c2"]},
+	  {"value": "low.example", "type": "domain", "severity": "low", "categories": ["malware"]}
+	]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t, func(c *config.Feeds) { c.ObservatoryMinSeverity = "high" })
+	h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	ix := h.holder.Load()
+	if _, ok := ix.Lookup("critical.example"); !ok {
+		t.Error("a critical indicator was dropped by a high floor")
+	}
+	if _, ok := ix.Lookup("low.example"); ok {
+		t.Error("a low indicator survived a high floor")
+	}
+}
+
+func TestRefreshObservatoryKeepsPartialAfterTruncation(t *testing.T) {
+	// A download cut off mid-document still carries real intelligence up to the
+	// cut. Throwing it away would leave the operator less protected than the
+	// broken download did.
+	body := `{"indicators": [
+	  {"value": "first.example", "type": "domain", "categories": ["c2"]},
+	  {"value": "second.example", "type": "domain", "categ`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, ok := h.holder.Load().Lookup("first.example"); !ok {
+		t.Error("indicators read before the truncation were discarded")
+	}
+}
+
+func TestObservatoryFeedIsSeededDisabled(t *testing.T) {
+	// Every source a default install blocks from is one an operator can fetch
+	// themselves. Ours is opt-in, and a refactor must not quietly flip that.
+	h := newManagerHarness(t)
+
+	found := false
+	for _, f := range catalog.DefaultFeeds {
+		if f.ID != catalog.ObservatoryFeedID {
+			continue
+		}
+		found = true
+		if f.Enabled {
+			t.Error("the Threat Observatory feed is seeded enabled; it must be opt-in")
+		}
+		if f.Format != string(FormatObservatory) {
+			t.Errorf("Observatory feed format = %q, want %q", f.Format, FormatObservatory)
+		}
+		if f.URL != catalog.ObservatoryFeedURL {
+			t.Errorf("Observatory feed URL = %q, want %q", f.URL, catalog.ObservatoryFeedURL)
+		}
+	}
+	if !found {
+		t.Fatal("the Threat Observatory feed is not in the shipped catalog")
+	}
+
+	// It is seeded into the database too, so it appears in the dashboard for an
+	// operator to turn on.
+	feeds, err := h.store.ListFeeds(context.Background())
+	if err != nil {
+		t.Fatalf("ListFeeds: %v", err)
+	}
+	for _, f := range feeds {
+		if f.ID == catalog.ObservatoryFeedID {
+			if !f.Builtin {
+				t.Error("the Observatory feed should be marked built-in")
+			}
+			return
+		}
+	}
+	t.Error("the Observatory feed was not seeded into the store")
+}
+
+func TestObservatoryDoesNotDowngradeAnotherFeedsClaim(t *testing.T) {
+	// The Observatory sorts among the malware feeds, so it is read first. Its
+	// indicators carry their own categories, though, so it can claim a domain
+	// as cryptomining that a later malware feed also lists. The malware claim
+	// has to win — otherwise enabling the Observatory would stop a policy that
+	// blocks malware but not cryptomining from blocking that domain at all.
+	observatory := `{"indicators": [
+	  {"value": "shared.example", "type": "domain", "severity": "high", "categories": ["cryptojacking"]},
+	  {"value": "onlyhere.example", "type": "domain", "severity": "high", "categories": ["c2"]}
+	]}`
+	obsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, observatory)
+	}))
+	defer obsSrv.Close()
+
+	malSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "0.0.0.0 shared.example\n")
+	}))
+	defer malSrv.Close()
+
+	h := newManagerHarness(t)
+	obs := h.addFeed(t, "Observatory", obsSrv.URL, "malware", "observatory")
+	mal := h.addFeed(t, "URLhaus-alike", malSrv.URL, "malware", "hosts")
+
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	ix := h.holder.Load()
+	entry, ok := ix.Lookup("shared.example")
+	if !ok {
+		t.Fatal("shared.example was not indexed")
+	}
+	if entry.Category != "malware" {
+		t.Errorf("shared.example category = %q, want malware", entry.Category)
+	}
+
+	// The Observatory keeps what only it lists.
+	if e, ok := ix.Lookup("onlyhere.example"); !ok || e.Category != "c2" {
+		t.Errorf("onlyhere.example = %+v, %v; want a c2 entry", e, ok)
+	}
+
+	// The stored per-feed counts reflect what each feed actually holds in the
+	// finished index, including the domain the Observatory lost.
+	ctx := context.Background()
+	obsStored, err := h.store.GetFeed(ctx, obs.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if obsStored.DomainCount != 1 {
+		t.Errorf("Observatory DomainCount = %d, want 1 (it lost shared.example)", obsStored.DomainCount)
+	}
+	malStored, err := h.store.GetFeed(ctx, mal.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if malStored.DomainCount != 1 {
+		t.Errorf("malware feed DomainCount = %d, want 1", malStored.DomainCount)
 	}
 }

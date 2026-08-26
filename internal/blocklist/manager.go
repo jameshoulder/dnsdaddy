@@ -168,7 +168,11 @@ func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
 		return store.FeedResult{Status: "error", Error: err.Error()}
 	}
 	req.Header.Set("User-Agent", "dnsdaddy/"+version.String()+" (+https://github.com/jameshoulder/dnsdaddy)")
-	req.Header.Set("Accept", "text/plain, */*")
+	if Format(f.Format) == FormatObservatory {
+		req.Header.Set("Accept", "application/json")
+	} else {
+		req.Header.Set("Accept", "text/plain, */*")
+	}
 	if f.ETag != "" {
 		req.Header.Set("If-None-Match", f.ETag)
 	}
@@ -284,17 +288,16 @@ func (m *Manager) rebuild(ctx context.Context, feeds []store.Feed, results map[s
 	}
 	b := NewBuilder(hint)
 
-	counts := map[string]int{}
+	loaded := make([]string, 0, len(enabled))
 	for _, f := range enabled {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		n, err := m.loadInto(b, f)
-		if err != nil {
+		if _, err := m.loadInto(b, f); err != nil {
 			m.log.Warn("skipping feed with no usable cached copy", "feed", f.ID, "error", err)
 			continue
 		}
-		counts[f.ID] = n
+		loaded = append(loaded, f.ID)
 	}
 
 	ix := b.Build()
@@ -306,13 +309,19 @@ func (m *Manager) rebuild(ctx context.Context, feeds []store.Feed, results map[s
 
 	// Persist the deduplicated per-feed contribution so the dashboard shows
 	// what each feed actually adds, not what it claims to contain.
-	for id, n := range counts {
+	//
+	// Read back off the finished index rather than tallied while loading: a
+	// later feed can take a domain off an earlier one by claiming it under a
+	// more severe category, and a count taken as that earlier feed was read
+	// would not know it.
+	byFeed := ix.CountsByFeed()
+	for _, id := range loaded {
 		if results != nil {
 			if r, ok := results[id]; ok && r.Error != "" {
 				continue // keep the previous count alongside the error
 			}
 		}
-		if err := m.store.SetFeedDomainCount(ctx, id, n); err != nil {
+		if err := m.store.SetFeedDomainCount(ctx, id, byFeed[id]); err != nil {
 			m.log.Warn("record feed count", "feed", id, "error", err)
 		}
 	}
@@ -327,6 +336,10 @@ func (m *Manager) loadInto(b *Builder, f store.Feed) (int, error) {
 		return 0, err
 	}
 	defer file.Close()
+
+	if Format(f.Format) == FormatObservatory {
+		return m.loadObservatoryInto(b, f, file)
+	}
 
 	entry := Entry{Category: f.Category, FeedID: f.ID, FeedName: f.Name}
 	added := 0
@@ -345,9 +358,68 @@ func (m *Manager) loadInto(b *Builder, f store.Feed) (int, error) {
 	return added, nil
 }
 
+// loadObservatoryInto indexes a Threat Observatory document.
+//
+// Unlike a line-based feed, every indicator carries its own category, so a
+// single Observatory feed contributes to malware, phishing, C2 and
+// cryptomining at once. Indicators whose labels we do not recognise fall back
+// to the feed's configured category: the Observatory lists a domain because it
+// wants it blocked, and dropping one over an unfamiliar label would lose
+// protection to a vocabulary mismatch.
+func (m *Manager) loadObservatoryInto(b *Builder, f store.Feed, r io.Reader) (int, error) {
+	fallback := f.Category
+	if !catalog.ValidCategory(fallback) {
+		fallback = "malware"
+	}
+
+	added := 0
+	res, err := ParseObservatory(r, m.cfg.ObservatoryMinSeverity, func(rec ObservatoryRecord) {
+		category := rec.Category
+		if category == "" {
+			category = fallback
+		}
+		if b.Add(rec.Domain, Entry{Category: category, FeedID: f.ID, FeedName: f.Name}) {
+			added++
+		}
+	})
+
+	if err != nil {
+		// A truncated or corrupt document stops the parse partway. Everything
+		// read before that point is real intelligence already in the builder,
+		// and throwing it away would leave the operator less protected than the
+		// broken download did. Keep it, and say so loudly.
+		if added > 0 {
+			m.log.Warn("observatory feed ended badly, keeping the indicators read so far",
+				"feed", f.ID, "indexed", added, "error", err)
+			return added, nil
+		}
+		return 0, err
+	}
+
+	if res.Skipped > 0 || res.BelowSeverity > 0 {
+		m.log.Debug("observatory feed had unusable indicators",
+			"feed", f.ID,
+			"accepted", res.Accepted,
+			"skipped", res.Skipped,
+			"below_min_severity", res.BelowSeverity)
+	}
+	m.log.Info("observatory feed indexed",
+		"feed", f.ID,
+		"indicators", res.Accepted,
+		"indexed", added,
+		"generated_at", res.GeneratedAt,
+		"source", res.Source)
+	return added, nil
+}
+
 // sortByCategoryPriority orders feeds so higher-severity categories claim a
 // domain first. A domain on both a malware feed and an ad feed should be
 // reported as malware in the query log.
+//
+// Builder.Add enforces that outcome regardless of order — it has to, since an
+// Observatory feed contributes domains at several severities. This ordering
+// makes the common case cheap: the more severe claim usually arrives first, so
+// the later one costs a single map lookup and nothing is rewritten.
 func sortByCategoryPriority(feeds []store.Feed) {
 	priority := map[string]int{}
 	for i, c := range catalog.Categories {

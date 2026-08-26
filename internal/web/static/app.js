@@ -1103,7 +1103,13 @@ pages.feeds = {
                         <div class="muted small mono">${f.url}</div>
                         ${raw(f.lastError ? html`<div class="small feed-error">${f.lastError}</div>` : '')}
                       </td>
-                      <td>${raw(categoryBadge(f.category))}</td>
+                      <td>${raw(categoryBadge(f.category))}
+                        ${raw(
+                          f.format === 'observatory'
+                            ? html`<div class="muted small">plus each indicator's own category</div>`
+                            : ''
+                        )}
+                      </td>
                       <td class="num">${f.enabled ? num(f.indexedDomains) : '—'}</td>
                       <td class="muted nowrap">${relTime(f.lastRefreshedAt)}</td>
                       <td>${raw(
@@ -1131,7 +1137,8 @@ pages.feeds = {
       <div class="card">
         <div class="card-head">
           <div><h2>Add a custom feed</h2>
-          <p>Any URL serving a hosts file, a plain domain list, or Adblock-style rules.</p></div>
+          <p>Any URL serving a hosts file, a plain domain list, or Adblock-style rules.
+             The format is sniffed per line.</p></div>
         </div>
         <form id="feed-form">
           <div class="grid grid-3">

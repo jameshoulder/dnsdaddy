@@ -22,6 +22,68 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Added
+
+- **DNS Daddy Threat Observatory as a first-class feed.**
+  [threats.dnsdaddy.dev](https://threats.dnsdaddy.dev) is now in the shipped
+  catalog as `dnsdaddy-observatory`, consumed through the same feed machinery,
+  the same disk cache, the same category filtering, and the same plain-English
+  block reasons as URLhaus or Phishing Army. There is no second blocking path.
+
+  **It ships disabled.** Every other source in the catalog is one you can fetch
+  and diff yourself, and a default that quietly reached back to a DNS Daddy
+  server would cost that property for every install. Enabling it is one toggle
+  on **Threat feeds**, and what it exposes — your server's IP and refresh
+  cadence, never your queries — is spelled out in
+  [`docs/threat-intel.md`](docs/threat-intel.md#the-dns-daddy-threat-observatory).
+
+  A new feed format, `observatory`, reads the Observatory's JSON indicator
+  document. It is the first non-line-based format and the first whose entries
+  carry **their own categories**, so one feed row contributes to malware,
+  phishing, C2 and cryptomining at once and a policy still gets exactly the
+  categories it enabled. An indicator with several labels resolves to one
+  category by the same ordering that decides which feed claims a domain listed
+  on two of them; an unrecognised label falls back to the feed's own category
+  rather than losing the block to a vocabulary mismatch. IP indicators are
+  skipped — there is no name to block.
+
+  Parsing is streamed and as forgiving as the line-based parsers: unknown
+  fields are skipped so the Observatory can add metadata without deployed
+  resolvers rejecting the file, a malformed indicator costs that indicator, and
+  a document truncated mid-download keeps every indicator read before the cut.
+
+  The format is not reserved for our URL — point a custom feed at your own
+  Observatory-shaped JSON, including over `file://`.
+
+  The endpoint contract the client targets is documented in full in
+  `docs/threat-intel.md`. The Observatory does not serve it yet; until it does,
+  enabling the feed records an HTTP 404 against that feed and changes nothing
+  else, which is one more reason it is off.
+
+- **`feeds.observatory_min_severity`** (`DNSDADDY_OBSERVATORY_MIN_SEVERITY`)
+  drops Observatory indicators below `low`, `medium`, `high`, or `critical`.
+  Empty — the default — indexes everything. An indicator that declares no
+  severity is always kept: losing intelligence to a missing field is the wrong
+  failure mode for a blocking control.
+
+### Changed
+
+- **The blocklist index now files a domain under the most severe category
+  claiming it**, rather than relying on feeds being read in category-priority
+  order to produce that outcome. Feed order was a sound proxy while every feed
+  had one category; an Observatory feed contributes domains at several
+  severities at once, so the rule is now enforced in `Builder.Add` directly.
+
+  Without it, enabling the Observatory could stop a domain being blocked: a
+  policy that enables malware but not cryptomining would have missed a domain
+  the Observatory called cryptomining and URLhaus called malware. Feeds are
+  still read in priority order, which keeps the common case a single map
+  lookup.
+
+  Per-feed contribution counts are read back off the finished index for the
+  same reason, so a feed that loses a domain to a more severe claim is no
+  longer credited with it.
+
 ### Security
 
 - **Go toolchain raised to 1.25.13**, fixing five standard-library

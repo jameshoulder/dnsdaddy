@@ -1030,7 +1030,7 @@ components:
         name: { type: string }
         url: { type: string }
         category: { type: string }
-        format: { type: string, enum: [auto, hosts, domains, adblock] }
+        format: { type: string, enum: [auto, hosts, domains, adblock, observatory] }
         enabled: { type: boolean }
         builtin: { type: boolean }
         domainCount: { type: integer }
@@ -1049,7 +1049,7 @@ components:
         name: { type: string }
         url: { type: string }
         category: { type: string }
-        format: { type: string, enum: [auto, hosts, domains, adblock] }
+        format: { type: string, enum: [auto, hosts, domains, adblock, observatory] }
         enabled: { type: boolean }
 
     Client:

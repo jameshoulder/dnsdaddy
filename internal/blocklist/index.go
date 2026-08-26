@@ -16,8 +16,29 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 )
+
+// categoryRank is the canonical category ordering as a lookup, where a lower
+// number is more severe. Built once: it is consulted for every domain claimed
+// twice during a rebuild, which on a full feed set is hundreds of thousands of
+// times.
+var categoryRank = func() map[string]int {
+	m := make(map[string]int, len(catalog.Categories))
+	for i, c := range catalog.Categories {
+		m[c.ID] = i
+	}
+	return m
+}()
+
+// rankOf returns a category's severity rank. Unknown categories sort last.
+func rankOf(category string) int {
+	if r, ok := categoryRank[category]; ok {
+		return r
+	}
+	return len(categoryRank)
+}
 
 // Entry records why a domain is in the index.
 type Entry struct {
@@ -97,10 +118,18 @@ func (ix *Index) CountsByFeed() map[string]int {
 
 // Builder accumulates domains from feeds into a new Index.
 //
-// A domain claimed by more than one feed keeps its first claim, and feeds are
-// added in category priority order so that a domain on both a malware list and
-// an ad list is reported as malware. That ordering is what makes the block
-// reason in the query log trustworthy.
+// A domain claimed by more than one feed is filed under the most severe
+// category claiming it, so a domain on both a malware list and an ad list is
+// reported as malware. That is what makes the block reason in the query log
+// trustworthy, and it is also what decides whether a policy blocks the domain
+// at all: a policy enabling malware but not ads must not miss it because an ad
+// feed happened to be read first.
+//
+// Feeds are still fed in category-priority order, which makes the common case
+// a single map lookup. The rule is enforced here rather than left to that
+// ordering because a feed's own category is no longer the whole story: the
+// Observatory format carries a category per indicator, so one feed contributes
+// domains at several severities and feed order alone cannot get this right.
 type Builder struct {
 	ix *Index
 }
@@ -117,13 +146,30 @@ func NewBuilder(n int) *Builder {
 	}}
 }
 
-// Add inserts a normalised domain. It returns true if the domain was new.
+// Add inserts a normalised domain, reporting whether this entry now owns it —
+// either because the domain was new, or because it displaced a less severe
+// classification. A domain already held at the same or a higher severity keeps
+// what it has, and Add returns false.
+//
+// The return value is what per-feed contribution counts are derived from, so
+// "owns it" rather than "was new" keeps those counts equal to what the finished
+// index actually attributes to each feed.
 func (b *Builder) Add(domain string, e Entry) bool {
 	if domain == "" {
 		return false
 	}
-	if _, exists := b.ix.domains[domain]; exists {
-		return false
+	if prev, exists := b.ix.domains[domain]; exists {
+		if rankOf(e.Category) >= rankOf(prev.Category) {
+			return false
+		}
+		// A more severe claim takes the domain over, and the previous holder
+		// stops being credited with it.
+		b.ix.byCategory[prev.Category]--
+		b.ix.feeds[prev.FeedID]--
+		b.ix.domains[domain] = e
+		b.ix.byCategory[e.Category]++
+		b.ix.feeds[e.FeedID]++
+		return true
 	}
 	b.ix.domains[domain] = e
 	b.ix.byCategory[e.Category]++

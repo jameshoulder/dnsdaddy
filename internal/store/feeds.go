@@ -244,10 +244,10 @@ func (s *Store) validateFeedURL(raw string) error {
 
 func validateFeedFormat(f string) error {
 	switch f {
-	case "auto", "hosts", "domains", "adblock":
+	case "auto", "hosts", "domains", "adblock", "observatory":
 		return nil
 	}
-	return fmt.Errorf("feed format must be auto, hosts, domains, or adblock, got %q", f)
+	return fmt.Errorf("feed format must be auto, hosts, domains, adblock, or observatory, got %q", f)
 }
 
 func truncate(s string, n int) string {

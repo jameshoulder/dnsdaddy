@@ -5,6 +5,10 @@
 // rather than fetched from a DNS Daddy-operated index so that a self-hosted
 // install has no runtime dependency on us, and so anyone can audit exactly
 // where their blocking decisions come from. See docs/threat-intel.md.
+//
+// The one DNS Daddy-operated source, the Threat Observatory, is defined in
+// observatory.go and ships disabled for exactly that reason: everything a
+// default install blocks still comes from somewhere you can fetch yourself.
 package catalog
 
 // Category identifies a class of domain that a policy can choose to block.
@@ -118,9 +122,13 @@ func CategoryReason(id string) string {
 
 // Feed describes a default threat-intelligence source.
 type Feed struct {
-	ID       string
-	Name     string
-	URL      string
+	ID   string
+	Name string
+	URL  string
+	// Category is the category every domain from this feed is filed under.
+	// The "observatory" format is the one exception: its indicators carry
+	// their own categories, and this acts as the fallback for an indicator
+	// whose labels we do not recognise.
 	Category string
 	Format   string
 	Enabled  bool
@@ -130,6 +138,20 @@ type Feed struct {
 // enabled; content-filtering feeds are seeded disabled so a fresh install
 // blocks threats and nothing else.
 var DefaultFeeds = []Feed{
+	{
+		// Our own platform, and the only feed here that is. It is seeded
+		// disabled on purpose: the point of listing every source in this file
+		// is that a self-hosted install depends on nothing DNS Daddy operates,
+		// and a default that quietly reached back to us would break that
+		// promise for every install that never read this comment. Turn it on
+		// deliberately — see docs/threat-intel.md.
+		ID:       ObservatoryFeedID,
+		Name:     "DNS Daddy Threat Observatory",
+		URL:      ObservatoryFeedURL,
+		Category: "malware",
+		Format:   "observatory",
+		Enabled:  false,
+	},
 	{
 		ID:       "urlhaus",
 		Name:     "abuse.ch URLhaus",

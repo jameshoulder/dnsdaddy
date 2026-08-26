@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -267,6 +269,53 @@ func TestFeedRejectsBadURL(t *testing.T) {
 			t.Errorf("CreateFeed accepted %q", url)
 		}
 	}
+}
+
+func TestFeedFormatValidation(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	for _, format := range []string{"auto", "hosts", "domains", "adblock", "observatory"} {
+		if _, err := st.CreateFeed(ctx, FeedInput{
+			Name: ptr("Custom " + format), URL: ptr("https://example.org/list"), Format: ptr(format),
+		}); err != nil {
+			t.Errorf("CreateFeed rejected format %q: %v", format, err)
+		}
+	}
+	for _, format := range []string{"json", "csv", "observatory-v2"} {
+		if _, err := st.CreateFeed(ctx, FeedInput{
+			Name: ptr("Custom"), URL: ptr("https://example.org/list"), Format: ptr(format),
+		}); err == nil {
+			t.Errorf("CreateFeed accepted unknown format %q", format)
+		}
+	}
+}
+
+func TestObservatoryFeedIsSeededDisabledAndBuiltin(t *testing.T) {
+	// The Observatory is the only DNS Daddy-operated source in the catalog. It
+	// is seeded so an operator can find and enable it, and seeded off so that a
+	// default install still depends on nothing we run.
+	st := newTestStore(t)
+	feeds, err := st.ListFeeds(context.Background())
+	if err != nil {
+		t.Fatalf("ListFeeds: %v", err)
+	}
+	for _, f := range feeds {
+		if f.ID != catalog.ObservatoryFeedID {
+			continue
+		}
+		if f.Enabled {
+			t.Error("the Threat Observatory feed was seeded enabled; it must be opt-in")
+		}
+		if !f.Builtin {
+			t.Error("the Threat Observatory feed should be built-in")
+		}
+		if f.Format != "observatory" {
+			t.Errorf("Observatory feed format = %q, want observatory", f.Format)
+		}
+		return
+	}
+	t.Fatal("the Threat Observatory feed was not seeded")
 }
 
 func TestQueryLogAndRollups(t *testing.T) {

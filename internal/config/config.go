@@ -216,6 +216,16 @@ type Feeds struct {
 	// session — or a leaked API token — could point a "feed" at any file the
 	// process can read and pull it back out through the dashboard.
 	LocalFeedDir string `yaml:"local_feed_dir"`
+
+	// ObservatoryMinSeverity drops DNS Daddy Threat Observatory indicators
+	// below the named severity (low, medium, high, critical). Empty — the
+	// default — blocks everything the Observatory lists.
+	//
+	// It applies only to the "observatory" feed format, because that is the
+	// only format whose entries carry a severity. An indicator that declares no
+	// severity is always kept: losing intelligence to a missing field is the
+	// wrong failure mode for a blocking control.
+	ObservatoryMinSeverity string `yaml:"observatory_min_severity"`
 }
 
 // Duration is a time.Duration that unmarshals from a string like "24h".
@@ -371,6 +381,7 @@ func applyEnv(cfg *Config) error {
 	envStr("DNSDADDY_BASE_URL", &cfg.HTTP.BaseURL)
 	envStr("DNSDADDY_SECURE_COOKIES", &cfg.HTTP.SecureCookies)
 	envStr("DNSDADDY_LOCAL_FEED_DIR", &cfg.Feeds.LocalFeedDir)
+	envStr("DNSDADDY_OBSERVATORY_MIN_SEVERITY", &cfg.Feeds.ObservatoryMinSeverity)
 	envStr("DNSDADDY_DETECTION_MIN_SEVERITY", &cfg.Detection.MinSeverity)
 	envStr("DNSDADDY_DETECTION_FINDINGS_FILE", &cfg.Detection.FindingsFile)
 	envList("DNSDADDY_DETECTION_EXCLUDED_DOMAINS", &cfg.Detection.ExcludedDomains)
@@ -530,6 +541,15 @@ func (c *Config) validate() error {
 	}
 	if c.Feeds.RefreshInterval.D() > 0 && c.Feeds.RefreshInterval.D() < time.Minute {
 		return fmt.Errorf("feed refresh_interval must be at least 1m")
+	}
+	// Checked inline rather than against internal/catalog: config is a leaf
+	// package on purpose, so that loading a config file cannot drag the rest of
+	// the server in behind it. The severities are catalog.SeverityNames().
+	switch strings.ToLower(strings.TrimSpace(c.Feeds.ObservatoryMinSeverity)) {
+	case "", "low", "medium", "high", "critical":
+	default:
+		return fmt.Errorf("feeds.observatory_min_severity must be low, medium, high, or critical, got %q",
+			c.Feeds.ObservatoryMinSeverity)
 	}
 
 	switch c.HTTP.SecureCookies {
