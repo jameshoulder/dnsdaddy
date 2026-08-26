@@ -77,6 +77,11 @@ type Feed struct {
 	Builtin     bool       `json:"builtin"`
 	DomainCount int        `json:"domainCount"`
 	LastRefresh *time.Time `json:"lastRefreshedAt"`
+	// LastSuccess is the last download that actually produced usable content,
+	// which is not the same as LastRefresh: a feed erroring since Tuesday has
+	// a refresh timestamp of a minute ago and intelligence three days old.
+	// Nil means this feed has never downloaded successfully.
+	LastSuccess *time.Time `json:"lastSuccessAt"`
 	LastStatus  string     `json:"lastStatus"`
 	LastError   string     `json:"lastError"`
 	ETag        string     `json:"-"`

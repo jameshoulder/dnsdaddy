@@ -22,6 +22,166 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Added
+
+- **DNS Daddy Threat Observatory as a first-class feed.**
+  [threats.dnsdaddy.dev](https://threats.dnsdaddy.dev) is now in the shipped
+  catalog as `dnsdaddy-observatory`, consumed through the same feed machinery,
+  the same disk cache, the same category filtering, and the same plain-English
+  block reasons as URLhaus or Phishing Army. There is no second blocking path.
+
+  **It ships disabled.** Every other source in the catalog is one you can fetch
+  and diff yourself, and a default that quietly reached back to a DNS Daddy
+  server would cost that property for every install. Enabling it is one toggle
+  on **Threat feeds**, and what it exposes — your server's IP and refresh
+  cadence, never your queries — is spelled out in
+  [`docs/threat-intel.md`](docs/threat-intel.md#the-dns-daddy-threat-observatory).
+
+  A new feed format, `observatory`, reads the Observatory's JSON indicator
+  document. It is the first non-line-based format and the first whose entries
+  carry **their own categories**, so one feed row contributes to malware,
+  phishing, C2 and cryptomining at once and a policy still gets exactly the
+  categories it enabled. An indicator keeps every category it names, so one
+  tagged both malware and C2 is blocked by a malware-only policy and a C2-only
+  policy alike. An unrecognised label falls back to the feed's own category
+  rather than losing the block to a vocabulary mismatch. IP indicators are
+  skipped — there is no name to block.
+
+  Individual indicators are parsed forgivingly — unknown fields skipped, a
+  malformed entry costing only itself — but the document is not. A response
+  that is not complete and well-formed is refused before it can replace the
+  cached copy; see **Fixed** below.
+
+  There is no per-feed filtering knob. The Observatory decides what belongs in
+  `feed.json`; your policies decide what gets blocked. Indicator fields DNS
+  Daddy does not act on (`severity`, `family`, `last_seen`) are parsed past and
+  ignored. Wanting a subset is a question for the feed URL, not for DNS Daddy's
+  configuration.
+
+  The format is not reserved for our URL — point a custom feed at your own
+  Observatory-shaped JSON, including over `file://`.
+
+  The endpoint contract the client targets is documented in full in
+  `docs/threat-intel.md`. The Observatory does not serve it yet; until it does,
+  enabling the feed records an HTTP 404 against that feed and changes nothing
+  else, which is one more reason it is off.
+
+- **One-click activation for the Threat Observatory.** A card on **Threats**,
+  and a compact **Threat intelligence** panel on the **Dashboard**, turn the
+  feed on without a trip to the advanced feeds page. One click enables the
+  built-in feed row, downloads it immediately rather than waiting up to twelve
+  hours for the scheduler, validates and indexes it through the ordinary feed
+  machinery, and reports what actually came back.
+
+  The card is careful about the difference between enabled and working. It
+  reads **Active** only once a download has validated; an enabled feed that has
+  never succeeded says so plainly, and one that succeeded and is now failing
+  shows how old the intelligence it is still enforcing is. A 404 — the state
+  the Observatory's endpoint is in today — is explained as the endpoint not
+  being live yet rather than shown as an HTTP status.
+
+  Activation changes no policy. The card names which of malware, phishing, C2
+  and cryptomining the operator's own policies enforce, and which Observatory
+  indicators are therefore indexed but not blocked. Disable turns off that one
+  feed, rebuilds the index so its domains stop being blocked straight away, and
+  leaves every other feed and the built-in row itself intact.
+
+  The Observatory stays an ordinary row on **Threat feeds** — URL, domain
+  count, refresh status, last refresh, errors — and stays disabled by default.
+
+- **`POST /api/v1/feeds/{id}/refresh`** refreshes a single feed, using the same
+  download, validation, caching and index rebuild as a full refresh. Switching
+  a feed on can now be verified in seconds rather than after a download of
+  every third-party list.
+
+- **`loaded` and `loadError` on every feed row**, reporting whether a feed's
+  cached copy is in the index answering queries *right now*. This is the only
+  field that can say a feed is protecting anything: `lastSuccessAt` records
+  that a download once succeeded, and cannot know that the file it produced has
+  since gone missing or stopped parsing. A feed in that state is skipped at
+  every rebuild while its row still shows a healthy refresh, and the dashboard
+  now says "Not blocking" rather than "Active".
+
+- **`lastSuccessAt` on every feed row** (`feeds.last_success_at`), recording the
+  last download that produced usable content. `lastRefreshedAt` moves on every
+  attempt including failures, so on its own it could not answer the question an
+  erroring feed actually raises: how old is the intelligence still being
+  enforced. Existing rows read `null` until their first refresh after upgrade.
+
+### Fixed
+
+- **A domain listed under several categories is now blocked by a policy
+  enabling any one of them.** The index previously kept a single category per
+  domain and discarded the rest, so a domain claimed as both malware and C2 was
+  invisible to a C2-only policy. Two feeds disagreeing about a domain hit the
+  same defect.
+
+  This was reachable before the Observatory — two feeds have always been able
+  to classify a domain differently — but the Observatory makes it routine,
+  because one indicator can name several categories at once.
+
+  `Index` now keeps every claim: the most severe one is primary, and the rest
+  live in a second map that is empty for the overwhelming majority of domains,
+  which are claimed once. Policy evaluation goes through `LookupEnabled`, which
+  returns the claim the policy actually enabled, so the query-log reason always
+  names a category the operator ticked. A domain claimed once costs exactly
+  what it did before; a second claim costs about 7 bytes.
+
+  A related fail-open goes with it: a name listed only under categories a
+  policy does not enable no longer shadows a parent it does. If `evil.com` is
+  on a malware list, `login.evil.com` is blocked by a malware-enabling policy
+  even when it also appears on an ad list.
+
+- **A truncated or malformed Observatory download can no longer replace a
+  working blocklist.** The cache was written atomically but never checked, so a
+  body that stopped halfway — or an HTML error page served with status 200 —
+  would be renamed over a good feed and silently unblock everything it carried.
+
+  Downloads are now validated as complete, well-formed documents before the
+  rename that installs them. A bad response leaves the previous copy in use,
+  records the error against that one feed, and leaves every other feed alone —
+  the same behaviour as a provider being unreachable. Cached files are
+  re-validated when loaded, so a copy damaged on disk cannot half-populate the
+  index either.
+
+  This applies to the `observatory` format only. Every prefix of a hosts file
+  is a valid hosts file, so there is nothing there to check.
+
+### Changed
+
+- **A feed download must now be a feed, not merely valid JSON.** The check that
+  guards the cache was a token-level walk: it proved a body was complete and
+  well-formed and nothing more, so `{"indicators":{}}`, or an API error served
+  with status 200, passed it, replaced intelligence that was blocking traffic,
+  and was recorded as a successful refresh — then failed at load time, leaving
+  the feed contributing nothing while the dashboard showed it healthy.
+
+  Validation is now the parser itself, run with nothing to emit to, so the two
+  cannot drift: whatever the loader will refuse, the download gate refuses
+  first, before the rename that installs it. It stays a streaming pass and
+  buffers nothing. A document with no `indicators` array is refused outright.
+
+- **`file://` feeds are validated before they replace the cache**, like every
+  other feed. A local file is not more trustworthy for being local: it can be
+  half-written by whatever produces it, truncated by a full disk, or repointed
+  through a symlink between refreshes.
+
+- **A rebuild reads the current feed configuration**, not the list the refresh
+  that triggered it started with. A refresh reads its feed list, then spends
+  minutes downloading; a feed disabled in that window used to be put back into
+  the index by that refresh's own rebuild, blocking traffic after the database
+  and the dashboard both said it was off, until the next refresh happened to
+  correct it.
+
+- **Enabling or disabling a feed now rebuilds the block index immediately**,
+  from the local cache and without any network access. Previously a disabled
+  feed kept blocking until the next scheduled refresh, up to twelve hours
+  later.
+
+- **Per-feed contribution counts are read back off the finished index**, rather
+  than tallied while each feed loads, so a feed whose claim on a domain is
+  superseded by a more severe one is no longer credited with it.
+
 ### Security
 
 - **`golang.org/x/mod` raised to v0.40.0**, clearing [CVE-2026-56864] (a

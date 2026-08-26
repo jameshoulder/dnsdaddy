@@ -2,6 +2,7 @@ package blocklist
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"strings"
 
@@ -20,6 +21,10 @@ const (
 	FormatDomains Format = "domains"
 	// FormatAdblock is "||evil.com^" Adblock Plus syntax.
 	FormatAdblock Format = "adblock"
+	// FormatObservatory is the DNS Daddy Threat Observatory's JSON indicator
+	// document. It is the one format that is not line-based, and the one whose
+	// entries carry their own category — see observatory.go.
+	FormatObservatory Format = "observatory"
 )
 
 // Loopback addresses that a hosts-format feed uses as the sink.
@@ -39,6 +44,12 @@ var sinkAddrs = map[string]bool{
 //
 // The returned counts are (accepted, skipped).
 func Parse(r io.Reader, format Format, emit func(domain string)) (int, int, error) {
+	if format == FormatObservatory {
+		// Guarded rather than silently sniffed: line-parsing a JSON document
+		// would quietly extract nonsense from it instead of failing.
+		return 0, 0, fmt.Errorf("format %q is JSON, not line-based; use ParseObservatory", format)
+	}
+
 	sc := bufio.NewScanner(r)
 	// Some feeds ship very long comment banners; 1 MiB is generous but bounded.
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)

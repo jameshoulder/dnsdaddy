@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -269,6 +271,53 @@ func TestFeedRejectsBadURL(t *testing.T) {
 	}
 }
 
+func TestFeedFormatValidation(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	for _, format := range []string{"auto", "hosts", "domains", "adblock", "observatory"} {
+		if _, err := st.CreateFeed(ctx, FeedInput{
+			Name: ptr("Custom " + format), URL: ptr("https://example.org/list"), Format: ptr(format),
+		}); err != nil {
+			t.Errorf("CreateFeed rejected format %q: %v", format, err)
+		}
+	}
+	for _, format := range []string{"json", "csv", "observatory-v2"} {
+		if _, err := st.CreateFeed(ctx, FeedInput{
+			Name: ptr("Custom"), URL: ptr("https://example.org/list"), Format: ptr(format),
+		}); err == nil {
+			t.Errorf("CreateFeed accepted unknown format %q", format)
+		}
+	}
+}
+
+func TestObservatoryFeedIsSeededDisabledAndBuiltin(t *testing.T) {
+	// The Observatory is the only DNS Daddy-operated source in the catalog. It
+	// is seeded so an operator can find and enable it, and seeded off so that a
+	// default install still depends on nothing we run.
+	st := newTestStore(t)
+	feeds, err := st.ListFeeds(context.Background())
+	if err != nil {
+		t.Fatalf("ListFeeds: %v", err)
+	}
+	for _, f := range feeds {
+		if f.ID != catalog.ObservatoryFeedID {
+			continue
+		}
+		if f.Enabled {
+			t.Error("the Threat Observatory feed was seeded enabled; it must be opt-in")
+		}
+		if !f.Builtin {
+			t.Error("the Threat Observatory feed should be built-in")
+		}
+		if f.Format != "observatory" {
+			t.Errorf("Observatory feed format = %q, want observatory", f.Format)
+		}
+		return
+	}
+	t.Fatal("the Threat Observatory feed was not seeded")
+}
+
 func TestQueryLogAndRollups(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -505,5 +554,69 @@ func TestClientNaming(t *testing.T) {
 
 	if err := st.SetClientName(ctx, "not-an-ip", "nope"); err == nil {
 		t.Error("SetClientName accepted an invalid IP")
+	}
+}
+
+func TestRecordFeedRefreshTracksLastSuccessSeparately(t *testing.T) {
+	// A feed that has been failing since Tuesday has a refresh timestamp of a
+	// minute ago and intelligence three days old. The dashboard needs both
+	// numbers to say "could not be refreshed; still enforcing what we had".
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	name, url, category, format := "Test", "https://example.org/list.txt", "malware", "hosts"
+	f, err := st.CreateFeed(ctx, FeedInput{Name: &name, URL: &url, Category: &category, Format: &format})
+	if err != nil {
+		t.Fatalf("CreateFeed: %v", err)
+	}
+	if f.LastSuccess != nil {
+		t.Error("a brand new feed claims a successful download")
+	}
+
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "ok", DomainCount: 10, ETag: `"v1"`}); err != nil {
+		t.Fatalf("record success: %v", err)
+	}
+	good, err := st.GetFeed(ctx, f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if good.LastSuccess == nil {
+		t.Fatal("a successful refresh recorded no success time")
+	}
+
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "error", Error: "HTTP 404 from https://example.org/list.txt"}); err != nil {
+		t.Fatalf("record failure: %v", err)
+	}
+	after, err := st.GetFeed(ctx, f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if after.LastSuccess == nil || !after.LastSuccess.Equal(*good.LastSuccess) {
+		t.Errorf("LastSuccess = %v after a failure, want the earlier %v", after.LastSuccess, good.LastSuccess)
+	}
+	if after.LastRefresh == nil || after.LastRefresh.Before(*good.LastSuccess) {
+		t.Error("LastRefresh did not move on a failed attempt")
+	}
+	if after.LastError == "" {
+		t.Error("the failure was not recorded")
+	}
+
+	// "Not modified" is a success: the provider confirmed the cached copy is
+	// current, so the intelligence is not stale.
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "not-modified", ETag: `"v1"`}); err != nil {
+		t.Fatalf("record not-modified: %v", err)
+	}
+	fresh, err := st.GetFeed(ctx, f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if fresh.LastSuccess == nil || fresh.LastSuccess.Before(*good.LastSuccess) {
+		t.Error("a not-modified response did not count as a successful refresh")
+	}
+	if fresh.LastError != "" {
+		t.Errorf("LastError = %q after a not-modified response, want empty", fresh.LastError)
+	}
+	if fresh.DomainCount != 10 {
+		t.Errorf("DomainCount = %d, want the previous 10 kept", fresh.DomainCount)
 	}
 }
