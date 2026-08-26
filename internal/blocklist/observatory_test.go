@@ -287,3 +287,121 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	}
 	return c.r.Read(p)
 }
+
+// --- structural validation -------------------------------------------------
+//
+// ValidateObservatory is the gate a download passes through before it is
+// allowed to replace a cache that is currently blocking traffic. A document
+// that is syntactically valid JSON but is not a feed must not get through: it
+// would be renamed over the good copy, recorded as a successful refresh, and
+// then fail at load time, leaving the feed contributing nothing while the
+// dashboard showed it healthy.
+
+func TestValidateObservatoryRejectsWellFormedJSONThatIsNotAFeed(t *testing.T) {
+	cases := []struct {
+		name, doc, want string
+	}{
+		{
+			name: "indicators is an object",
+			doc:  `{"indicators":{}}`,
+			want: "not an array",
+		},
+		{
+			name: "indicators is a string",
+			doc:  `{"source":"x","indicators":"none"}`,
+			want: "not an array",
+		},
+		{
+			name: "indicators is a number",
+			doc:  `{"indicators":42}`,
+			want: "not an array",
+		},
+		{
+			name: "no indicators at all",
+			doc:  `{"generated_at":"2026-08-26T09:15:00Z","source":"dnsdaddy-threat-observatory"}`,
+			want: "not a feed document",
+		},
+		{
+			name: "an API error served as 200",
+			doc:  `{"error":"rate limited","retry_after":60}`,
+			want: "not a feed document",
+		},
+		{
+			name: "an empty object",
+			doc:  `{}`,
+			want: "not a feed document",
+		},
+		{
+			name: "a bare JSON string",
+			doc:  `"nope"`,
+			want: "not a JSON object or array",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateObservatory(strings.NewReader(tc.doc))
+			if err == nil {
+				t.Fatalf("ValidateObservatory(%s) accepted a document that is not a feed", tc.doc)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+
+			// Whatever the validator refuses, the loader must refuse too, or a
+			// cached file damaged on disk could still half-populate the index.
+			if _, perr := ParseObservatory(strings.NewReader(tc.doc), func(ObservatoryRecord) {}); perr == nil {
+				t.Errorf("ParseObservatory accepted %s but ValidateObservatory refused it; "+
+					"the two must not disagree", tc.doc)
+			}
+		})
+	}
+}
+
+func TestValidateObservatoryAcceptsRealDocuments(t *testing.T) {
+	// The shapes that must keep working, including a deliberately empty feed:
+	// there is no way to tell a cleaned-up list from a broken one, and the
+	// documented contract is that a valid smaller feed is accepted.
+	cases := map[string]string{
+		"documented envelope": `{"generated_at":"2026-08-26T09:15:00Z","source":"dnsdaddy-threat-observatory",
+			"indicators":[{"value":"evil.example","type":"domain","categories":["malware"]}]}`,
+		"bare array":          `[{"value":"evil.example","type":"domain"}]`,
+		"empty indicators":    `{"indicators":[]}`,
+		"empty bare array":    `[]`,
+		"unknown top field":   `{"schema_version":3,"indicators":[{"value":"evil.example"}]}`,
+		"malformed indicator": `{"indicators":[{"value":"evil.example"},{"value":123},"junk"]}`,
+	}
+
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateObservatory(strings.NewReader(doc)); err != nil {
+				t.Errorf("ValidateObservatory rejected a valid document: %v", err)
+			}
+		})
+	}
+}
+
+func TestObservatoryValidationAndParsingCannotDrift(t *testing.T) {
+	// The two are the same code path with and without an emit function, which
+	// is the only way to be sure a document the validator waves through is one
+	// the loader can actually use. This pins that property rather than the
+	// implementation detail behind it.
+	docs := []string{
+		`{"indicators":[{"value":"a.example"}]}`,
+		`{"indicators":{}}`,
+		`{"indicators":[{"value":"a.example"}]}{"indicators":[]}`,
+		`{"indicators":[{"value":"a.example"}`,
+		`[{"value":"a.example"}`,
+		`{}`,
+		`not json at all`,
+		``,
+	}
+
+	for _, doc := range docs {
+		validateErr := ValidateObservatory(strings.NewReader(doc))
+		_, parseErr := ParseObservatory(strings.NewReader(doc), func(ObservatoryRecord) {})
+		if (validateErr == nil) != (parseErr == nil) {
+			t.Errorf("validate and parse disagree on %q: validate=%v parse=%v", doc, validateErr, parseErr)
+		}
+	}
+}

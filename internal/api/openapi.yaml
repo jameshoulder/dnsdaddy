@@ -1065,6 +1065,16 @@ components:
         indexedDomains:
           type: integer
           description: Domains this feed contributes after de-duplication against higher-priority feeds.
+        loaded:
+          type: boolean
+          description: >-
+            Whether this feed's cached copy is in the index answering queries right
+            now. This, not lastSuccessAt, is what says a feed is protecting anything:
+            a feed whose cached file has gone missing or will not parse is skipped at
+            every rebuild while its row still shows a healthy refresh.
+        loadError:
+          type: string
+          description: Why the cached copy could not be loaded, when it could not. Empty otherwise.
         lastRefreshedAt:
           type: [string, "null"]
           format: date-time

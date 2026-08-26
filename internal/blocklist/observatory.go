@@ -62,11 +62,40 @@ type observatoryIndicator struct {
 // malformed entry must not cost an operator a whole feed's worth of blocking.
 // Unusable indicators are counted and skipped.
 //
-// It is not forgiving about the document as a whole. A truncated or malformed
-// document returns an error with whatever was read before the fault, and the
-// caller is expected to discard it rather than treat a partial feed as a
-// complete one — see ValidateObservatory.
+// It is not forgiving about the document as a whole. A document that is
+// truncated, malformed, or not shaped like a feed at all returns an error, and
+// the caller is expected to discard it rather than treat it as a small feed —
+// see ValidateObservatory, which is this same function with nothing to emit to.
 func ParseObservatory(r io.Reader, emit func(ObservatoryRecord)) (ObservatoryResult, error) {
+	return parseObservatory(r, emit)
+}
+
+// ValidateObservatory reports whether r holds a complete, well-formed
+// Observatory document. It streams the whole thing and buffers none of it.
+//
+// This is what stands between a bad response and the operator's blocklist. A
+// feed download is replacing a dataset that is currently blocking traffic, and
+// a body that stops halfway is not a smaller dataset — it is thousands of
+// malicious domains silently becoming resolvable again. The same goes for a
+// 200 response carrying an HTML error page, or a JSON document that parses
+// perfectly and simply is not a feed: `{"error":"rate limited"}` is complete,
+// well-formed, and would quietly empty the feed it replaced.
+//
+// So the rule is all or nothing, and the check is the parser itself, run with
+// nothing to emit to. That is deliberate. A validator that agreed with the
+// parser on the day it was written and drifted afterwards would be worse than
+// none: it would wave through a document the loader then refuses, which is
+// precisely the failure it exists to prevent — the good cache replaced, the
+// refresh recorded as successful, and the feed contributing nothing.
+func ValidateObservatory(r io.Reader) error {
+	_, err := parseObservatory(r, nil)
+	return err
+}
+
+// parseObservatory is the single implementation behind both ParseObservatory
+// and ValidateObservatory. emit may be nil, which makes it a validating pass
+// that still walks every byte and buffers none of them.
+func parseObservatory(r io.Reader, emit func(ObservatoryRecord)) (ObservatoryResult, error) {
 	var res ObservatoryResult
 
 	dec := json.NewDecoder(r)
@@ -81,11 +110,19 @@ func ParseObservatory(r io.Reader, emit func(ObservatoryRecord)) (ObservatoryRes
 		// A bare array of indicators, with no envelope. Not the documented
 		// shape, but cheap to accept and it keeps a hand-rolled test fixture or
 		// a trimmed-down mirror working.
-		return res, parseIndicatorArray(dec, &res, emit)
+		if err := parseIndicatorArray(dec, &res, emit); err != nil {
+			return res, err
+		}
+		return res, endOfDocument(dec)
 	case '{':
 	default:
 		return res, fmt.Errorf("observatory feed is not a JSON object or array")
 	}
+
+	// A feed has to actually carry an indicator list. Without this, any JSON
+	// object at all — an API error, a status page, a config file — reads as a
+	// valid feed containing nothing, and replaces a working cache with it.
+	seenIndicators := false
 
 	for dec.More() {
 		keyTok, err := dec.Token()
@@ -105,6 +142,7 @@ func ParseObservatory(r io.Reader, emit func(ObservatoryRecord)) (ObservatoryRes
 			if err := parseIndicatorArray(dec, &res, emit); err != nil {
 				return res, err
 			}
+			seenIndicators = true
 		case "generated_at":
 			if s, ok := decodeString(dec); ok {
 				if ts, err := time.Parse(time.RFC3339, s); err == nil {
@@ -124,55 +162,22 @@ func ParseObservatory(r io.Reader, emit func(ObservatoryRecord)) (ObservatoryRes
 			}
 		}
 	}
-	return res, nil
+
+	// Consume the closing brace. On a truncated document dec.More() above
+	// returns false rather than surfacing the read error, so this is where a
+	// body that stopped halfway is caught.
+	if _, err := dec.Token(); err != nil {
+		return res, fmt.Errorf("observatory feed ends mid-document: it is truncated")
+	}
+	if !seenIndicators {
+		return res, fmt.Errorf(`observatory feed has no "indicators" array; it is not a feed document`)
+	}
+	return res, endOfDocument(dec)
 }
 
-// ValidateObservatory reports whether r holds a complete, well-formed
-// Observatory document. It streams the whole thing and buffers none of it.
-//
-// This is what stands between a bad response and the operator's blocklist. A
-// feed download is replacing a dataset that is currently blocking traffic, and
-// a body that stops halfway is not a smaller dataset — it is thousands of
-// malicious domains silently becoming resolvable again. The same goes for a
-// 200 response carrying an HTML error page, which is a perfectly complete
-// document that happens not to be a feed.
-//
-// So the rule is all or nothing: a document that does not parse from first
-// byte to last is refused before it can replace anything, and the previous
-// copy keeps working.
-func ValidateObservatory(r io.Reader) error {
-	dec := json.NewDecoder(r)
-
-	first, err := dec.Token()
-	if err != nil {
-		return fmt.Errorf("observatory feed is not JSON: %w", err)
-	}
-	delim, isDelim := first.(json.Delim)
-	if !isDelim || (delim != '{' && delim != '[') {
-		return fmt.Errorf("observatory feed is not a JSON object or array")
-	}
-
-	depth := 1
-	for depth > 0 {
-		tok, err := dec.Token()
-		if err != nil {
-			if err == io.EOF {
-				return fmt.Errorf("observatory feed ends mid-document: it is truncated")
-			}
-			return fmt.Errorf("observatory feed is malformed: %w", err)
-		}
-		if d, ok := tok.(json.Delim); ok {
-			switch d {
-			case '{', '[':
-				depth++
-			case '}', ']':
-				depth--
-			}
-		}
-	}
-
-	// Anything after the top-level value means this is not one document —
-	// two responses concatenated, or a body with a trailer appended.
+// endOfDocument reports an error if anything follows the top-level value —
+// two responses concatenated, or a body with a trailer appended.
+func endOfDocument(dec *json.Decoder) error {
 	if dec.More() {
 		return fmt.Errorf("observatory feed has trailing content after the document")
 	}
@@ -195,7 +200,9 @@ func parseIndicatorArray(dec *json.Decoder, res *ObservatoryResult, emit func(Ob
 			res.Skipped++
 			continue
 		}
-		emit(rec)
+		if emit != nil {
+			emit(rec)
+		}
 		res.Accepted++
 	}
 	// Consume the closing bracket so a caller reading further fields resumes

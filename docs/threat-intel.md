@@ -109,13 +109,18 @@ the point:
 
 | Card says | Means |
 |---|---|
-| **Active**, with a domain count and an update time | A complete document downloaded, validated and indexed. |
+| **Active**, with a domain count and an update time | Its indicators are in the index answering queries. |
 | **Attention**, with the age of the last good copy | The refresh failed. The previous copy is still indexed and still blocking. |
+| **Not blocking** | It downloaded at some point, but that copy is not in the running blocklist — the cached file is missing or will not parse. |
 | Enabled, not downloaded yet | It has never successfully downloaded. Nothing from this feed is being enforced. |
 
-An enabled feed is never described as active until something has actually
-downloaded — which matters right now, because the endpoint is not live yet and
-enabling it today lands in the third row.
+"Active" is decided by whether the feed is in the index right now (`loaded` on
+the feed row), never by the download history alone. The two can disagree: a
+feed whose cached file goes missing has a perfectly healthy `lastSuccessAt`, no
+error, and blocks nothing at all after the next restart. Reporting that as
+protection would be the worst thing this card could do, so it does not — and
+that is also why enabling the Observatory today lands in the last row, since
+the endpoint is not live yet.
 
 Disable puts it back: that feed stops contributing, the index is rebuilt
 without it, and every other feed and every policy is untouched. The built-in
@@ -144,8 +149,10 @@ single feed, using the same download, validation, caching and index rebuild as
 a full refresh. It exists so that switching a feed on can be verified in
 seconds instead of after a download of every third-party list.
 
-`lastRefreshedAt` moves on every attempt; `lastSuccessAt` moves only when a
-download produced content this server can enforce. A feed that has been
+`loaded` says whether the feed is in the index serving traffic; `loadError`
+says why not when it is not. `lastRefreshedAt` moves on every attempt;
+`lastSuccessAt` moves only when a download produced content this server can
+enforce. A feed that has been
 failing since Tuesday has a recent `lastRefreshedAt` and a three-day-old
 `lastSuccessAt`, and it is the second number that dates the intelligence
 actually in the index.
@@ -250,19 +257,28 @@ Unknown top-level fields are skipped, so the Observatory can add metadata
 without every deployed resolver rejecting the file, and a malformed indicator
 costs that indicator rather than the feed.
 
-A response that is not a complete, well-formed document is **refused before it
-replaces anything**. This matters more than it sounds: a feed download is
+A response that is not a complete, well-formed feed document is **refused
+before it replaces anything**. This matters more than it sounds: a feed download is
 replacing a dataset that is currently blocking traffic, and a body that stops
 halfway is not a smaller dataset — it is thousands of malicious domains
-silently becoming resolvable again. So a truncated body, or an HTML error page
-served with status 200, is rejected; the previously cached copy stays in use;
-the error is shown against that one feed in the dashboard; and every other feed
-carries on. It is the same behaviour as a provider being unreachable, because
-it is the same kind of failure.
+silently becoming resolvable again. So a truncated body, an HTML error page
+served with status 200, or a JSON document that parses perfectly and simply is
+not a feed — `{"error":"rate limited"}`, or an `indicators` field that is not an
+array — is rejected; the previously cached copy stays in use; the error is
+shown against that one feed in the dashboard; and every other feed carries on.
+It is the same behaviour as a provider being unreachable, because it is the
+same kind of failure.
 
-The check is a streaming pass over the downloaded file, made before the atomic
+The check is the parser run with nothing to emit to, rather than a separate
+validator, so the two cannot disagree about what a feed is. A validator that
+waved through a document the loader then refused would produce the worst
+outcome available: the good cache replaced, the refresh recorded as a success,
+and the feed silently contributing nothing.
+
+It is a streaming pass over the downloaded file, made before the atomic
 rename that installs it as the cache, and repeated when a cached file is loaded
-so a copy damaged on disk cannot half-populate the index either. Feeds are
+so a copy damaged on disk cannot half-populate the index either. `file://`
+feeds go through exactly the same gate. Feeds are
 streamed rather than buffered, and `feeds.max_feed_bytes` caps the download
 like any other.
 

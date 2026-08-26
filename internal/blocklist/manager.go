@@ -40,6 +40,55 @@ type Manager struct {
 	refreshing  atomic.Bool
 	lastRefresh atomic.Int64 // unix milli
 	mu          sync.Mutex
+
+	// loads is what the live index is actually made of, keyed by feed ID and
+	// replaced wholesale on every rebuild. See FeedLoads.
+	loads atomic.Pointer[map[string]FeedLoad]
+}
+
+// FeedLoad says whether a feed's cached copy made it into the index that is
+// serving traffic right now.
+//
+// This is runtime state, not history, and the difference matters. A feed row
+// records that a download succeeded; it cannot record that the file that
+// download produced has since gone missing, been truncated by a full disk, or
+// failed to parse on the way into the index at boot. In that situation the
+// database says the feed is fine and the resolver is not blocking a single one
+// of its domains. Anything that reports protection to an operator has to read
+// this, not the timestamps.
+type FeedLoad struct {
+	// Loaded is true when this feed's cached copy was read into the current
+	// index. It says nothing about how many domains survived de-duplication.
+	Loaded bool
+	// Error explains why not, in terms an operator can act on. Empty when
+	// Loaded is true.
+	Error string
+}
+
+// FeedLoads returns what the current index was built from, keyed by feed ID.
+// Feeds that are disabled, or that have never been through a rebuild, are
+// absent — which callers must read as "not loaded".
+func (m *Manager) FeedLoads() map[string]FeedLoad {
+	p := m.loads.Load()
+	if p == nil {
+		return map[string]FeedLoad{}
+	}
+	return *p
+}
+
+// describeLoadError turns a cache-load failure into something worth showing an
+// operator. A missing file is by far the most common case and says nothing
+// useful in its raw form — it is a path inside the server's data directory and
+// an errno.
+//
+// The wording has to hold for both feeds that were never downloaded and feeds
+// whose cached copy has since gone: "missing" is true of both, where "never
+// downloaded" would contradict a refresh timestamp the operator can see.
+func describeLoadError(err error) string {
+	if errors.Is(err, os.ErrNotExist) {
+		return "its cached copy is missing"
+	}
+	return err.Error()
 }
 
 // NewManager constructs a feed manager writing its cache under dataDir/feeds.
@@ -65,11 +114,7 @@ func NewManager(st *store.Store, holder *Holder, cfg config.Feeds, dataDir strin
 // LoadFromCache rebuilds the index from disk without any network access.
 // Feeds with no cached copy are skipped.
 func (m *Manager) LoadFromCache(ctx context.Context) error {
-	feeds, err := m.store.ListFeeds(ctx)
-	if err != nil {
-		return err
-	}
-	return m.rebuild(ctx, feeds, nil)
+	return m.rebuild(ctx, nil)
 }
 
 // Refresh downloads every enabled feed and rebuilds the index. Feeds that fail
@@ -107,7 +152,7 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	}
 
 	m.lastRefresh.Store(time.Now().UnixMilli())
-	return m.rebuild(ctx, feeds, results)
+	return m.rebuild(ctx, results)
 }
 
 // beginRefresh claims the single refresh slot, returning the function that
@@ -198,7 +243,7 @@ func (m *Manager) refreshOne(ctx context.Context, feedID string) error {
 	// refreshed", and one feed is not the feeds. Reporting a full refresh on
 	// the dashboard because a single feed was fetched would be a lie of
 	// exactly the kind the freshness figure exists to prevent.
-	if err := m.rebuild(ctx, feeds, map[string]store.FeedResult{target.ID: res}); err != nil {
+	if err := m.rebuild(ctx, map[string]store.FeedResult{target.ID: res}); err != nil {
 		return err
 	}
 	if res.Error != "" {
@@ -396,6 +441,16 @@ func (m *Manager) copyLocal(f store.Feed) store.FeedResult {
 	if err != nil {
 		return store.FeedResult{Status: "error", Error: err.Error()}
 	}
+
+	// The same gate as an HTTP download, for the same reason. A file:// feed
+	// is not more trustworthy for being local: it can be half-written by
+	// whatever produces it, truncated by a full disk, or repointed through a
+	// symlink, and renaming any of those over a good cache would silently
+	// unblock everything the old copy carried.
+	if err := m.verifyDownload(f, tmpName); err != nil {
+		return store.FeedResult{Status: "error", Error: err.Error()}
+	}
+
 	if err := os.Rename(tmpName, m.cachePath(f.ID)); err != nil {
 		return store.FeedResult{Status: "error", Error: err.Error()}
 	}
@@ -403,9 +458,24 @@ func (m *Manager) copyLocal(f store.Feed) store.FeedResult {
 }
 
 // rebuild constructs a fresh index from the cached feed files and swaps it in.
-func (m *Manager) rebuild(ctx context.Context, feeds []store.Feed, results map[string]store.FeedResult) error {
+//
+// The feed list is read here, inside the lock, rather than taken from the
+// caller. That is the whole point: a refresh reads the feed list, then spends
+// minutes downloading, and the operator can disable a feed in the meantime.
+// Rebuilding from the list the refresh started with would put that feed's
+// domains back into the index after the database and the dashboard both said
+// it was off — blocking traffic nobody could account for, and nothing would
+// correct it until the next refresh. Rebuilds are serialised on m.mu, so
+// whichever one runs last reads the current configuration and has the final
+// say.
+func (m *Manager) rebuild(ctx context.Context, results map[string]store.FeedResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	feeds, err := m.store.ListFeeds(ctx)
+	if err != nil {
+		return err
+	}
 
 	enabled := make([]store.Feed, 0, len(feeds))
 	for _, f := range feeds {
@@ -423,6 +493,12 @@ func (m *Manager) rebuild(ctx context.Context, feeds []store.Feed, results map[s
 	}
 	b := NewBuilder(hint)
 
+	// What actually went into this index, feed by feed. A feed can be enabled,
+	// have downloaded successfully last week, and still contribute nothing
+	// today because its cached file went missing or was damaged on disk. The
+	// database cannot tell that story — it only remembers the download — so it
+	// is recorded here, by the rebuild that either used the file or could not.
+	loads := make(map[string]FeedLoad, len(enabled))
 	loaded := make([]string, 0, len(enabled))
 	for _, f := range enabled {
 		if ctx.Err() != nil {
@@ -430,13 +506,16 @@ func (m *Manager) rebuild(ctx context.Context, feeds []store.Feed, results map[s
 		}
 		if _, err := m.loadInto(b, f); err != nil {
 			m.log.Warn("skipping feed with no usable cached copy", "feed", f.ID, "error", err)
+			loads[f.ID] = FeedLoad{Error: describeLoadError(err)}
 			continue
 		}
+		loads[f.ID] = FeedLoad{Loaded: true}
 		loaded = append(loaded, f.ID)
 	}
 
 	ix := b.Build()
 	m.holder.Store(ix)
+	m.loads.Store(&loads)
 	m.log.Info("blocklist index rebuilt",
 		"domains", ix.Len(),
 		"feeds", len(enabled),

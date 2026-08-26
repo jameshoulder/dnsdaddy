@@ -38,6 +38,9 @@ type harness struct {
 	// lists is the live blocklist index the API and DNS handler share, so a
 	// test can assert what a refresh actually made blockable.
 	lists *blocklist.Holder
+	// feeds is the same manager the API holds, so a test can rebuild the index
+	// from disk the way a restart does.
+	feeds *blocklist.Manager
 	// dir is the data directory, kept so a test can reopen the database and
 	// check that a setting survived a restart.
 	dir string
@@ -139,7 +142,7 @@ func newHarness(t *testing.T) *harness {
 	jar := &cookieJar{cookies: map[string]*http.Cookie{}}
 	return &harness{
 		t: t, server: srv, store: st, client: &http.Client{Jar: jar},
-		detector: detector, lists: lists, dir: dir,
+		detector: detector, lists: lists, feeds: feeds, dir: dir,
 	}
 }
 

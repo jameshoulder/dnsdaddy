@@ -940,3 +940,270 @@ func TestBeginRefreshFeedClaimsTheSlotBeforeTheWorkStarts(t *testing.T) {
 		t.Error("the refresh slot was not released after the work finished")
 	}
 }
+
+// --- what may replace a working cache --------------------------------------
+
+func TestStructurallyInvalidObservatoryNeverReplacesLastKnownGood(t *testing.T) {
+	// A body that is perfectly good JSON and simply is not a feed. It passes
+	// every syntax check there is, so nothing but a structural check stops it
+	// being renamed over intelligence that is currently blocking traffic —
+	// and unlike a truncated body, it arrives complete and looks like a
+	// successful download all the way to the point where the index is built.
+	var serve atomic.Value
+	serve.Store(`{"indicators":[{"value":"known-bad.example","type":"domain","categories":["malware"]}]}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, serve.Load().(string))
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("first Refresh: %v", err)
+	}
+	if _, ok := h.holder.Load().Lookup("known-bad.example"); !ok {
+		t.Fatal("setup: the good feed is not indexed")
+	}
+
+	for _, bad := range []string{
+		`{"indicators":{}}`,
+		`{"error":"rate limited"}`,
+		`{"generated_at":"2026-08-26T09:15:00Z"}`,
+	} {
+		serve.Store(bad)
+		if err := h.mgr.Refresh(context.Background()); err != nil {
+			t.Fatalf("Refresh with %s: %v", bad, err)
+		}
+
+		if _, ok := h.holder.Load().Lookup("known-bad.example"); !ok {
+			t.Fatalf("%s replaced the last known good feed; its domains stopped being blocked", bad)
+		}
+
+		stored, err := h.store.GetFeed(context.Background(), f.ID)
+		if err != nil {
+			t.Fatalf("GetFeed: %v", err)
+		}
+		if stored.LastError == "" {
+			t.Errorf("%s was recorded as a successful refresh", bad)
+		}
+		if stored.LastStatus != "error" {
+			t.Errorf("%s recorded status %q, want error", bad, stored.LastStatus)
+		}
+	}
+}
+
+func TestInvalidLocalObservatoryFeedNeverReplacesLastKnownGood(t *testing.T) {
+	// file:// feeds get the same gate. A local file is not more trustworthy
+	// for being local: it can be half-written by whatever produces it, or
+	// repointed through a symlink between one refresh and the next.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "observatory.json")
+	good := `{"indicators":[{"value":"known-bad.example","type":"domain","categories":["malware"]}]}`
+	if err := os.WriteFile(path, []byte(good), 0o600); err != nil {
+		t.Fatalf("write feed: %v", err)
+	}
+
+	h := newManagerHarness(t, func(c *config.Feeds) { c.LocalFeedDir = dir })
+	f := h.addFeed(t, "Local Observatory", "file://"+path, "malware", "observatory")
+
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("first Refresh: %v", err)
+	}
+	if _, ok := h.holder.Load().Lookup("known-bad.example"); !ok {
+		t.Fatal("setup: the good local feed is not indexed")
+	}
+
+	for name, bad := range map[string]string{
+		"truncated":  `{"indicators":[{"value":"other.example"}`,
+		"not a feed": `{"error":"generator crashed"}`,
+		"html":       `<!doctype html><h1>500</h1>`,
+	} {
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatalf("write %s feed: %v", name, err)
+		}
+		if err := h.mgr.Refresh(context.Background()); err != nil {
+			t.Fatalf("Refresh with %s local feed: %v", name, err)
+		}
+
+		if _, ok := h.holder.Load().Lookup("known-bad.example"); !ok {
+			t.Errorf("a %s local feed replaced the last known good copy", name)
+		}
+		stored, err := h.store.GetFeed(context.Background(), f.ID)
+		if err != nil {
+			t.Fatalf("GetFeed: %v", err)
+		}
+		if stored.LastError == "" {
+			t.Errorf("a %s local feed was recorded as a successful refresh", name)
+		}
+	}
+}
+
+// --- runtime load state ----------------------------------------------------
+
+func TestFeedLoadsReportsWhatTheIndexIsActuallyMadeOf(t *testing.T) {
+	// The restart case: the database remembers a successful download, the
+	// cached file it produced is gone, and the rebuild skips the feed. Nothing
+	// in the feed row can tell an operator that, so the manager has to.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"indicators":[{"value":"known-bad.example","type":"domain","categories":["malware"]}]}`)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if load := h.mgr.FeedLoads()[f.ID]; !load.Loaded {
+		t.Fatalf("a freshly downloaded feed is not reported as loaded: %+v", load)
+	}
+
+	// The cache file goes missing, as it would if the data directory were
+	// restored from an incomplete backup or the disk filled.
+	if err := os.Remove(filepath.Join(h.dir, "feeds", f.ID+".list")); err != nil {
+		t.Fatalf("remove cache: %v", err)
+	}
+
+	// Restart: rebuild from disk, no network.
+	if err := h.mgr.LoadFromCache(context.Background()); err != nil {
+		t.Fatalf("LoadFromCache: %v", err)
+	}
+
+	if _, ok := h.holder.Load().Lookup("known-bad.example"); ok {
+		t.Fatal("setup: the feed is still indexed, so this is not the case under test")
+	}
+
+	load := h.mgr.FeedLoads()[f.ID]
+	if load.Loaded {
+		t.Error("a feed skipped by the rebuild is reported as loaded; the dashboard would claim protection that does not exist")
+	}
+	if load.Error == "" {
+		t.Error("no reason was recorded for skipping the feed")
+	}
+
+	// And the row still looks healthy, which is exactly why the load state has
+	// to exist separately.
+	stored, err := h.store.GetFeed(context.Background(), f.ID)
+	if err != nil {
+		t.Fatalf("GetFeed: %v", err)
+	}
+	if stored.LastSuccess == nil || stored.LastError != "" {
+		t.Fatalf("precondition: the feed row should still look healthy, got success=%v error=%q",
+			stored.LastSuccess, stored.LastError)
+	}
+}
+
+func TestFeedLoadsReportsACorruptCacheAsNotLoaded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"indicators":[{"value":"known-bad.example","type":"domain","categories":["malware"]}]}`)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	// Damaged on disk rather than missing: half a document.
+	cache := filepath.Join(h.dir, "feeds", f.ID+".list")
+	if err := os.WriteFile(cache, []byte(`{"indicators":[{"value":"known-bad.exa`), 0o600); err != nil {
+		t.Fatalf("corrupt cache: %v", err)
+	}
+
+	if err := h.mgr.LoadFromCache(context.Background()); err != nil {
+		t.Fatalf("LoadFromCache: %v", err)
+	}
+	if load := h.mgr.FeedLoads()[f.ID]; load.Loaded {
+		t.Error("a feed whose cache will not parse is reported as loaded")
+	}
+	if _, ok := h.holder.Load().Lookup("known-bad.example"); ok {
+		t.Error("a corrupt cache half-populated the index")
+	}
+}
+
+// --- concurrent refresh and disable ----------------------------------------
+
+func TestDisableDuringRefreshIsNotUndoneByTheRefreshRebuild(t *testing.T) {
+	// The race the index has to be immune to: a refresh reads the feed list,
+	// spends time downloading, and the operator disables a feed in the
+	// meantime. If the refresh rebuilt from the list it started with, the
+	// disabled feed's domains would go back into the index after the database
+	// and the dashboard both said it was off, and nothing would correct it
+	// until the next refresh.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hold the download open so the disable lands mid-refresh
+		io.WriteString(w, `{"indicators":[{"value":"known-bad.example","type":"domain","categories":["malware"]}]}`)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+
+	done := make(chan error, 1)
+	go func() { done <- h.mgr.Refresh(context.Background()) }()
+
+	// The refresh has read the feed list and is blocked on the download.
+	// Disable the feed underneath it, exactly as the API does.
+	waitFor(t, func() bool { return h.mgr.Refreshing() })
+	if _, err := h.store.UpdateFeed(context.Background(), f.ID, store.FeedInput{Enabled: ptr(false)}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	if _, ok := h.holder.Load().Lookup("known-bad.example"); ok {
+		t.Error("a feed disabled during a refresh was put back into the index by that refresh's rebuild")
+	}
+	if load := h.mgr.FeedLoads()[f.ID]; load.Loaded {
+		t.Error("a disabled feed is reported as loaded")
+	}
+}
+
+func TestDisableRebuildAfterRefreshStillWins(t *testing.T) {
+	// The same race with the two rebuilds in the other order: the refresh
+	// finishes first, then the disable's rebuild runs. Both must land on the
+	// same answer, because both read the current configuration.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"indicators":[{"value":"known-bad.example","type":"domain","categories":["malware"]}]}`)
+	}))
+	defer srv.Close()
+
+	h := newManagerHarness(t)
+	f := h.addFeed(t, "Observatory", srv.URL, "malware", "observatory")
+	if err := h.mgr.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, ok := h.holder.Load().Lookup("known-bad.example"); !ok {
+		t.Fatal("setup: the feed is not indexed")
+	}
+
+	if _, err := h.store.UpdateFeed(context.Background(), f.ID, store.FeedInput{Enabled: ptr(false)}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if err := h.mgr.LoadFromCache(context.Background()); err != nil {
+		t.Fatalf("LoadFromCache: %v", err)
+	}
+
+	if _, ok := h.holder.Load().Lookup("known-bad.example"); ok {
+		t.Error("a disabled feed is still in the index after a rebuild")
+	}
+}
+
+// waitFor blocks until cond is true, failing the test if it never becomes so.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition never became true")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -490,6 +492,59 @@ func TestRefreshOneFeedRejectsDisabledAndUnknownFeeds(t *testing.T) {
 	}
 }
 
+func TestObservatoryIsNotActiveWhenItsCacheCannotBeLoaded(t *testing.T) {
+	// The restart case, and the one place where trusting the database would
+	// tell an operator the exact opposite of the truth. The feed row records a
+	// successful download and no error; the file that download produced is
+	// gone; the rebuild at startup skips the feed; and not one of its domains
+	// is being blocked. The API must say so.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(observatoryDocument))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t)
+	h.login()
+	pointObservatoryAt(t, h, srv.URL)
+	activate(t, h)
+
+	if row := observatoryRow(t, h); row["loaded"] != true {
+		t.Fatalf("setup: a freshly activated feed reports loaded = %v", row["loaded"])
+	}
+
+	// The cached file goes missing — an incomplete backup restore, a full
+	// disk, an operator tidying the data directory.
+	if err := os.Remove(filepath.Join(h.dir, "feeds", catalog.ObservatoryFeedID+".list")); err != nil {
+		t.Fatalf("remove cache: %v", err)
+	}
+
+	// Restart: the index is rebuilt from disk with no network access, exactly
+	// as it is at boot.
+	if err := h.feeds.LoadFromCache(context.Background()); err != nil {
+		t.Fatalf("LoadFromCache: %v", err)
+	}
+
+	row := observatoryRow(t, h)
+
+	// The precondition that makes this dangerous: the row still looks healthy.
+	if row["lastSuccessAt"] == nil {
+		t.Fatal("precondition: the row should still record a successful download")
+	}
+
+	if row["loaded"] != false {
+		t.Errorf("loaded = %v, want false; the feed is not in the index answering queries", row["loaded"])
+	}
+	if le, _ := row["loadError"].(string); le == "" {
+		t.Error("no loadError explains why the cached copy could not be used")
+	}
+	if n, _ := row["indexedDomains"].(float64); n != 0 {
+		t.Errorf("indexedDomains = %v, want 0", row["indexedDomains"])
+	}
+	if _, ok := h.lists.Load().Lookup("c2.example"); ok {
+		t.Error("the feed is somehow still indexed, so this is not the case under test")
+	}
+}
+
 func TestFeedRowMatchesObservatoryCardContract(t *testing.T) {
 	// The activation card decides between "Active", "Attention" and "not
 	// downloaded yet" purely from these fields. A renamed tag would not break
@@ -501,7 +556,9 @@ func TestFeedRowMatchesObservatoryCardContract(t *testing.T) {
 	row := observatoryRow(t, h)
 	requireKeys(t, "feed row", row,
 		"id", "name", "url", "category", "format", "enabled", "builtin",
-		"indexedDomains", "lastRefreshedAt", "lastSuccessAt", "lastStatus", "lastError")
+		"indexedDomains", "lastRefreshedAt", "lastSuccessAt", "lastStatus", "lastError",
+		// The card decides "Active" from loaded, never from the timestamps.
+		"loaded", "loadError")
 
 	_, raw := h.do("GET", "/api/v1/feeds", nil)
 	body := decode[map[string]any](t, raw)

@@ -337,21 +337,35 @@ const OBSERVATORY_CATEGORIES = 'Malware · Phishing · C2 · Cryptomining';
 const OBSERVATORY_CATEGORY_IDS = ['malware', 'phishing', 'c2', 'cryptomining'];
 
 /**
- * Which state the card is in, derived entirely from the feed row.
+ * Which state the card is in, derived from the feed row.
  *
- * The important line is the last one: "active" requires a successful download,
- * not merely an enabled feed. A feed switched on thirty seconds ago against an
- * endpoint that 404s is enabled, has a recent lastRefreshedAt, and is
- * protecting nobody — saying "Active" there would be the single most
- * misleading thing this card could do.
+ * "Active" is decided by `loaded` — whether this feed is in the index that is
+ * answering queries right now — and never by the download history alone. That
+ * distinction is the whole job of this function. A feed that downloaded
+ * successfully last week and whose cached file has since gone missing has a
+ * healthy lastSuccessAt, no lastError, and is blocking precisely nothing: the
+ * rebuild at the last restart skipped it. Reporting that as Active is the most
+ * misleading thing this card could do, so the two failure modes are kept
+ * apart:
+ *
+ *   loaded                     → the index has it; the card may say Active
+ *   !loaded && lastSuccessAt   → downloaded once, unusable now  ("unusable")
+ *   !loaded && lastError       → never downloaded, and we know why ("unavailable")
+ *   !loaded && neither         → enabled, nothing attempted yet  ("pending")
+ *
+ * A feed that is loaded but whose most recent refresh failed is "stale": the
+ * last known good copy is in the index and still blocking, and only the
+ * refresh is broken.
  */
 function observatoryState(feed, refreshing) {
   if (!feed) return 'missing';
   if (!feed.enabled) return 'off';
   if (refreshing) return 'connecting';
-  if (feed.lastError) return feed.lastSuccessAt ? 'stale' : 'unavailable';
-  if (!feed.lastSuccessAt) return 'pending';
-  return 'active';
+  if (!feed.loaded) {
+    if (feed.lastSuccessAt) return 'unusable';
+    return feed.lastError ? 'unavailable' : 'pending';
+  }
+  return feed.lastError ? 'stale' : 'active';
 }
 
 /**
@@ -446,6 +460,7 @@ function observatoryCard(feed, { refreshing = false, policies = null } = {}) {
     active: html`<span class="badge ok">Active</span>`,
     connecting: html`<span class="badge info">Connecting…</span>`,
     stale: html`<span class="badge warn">Attention</span>`,
+    unusable: html`<span class="badge bad">Not blocking</span>`,
     unavailable: html`<span class="badge warn">Attention</span>`,
     pending: html`<span class="badge warn">Pending</span>`,
     off: '',
@@ -503,6 +518,26 @@ function observatoryCard(feed, { refreshing = false, policies = null } = {}) {
       ${raw(observatoryErrorDetails(feed.lastError))}
       <div class="row obs-actions">
         <button class="btn btn-primary" id="observatory-retry">Retry connection</button>
+        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
+      </div>
+    `,
+
+    // Downloaded successfully at some point, but the cached file is not in
+    // the index now — it went missing, or it would not parse on the way in.
+    // The feed row looks healthy and the resolver is blocking nothing from it,
+    // which is the one situation where trusting the timestamps would tell an
+    // operator the opposite of the truth.
+    unusable: () => html`
+      <p>The Observatory is enabled but is <strong>not currently blocking anything</strong>.</p>
+      <p class="muted small">
+        It downloaded successfully ${relTime(feed.lastSuccessAt)}, but that copy could not be
+        loaded into the running blocklist${feed.loadError ? ` — ${feed.loadError}` : ''}.
+        Downloading it again will fix it.
+      </p>
+      ${raw(observatoryErrorDetails(feed.lastError))}
+      <div class="row obs-actions">
+        <button class="btn btn-primary" id="observatory-retry">Download again</button>
+        <a class="btn btn-ghost" href="#/feeds">View details</a>
         <button class="btn btn-ghost" id="observatory-disable">Disable</button>
       </div>
     `,
@@ -592,31 +627,78 @@ function mountObservatoryCard(feedId) {
  * happening, and the operator is told what actually came back.
  */
 async function runObservatoryRefresh(feedId) {
-  try {
-    await apiSend('POST', `/feeds/${feedId}/refresh`);
-  } catch (err) {
-    // A full refresh already running is not a failure: the poll below picks up
-    // whatever it produces for this feed.
-    if (!(err instanceof ApiError && err.status === 409)) {
-      reportError(err);
-    }
-  }
-
   const route = router.current;
-  await router.reload(); // paints the connecting state
+  // Paint the connecting state as soon as a refresh is actually in flight —
+  // ours, or the one we are queued behind — and not before.
+  let painted = false;
+  const data = await claimRefresh(feedId, {
+    onRunning: async () => {
+      if (painted) return;
+      painted = true;
+      await router.reload();
+    },
+  });
+  await router.reload(); // the outcome
 
-  const data = await waitForFeedRefresh();
   const feed = data && (data.feeds || []).find((f) => f.id === feedId);
   if (feed) {
     if (feed.lastError) {
       toast(observatoryErrorSummary(feed.lastError), 'error');
-    } else if (feed.lastSuccessAt) {
+    } else if (feed.loaded) {
       toast(`Threat Observatory active — ${num(feed.indexedDomains)} domains indexed`);
     }
   }
 
   // Only repaint if the operator is still on the page they clicked from.
   if (router.current === route) await router.reload();
+}
+
+/**
+ * Refresh one feed, waiting for the refresh slot if something else holds it.
+ *
+ * The server serialises refreshes: a second one is refused with 409 rather
+ * than queued. Treating that 409 as "fine, the running refresh will cover us"
+ * is wrong, and quietly so. A full refresh reads its feed list before it starts
+ * downloading, so one that began before this feed was enabled will never fetch
+ * it; nor will a targeted refresh of some other feed. The operator would be
+ * left with an enabled feed, no download, and a card that had claimed to be
+ * connecting.
+ *
+ * So a 409 means wait for the slot and ask again, up to a bounded number of
+ * attempts. Nothing here starts a concurrent refresh — the server owns that
+ * decision and this only ever asks.
+ */
+async function claimRefresh(feedId, opts = {}) {
+  const {
+    attempts = 4,
+    onRunning = null,
+    // Injected so the retry sequence can be tested without a server. The
+    // defaults are the only thing the dashboard ever uses.
+    post = (id) => apiSend('POST', `/feeds/${id}/refresh`),
+    waitIdle = waitForFeedRefresh,
+    read = () => apiGet('/feeds').catch(() => null),
+    onError = reportError,
+    notify = toast,
+  } = opts;
+
+  let data = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await post(feedId);
+      if (onRunning) await onRunning();
+      return await waitIdle();
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 409)) {
+        onError(err);
+        return await read();
+      }
+      // Somebody else holds the slot. Wait for them to finish, then ask again.
+      if (onRunning) await onRunning();
+      data = await waitIdle();
+    }
+  }
+  notify('Another feed refresh kept the queue busy — try again in a moment', 'error');
+  return data;
 }
 
 /** Poll the feeds endpoint until no refresh is running, then return it. */
@@ -648,13 +730,17 @@ function waitForFeedRefresh({ intervalMs = 2000, timeoutMs = 180000 } = {}) {
  */
 function feedStatusBadge(feed) {
   if (!feed.enabled) return html`<span class="badge">Off</span>`;
-  if (feed.lastError) {
-    return feed.lastSuccessAt
-      ? html`<span class="badge warn">Stale</span>`
-      : html`<span class="badge bad">Unavailable</span>`;
+  // Same rule as the Observatory card: "Active" means this feed is in the
+  // index answering queries, not that a download once succeeded.
+  if (!feed.loaded) {
+    if (feed.lastSuccessAt) return html`<span class="badge bad">Not blocking</span>`;
+    return feed.lastError
+      ? html`<span class="badge bad">Unavailable</span>`
+      : html`<span class="badge warn">Pending</span>`;
   }
-  if (feed.lastSuccessAt) return html`<span class="badge ok">Active</span>`;
-  return html`<span class="badge warn">Pending</span>`;
+  return feed.lastError
+    ? html`<span class="badge warn">Stale</span>`
+    : html`<span class="badge ok">Active</span>`;
 }
 
 /**
@@ -1521,6 +1607,11 @@ pages.feeds = {
                         <strong>${f.name}</strong>
                         <div class="muted small mono">${f.url}</div>
                         ${raw(f.lastError ? html`<div class="small feed-error">${f.lastError}</div>` : '')}
+                        ${raw(
+                          f.enabled && !f.loaded && f.lastSuccessAt
+                            ? html`<div class="small feed-error">Not in the running blocklist${f.loadError ? ` — ${f.loadError}` : ''}</div>`
+                            : ''
+                        )}
                       </td>
                       <td>${raw(categoryBadge(f.category))}
                         ${raw(
@@ -2128,6 +2219,8 @@ if (typeof document !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     esc,
+    ApiError,
+    claimRefresh,
     observatoryState,
     observatoryErrorSummary,
     observatoryEnforcement,

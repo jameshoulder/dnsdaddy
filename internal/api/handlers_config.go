@@ -268,6 +268,7 @@ func (a *API) handleListFeeds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	indexed := a.Lists.Load().CountsByFeed()
+	loads := a.Feeds.FeedLoads()
 
 	type row struct {
 		store.Feed
@@ -275,10 +276,29 @@ func (a *API) handleListFeeds(w http.ResponseWriter, r *http.Request) {
 		// against higher-priority feeds — usually lower than DomainCount, and
 		// the number that actually matters.
 		IndexedDomains int `json:"indexedDomains"`
+		// Loaded reports whether this feed's cached copy is in the index that
+		// is answering queries right now.
+		//
+		// This is the only field that can say whether a feed is protecting
+		// anybody. lastSuccessAt records that a download once succeeded; it
+		// cannot know that the file it produced later went missing or was
+		// damaged, and a feed in that state is skipped at every rebuild while
+		// the row still shows a healthy refresh. Anything that reports
+		// protection reads this.
+		Loaded bool `json:"loaded"`
+		// LoadError says why the cached copy could not be used, when it could
+		// not. Empty otherwise.
+		LoadError string `json:"loadError"`
 	}
 	out := make([]row, 0, len(feeds))
 	for _, f := range feeds {
-		out = append(out, row{Feed: f, IndexedDomains: indexed[f.ID]})
+		load := loads[f.ID]
+		out = append(out, row{
+			Feed:           f,
+			IndexedDomains: indexed[f.ID],
+			Loaded:         load.Loaded,
+			LoadError:      load.Error,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

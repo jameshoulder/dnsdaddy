@@ -94,6 +94,14 @@ should be swapping a binary, not restoring a backup.
   a feed on can now be verified in seconds rather than after a download of
   every third-party list.
 
+- **`loaded` and `loadError` on every feed row**, reporting whether a feed's
+  cached copy is in the index answering queries *right now*. This is the only
+  field that can say a feed is protecting anything: `lastSuccessAt` records
+  that a download once succeeded, and cannot know that the file it produced has
+  since gone missing or stopped parsing. A feed in that state is skipped at
+  every rebuild while its row still shows a healthy refresh, and the dashboard
+  now says "Not blocking" rather than "Active".
+
 - **`lastSuccessAt` on every feed row** (`feeds.last_success_at`), recording the
   last download that produced usable content. `lastRefreshedAt` moves on every
   attempt including failures, so on its own it could not answer the question an
@@ -140,6 +148,30 @@ should be swapping a binary, not restoring a backup.
   is a valid hosts file, so there is nothing there to check.
 
 ### Changed
+
+- **A feed download must now be a feed, not merely valid JSON.** The check that
+  guards the cache was a token-level walk: it proved a body was complete and
+  well-formed and nothing more, so `{"indicators":{}}`, or an API error served
+  with status 200, passed it, replaced intelligence that was blocking traffic,
+  and was recorded as a successful refresh — then failed at load time, leaving
+  the feed contributing nothing while the dashboard showed it healthy.
+
+  Validation is now the parser itself, run with nothing to emit to, so the two
+  cannot drift: whatever the loader will refuse, the download gate refuses
+  first, before the rename that installs it. It stays a streaming pass and
+  buffers nothing. A document with no `indicators` array is refused outright.
+
+- **`file://` feeds are validated before they replace the cache**, like every
+  other feed. A local file is not more trustworthy for being local: it can be
+  half-written by whatever produces it, truncated by a full disk, or repointed
+  through a symlink between refreshes.
+
+- **A rebuild reads the current feed configuration**, not the list the refresh
+  that triggered it started with. A refresh reads its feed list, then spends
+  minutes downloading; a feed disabled in that window used to be put back into
+  the index by that refresh's own rebuild, blocking traffic after the database
+  and the dashboard both said it was off, until the next refresh happened to
+  correct it.
 
 - **Enabling or disabling a feed now rebuilds the block index immediately**,
   from the local cache and without any network access. Previously a disabled
