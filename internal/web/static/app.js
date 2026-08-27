@@ -345,6 +345,51 @@ function diagnosticsBanner(diagnostics) {
     </div>`;
 }
 
+/**
+ * Shown until a device on the network has actually used the resolver.
+ *
+ * A fresh install looks identical whether it is working perfectly and nothing
+ * has been pointed at it, or it is refusing every client — the charts are
+ * empty either way. This says which, and gives the one command that settles
+ * it. It disappears the moment a real client appears; nothing here invents
+ * activity that has not happened.
+ */
+function firstClientCard(overview) {
+  if (!overview || overview.clientsSeen24h > 0) return '';
+
+  // Client addresses are not recorded, so "no clients" would be a statement
+  // about the privacy setting rather than about the network.
+  if (!overview.clientAttribution) return '';
+
+  // The address the browser reached the dashboard on is almost always the
+  // right one to hand a test client — unless it is loopback, which means an
+  // SSH tunnel or a proxy, and the DNS address is something this page cannot
+  // know.
+  const host = window.location.hostname;
+  const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+  const target = isLoopback ? '<your-server-ip>' : host;
+
+  return html`
+    <div class="card first-client">
+      <div class="first-client-title">No devices have used this resolver yet</div>
+      <p class="muted small">
+        DNS Daddy is running. Nothing on your network has sent it a query, which
+        is expected until you point something at it.
+      </p>
+      <p class="small">Try this from another machine:</p>
+      <pre class="first-client-cmd">nslookup example.com ${target}</pre>
+      <p class="muted small">
+        ${raw(isLoopback
+          ? 'You are viewing this over loopback, so this page cannot tell which address your clients should use — substitute the server\'s LAN address.'
+          : 'Then reload this page: the query should appear in the Query log, attributed to that machine.')}
+      </p>
+      <p class="muted small">
+        Nothing appears? Run <code>dnsdaddy doctor</code> on the server — it
+        reports whether the query was refused, and why.
+      </p>
+    </div>`;
+}
+
 function categoryBadge(category, label) {
   if (!category) return html`<span class="muted">—</span>`;
   return html`<span class="badge" data-fg="${colourFor(category)}">${label || category}</span>`;
@@ -873,6 +918,7 @@ pages.dashboard = {
 
     return html`
       ${raw(diagnosticsBanner(diagnostics))}
+      ${raw(firstClientCard(overview))}
       <div class="section grid grid-4">
         ${raw(metricCard({
           label: 'Protection',
@@ -2281,5 +2327,6 @@ if (typeof module !== 'undefined' && module.exports) {
     feedStatusBadge,
     threatIntelPanel,
     diagnosticsBanner,
+    firstClientCard,
   };
 }

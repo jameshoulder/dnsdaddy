@@ -249,6 +249,31 @@ func (s *Store) TotalsSince(ctx context.Context, t time.Time) (Totals, error) {
 	return out, err
 }
 
+// DistinctClientsSince counts the separate client addresses seen since t.
+//
+// Loopback is excluded deliberately. A health check, `dnsdaddy doctor` and the
+// operator's own `dig` from the server all arrive from 127.0.0.1, and counting
+// them would let the dashboard tell somebody their network is using the
+// resolver when the only thing that has ever queried it is the server itself.
+//
+// Returns 0 when client-IP logging is off, because then there is nothing to
+// count — callers must not read that as "no clients". Overview reports the
+// setting alongside the number so the dashboard can tell the two apart.
+func (s *Store) DistinctClientsSince(ctx context.Context, t time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT client_ip) FROM query_log
+		WHERE ts >= ?
+		  AND client_ip != ''
+		  AND client_ip NOT LIKE '127.%'
+		  AND client_ip != '::1'`,
+		// query_log.ts is milliseconds, not seconds. Comparing against
+		// Unix() here made every row look newer than any cutoff, so the
+		// 24-hour window silently counted the entire retained log.
+		unixMilli(t)).Scan(&n)
+	return n, err
+}
+
 // ActivityBucket is one hour of the query-activity chart.
 type ActivityBucket struct {
 	Hour    time.Time `json:"hour"`

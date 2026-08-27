@@ -51,6 +51,18 @@ type Overview struct {
 	LastFeedRefresh   *time.Time `json:"lastFeedRefresh"`
 	UptimeSeconds     int64      `json:"uptimeSeconds"`
 	Version           string     `json:"version"`
+
+	// ClientsSeen24h counts distinct non-loopback client addresses in the last
+	// 24 hours. Zero on a fresh install means nothing on the network has
+	// pointed at the resolver yet, which is the most common reason a new
+	// operator thinks it is broken.
+	ClientsSeen24h int `json:"clientsSeen24h"`
+	// ClientAttribution reports whether client addresses are recorded at all.
+	// When it is false, ClientsSeen24h is always zero and means nothing —
+	// without this flag the dashboard would tell an operator who has
+	// deliberately turned off client logging that no device is using their
+	// resolver, forever.
+	ClientAttribution bool `json:"clientAttribution"`
 }
 
 func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +85,19 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	blocklistSize := a.Lists.Load().Len()
+
+	attribution := a.Config.Log.QueryLog && a.Config.Log.LogClientIP
+	clientsSeen := 0
+	if attribution {
+		if n, err := a.Store.DistinctClientsSince(ctx, time.Now().Add(-24*time.Hour)); err == nil {
+			clientsSeen = n
+		} else {
+			// Not fatal: the rest of the overview is still worth serving, and
+			// a missing count is reported as "unknown" rather than "none".
+			a.Log.Debug("count distinct clients", "error", err)
+			attribution = false
+		}
+	}
 
 	// "Protected" requires both a loaded blocklist and at least one policy
 	// actually enforcing a category. A resolver with feeds loaded but every
@@ -128,6 +153,8 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 		LastFeedRefresh:   lastRefresh,
 		UptimeSeconds:     int64(time.Since(a.StartedAt).Seconds()),
 		Version:           version.String(),
+		ClientsSeen24h:    clientsSeen,
+		ClientAttribution: attribution,
 	})
 }
 

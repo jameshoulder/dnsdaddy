@@ -29,6 +29,7 @@ const {
   feedStatusBadge,
   threatIntelPanel,
   diagnosticsBanner,
+  firstClientCard,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -539,4 +540,69 @@ test('server-supplied text is escaped', () => {
   assert.doesNotMatch(out, /<script/, 'evidence was not escaped');
   assert.doesNotMatch(out, /<b>/, 'action was not escaped');
   assert.match(out, /&lt;img/);
+});
+
+
+/*
+ * The first-client card.
+ *
+ * A fresh install looks identical whether it is working perfectly with nothing
+ * pointed at it, or refusing every client — both produce empty charts. This
+ * card says which. It must never invent activity, and must never claim "no
+ * devices" when the truth is "we are not recording which devices".
+ */
+
+// window is not defined under node --test; the card reads location.hostname.
+function withHostname(host, fn) {
+  const had = typeof global.window !== 'undefined';
+  const previous = had ? global.window : undefined;
+  global.window = { location: { hostname: host } };
+  try {
+    return fn();
+  } finally {
+    if (had) global.window = previous;
+    else delete global.window;
+  }
+}
+
+test('the card appears when no client has been seen, naming the dashboard host', () => {
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard({ clientsSeen24h: 0, clientAttribution: true }));
+
+  assert.match(out, /No devices have used this resolver yet/);
+  assert.match(out, /nslookup example\.com 192\.168\.1\.75/,
+    'the command must name the address the operator reached the dashboard on');
+  assert.match(out, /dnsdaddy doctor/, 'it must say what to do when nothing appears');
+});
+
+test('the card disappears as soon as a real client exists', () => {
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard({ clientsSeen24h: 1, clientAttribution: true }));
+  assert.strictEqual(out, '', 'onboarding must not outlive its usefulness');
+});
+
+test('the card is silent when client addresses are not recorded', () => {
+  // log_client_ip false is a deliberate privacy choice. Saying "no devices"
+  // there would be a statement about the setting, not about the network — and
+  // it would never stop being shown.
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard({ clientsSeen24h: 0, clientAttribution: false }));
+  assert.strictEqual(out, '');
+});
+
+test('over an SSH tunnel it does not claim loopback is the DNS address', () => {
+  for (const host of ['127.0.0.1', 'localhost']) {
+    const out = withHostname(host, () =>
+      firstClientCard({ clientsSeen24h: 0, clientAttribution: true }));
+
+    assert.doesNotMatch(out, /nslookup example\.com 127\.0\.0\.1/,
+      'handing a client 127.0.0.1 as its DNS server would be actively wrong');
+    assert.doesNotMatch(out, /nslookup example\.com localhost/);
+    assert.match(out, /your-server-ip|LAN address/);
+  }
+});
+
+test('the card tolerates a missing overview', () => {
+  assert.strictEqual(withHostname('192.168.1.75', () => firstClientCard(null)), '');
+  assert.strictEqual(withHostname('192.168.1.75', () => firstClientCard(undefined)), '');
 });
