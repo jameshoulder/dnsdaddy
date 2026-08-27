@@ -515,8 +515,9 @@ sudo dnsdaddy doctor                              # native install
 docker compose exec dnsdaddy dnsdaddy doctor      # docker
 ```
 
-It reads your configuration, reads the database, and sends real DNS queries at
-your own listeners. It changes nothing, and it exits non-zero if any check
+It reads your configuration, reads the database, and sends real DNS queries — at
+your own listeners and through each configured upstream. It changes nothing (the
+database is opened strictly read-only), and it exits non-zero if any check
 fails, so it can gate a deployment script. `--json` emits the same findings for
 a monitoring system.
 
@@ -533,7 +534,7 @@ What it tells apart, which `dig` alone cannot:
 | Clients get `REFUSED` | that the resolver is **working and declining this source address**, and which ranges it will accept |
 | A network exists but gets nothing | that the network is **not in `dns.allowed_client_cidrs`**, with both values quoted |
 | Everything resolves, nothing blocked | that the **threat index is empty**, or is enforcing last-known-good data that is stale |
-| Names fail intermittently | which **upstreams** answered and which did not |
+| Names fail intermittently | which **upstreams** resolved a real test query and which did not — and, for one that answered `REFUSED` or `SERVFAIL`, that the transport is fine and the problem is the resolver itself |
 
 ### The most common first-install failure
 
