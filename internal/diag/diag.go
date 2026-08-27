@@ -150,8 +150,19 @@ func ClientAccess(in ClientAccessInput) []Check {
 }
 
 // networkReachability compares each configured network against the ACL.
+//
+// An empty ACL is not a narrow ACL, and the difference matters: Handler.
+// clientAllowed returns true the moment len(allowedClients) is zero, whatever
+// the source address. Comparing networks against an empty prefix list would
+// therefore report every one of them as REFUSED when every one of them is in
+// fact permitted — a false failure on two supported configurations, a
+// deliberate public resolver and loopback-only listeners, and one that made
+// `dnsdaddy doctor` exit non-zero on a working deployment.
+//
+// Whether an empty ACL is *wise* is a separate question, and the check above
+// answers it.
 func networkReachability(in ClientAccessInput, allowed []netip.Prefix) []Check {
-	if len(in.Networks) == 0 {
+	if len(in.Networks) == 0 || len(allowed) == 0 {
 		return nil
 	}
 

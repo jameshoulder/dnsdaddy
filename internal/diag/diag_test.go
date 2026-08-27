@@ -217,3 +217,55 @@ func TestPassingChecksCarryTheirCaveatInTheSummary(t *testing.T) {
 		t.Errorf("summary lost the condition the verdict depends on: %q", c.Summary)
 	}
 }
+
+// An empty ACL refuses nothing: Handler.clientAllowed returns true as soon as
+// len(allowedClients) == 0, whatever the source address. Comparing configured
+// networks against an empty prefix list therefore reports every one of them as
+// REFUSED when in fact every one of them is permitted.
+//
+// That made the diagnostics endpoint show a false failure and `dnsdaddy doctor`
+// exit non-zero on a supported configuration — a deliberate public resolver.
+func TestClientAccessDoesNotReportFailuresWhenTheACLIsEmpty(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		public bool
+	}{
+		{"public resolver", true},
+		// The same arithmetic applies without the opt-in: config validation
+		// permits an empty ACL when the listeners are loopback-only, and there
+		// too nothing is refused on its source address.
+		{"loopback-only listeners", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checks := ClientAccess(ClientAccessInput{
+				AllowedCIDRs:        nil,
+				AllowPublicResolver: tt.public,
+				Networks: []Network{
+					{Name: "Home", PolicyName: "Standard", Enabled: true, CIDRs: []string{"192.168.1.0/24"}},
+					{Name: "Branch", PolicyName: "Strict", Enabled: true, CIDRs: []string{"203.0.113.0/24"}},
+				},
+			})
+
+			for _, c := range checks {
+				if c.Status == StatusFail {
+					t.Errorf("reported a failure with no ACL configured, so nothing is refused: %s", c.Summary)
+				}
+			}
+			if got := Worst(checks); got == StatusFail {
+				t.Errorf("Worst = %s; doctor would exit non-zero on a working configuration", got)
+			}
+		})
+	}
+}
+
+// Removing the reachability comparison must not remove it for a real ACL: the
+// check that started this whole audit has to keep working.
+func TestClientAccessStillReportsUnreachableNetworksWithAnACL(t *testing.T) {
+	checks := ClientAccess(ClientAccessInput{
+		AllowedCIDRs: []string{"127.0.0.0/8"},
+		Networks:     []Network{{Name: "Home", Enabled: true, CIDRs: []string{"192.168.1.0/24"}}},
+	})
+	if Worst(checks) != StatusFail {
+		t.Fatalf("Worst = %s, want fail", Worst(checks))
+	}
+}
