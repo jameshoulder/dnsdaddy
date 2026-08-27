@@ -1,7 +1,8 @@
 # DNS Daddy — protective DNS on a small VPS.
 #
-#   cp .env.example .env     # set DNSDADDY_ALLOWED_CLIENT_CIDRS — see below
+#   cp .env.example .env     # a LAN install needs no edits
 #   docker compose up -d
+#   docker compose exec dnsdaddy dnsdaddy doctor
 #
 # The dashboard is published on 127.0.0.1:8080 only. It is NOT reachable from
 # another machine by design: put Caddy in front for HTTPS (deploy/Caddyfile.example)
@@ -54,18 +55,26 @@ services:
 
     environment:
       # ---- Who may use this resolver -------------------------------------
-      # REQUIRED on a public VPS. Queries from anything not listed here are
-      # REFUSED before any upstream work.
+      # Queries from anything not listed here are REFUSED before any upstream
+      # work happens.
       #
-      # The built-in default covers loopback and the private ranges only, which
-      # is right for a resolver on a LAN but WRONG for a VPS: your clients
-      # arrive from public addresses, so leaving this unset means every real
-      # query is refused and DNS appears dead.
+      # The substituted default below is the binary's own: loopback, the RFC
+      # 1918 private ranges, carrier-grade NAT, link-local, the IPv6
+      # equivalents, and the Docker bridge. A LAN install needs no change, and
+      # a Docker install must not serve a narrower set than a native one —
+      # config.DefaultAllowedClientCIDRs is the single source of truth, and
+      # config.TestComposeClientACLDefaultMatchesBuiltIn keeps this line
+      # honest.
       #
-      # Set it to the same source addresses your firewall allows on port 53.
-      # Include Docker's bridge gateway (172.16.0.0/12) so the published port
-      # keeps working, and loopback for health checks.
-      DNSDADDY_ALLOWED_CLIENT_CIDRS: "${DNSDADDY_ALLOWED_CLIENT_CIDRS:-127.0.0.0/8,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}"
+      # On a public VPS you DO have to set DNSDADDY_ALLOWED_CLIENT_CIDRS in
+      # .env: your clients arrive from public addresses, which none of these
+      # cover, so every real query is refused. Setting it replaces this list
+      # rather than adding to it — keep 127.0.0.0/8 for health checks and
+      # 172.16.0.0/12 for the published port.
+      #
+      # `dnsdaddy doctor` reports whether the networks in your dashboard can
+      # actually reach the resolver.
+      DNSDADDY_ALLOWED_CLIENT_CIDRS: "${DNSDADDY_ALLOWED_CLIENT_CIDRS:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,::1/128,fc00::/7,fe80::/10}"
 
       # Upstreams are DNS-over-TLS by default: queries DNS Daddy forwards are
       # encrypted, so the ISP cannot read or tamper with them.
