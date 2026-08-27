@@ -1,0 +1,368 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+)
+
+func mustCreateNetwork(t *testing.T, st *Store, in NetworkInput) Network {
+	t.Helper()
+	n, err := st.CreateNetwork(context.Background(), in)
+	if err != nil {
+		t.Fatalf("CreateNetwork: %v", err)
+	}
+	return n
+}
+
+// A private range needs no ceremony: tick the box, and it is permitted.
+func TestPrivateNetworkIsPermittedWithoutAcknowledgement(t *testing.T) {
+	st := newTestStore(t)
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("Home"),
+		CIDRs:         ptr([]string{"192.168.1.0/24"}),
+		AllowResolver: ptr(true),
+	})
+	if !n.AllowResolver {
+		t.Fatal("allowResolver did not persist")
+	}
+	if len(n.AcknowledgedPublicCIDRs) != 0 {
+		t.Errorf("a private range was recorded as acknowledged: %v", n.AcknowledgedPublicCIDRs)
+	}
+}
+
+// The affirmation required by a public address is a real gate, not a warning
+// the caller can ignore: without it nothing is permitted at all.
+func TestPublicRangeRequiresAcknowledgement(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := st.CreateNetwork(ctx, NetworkInput{
+		Name:          ptr("VPS client"),
+		CIDRs:         ptr([]string{"203.0.113.25/32"}),
+		AllowResolver: ptr(true),
+	})
+	var needAck *ErrPublicAckRequired
+	if !errors.As(err, &needAck) {
+		t.Fatalf("err = %v, want ErrPublicAckRequired", err)
+	}
+	if got := needAck.PublicCIDRs(); len(got) != 1 || got[0] != "203.0.113.25/32" {
+		t.Errorf("PublicCIDRs = %v, want the offending range named", got)
+	}
+	// The operator has to be told what they are agreeing to, and that DNS
+	// Daddy is not going to configure their firewall for them.
+	for _, want := range []string{"port 53", "firewall"} {
+		if !strings.Contains(needAck.Error(), want) {
+			t.Errorf("error does not mention %q: %s", want, needAck.Error())
+		}
+	}
+
+	// Nothing was written.
+	all, err := st.ListNetworks(ctx)
+	if err != nil {
+		t.Fatalf("ListNetworks: %v", err)
+	}
+	for _, n := range all {
+		if n.Name == "VPS client" {
+			t.Fatal("the refused network was created anyway")
+		}
+	}
+}
+
+func TestPublicRangeIsPermittedOnceAcknowledged(t *testing.T) {
+	st := newTestStore(t)
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("VPS client"),
+		CIDRs:         ptr([]string{"203.0.113.25/32"}),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+	if !n.AllowResolver {
+		t.Fatal("allowResolver did not persist")
+	}
+	if len(n.AcknowledgedPublicCIDRs) != 1 || n.AcknowledgedPublicCIDRs[0] != "203.0.113.25/32" {
+		t.Errorf("acknowledged = %v, want the public range recorded", n.AcknowledgedPublicCIDRs)
+	}
+}
+
+// A public range recorded while the network was unpermitted still needs the
+// affirmation when the permission is granted: it is the permission that
+// exposes the resolver, not the row in the CIDR table.
+func TestPermittingAnExistingPublicRangeStillNeedsAcknowledgement(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:  ptr("VPS client"),
+		CIDRs: ptr([]string{"203.0.113.25/32"}),
+	})
+
+	_, err := st.UpdateNetwork(ctx, n.ID, NetworkInput{AllowResolver: ptr(true)})
+	var needAck *ErrPublicAckRequired
+	if !errors.As(err, &needAck) {
+		t.Fatalf("err = %v, want ErrPublicAckRequired — flipping the permission is what exposes it", err)
+	}
+}
+
+// The mirror image: adding a public range to a network that is *already*
+// permitted must be caught too. Validating the request in isolation rather
+// than the merged result is how either half of a two-step change slips past.
+func TestAddingAPublicRangeToAPermittedNetworkNeedsAcknowledgement(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("Home"),
+		CIDRs:         ptr([]string{"192.168.1.0/24"}),
+		AllowResolver: ptr(true),
+	})
+
+	_, err := st.UpdateNetwork(ctx, n.ID, NetworkInput{
+		CIDRs: ptr([]string{"192.168.1.0/24", "203.0.113.25/32"}),
+	})
+	var needAck *ErrPublicAckRequired
+	if !errors.As(err, &needAck) {
+		t.Fatalf("err = %v, want ErrPublicAckRequired", err)
+	}
+}
+
+// Having acknowledged a range once, an unrelated edit must not ask again —
+// otherwise renaming a network becomes a security prompt and the prompt stops
+// meaning anything.
+func TestAcknowledgementIsRememberedAcrossUnrelatedEdits(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("VPS client"),
+		CIDRs:         ptr([]string{"203.0.113.25/32"}),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+
+	renamed, err := st.UpdateNetwork(ctx, n.ID, NetworkInput{Name: ptr("Head office")})
+	if err != nil {
+		t.Fatalf("renaming a network with an acknowledged public range failed: %v", err)
+	}
+	if !renamed.AllowResolver {
+		t.Error("renaming revoked the permission")
+	}
+	if len(renamed.AcknowledgedPublicCIDRs) != 1 {
+		t.Errorf("acknowledged = %v, want the affirmation remembered", renamed.AcknowledgedPublicCIDRs)
+	}
+}
+
+// But a *different* public range is a different decision.
+func TestANewPublicRangeNeedsItsOwnAcknowledgement(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("VPS client"),
+		CIDRs:         ptr([]string{"203.0.113.25/32"}),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+
+	_, err := st.UpdateNetwork(ctx, n.ID, NetworkInput{
+		CIDRs: ptr([]string{"203.0.113.25/32", "198.51.100.10/32"}),
+	})
+	var needAck *ErrPublicAckRequired
+	if !errors.As(err, &needAck) {
+		t.Fatalf("err = %v, want ErrPublicAckRequired for the new range", err)
+	}
+	if got := needAck.PublicCIDRs(); len(got) != 1 || got[0] != "198.51.100.10/32" {
+		t.Errorf("PublicCIDRs = %v, want only the range that was not acknowledged", got)
+	}
+}
+
+// The open-resolver guard. A default route must not be permittable from the
+// dashboard at any level of confirmation — dns.allow_public_resolver is the
+// authority for that, and it lives in configuration on purpose.
+func TestDefaultRouteCannotBePermitted(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	for _, cidr := range []string{"0.0.0.0/0", "::/0"} {
+		t.Run(cidr, func(t *testing.T) {
+			_, err := st.CreateNetwork(ctx, NetworkInput{
+				Name:          ptr("Everyone"),
+				CIDRs:         ptr([]string{cidr}),
+				AllowResolver: ptr(true),
+				// Even with the acknowledgement, which is the point: this is
+				// not a range you can affirm your way into.
+				PublicAck: ptr(true),
+			})
+			if err == nil {
+				t.Fatal("a default route was accepted as a resolver permission")
+			}
+			var needAck *ErrPublicAckRequired
+			if errors.As(err, &needAck) {
+				t.Fatal("a default route was treated as merely needing acknowledgement")
+			}
+			if !strings.Contains(err.Error(), "allow_public_resolver") {
+				t.Errorf("the error does not point at the setting that does permit this: %v", err)
+			}
+		})
+	}
+}
+
+// A default route remains a legal *policy* range. "Everything already allowed
+// in gets this policy" is a reasonable thing to express, and rejecting it
+// would break configurations that predate resolver access entirely.
+func TestDefaultRouteIsStillAllowedForPolicyAttribution(t *testing.T) {
+	st := newTestStore(t)
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:  ptr("Catch-all"),
+		CIDRs: ptr([]string{"0.0.0.0/0"}),
+	})
+	if n.AllowResolver {
+		t.Fatal("a network created without a permission came back permitted")
+	}
+	if len(n.CIDRs) != 1 || n.CIDRs[0] != "0.0.0.0/0" {
+		t.Errorf("cidrs = %v, want the default route stored for policy attribution", n.CIDRs)
+	}
+}
+
+// A PATCH that mentions only one field must leave the rest alone. Silently
+// revoking access because a client did not resend the field would be the same
+// class of surprise this work exists to remove.
+func TestPartialUpdatePreservesResolverAccess(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("Home"),
+		CIDRs:         ptr([]string{"192.168.1.0/24"}),
+		AllowResolver: ptr(true),
+	})
+
+	updated, err := st.UpdateNetwork(ctx, n.ID, NetworkInput{Location: ptr("Leeds")})
+	if err != nil {
+		t.Fatalf("UpdateNetwork: %v", err)
+	}
+	if !updated.AllowResolver {
+		t.Error("an unrelated update revoked resolver access")
+	}
+}
+
+func TestRevokingResolverAccessPersists(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("Home"),
+		CIDRs:         ptr([]string{"192.168.1.0/24"}),
+		AllowResolver: ptr(true),
+	})
+	updated, err := st.UpdateNetwork(ctx, n.ID, NetworkInput{AllowResolver: ptr(false)})
+	if err != nil {
+		t.Fatalf("UpdateNetwork: %v", err)
+	}
+	if updated.AllowResolver {
+		t.Fatal("revoking access did not persist")
+	}
+
+	reread, err := st.GetNetwork(ctx, n.ID)
+	if err != nil {
+		t.Fatalf("GetNetwork: %v", err)
+	}
+	if reread.AllowResolver {
+		t.Error("the revocation was not stored")
+	}
+}
+
+// State has to survive a restart, which for SQLite means closing and
+// reopening the file rather than trusting an in-memory copy.
+func TestResolverAccessSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/test.db"
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("VPS client"),
+		CIDRs:         ptr([]string{"203.0.113.25/32"}),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.GetNetwork(context.Background(), n.ID)
+	if err != nil {
+		t.Fatalf("GetNetwork: %v", err)
+	}
+	if !got.AllowResolver {
+		t.Error("resolver access did not survive a restart")
+	}
+	if len(got.AcknowledgedPublicCIDRs) != 1 {
+		t.Errorf("acknowledged = %v, want the affirmation to survive a restart", got.AcknowledgedPublicCIDRs)
+	}
+}
+
+// The migration has to leave existing deployments exactly as they were: every
+// network that predates the column is unpermitted, so the bootstrap ACL alone
+// keeps admitting whoever it admitted before.
+func TestSeededNetworkIsNotPermittedByDefault(t *testing.T) {
+	st := newTestStore(t)
+
+	networks, err := st.ListNetworks(context.Background())
+	if err != nil {
+		t.Fatalf("ListNetworks: %v", err)
+	}
+	if len(networks) == 0 {
+		t.Fatal("expected the seeded catch-all network")
+	}
+	for _, n := range networks {
+		if n.AllowResolver {
+			t.Errorf("network %q is permitted to resolve out of the box; an upgrade would widen "+
+				"the ACL without anyone asking", n.Name)
+		}
+	}
+}
+
+// CIDRs are canonicalised by the same function that classifies them, so an
+// acknowledgement can never be recorded against a string the ACL will not
+// recognise.
+func TestCIDRCanonicalisationMatchesTheAdmissionCheck(t *testing.T) {
+	st := newTestStore(t)
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:          ptr("Odd input"),
+		CIDRs:         ptr([]string{"10.1.2.3/8", "192.168.1.7", " 172.16.0.0/12 "}),
+		AllowResolver: ptr(true),
+	})
+	want := map[string]bool{"10.0.0.0/8": true, "192.168.1.7/32": true, "172.16.0.0/12": true}
+	if len(n.CIDRs) != len(want) {
+		t.Fatalf("cidrs = %v, want %d canonical entries", n.CIDRs, len(want))
+	}
+	for _, c := range n.CIDRs {
+		if !want[c] {
+			t.Errorf("unexpected stored form %q", c)
+		}
+	}
+}
+
+func TestInvalidCIDRIsRejected(t *testing.T) {
+	st := newTestStore(t)
+	_, err := st.CreateNetwork(context.Background(), NetworkInput{
+		Name:  ptr("Bad"),
+		CIDRs: ptr([]string{"192.168.1.0/33"}),
+	})
+	if err == nil {
+		t.Fatal("an invalid CIDR was accepted")
+	}
+}

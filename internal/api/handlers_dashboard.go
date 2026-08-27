@@ -114,6 +114,19 @@ type Overview struct {
 	// deliberately turned off client logging that no device is using their
 	// resolver, forever.
 	ClientAttribution bool `json:"clientAttribution"`
+
+	// PermittedNetworks is how many configured networks are allowed to query
+	// the resolver. Zero on a VPS install is the exact state that made DNS
+	// Daddy look broken: everything green, every client REFUSED. The
+	// onboarding card reads this so it can say "nothing is permitted yet"
+	// rather than "point a device at it and see", which is advice that cannot
+	// work.
+	PermittedNetworks int `json:"permittedNetworks"`
+
+	// UnrestrictedAccess reports that no client ACL is configured, so nothing
+	// is refused on its source address. PermittedNetworks is not meaningful
+	// when this is true.
+	UnrestrictedAccess bool `json:"unrestrictedAccess"`
 }
 
 func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -183,19 +196,21 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, Overview{
-		ProtectionStatus:  protection,
-		ResolverStatus:    resolverStatus,
-		Queries24h:        totals.Queries,
-		ThreatsBlocked24h: totals.Blocked,
-		BlockRate24h:      round2(blockRate),
-		ProtectedNetworks: len(networks),
-		ActivePolicies:    len(policies),
-		BlocklistDomains:  blocklistSize,
-		LastFeedRefresh:   lastRefresh,
-		UptimeSeconds:     int64(time.Since(a.StartedAt).Seconds()),
-		Version:           version.String(),
-		HasSeenClients:    seenClients,
-		ClientAttribution: attribution,
+		ProtectionStatus:   protection,
+		ResolverStatus:     resolverStatus,
+		Queries24h:         totals.Queries,
+		ThreatsBlocked24h:  totals.Blocked,
+		BlockRate24h:       round2(blockRate),
+		ProtectedNetworks:  len(networks),
+		ActivePolicies:     len(policies),
+		PermittedNetworks:  permittedNetworks(networks),
+		BlocklistDomains:   blocklistSize,
+		LastFeedRefresh:    lastRefresh,
+		UptimeSeconds:      int64(time.Since(a.StartedAt).Seconds()),
+		Version:            version.String(),
+		HasSeenClients:     seenClients,
+		ClientAttribution:  attribution,
+		UnrestrictedAccess: a.ClientACL.Current().Unrestricted(),
 	})
 }
 
@@ -444,4 +459,18 @@ func intParam(r *http.Request, name string, def int) int {
 
 func round2(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
+}
+
+// permittedNetworks counts the networks allowed to query the resolver.
+//
+// Disabled networks do not count: "disabled" that still permits traffic would
+// be a worse lie than no switch at all.
+func permittedNetworks(networks []store.Network) int {
+	n := 0
+	for _, net := range networks {
+		if net.Enabled && net.AllowResolver {
+			n++
+		}
+	}
+	return n
 }

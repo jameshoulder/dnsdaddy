@@ -719,3 +719,34 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   background: rgb(255 255 255 / 0.04);
   overflow-x: auto;
 }
+
+/* The ordered steps shown when nothing is permitted yet. Numbered because the
+   order matters: testing before the permission exists fails for a reason the
+   test cannot report. */
+.first-client-steps { margin: 0.5rem 0 0.6rem 1.1rem; padding: 0; }
+.first-client-steps li { margin-bottom: 0.3rem; }
+.first-client-steps code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+}
+
+/* ---------- client access ----------------------------------------------- */
+
+/*
+ * The policy/access distinction, stated beside the control rather than in the
+ * documentation. It is the single most confusing thing about configuring this
+ * product, and burying it in docs/ is what made a healthy resolver look broken.
+ */
+.access-explainer {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.access-explainer p { margin: 0 0 6px; }
+.access-explainer p:last-child { margin-bottom: 0; }
+.access-explainer strong { color: var(--foreground); }
+
+.access-toggle { padding-top: 10px; }
+.access-cell { padding: 0; gap: 7px; align-items: center; }

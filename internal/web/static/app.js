@@ -115,9 +115,14 @@ function duration(seconds) {
 /* ---------- API --------------------------------------------------------- */
 
 class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, body) {
     super(message);
     this.status = status;
+    // The parsed response, so a caller can act on structured detail rather
+    // than parsing prose. The public-address confirmation needs the exact
+    // ranges the server objected to, and inventing them here would mean two
+    // implementations of a security rule that must have one.
+    this.body = body || null;
   }
 }
 
@@ -144,7 +149,7 @@ async function api(path, options = {}) {
     }
   }
   if (!res.ok) {
-    throw new ApiError(res.status, (body && body.error) || `Request failed (${res.status})`);
+    throw new ApiError(res.status, (body && body.error) || `Request failed (${res.status})`, body);
   }
   return body;
 }
@@ -350,9 +355,9 @@ function diagnosticsBanner(diagnostics) {
  *
  * A fresh install looks identical whether it is working perfectly and nothing
  * has been pointed at it, or it is refusing every client — the charts are
- * empty either way. This says which, and gives the one command that settles
- * it. It disappears the moment a real client appears; nothing here invents
- * activity that has not happened.
+ * empty either way. This says which, and gives the next action rather than a
+ * command that cannot succeed. It disappears the moment a real client appears;
+ * nothing here invents activity that has not happened.
  */
 function firstClientCard(overview) {
   if (typeof window === 'undefined') return '';
@@ -370,14 +375,41 @@ function firstClientCard(overview) {
   const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
   const target = isLoopback ? '<your-server-ip>' : host;
 
+  // Nothing permitted and an ACL in force means every client will be REFUSED.
+  // Telling somebody in that state to "try nslookup" sends them to debug a
+  // network fault that does not exist.
+  const nothingPermitted = !overview.unrestrictedAccess && !overview.permittedNetworks;
+
+  if (nothingPermitted) {
+    return html`
+      <div class="card first-client">
+        <div class="first-client-title">No networks are permitted to use this resolver yet</div>
+        <p class="muted small">
+          DNS Daddy is running, and will answer REFUSED to every client until
+          you say which addresses may use it. Testing before that step will
+          fail, and the failure will not tell you why.
+        </p>
+        <ol class="small first-client-steps">
+          <li>Open <a href="#/networks">Networks</a> and add your client or network.</li>
+          <li>Tick <strong>Allow this network to use DNS Daddy</strong>.</li>
+          <li>Point the device at <code>${target}</code> for DNS.</li>
+          <li>Test it: <code>nslookup example.com ${target}</code></li>
+        </ol>
+        <p class="muted small">
+          It takes effect immediately — there is nothing to restart and no file
+          to edit.
+        </p>
+      </div>`;
+  }
+
   return html`
     <div class="card first-client">
       <div class="first-client-title">No devices have used this resolver yet</div>
       <p class="muted small">
-        DNS Daddy is running. Nothing on your network has sent it a query, which
-        is expected until you point something at it.
+        DNS Daddy is running and your networks are permitted to use it. Nothing
+        has sent it a query, which is expected until you point something at it.
       </p>
-      <p class="small">Try this from another machine:</p>
+      <p class="small">Try this from an allowed client:</p>
       <pre class="first-client-cmd">nslookup example.com ${target}</pre>
       <p class="muted small">
         ${raw(isLoopback
@@ -1423,6 +1455,131 @@ pages.detections = {
   },
 };
 
+/**
+ * The one sentence the product has to get across on this page.
+ *
+ * A Network has always decided what happens to a client's queries. Whether
+ * DNS Daddy accepts them at all was a separate setting in an environment
+ * variable, and the gap between the two is what made a correctly configured
+ * resolver look broken: the network was listed, and every client was REFUSED.
+ * Both are set here now, and the distinction is stated where the choice is
+ * made rather than left in the documentation.
+ */
+function accessExplainer() {
+  return html`
+    <div class="access-explainer">
+      <p class="small">
+        <strong>Policy</strong> decides what DNS Daddy does with this network's
+        queries — what it blocks, what it logs.
+      </p>
+      <p class="small">
+        <strong>Access</strong> decides whether DNS Daddy accepts queries from
+        this network at all. Without it, clients here are answered
+        <code>REFUSED</code>.
+      </p>
+    </div>`;
+}
+
+/** A short account of who may currently use the resolver, and from where. */
+function clientAccessSummary(access) {
+  if (!access) return '';
+
+  if (access.unrestricted) {
+    return html`
+      <div class="card section">
+        <div class="card-head"><div><h2>Who may use this resolver</h2></div></div>
+        <p class="small">
+          ${access.allowPublicResolver
+            ? 'Every address on the internet. dns.allow_public_resolver is set and no client ACL is configured.'
+            : 'Every address. No client ACL is configured, which DNS Daddy only starts with when the DNS listeners are loopback-only.'}
+        </p>
+        <p class="muted small">
+          Permissions set below are recorded and take effect if a client ACL is
+          ever configured. While nothing is configured, nothing is refused.
+        </p>
+      </div>`;
+  }
+
+  const bootstrap = access.bootstrapCidrs || [];
+  const effective = access.effectiveCidrs || [];
+  const fromDashboard = effective.filter((c) => !bootstrap.includes(c));
+
+  return html`
+    <div class="card section">
+      <div class="card-head">
+        <div>
+          <h2>Who may use this resolver</h2>
+          <p>Everything else is answered REFUSED before any lookup happens.</p>
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div>
+          <div class="muted small">From configuration</div>
+          <div class="mono small">${bootstrap.length ? bootstrap.join(', ') : '—'}</div>
+          <p class="muted small">
+            DNSDADDY_ALLOWED_CLIENT_CIDRS, or dns.allowed_client_cidrs. Changing
+            it needs a restart, so it is the right place for a headless or
+            automated deployment and the wrong place for day-to-day admin.
+          </p>
+        </div>
+        <div>
+          <div class="muted small">From the networks below</div>
+          <div class="mono small">${fromDashboard.length ? fromDashboard.join(', ') : '—'}</div>
+          <p class="muted small">
+            Added and removed here, in force on the next query. No restart.
+          </p>
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * Confirms a permission that would accept DNS from the public internet.
+ *
+ * Driven entirely by the server's own refusal: the ranges named are the ones
+ * it objected to. Classifying addresses here as well would be a second
+ * implementation of a security rule, free to drift from the one that is
+ * actually enforced.
+ */
+function confirmPublicAccess(cidrs) {
+  const list = (cidrs || []).join(', ');
+  return confirm(
+    `${list} is a public internet address.\n\n` +
+      'Allowing it means DNS Daddy will accept DNS requests from that source.\n\n' +
+      'Make sure your VPS or cloud firewall restricts TCP and UDP port 53 to ' +
+      'addresses you trust. DNS Daddy will not open or close your provider ' +
+      'firewall, and cannot see it.\n\n' +
+      'Allow this network to use DNS Daddy?'
+  );
+}
+
+/**
+ * Sends a network write, and retries once with the acknowledgement if the
+ * server asks for one and the operator agrees.
+ */
+async function sendNetwork(method, path, payload) {
+  try {
+    return await apiSend(method, path, payload);
+  } catch (err) {
+    const needsAck = err instanceof ApiError && err.body && err.body.publicAckRequired;
+    if (!needsAck) throw err;
+    if (!confirmPublicAccess(err.body.publicCidrs)) return null;
+    return apiSend(method, path, { ...payload, publicAck: true });
+  }
+}
+
+function accessBadge(n) {
+  if (n.allowResolver) {
+    const tone = (n.publicCidrs || []).length ? 'warn' : 'ok';
+    const label = (n.publicCidrs || []).length ? 'Allowed (public)' : 'Allowed';
+    return html`<span class="badge ${tone}">${label}</span>`;
+  }
+  if (n.resolvesVia) {
+    return html`<span class="badge warn" title="Covered by ${n.resolvesVia}">Via wider range</span>`;
+  }
+  return html`<span class="badge bad">Refused</span>`;
+}
+
 pages.networks = {
   title: 'Networks',
   subtitle: 'Sites, VLANs, and roaming profiles.',
@@ -1433,6 +1590,8 @@ pages.networks = {
       .join('');
 
     return html`
+      ${raw(clientAccessSummary(networks.clientAccess))}
+
       <div class="card section">
         <div class="card-head">
           <div>
@@ -1449,8 +1608,15 @@ pages.networks = {
           <label class="field">
             <span>Client networks (CIDR, comma separated)</span>
             <input name="cidrs" placeholder="10.0.10.0/24, 192.168.4.0/24">
-            <span class="hint muted">Queries arriving from these addresses get this network's policy. A single IP works too.</span>
+            <span class="hint muted">A single IP works too — 203.0.113.25 means just that machine.</span>
           </label>
+          <label class="checkline access-toggle">
+            <input type="checkbox" name="allowResolver" checked>
+            <span><strong>Allow this network to use DNS Daddy</strong>
+              <span class="cat-desc">Permits DNS queries from these addresses. Leave it off and
+                clients here are answered REFUSED, whatever policy they have.</span></span>
+          </label>
+          ${raw(accessExplainer())}
           <button class="btn btn-primary" type="submit">Add network</button>
         </form>
       </div>
@@ -1460,7 +1626,7 @@ pages.networks = {
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Network</th><th>Client ranges</th><th>Policy</th>
+              <tr><th>Network</th><th>Client ranges</th><th>Policy</th><th>Access</th>
                   <th class="num">Queries 24h</th><th class="num">Blocked</th><th>Status</th><th></th></tr>
             </thead>
             <tbody>
@@ -1468,10 +1634,26 @@ pages.networks = {
                 networks.networks
                   .map((n) => {
                     const policy = policies.policies.find((p) => p.id === n.policyId);
+                    const publicRanges = n.publicCidrs || [];
                     return html`<tr>
                       <td><strong>${n.name}</strong><div class="muted small">${n.location || '—'}</div></td>
-                      <td class="mono">${n.cidrs.length ? n.cidrs.join(', ') : 'catch-all'}</td>
+                      <td class="mono">${n.cidrs.length ? n.cidrs.join(', ') : 'catch-all'}
+                        ${raw(publicRanges.length
+                          ? html`<div class="muted small">public: ${publicRanges.join(', ')}</div>`
+                          : '')}
+                      </td>
                       <td>${policy ? policy.name : n.policyId}</td>
+                      <td>
+                        <label class="checkline access-cell" title="Allow this network to use DNS Daddy">
+                          <input type="checkbox" data-access="${n.id}" data-name="${n.name}"
+                                 ${raw(n.allowResolver ? 'checked' : '')}>
+                          <span>${raw(accessBadge(n))}</span>
+                        </label>
+                        ${raw(!n.allowResolver && n.resolvesVia
+                          ? html`<div class="muted small">Reachable anyway, inside ${n.resolvesVia}.
+                                 Access has no deny rules.</div>`
+                          : '')}
+                      </td>
                       <td class="num">${num(n.queries24h)}</td>
                       <td class="num">${num(n.blocked24h)}</td>
                       <td>${raw(statusBadge(n.status))}</td>
@@ -1496,18 +1678,50 @@ pages.networks = {
         .map((s) => s.trim())
         .filter(Boolean);
       try {
-        await apiSend('POST', '/networks', {
+        const created = await sendNetwork('POST', '/networks', {
           name: form.get('name'),
           location: form.get('location') || '',
           policyId: form.get('policyId'),
           cidrs,
+          allowResolver: form.get('allowResolver') === 'on',
         });
+        if (!created) {
+          toast('Network not added — the public address was not confirmed', 'error');
+          return;
+        }
+        if (created.warning) toast(created.warning, 'error');
         toast('Network added');
         router.reload();
       } catch (err) {
         reportError(err);
       }
     });
+
+    $$('[data-access]').forEach((box) =>
+      box.addEventListener('change', async () => {
+        const wanted = box.checked;
+        try {
+          const updated = await sendNetwork('PATCH', `/networks/${box.dataset.access}`, {
+            allowResolver: wanted,
+          });
+          if (!updated) {
+            // The operator declined the public-address confirmation. Put the
+            // control back where it was rather than leaving it showing a
+            // permission that was never granted.
+            box.checked = !wanted;
+            return;
+          }
+          if (updated.warning) toast(updated.warning, 'error');
+          toast(wanted
+            ? `"${box.dataset.name}" may now use DNS Daddy`
+            : `"${box.dataset.name}" can no longer use DNS Daddy`);
+          router.reload();
+        } catch (err) {
+          box.checked = !wanted;
+          reportError(err);
+        }
+      })
+    );
 
     $$('[data-delete-network]').forEach((btn) =>
       btn.addEventListener('click', async () => {
