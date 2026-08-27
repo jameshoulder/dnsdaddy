@@ -364,7 +364,7 @@ func reportClientAccess(ctx context.Context, st *store.Store, cfg config.Config,
 		AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
 		Networks:            diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
 		AllowPublicResolver: cfg.DNS.AllowPublicResolver,
-		RefusedQueries:      -1, // nothing has been served yet
+		RefusedQueries:      nil, // nothing has been served yet
 	})
 
 	for _, c := range diag.Failures(checks) {

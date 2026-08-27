@@ -218,7 +218,7 @@ func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config)
 		return diag.ClientAccess(diag.ClientAccessInput{
 			AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
 			AllowPublicResolver: cfg.DNS.AllowPublicResolver,
-			RefusedQueries:      -1,
+			RefusedQueries:      nil,
 		})
 	}
 
@@ -237,7 +237,7 @@ func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config)
 		AllowPublicResolver: cfg.DNS.AllowPublicResolver,
 		// This process has served nothing; the live counter is on the running
 		// daemon and reaches the operator through /metrics and the dashboard.
-		RefusedQueries: -1,
+		RefusedQueries: nil,
 	})
 }
 

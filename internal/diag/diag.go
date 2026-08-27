@@ -66,8 +66,11 @@ type ClientAccessInput struct {
 	// AllowPublicResolver is dns.allow_public_resolver.
 	AllowPublicResolver bool
 	// RefusedQueries is how many queries the ACL has rejected since start.
-	// Negative means "not measured" (the caller has no running handler).
-	RefusedQueries int64
+	// Nil means not measured — a caller with no running handler, such as a
+	// startup check or `dnsdaddy doctor` in its own process. A pointer rather
+	// than a sentinel so "none refused" and "never counted" stay distinct,
+	// and so the counter needs no signed conversion on the way in.
+	RefusedQueries *uint64
 }
 
 const sectionClientAccess = "CLIENT ACCESS"
@@ -130,12 +133,13 @@ func ClientAccess(in ClientAccessInput) []Check {
 
 	checks = append(checks, networkReachability(in, allowed)...)
 
-	if in.RefusedQueries > 0 {
+	if in.RefusedQueries != nil && *in.RefusedQueries > 0 {
+		n := *in.RefusedQueries
 		checks = append(checks, Check{
 			Section: sectionClientAccess,
 			Name:    "Queries refused by the client ACL",
 			Status:  StatusWarn,
-			Summary: fmt.Sprintf("%d quer%s been REFUSED because the source address is not in dns.allowed_client_cidrs.", in.RefusedQueries, plural(in.RefusedQueries, "y has", "ies have")),
+			Summary: fmt.Sprintf("%d quer%s been REFUSED because the source address is not in dns.allowed_client_cidrs.", n, plural(n, "y has", "ies have")),
 			Action: "If clients report that DNS is not working, this is why. The refused addresses are " +
 				"not recorded — an unauthorised source could otherwise fill the log — so compare the " +
 				"address your client actually has against the ranges above.",
@@ -315,7 +319,7 @@ func orNone(s string) string {
 	return s
 }
 
-func plural(n int64, one, many string) string {
+func plural(n uint64, one, many string) string {
 	if n == 1 {
 		return one
 	}

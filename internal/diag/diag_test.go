@@ -6,6 +6,8 @@ import (
 )
 
 // find returns the first check whose Name contains sub.
+func refusals(n uint64) *uint64 { return &n }
+
 func find(t *testing.T, checks []Check, sub string) Check {
 	t.Helper()
 	for _, c := range checks {
@@ -29,7 +31,7 @@ func TestClientAccessFailsWhenNetworkIsOutsideTheACL(t *testing.T) {
 			ID: "n_home", Name: "Home", PolicyName: "Standard",
 			Enabled: true, CIDRs: []string{"192.168.1.0/24"},
 		}},
-		RefusedQueries: -1,
+		RefusedQueries: nil,
 	})
 
 	c := find(t, checks, `Network "Home"`)
@@ -60,7 +62,7 @@ func TestClientAccessPassesWhenNetworkIsInsideTheACL(t *testing.T) {
 		Networks: []Network{{
 			Name: "Home", PolicyName: "Standard", Enabled: true, CIDRs: []string{"192.168.1.0/24"},
 		}},
-		RefusedQueries: -1,
+		RefusedQueries: nil,
 	})
 
 	if c := find(t, checks, `Network "Home"`); c.Status != StatusPass {
@@ -79,7 +81,7 @@ func TestClientAccessWarnsOnPartialCoverage(t *testing.T) {
 		Networks: []Network{{
 			Name: "Home", Enabled: true, CIDRs: []string{"192.168.0.0/16"},
 		}},
-		RefusedQueries: -1,
+		RefusedQueries: nil,
 	})
 
 	c := find(t, checks, `Network "Home"`)
@@ -100,7 +102,7 @@ func TestClientAccessIgnoresDisabledAndCatchAllNetworks(t *testing.T) {
 			{Name: "Retired", Enabled: false, CIDRs: []string{"192.168.1.0/24"}},
 			{Name: "Default", Enabled: true, CIDRs: nil},
 		},
-		RefusedQueries: -1,
+		RefusedQueries: nil,
 	})
 
 	for _, c := range checks {
@@ -115,8 +117,7 @@ func TestClientAccessIgnoresDisabledAndCatchAllNetworks(t *testing.T) {
 
 func TestClientAccessReportsAnUnparseableEntry(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs:   []string{"192.168.1.0/24", "192.168.2.0/33"},
-		RefusedQueries: -1,
+		AllowedCIDRs: []string{"192.168.1.0/24", "192.168.2.0/33"},
 	})
 
 	c := find(t, checks, "Client ACL parses")
@@ -132,7 +133,6 @@ func TestClientAccessWarnsAboutAnOpenResolver(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
 		AllowedCIDRs:        nil,
 		AllowPublicResolver: true,
-		RefusedQueries:      -1,
 	})
 
 	c := find(t, checks, "Client ACL configured")
@@ -150,7 +150,7 @@ func TestClientAccessWarnsAboutAnOpenResolver(t *testing.T) {
 func TestClientAccessReportsObservedRefusals(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
 		AllowedCIDRs:   []string{"10.0.0.0/8"},
-		RefusedQueries: 1240,
+		RefusedQueries: refusals(1240),
 	})
 
 	c := find(t, checks, "Queries refused")
@@ -161,7 +161,7 @@ func TestClientAccessReportsObservedRefusals(t *testing.T) {
 		t.Errorf("summary does not carry the count: %q", c.Summary)
 	}
 
-	quiet := ClientAccess(ClientAccessInput{AllowedCIDRs: []string{"10.0.0.0/8"}, RefusedQueries: 0})
+	quiet := ClientAccess(ClientAccessInput{AllowedCIDRs: []string{"10.0.0.0/8"}, RefusedQueries: refusals(0)})
 	for _, c := range quiet {
 		if strings.Contains(c.Name, "Queries refused") {
 			t.Error("reported refusals when none have happened")
@@ -175,7 +175,7 @@ func TestClientAccessDoesNotMixAddressFamilies(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
 		AllowedCIDRs:   []string{"10.0.0.0/8"},
 		Networks:       []Network{{Name: "v6", Enabled: true, CIDRs: []string{"fd00::/64"}}},
-		RefusedQueries: -1,
+		RefusedQueries: nil,
 	})
 
 	if c := find(t, checks, `Network "v6"`); c.Status != StatusFail {
@@ -204,7 +204,7 @@ func TestFailuresSelectsOnlyFailures(t *testing.T) {
 // carried in Action would silently vanish from exactly the output it matters
 // in.
 func TestPassingChecksCarryTheirCaveatInTheSummary(t *testing.T) {
-	checks := ClientAccess(ClientAccessInput{AllowedCIDRs: nil, RefusedQueries: -1})
+	checks := ClientAccess(ClientAccessInput{AllowedCIDRs: nil})
 
 	for _, c := range checks {
 		if c.Status == StatusPass && c.Action != "" {

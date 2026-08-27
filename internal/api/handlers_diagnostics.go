@@ -32,11 +32,12 @@ func (a *API) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	refused := a.DNS.RefusedClients()
 	checks := diag.ClientAccess(diag.ClientAccessInput{
 		AllowedCIDRs:        a.Config.DNS.AllowedClientCIDRs,
 		Networks:            diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
 		AllowPublicResolver: a.Config.DNS.AllowPublicResolver,
-		RefusedQueries:      int64(a.DNS.RefusedClients()),
+		RefusedQueries:      &refused,
 	})
 
 	writeJSON(w, http.StatusOK, DiagnosticsResponse{
