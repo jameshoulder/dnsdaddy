@@ -2,99 +2,207 @@
 
 # DNS Daddy
 
-**A free, open-source, self-hosted protective DNS project — designed to give
-people visibility and control over what their networks resolve.**
+**A lightweight, self-hosted protective DNS resolver and DNS-security
+visibility tool.**
 
-Block malware, phishing and command-and-control at the resolver. See which
-device asked for what, and why it was stopped. Then look at the traffic itself
-and see what reputation feeds cannot tell you.
+Block malicious domains at the resolver. See which device asked for what, and
+why it was stopped. Keep the telemetry on your own hardware.
 
 **Free & Open Source · No Account · No Trial · No Subscription**
 
 [![Go](https://img.shields.io/badge/Go-1.25.13+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-Apache--2.0-BFED6D)](LICENSE)
 [![CI](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml)
+[![Security](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml)
 
 </div>
 
 ---
 
-> ⚠️ **Experimental proof of concept — not independently audited and not
-> currently represented as production-grade security software.** Review the
-> code and test it in environments you control before relying on it.
+> ### Alpha
+>
+> DNS Daddy works and is actively developed, but it is early software and
+> **has not had an independent professional security review**. Run it in
+> environments you control. [What is checked, and what none of it
+> proves](docs/assurance.md).
 
-## What this is
+## What is DNS Daddy?
 
-DNS Daddy is a hobby / learning project: a single Go binary that answers DNS
-for a network, blocks known-malicious domains using public
-threat-intelligence feeds, and records what happened in plain English. It
-ships with its own dashboard and a documented REST API.
+DNS Daddy is a single Go binary that answers DNS for a network. It blocks
+known-malicious domains using public threat-intelligence feeds, records what
+happened in plain English, applies different policies to different networks,
+and raises explainable findings about traffic no feed has heard of yet. It
+ships with its own dashboard, a documented REST API, and a diagnostic command
+that tells you why DNS is not working when it is not working.
 
-It started as a personal project built while studying cybersecurity at
-Master's level, as a way to learn DNS internals, Go, and secure-by-default
-system design in practice.
+It is aimed at the space commercial protective-DNS platforms occupy — Cisco
+Umbrella, Cisco Secure Access, DNSFilter and the like — but from the other
+direction. *Inspired by the useful ideas behind commercial protective DNS
+platforms, and designed to stay lightweight, self-hosted and inspectable.* It
+makes no claim to their capability, assurance, scale or support.
 
-**DNS Daddy is an AI-assisted open-source project.** That is stated plainly
-rather than hidden, because the useful answer to "was this written with an LLM?"
-is evidence, not reassurance. Security claims here are backed where possible by
-tests, reproducible runs and written-down design decisions —
-[docs/assurance.md](docs/assurance.md) lists exactly what is checked, by what,
-and, just as importantly, what none of it proves.
+## Why would I use it?
 
-**It has not had an independent professional security audit.** Nobody outside
-the project has adversarially reviewed the DNS parser, the resolver, policy
-attribution or the authentication code. That is the largest gap in this project
-and no amount of CI substitutes for it. Until it is closed, do not trust DNS
-Daddy with anything that matters.
+Public resolvers like Quad9 and Cloudflare block known-bad domains, and that is
+genuinely worth having. What they cannot tell you is:
 
-**This is not currently represented as a finished, audited, or
-enterprise-ready product.** It is free, open source (Apache-2.0), and
-self-hosted only — there is no paid tier, no account, no trial, and no
-licence fee, now or planned. It is intended primarily for:
+- **which device** made the request,
+- **why** it was blocked, and which feed said so,
+- whether one endpoint has been quietly **beaconing** to the same
+  infrastructure for three weeks,
+- or give you any local, inspectable **record** of what happened.
 
-- learning and experimentation,
-- labs and homelabs,
-- security research, and
-- peer review — **if you have security experience and are willing to poke
-  holes in this, that is genuinely wanted.** Issues and PRs pointing out
-  flaws (design or implementation) are one of the most useful contributions
-  this project can receive right now.
+DNS Daddy answers those, and lets different sites, VLANs and roaming laptops
+carry different policies. Concretely, people use it to:
 
-If you are looking for something audited and vendor-supported for a
-production network, this is not (yet) that. If you want to learn how a small
-protective-DNS resolver is built, read the code, break it, and tell me what
-you find, you are exactly who this is for.
+| | |
+|---|---|
+| **See what a network actually resolves** | A homelab or small office where nobody has ever looked at DNS traffic before. |
+| **Investigate a device** | "This laptop was flagged — what has it been asking for?" |
+| **Learn how protective DNS works** | The code, the threat model and the detector maths are all readable, and there is an offline lab. |
+| **Keep telemetry in-house** | Nothing is uploaded. No account, no cloud tenant, no vendor with a copy of your DNS. |
+| **Feed a SIEM** | Findings and query data as documented, versioned NDJSON. |
 
-## Why not just use Quad9 or Cloudflare?
+## DNS Daddy + Pi-hole
 
-Public resolvers block known-bad domains and that is genuinely worth having.
-What they cannot tell you is:
+**Not a replacement.** Pi-hole is excellent at blocking ads and trackers, and
+if that is what you want, Pi-hole on its own is a complete answer.
 
-- which device made the request,
-- why it was blocked,
-- whether one endpoint has been quietly beaconing to the same infrastructure
-  for three weeks,
-- or any kind of local, inspectable record of what happened.
+DNS Daddy focuses on a different question: protective DNS, threat
+intelligence, explainable security decisions, and visibility into what devices
+are resolving. The two run happily together — put DNS Daddy in front with
+Pi-hole as its upstream, so DNS Daddy keeps per-client identity and Pi-hole
+keeps blocking ads.
 
-DNS Daddy answers all of those, and lets different sites, VLANs, and roaming
-laptops carry different policies.
+**[docs/pi-hole.md](docs/pi-hole.md)** works through both forwarding
+topologies, what each one costs, and why the order matters. It is reasoned from
+the code rather than measured end-to-end, and says so.
 
 ## What you get
 
 | | |
 |---|---|
-| **Threat blocking** | Malware, phishing, C2, and cryptomining on by default. Newly registered domains, ads, adult, and gambling available and off by default. |
+| **Threat blocking** | Malware, phishing, C2 and cryptomining on by default. Newly registered domains, ads, adult and gambling available and off by default. |
 | **Plain-English logs** | Every query records what happened and why: *"Domain is on a phishing list"*, not an error code. |
 | **Per-network policies** | Match clients by CIDR, or give roaming devices a DoH URL that carries their policy anywhere. |
 | **Instant allow-listing** | Clear a false positive from the dashboard. It applies on the next query — the answer cache is purged, so no waiting for a TTL. |
 | **Encrypted upstream** | Forwards over DNS-over-TLS by default, so your ISP cannot read or tamper with what DNS Daddy passes on. |
 | **DoH and DoT** | Serves RFC 8484 DNS-over-HTTPS and DNS-over-TLS as well as plain DNS. |
-| **Behavioural detection** | Six experimental detectors — DNS tunnelling, beaconing, NXDOMAIN bursts, unusual TXT, DGA-like domains, resolution failures. They alert and explain; they never block. |
+| **Behavioural detection** | Six experimental detectors — tunnelling, beaconing, NXDOMAIN bursts, unusual TXT, DGA-like domains, resolution failures. They alert and explain; they never block. |
 | **Findings you can check** | Every detection publishes the measurements behind it, with bands and weights, so the score can be reproduced on paper. |
+| **Self-diagnosis** | `dnsdaddy doctor` tells you why DNS is not working, in plain English, with the evidence. |
 | **DNSSEC visibility** | Records the upstream's validation verdict per query. Not local validation — and the docs say so. |
 | **SIEM-ready** | Newline-delimited JSON with a documented, versioned schema. Wazuh, Elastic, Splunk and Sentinel configurations included. |
-| **Reports you can forward** | A Markdown summary written for someone who does not run the network. |
 | **Open by construction** | Documented OpenAPI spec, Prometheus metrics, every threat feed listed by URL in [`internal/catalog`](internal/catalog/catalog.go). |
+
+## Quick start
+
+Docker Compose, on a Linux machine or VM on your LAN:
+
+```bash
+git clone https://github.com/jameshoulder/dnsdaddy.git
+cd dnsdaddy
+./deploy/install-docker.sh
+```
+
+The installer checks Docker, finds your address, checks ports 53 and 8080,
+asks whether this is a LAN or a public VPS, writes `.env`, starts the stack and
+runs the readiness check. Use `--dry-run` to see what it would do first.
+
+Prefer to drive it yourself:
+
+```bash
+git clone https://github.com/jameshoulder/dnsdaddy.git
+cd dnsdaddy
+cp .env.example .env
+docker compose up -d
+docker compose exec dnsdaddy dnsdaddy doctor
+docker compose logs dnsdaddy | grep -i password
+```
+
+**On a LAN or in a VM there is nothing to edit.** The built-in client ACL
+already serves loopback, every private range, carrier-grade NAT, link-local and
+the IPv6 equivalents.
+
+**To open the dashboard from your laptop**, set your machine's LAN address in
+`.env` and restart:
+
+```bash
+echo "DNSDADDY_DASHBOARD_BIND=$(hostname -I | awk '{print $1}')" >> .env
+docker compose up -d
+```
+
+That publishes the dashboard on your LAN and nowhere else — a private address
+is not routable from the internet. Do **not** set it to `0.0.0.0`: that puts an
+authenticated but *plaintext* management API on every interface, and Docker's
+port publishing bypasses `ufw`.
+
+**On a public VPS**, leave the dashboard on loopback, put TLS in front
+([`deploy/Caddyfile.example`](deploy/Caddyfile.example)), and set
+`DNSDADDY_ALLOWED_CLIENT_CIDRS` — your clients arrive from public addresses,
+which the default does not cover, so every real query would be answered
+`REFUSED`.
+
+## What success looks like
+
+Run `dnsdaddy doctor` **before** you point anything at the resolver. It reads
+your configuration, reads the database, and sends real DNS queries at your own
+listeners and through each upstream. It changes nothing, and exits non-zero if
+anything fails, so it can gate a deployment script.
+
+```text
+DNS Daddy doctor — v0.2.0-alpha.1
+
+SYSTEM
+  [PASS] Configuration loaded.
+  [PASS] The data directory is writable.
+
+DNS LISTENER
+  [PASS] DNS Daddy answered a query on 192.168.1.75:53 over udp.
+         rcode: NOERROR
+         elapsed: 23ms
+
+CLIENT ACCESS
+  [PASS] 9 address range(s) may send queries; everything else is REFUSED.
+  [PASS] Network "Home" is permitted to send queries.
+         192.168.1.0/24 → policy Standard business
+
+UPSTREAM
+  [PASS] Upstream tls://9.9.9.9:853#dns.quad9.net resolved a test query in 24ms.
+
+THREAT INTELLIGENCE
+  [PASS] 412,908 domains indexed, refreshed 3m ago.
+
+READY
+```
+
+- **PASS** — checked, and fine.
+- **WARN** — working, but worth knowing about. Stale threat intelligence still
+  enforcing last-known-good data, say.
+- **FAIL** — clients cannot use this, or are not being protected. The check
+  names the values it compared and what to do about them.
+
+Then prove it end to end from **another machine**:
+
+```bash
+nslookup example.com 192.168.1.75
+dig @192.168.1.75 example.com          # NOERROR
+dig @192.168.1.75 <a-domain-you-blocked>   # NXDOMAIN
+```
+
+**Do not change your router or DHCP DNS setting yet.** Point one device at DNS
+Daddy, watch the Query log fill, leave it a day. Only then roll it out — a
+mistake at the DHCP level takes DNS down for everyone at once.
+
+## The interface
+
+There are no screenshots in this repository yet, and adding some is one of the
+most useful contributions available. If you run DNS Daddy on a real network,
+the shots worth capturing are listed in
+[docs/screenshots.md](docs/screenshots.md).
+
+Until then, the [offline lab](#see-it-working) below produces a populated
+dashboard on your own machine in about a minute, with no real traffic involved.
 
 ## See it working
 
@@ -103,20 +211,11 @@ isolated network with its own resolver, its own upstream and seven synthetic
 clients, and produces findings in about a minute:
 
 ```bash
-git clone https://github.com/jameshoulder/dnsdaddy.git
-cd dnsdaddy
 docker compose --profile lab up --build
 # dashboard: http://127.0.0.1:8081   password: dnsdaddy-lab-demo-password
 ```
 
 ```
-$ dnsdaddy-lab -scenario all -speed 10
-▶ dns-tunnelling — 384 queries over 6m0s (replayed in ~36s)
-▶ nxdomain-anomaly — 719 queries over 6m0s
-▶ normal-dns — 117 queries over 6m0s
-▶ high-entropy-subdomains — 522 queries over 6m0s
-...
-
 normal-dns                 172.30.0.31  no findings
 dns-tunnelling             172.30.0.32  dns_tunnel_suspected (high)
 high-entropy-subdomains    172.30.0.33  no findings
@@ -128,125 +227,17 @@ beaconing                  172.30.0.37  dns_beaconing_suspected (medium)
 
 Nothing leaves the machine. Every name is under `.example` or `.test`, and the
 upstream is a synthetic responder that ships with the lab — there is no
-malicious infrastructure involved because there is none to involve.
+malicious infrastructure involved because there is none to involve. Everything
+is seeded, so the same command produces the same traffic every time.
 
-The two `no findings` lines are the interesting ones.
+**The two `no findings` lines are the interesting ones.**
 [`high-entropy-subdomains`](labs/high-entropy-subdomains.md) generates labels
 that are genuinely random — indistinguishable from a tunnel's payload by
-entropy alone — and asserts that nothing fires.
+entropy alone — and asserts that nothing fires. A detection demo that only ever
+shows detections teaches you nothing about the false positives you will
+actually spend your time on.
 
-Everything is seeded, so the same command produces the same traffic every time.
 See [labs/README.md](labs/README.md).
-
-> **Screenshots welcome.** There are none in this repository yet, and a
-> pull request adding a few of the dashboard would be a genuinely useful
-> contribution.
-
-## Install
-
-### Docker (recommended)
-
-```bash
-git clone https://github.com/jameshoulder/dnsdaddy.git
-cd dnsdaddy
-cp .env.example .env
-docker compose up -d
-docker compose exec dnsdaddy dnsdaddy doctor
-docker compose logs dnsdaddy | grep password
-```
-
-**On a LAN or in a VM there is nothing to edit.** The built-in client ACL
-already serves loopback, every private range, carrier-grade NAT, link-local and
-the IPv6 equivalents.
-
-**On a public VPS you must set `DNSDADDY_ALLOWED_CLIENT_CIDRS` in `.env`.** Your
-clients arrive from public addresses, which the default does not cover, so every
-real query is answered `REFUSED`. Setting it *replaces* the default rather than
-adding to it.
-
-Either way, `dnsdaddy doctor` is the check that matters: it compares the
-networks in your dashboard against the addresses actually permitted to resolve,
-and says so in plain English when they disagree. Run it before you point any
-client at the resolver.
-
-**The dashboard is published on `127.0.0.1:8080` only.** `http://<server>:8080`
-will not connect from another machine, and that is deliberate: it keeps an
-authenticated management API off the public internet in plaintext. To reach it:
-
-- **From the server:** `curl http://127.0.0.1:8080/api/v1/health`
-- **From your laptop, no public DNS name:** SSH tunnel, then browse to
-  `http://127.0.0.1:8080`
-  ```bash
-  ssh -L 8080:127.0.0.1:8080 you@your-server
-  ```
-- **Properly, with a domain:** put Caddy in front for HTTPS —
-  [`deploy/Caddyfile.example`](deploy/Caddyfile.example) and
-  [docs/deploy.md](docs/deploy.md#5-put-tls-in-front-of-the-dashboard).
-
-Do **not** change the port mapping to `8080:8080` to make it reachable. Docker's
-port publishing bypasses `ufw`, so that exposes the management API to the whole
-internet over plain HTTP.
-
-Then sign in and go to **Threat feeds → Refresh now**.
-
-To survive reboots, enable Docker and the Compose unit:
-
-```bash
-sudo systemctl enable docker
-sudo cp deploy/dnsdaddy-compose.service /etc/systemd/system/
-sudo $EDITOR /etc/systemd/system/dnsdaddy-compose.service   # set WorkingDirectory
-sudo systemctl daemon-reload && sudo systemctl enable --now dnsdaddy-compose
-```
-
-Check the whole service — container, API, DNS, and HTTPS — with:
-
-```bash
-./deploy/healthcheck.sh
-```
-
-### systemd
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/jameshoulder/dnsdaddy/main/deploy/install.sh | sudo bash
-```
-
-Creates a service account, frees port 53 from `systemd-resolved`, installs a
-hardened unit, and starts it.
-
-> Pick **one** of Docker or systemd. Both bind port 53 and port 8080, and
-> running both leaves whichever started second failing on "address already in
-> use". If you use Docker, make sure the native service is not also enabled:
-> `sudo systemctl disable --now dnsdaddy`.
-
-### From source
-
-```bash
-git clone https://github.com/jameshoulder/dnsdaddy.git
-cd dnsdaddy
-make build          # → bin/dnsdaddy
-make run            # local dev on 127.0.0.1:5353, data in ./tmp
-```
-
-Go 1.25.13+, no cgo, no npm. The dashboard is embedded in the binary.
-
-## First 30 minutes
-
-1. **Install** — above. From the server, confirm
-   `curl http://127.0.0.1:8080/api/v1/health` returns `"status":"ok"`.
-   `"degraded"` means it is resolving but has no blocklist yet — carry on to
-   step 2, then re-check.
-2. **Load feeds** — Threat feeds → Refresh now. Expect a few hundred thousand domains.
-3. **Test on one device** before touching anyone else's DNS:
-   ```bash
-   dig @<server> example.com          # NOERROR
-   dig @<server> <a-domain-you-blocked>   # NXDOMAIN
-   ```
-4. **Point a test VLAN at it**, watch the Query log fill, and leave it a day.
-5. **Then** change your DHCP scope or firewall for everyone, and block outbound
-   port 53 to everything except DNS Daddy so devices cannot route around it.
-
-Setup instructions for pfSense, OPNsense, UniFi, FortiGate, Windows Server, and
-roaming clients are in **[docs/integrations.md](docs/integrations.md)**.
 
 ## Detection, and what it deliberately does not do
 
@@ -254,23 +245,12 @@ Blocking a domain because it is on a threat feed is a solved problem, and DNS
 Daddy does it. The more interesting question is what you can tell from the
 traffic itself when no feed has heard of the domain yet.
 
-Six detectors watch the query stream and raise explainable findings:
-
-| | Looks for |
-|---|---|
-| `dns_tunnel` | DNS being used as a data carrier |
-| `dga_like` | Algorithmically generated rendezvous domains |
-| `nxdomain_anomaly` | A host working through a list of names that do not exist |
-| `txt_anomaly` | TXT records used for something other than mail policy |
-| `dns_beaconing` | Queries arriving on a machine's schedule, not a person's |
-| `resolution_failure` | Domains that have stopped resolving upstream |
-
-**None of them block anything, and that is the design rather than an unfinished
-feature.** These are heuristics that infer intent from traffic shape. They have
-false positives — that is inherent, not a tuning problem — and a false positive
-turned into a block is a working service silently broken at a time nobody chose.
-Blocking stays with the threat feeds, where a human established the domain was
-malicious. Detection observes, scores, explains and alerts.
+**None of the six detectors block anything, and that is the design rather than
+an unfinished feature.** They are heuristics that infer intent from traffic
+shape. They have false positives — that is inherent, not a tuning problem — and
+a false positive turned into a block is a working service silently broken at a
+time nobody chose. Blocking stays with the threat feeds, where a human
+established the domain was malicious.
 
 **All six are experimental.** Their thresholds are calibrated against synthetic
 traffic, not a production network, and nobody has yet measured a real
@@ -297,29 +277,102 @@ Possible DNS tunnelling — high, confidence 0.98
                                                         score        0.90
 ```
 
-*(Real output from the `dns-tunnelling` lab scenario, below — not a mock-up.)*
+*(Real output from the `dns-tunnelling` lab scenario — not a mock-up.)*
 
 The contributions sum to the score, so an analyst can check the arithmetic.
 **No single measurement can raise a finding** — the tunnelling detector requires
 at least three of seven signals, which is the concrete answer to "high entropy
 means malicious". It does not.
 
-**See it happen, offline, in about a minute:**
+Full detail: **[docs/detection/README.md](docs/detection/README.md)**.
 
-```bash
-docker compose --profile lab up --build
-# dashboard: http://127.0.0.1:8081   password: dnsdaddy-lab-demo-password
-```
+## Where the blocking comes from
 
-Seven scenarios on an isolated network, with their own synthetic upstream.
-Nothing leaves the machine and no malicious infrastructure is involved — every
-name is under `.example` or `.test`. Two of the seven are designed to produce
-**no** findings, and they are the useful ones: a detection demo that only ever
-shows detections teaches you nothing about the false positives you will actually
-spend your time on.
+No black-box intelligence. Every default feed is a public, no-registration
+source listed with its URL in
+[`internal/catalog/catalog.go`](internal/catalog/catalog.go) — abuse.ch
+URLhaus, Phishing Army, The Block List Project, HaGeZi and CoinBlockerLists.
+You can disable any of them and add your own.
 
-Full detail: **[docs/detection/README.md](docs/detection/README.md)** ·
-**[labs/README.md](labs/README.md)**
+Downloaded feeds are cached to disk, so a restart rebuilds the index locally in
+seconds. A provider being down never leaves a booting server unprotected, and a
+failed, truncated or malformed refresh keeps the last known good index rather
+than emptying it.
+
+Our own [DNS Daddy Threat Observatory](https://threats.dnsdaddy.dev) is in the
+catalog too and ships **disabled**, so a stock install depends on nothing we
+operate. Turning it on is one click, and from there it is an ordinary feed with
+no more trust than the others — your policies still decide what is blocked, and
+your query logs are never uploaded.
+
+> The Observatory's public feed endpoint is not live yet. Enabling it today
+> reports that the endpoint is not available; the same code works unchanged
+> once it ships.
+
+Full detail, including how to handle a false positive and exactly what enabling
+the Observatory exposes: **[docs/threat-intel.md](docs/threat-intel.md)**.
+
+## Security and assurance
+
+DNS Daddy is an **AI-assisted open-source project**. AI assistance is treated
+as implementation support, not security review. Security claims are backed
+where possible by tests, reproducible evidence, documented design decisions and
+automated analysis.
+
+**It has not yet undergone independent professional security review.** Nobody
+outside the project has adversarially reviewed the DNS parser, the resolver,
+policy attribution or the authentication code. That is the largest gap in this
+project and no amount of CI substitutes for it.
+
+Running on every change: the race detector, `staticcheck`, `gosec`,
+`govulncheck`, CodeQL, Semgrep, Trivy, fuzzing of the parsers every query hits
+before authentication, an SBOM, and an end-to-end smoke test that asserts an
+open-resolver configuration **refuses to start**.
+
+**[docs/assurance.md](docs/assurance.md) is the honest version** — every
+control, how to run it yourself, the invariants the test suite exists to
+protect, and a section on what none of it proves that is meant to be read
+twice. [docs/audit-2026-08.md](docs/audit-2026-08.md) is the most recent
+full audit, including the bugs it found and where a reviewer should start.
+
+## Honest limitations
+
+Worth knowing before you rely on this:
+
+- **No independent security review.** The caveat that qualifies every other
+  line here.
+- **Deployment is not yet verified across VM platforms.**
+  [docs/deployment-matrix.md](docs/deployment-matrix.md) is the checklist, and
+  every row on it is currently marked *not run*.
+- **Forwarding, not recursive.** DNS Daddy forwards to upstream resolvers
+  rather than walking the root zone itself.
+- **It does not validate DNSSEC.** It asks the upstream for its verdict and
+  records it per query, which is a strictly weaker statement — a lying upstream
+  will happily claim an answer was validated.
+  [docs/dns-security/dnssec.md](docs/dns-security/dnssec.md) is explicit about
+  what the telemetry is and is not worth.
+- **Behavioural detection is experimental and alert-only.** Thresholds come
+  from synthetic traffic. Nothing is blocked on a heuristic, and a slow tunnel
+  or a word-list DGA will not be caught at all.
+- **Browser DoH bypasses it.** Any device can resolve over HTTPS directly to a
+  public resolver and skip you entirely. Mitigations are real but need
+  configuring; see
+  [docs/integrations.md](docs/integrations.md#stopping-doh-bypass).
+- **One server is one server.** No clustering or anycast. Run two and give
+  clients both addresses.
+- **No SSO, RBAC, or multi-tenancy.** A single admin password plus API tokens.
+- **No per-client rate limiting.** One authorised client can saturate the
+  resolver.
+- **DNS rebinding is not mitigated.** Private addresses are not filtered out of
+  upstream answers.
+- **`safeSearch` is accepted by the API but not enforced.** Marked
+  `deprecated` in the OpenAPI schema rather than removed — see
+  [docs/roadmap.md](docs/roadmap.md#safesearch-enforcement).
+
+**[docs/capabilities.md](docs/capabilities.md) is the full picture** — what is
+available, what is experimental, and what is only planned. If you find a claim
+anywhere in this repository that page does not support, that is a bug worth
+reporting.
 
 ## Will it run on a $5 box?
 
@@ -329,12 +382,45 @@ deployment.
 | | |
 |---|---|
 | Binary | ~13 MB, static, no cgo |
-| Memory | ~14 MB before any feed loads; roughly **165–215 bytes per blocked domain** depending on how long the names in your feeds are, so a 500,000-domain index costs somewhere around 80–105 MB. Budget 250 MB total. |
+| Memory | ~14 MB before any feed loads; roughly **165–215 bytes per blocked domain**, so a 500,000-domain index costs around 80–105 MB. Budget 250 MB total. |
 | Disk | Query logs at ~100 bytes a row. 1M queries/day at the default 7-day retention is about 700 MB. |
 | Load | The hot path does no database work and no allocation on a blocklist miss. |
 
 Statistics are rolled up hourly and kept for 90 days independently of the raw
 query log, so you can cut retention to a day without losing your charts.
+
+*Measured on one machine. Treat as an order of magnitude, not a specification.*
+
+## Detailed installation
+
+| | |
+|---|---|
+| **[docs/deploy.md](docs/deploy.md)** | Full walkthrough: VPS, TLS, firewalling, monitoring, backups, upgrades, uninstall |
+| [docs/deployment-matrix.md](docs/deployment-matrix.md) | The acceptance checklist for clean machines, VMs and VPSes |
+| [docs/integrations.md](docs/integrations.md) | pfSense, OPNsense, UniFi, FortiGate, Windows Server, roaming clients |
+| [docs/pi-hole.md](docs/pi-hole.md) | Running alongside Pi-hole |
+
+**Native systemd** instead of Docker:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jameshoulder/dnsdaddy/main/deploy/install.sh | sudo bash
+```
+
+Creates a service account, frees port 53 from `systemd-resolved`, installs a
+hardened unit, and starts it.
+
+> Pick **one** of Docker or systemd. Both bind port 53 and port 8080, and
+> running both leaves whichever started second failing on "address already in
+> use".
+
+**From source:**
+
+```bash
+make build          # → bin/dnsdaddy
+make run            # local dev on 127.0.0.1:5353, data in ./tmp
+```
+
+Go 1.25.13+, no cgo, no npm. The dashboard is embedded in the binary.
 
 ## Configuration
 
@@ -357,7 +443,6 @@ log:
 
 Configuration deliberately lives in the file rather than the database, so a
 deployment is reproducible from its config rather than from accumulated state.
-The dashboard shows the effective configuration read-only.
 
 ## API
 
@@ -368,6 +453,9 @@ generate a client against the exact build you are talking to.
 # Create a token from Settings → API tokens, then:
 curl -H "Authorization: Bearer dnsd_…" https://dns.example.co.uk/api/v1/overview
 
+# Why DNS is not working, as JSON
+curl -H "Authorization: Bearer dnsd_…" https://dns.example.co.uk/api/v1/diagnostics
+
 # This month's evidence pack, ready to forward
 curl -H "Authorization: Bearer dnsd_…" \
   'https://dns.example.co.uk/api/v1/reports/summary?days=30&format=markdown'
@@ -375,10 +463,6 @@ curl -H "Authorization: Bearer dnsd_…" \
 # Behavioural findings as NDJSON, for a SIEM
 curl -H "Authorization: Bearer dnsd_…" \
   'https://dns.example.co.uk/api/v1/findings/export?hours=24'
-
-# What this build says about its own detectors — generated from the running
-# code, so it cannot drift from what it does
-curl -H "Authorization: Bearer dnsd_…" https://dns.example.co.uk/api/v1/detectors
 ```
 
 Prometheus metrics are at `/metrics`.
@@ -392,203 +476,63 @@ do not understand is one you cannot judge.
 | | |
 |---|---|
 | **[docs/capabilities.md](docs/capabilities.md)** | **Available / experimental / planned. Start here.** |
+| [docs/assurance.md](docs/assurance.md) | What is checked, by what, and what none of it proves |
+| [docs/audit-2026-08.md](docs/audit-2026-08.md) | The most recent full audit: findings, fixes, reviewer guide |
 | [docs/threat-model.md](docs/threat-model.md) | Assets, boundaries, actors, threats, mitigations, residual risk |
 | [docs/detection/](docs/detection/) | Detection engineering, the finding schema, ATT&CK policy, tunnelling in depth |
 | [docs/threat-hunting/](docs/threat-hunting/) | Six hunts you can run against telemetry this actually produces |
 | [docs/dns-security/](docs/dns-security/) | Protective DNS, DNSSEC, DoH/DoT and bypass |
 | [labs/](labs/) | The offline lab and its seven scenarios |
 | [docs/siem.md](docs/siem.md) | Wazuh, Elastic, Splunk, Sentinel |
-| [docs/roadmap.md](docs/roadmap.md) | What might come next, and what would have to be true first |
-| [docs/deploy.md](docs/deploy.md) | Nanode walkthrough, TLS, firewalling, backups, upgrades |
-| [docs/integrations.md](docs/integrations.md) | pfSense, OPNsense, UniFi, FortiGate, Windows, roaming clients, blocking DoH bypass |
-| [docs/threat-intel.md](docs/threat-intel.md) | Every default feed, where it comes from, and how to handle a false positive |
+| [docs/threat-intel.md](docs/threat-intel.md) | Every default feed, where it comes from, and handling a false positive |
 | [docs/privacy.md](docs/privacy.md) | What is stored, for how long, and how to store less |
 | [docs/architecture.md](docs/architecture.md) | How a query flows through the system, and why it is built this way |
+| [docs/roadmap.md](docs/roadmap.md) | What might come next, and what would have to be true first |
 | [SECURITY.md](SECURITY.md) | Vulnerability disclosure |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup and house style |
 
-## Where the blocking comes from
+## Help wanted
 
-No black-box intelligence. Every default feed is a public, no-registration
-source listed with its URL in
-[`internal/catalog/catalog.go`](internal/catalog/catalog.go), including
-abuse.ch URLhaus, Phishing Army, The Block List Project, HaGeZi, and
-CoinBlockerLists. You can disable any of them and add your own.
+This is a solo project and the things that would help most are specific. If any
+of these is your area, it would be genuinely valuable.
 
-Our own [DNS Daddy Threat Observatory](https://threats.dnsdaddy.dev) is in the
-catalog too, and ships **disabled**. Its indicators carry their own categories —
-one domain can be both malware and C2, and a policy enabling either blocks it —
-feeding the same policy and block-reason machinery as everything else. It is
-opt-in so that a stock install still depends on nothing we operate:
-[what enabling it means](docs/threat-intel.md#the-dns-daddy-threat-observatory).
+**Go review** — ranked by risk, with a reviewer's guide in
+[docs/audit-2026-08.md](docs/audit-2026-08.md#g-where-a-reviewer-should-start):
 
-Downloaded feeds are cached to disk, so a restart rebuilds the index locally in
-seconds — the resolver is protecting traffic before it makes a single HTTP
-request, and a provider being down never leaves a booting server unprotected.
+- `internal/dnsserver` — the DNS handler and the client ACL. Every query goes
+  through it.
+- `internal/resolver` — cache key construction, upstream failover, DoT/DoH.
+- `internal/policy` — client attribution. Wrong attribution silently gives a
+  device someone else's policy.
+- `internal/api` — session handling, API tokens, CSRF, proxy trust.
+- `internal/blocklist` — feed refresh and the atomic index swap. The
+  last-known-good invariant is the one to attack.
 
-Full detail, including how to handle a false positive: **[docs/threat-intel.md](docs/threat-intel.md)**.
+**Deployment testing** — every row in
+[docs/deployment-matrix.md](docs/deployment-matrix.md) is currently *not run*.
+Ubuntu, Debian, Proxmox, Hyper-V, VMware, VirtualBox, a cloud VPS, plain Docker
+Compose. **Rows that fail are more valuable than rows that pass**: a failure is
+a real product defect, and if you had to invent a step to get through it, that
+step is missing from the documentation.
 
-### Enable DNS Daddy Threat Observatory
+**Pi-hole users** — [docs/pi-hole.md](docs/pi-hole.md) is reasoned from the
+code, not measured. Running either topology on a real network and reporting
+what client attribution actually looks like would turn analysis into evidence.
 
-The Observatory is an optional, built-in source of live security intelligence
-that we publish. It is off until you turn it on, and turning it on is one click:
+**Security practitioners** — please try to break:
 
-**Threats → DNS Daddy Threat Observatory → Enable Threat Observatory.**
-The same card sits in the Threat intelligence panel on the Dashboard.
+- the resolver ACL and the open-resolver protections,
+- DoH and DoT handling, including the per-network token path,
+- reverse-proxy header trust,
+- threat-feed handling and what a malicious or malformed feed can do,
+- resource exhaustion by an authorised client.
 
-That click enables the built-in feed, downloads it immediately rather than
-waiting for the next scheduled refresh, validates the document, and rebuilds
-the index — then tells you what actually happened. No account, no API key, no
-registration.
+Report anything sensitive privately via [SECURITY.md](SECURITY.md). Everything
+else is welcome as an issue or a PR — see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-From there it is an ordinary feed, and nothing about the way blocking works
-changes:
-
-```text
-Threat Observatory
-      ↓
-DNS Daddy feed ingestion   (download, validate, cache, index)
-      ↓
-normal category policies   (what you ticked, and only that)
-      ↓
-DNS block decision
-```
-
-Two things follow from that diagram and are worth being explicit about:
-
-- **It supplies intelligence; your policies still decide.** Enabling the feed
-  does not tick a single category box. If you have deliberately switched
-  cryptomining off, Observatory cryptomining indicators are indexed and not
-  blocked, and the card says so.
-- **It is one source among several.** DNS Daddy keeps using the independent
-  feeds above whether the Observatory is on or off, and it gets no more trust
-  than they do. If it cannot be downloaded, the last good copy keeps blocking
-  and the card reports the failure against that one feed — the resolver and
-  every other feed carry on.
-
-Enabling it means your server periodically requests
-`https://threats.dnsdaddy.dev/api/v1/feed.json`, so we see your server's public
-IP, its User-Agent, and roughly how often it asks. Your DNS query logs, your
-clients, and which indicators matched are never uploaded — matching happens
-entirely on your server. The full trade-off is in
-[docs/threat-intel.md](docs/threat-intel.md#the-dns-daddy-threat-observatory).
-
-> The Observatory's public feed endpoint is not live yet. Enabling it today
-> reports that the endpoint is not available; the same code works unchanged
-> once it ships.
-
-## Honest limitations
-
-Worth knowing before you rely on this:
-
-- **Forwarding, not recursive.** DNS Daddy forwards to upstream resolvers
-  rather than walking the root zone itself.
-- **It does not validate DNSSEC.** It asks the upstream for its verdict and
-  records it per query, which is a strictly weaker statement — a lying upstream
-  will happily claim an answer was validated. Local validation is on the
-  roadmap. [docs/dns-security/dnssec.md](docs/dns-security/dnssec.md) is
-  explicit about what the telemetry is and is not worth.
-- **Behavioural detection is experimental and alert-only.** The thresholds come
-  from synthetic traffic. Nothing is blocked on a heuristic, and a slow tunnel
-  or a word-list DGA will not be caught at all —
-  [docs/capabilities.md](docs/capabilities.md) lists what each detector misses.
-- **Browser DoH bypasses it.** Any device can resolve over HTTPS directly to a
-  public resolver and skip you entirely. Mitigations are real but need
-  configuring; see [docs/integrations.md](docs/integrations.md#stopping-doh-bypass).
-- **One server is one server.** Nothing here does clustering or anycast. Run
-  two and give clients both addresses.
-- **No SSO, RBAC, or multi-tenancy.** A single admin password plus API tokens.
-- **`safeSearch` is accepted by the API but not enforced.** It is stored on the
-  policy and returned again; the resolver never reads it, so setting it changes
-  nothing. It is marked `deprecated` in the OpenAPI schema and says so in its
-  own description, rather than being removed — see
-  [docs/roadmap.md](docs/roadmap.md#safesearch-enforcement).
-- **No per-client rate limiting.** One authorised client can saturate the
-  resolver.
-- **DNS rebinding is not mitigated.** Private addresses are not filtered out of
-  upstream answers.
-
-**[docs/capabilities.md](docs/capabilities.md) is the full picture** — what is
-available, what is experimental, and what is only planned. If you find a claim
-anywhere in this repository that page does not support, that is a bug worth
-reporting.
-
-Also tracked in [issues](https://github.com/jameshoulder/dnsdaddy/issues).
-
-## Security testing and review
-
-**None of this makes DNS Daddy secure, audited, certified, or free of
-vulnerabilities.** It is still an experimental, AI-assisted proof of concept
-that has had no independent adversarial review. Automated tools find the bugs
-they have rules for; they do not find design flaws, and a clean run is evidence
-of nothing much. This section describes what has actually been done, so you can
-judge it for yourself rather than take a badge on trust.
-
-**Running in CI on every change** — [`security.yml`](.github/workflows/security.yml):
-
-| | |
-|---|---|
-| [CodeQL](https://codeql.github.com/) | `security-extended` query set |
-| [Semgrep](https://semgrep.dev/) | `p/golang`, `p/github-actions`, `p/secrets`; a finding fails the build |
-| [gosec](https://github.com/securego/gosec) | Go security linter, medium severity and above |
-| [govulncheck](https://go.dev/blog/govulncheck) | Advisories actually reachable from this code, standard library included |
-| [Trivy](https://trivy.dev/) | Container image and filesystem scanning |
-| Fuzzing | Domain normalisation and suffix matching, the parsers every query hits before authentication |
-| SBOM | CycloneDX, so an operator can answer "am I affected?" without waiting for me |
-
-Dependencies and pinned action SHAs are monitored by Dependabot, with a
-seven-day cooldown on routine version bumps so a freshly poisoned release is
-not pulled in on the day it lands. Security updates are exempt from that
-cooldown and still arrive immediately.
-
-**One advisory is knowingly outstanding.** Run `govulncheck ./...` yourself and
-it will report *"1 vulnerability in modules you require, but your code doesn't
-appear to call"*. That is
-[GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) — `golang.org/x/crypto/openpgp`
-is unmaintained and unsafe by design, and it has no fixed version. DNS Daddy
-requires `golang.org/x/crypto` for `bcrypt`, which is what hashes the admin
-password; it never imports `openpgp`, so the vulnerable code is not built into
-the binary. It is listed here rather than left for you to find, because "zero
-findings" that quietly excludes a category is worse than a number with an
-explanation.
-
-**Semgrep findings are triaged, not just counted.** DNS Daddy has been scanned
-with [Semgrep](https://semgrep.dev/) and the findings assessed against the
-actual code and data flow rather than the rule name. The review produced real
-fixes, most notably remediation of a **Markdown injection** issue in generated
-reports: feed, network, location and policy names reached the rendered report
-unescaped. It also produced contextual false positives — binary DNS wire
-responses, Prometheus text output and a static embedded OpenAPI document are all
-flagged by an HTML-escaping rule that does not apply to them, and escaping any of
-the three would corrupt the protocol rather than protect anyone. Those are
-documented with narrow, line-specific suppressions naming the exact rule and the
-tests that justify it; no rule is disabled repository-wide.
-
-That review was originally a point-in-time scan, which turned out to be its own
-lesson. When the tool was re-run during a later audit, **three of the
-suppressions were no longer suppressing anything** — Semgrep honours the
-annotation only on the matched line or the one immediately above it, and an
-intervening comment had quietly disabled two of them. Nothing noticed, because
-nothing re-ran the tool. Semgrep is now in CI for exactly that reason.
-
-The full triage — every finding, its classification, what was changed, what was
-found to be wrong on re-inspection, and the residual risk that was *not* fixed
-— is in
-[docs/security/semgrep-triage-2026-07-29.md](docs/security/semgrep-triage-2026-07-29.md).
-It is kept in the repository for scrutiny, on the view that showing the
-reasoning is worth more than treating a green scanner as proof of security.
-
-## Contributing and security review
-
-This is a solo, experimental project and it would benefit enormously from
-outside eyes — especially from people with real security review experience.
-If you find a design flaw, a logic bug, or something that just looks wrong,
-please open an issue or a PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for how
-the code is organised, and [SECURITY.md](SECURITY.md) for how to report
-anything sensitive privately.
-
-There is no roadmap promise and no commercial edition — this is free,
-self-hosted, open-source software, full stop.
+**A well-described bug is worth more than a patch to code you do not yet
+trust.** Findings without fixes are very welcome.
 
 ## ☕ Support the project
 
@@ -601,33 +545,34 @@ including the people who never send a penny.
 If you find the project useful and fancy supporting the hosting, testing and
 caffeine behind it, you are welcome to
 [buy me a coffee](https://buymeacoffee.com/jameshoulder). You absolutely don't
-have to, and it buys no guarantees — this is still an unaudited proof of
-concept built in someone's spare time, and a coffee does not change that.
+have to, and it buys no guarantees.
 
 Code reviews, bug reports, documentation improvements and pull requests are
-every bit as appreciated — genuinely more so, if you have security experience
-and are willing to
-[poke holes in it](#contributing-and-security-review). Code, bug reports and
-coffee, all gratefully accepted.
+every bit as appreciated — genuinely more so.
 
 ## Project status
 
-**Actively developed, experimental, unaudited, and free — permanently.**
+**Alpha. Actively developed, not independently reviewed, and free —
+permanently.**
 
 | | |
 |---|---|
 | Maintained by | One person, in spare time |
 | Licence | Apache-2.0, no commercial edition planned or possible |
-| Independent security review | **None.** This is the caveat that qualifies every other line. |
-| Core DNS resolution | Stable. Tested, fuzzed, and unchanged in shape since the first release. |
-| Behavioural detection | **Experimental.** Thresholds from synthetic traffic; no measured false-positive rate. |
+| Independent security review | **None.** The caveat that qualifies every other line. |
+| Core DNS resolution | Tested, fuzzed, and unchanged in shape since the first release |
+| Behavioural detection | **Experimental.** Thresholds from synthetic traffic; no measured false-positive rate |
+| Deployment matrix | **Not yet executed.** See [docs/deployment-matrix.md](docs/deployment-matrix.md) |
 | API | Versioned at `/api/v1`, with an OpenAPI spec served by each build |
-| Finding schema | Version 1.0. Additive changes only within 1.x. |
+| Finding schema | Version 1.0. Additive changes only within 1.x |
 | Breaking changes | Recorded in [CHANGELOG.md](CHANGELOG.md) |
 
-What would most improve this project is not a feature. It is somebody running
-the detectors on a real network and reporting what fired and whether it was
-real. See [docs/roadmap.md](docs/roadmap.md).
+DNS Daddy began as a cybersecurity Master's project exploring how a small,
+transparent protective DNS platform could work without enterprise
+infrastructure. It has been developed since with an explicit engineering
+process — see [docs/assurance.md](docs/assurance.md) and
+[docs/audit-2026-08.md](docs/audit-2026-08.md) — and the most useful thing
+anyone can do for it now is run it somewhere real and report what broke.
 
 ## Licence
 
