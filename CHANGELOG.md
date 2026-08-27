@@ -22,7 +22,65 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The documented Docker install refused every LAN client.** `.env.example`
+  shipped an *active* `DNSDADDY_ALLOWED_CLIENT_CIDRS=127.0.0.0/8,172.16.0.0/12`
+  beneath a heading reading "REQUIRED on a public VPS". Because the documented
+  first step is `cp .env.example .env`, that value replaced the built-in ACL —
+  loopback plus every private range — with loopback and the Docker bridge
+  alone. Every client on a LAN or in a VM was answered `REFUSED` while the
+  dashboard, `/api/v1/health` and the container health check all reported
+  healthy.
+
+  The assignment is now commented out, and the guidance is LAN-first: a home,
+  homelab or VM install needs no edit at all, and setting the variable
+  **replaces** the built-in list rather than adding to it.
+
+  The Compose fallback was separately narrower than the binary's own default,
+  silently dropping carrier-grade NAT (what Tailscale hands out), link-local
+  and all IPv6. It is now exactly `config.DefaultAllowedClientCIDRs`, pinned
+  there by a test so the two cannot drift again.
+
+- **Link-local IPv6 clients were refused, and misattributed where they got
+  through.** The kernel reports such a peer with a scope zone
+  (`fe80::1%eth0`), and `netip.Prefix.Contains` returns false for any zoned
+  address. Since `fe80::/10` ships in the default ACL, the shipped
+  configuration promised to serve exactly the clients it turned away. RFC 8106
+  RDNSS — how a router advertises a resolver — commonly advertises a link-local
+  address, so this affected real deployments.
+
 ### Added
+
+- **`dnsdaddy doctor`.** The first thing to run when DNS is not working. It
+  reads your configuration, reads the database and sends real DNS queries at
+  your own listeners, then reports SYSTEM, DATABASE, DNS LISTENER, CLIENT
+  ACCESS, UPSTREAM, WEB INTERFACE and THREAT INTELLIGENCE as PASS/WARN/FAIL
+  with the evidence behind each verdict and the next action. It changes
+  nothing, `--json` emits the same findings for a monitoring system, and it
+  exits non-zero on failure so it can gate a deployment.
+
+  What it tells apart, which `dig` cannot: `REFUSED` means the resolver is
+  running and declining *this source address* — not that DNS is broken;
+  nothing listening is a different problem from another process holding the
+  port, and that process is named by pid, with systemd-resolved, dnsmasq, BIND,
+  Unbound, Pi-hole and CoreDNS each given their own remedy.
+
+- **A network can no longer exist in the dashboard while being unable to
+  resolve, silently.** Adding a **Network** assigns a policy; it does not
+  permit an address to send queries — `dns.allowed_client_cidrs` does that, and
+  it is checked first. Nothing used to correlate the two. Now the conflict is
+  reported at startup, at `GET /api/v1/diagnostics`, and by `dnsdaddy doctor`,
+  naming the network, its policy, and both CIDR lists.
+
+- **`dnsdaddy_client_refused_total`** in `/metrics` — queries rejected on their
+  source address. A number climbing here rules out firewalls, routing and port
+  conflicts in one step. The counter already existed and was read by nothing.
+
+- **[`docs/assurance.md`](docs/assurance.md)** — what is checked, by what, and
+  what none of it proves. **[`docs/audit-2026-08.md`](docs/audit-2026-08.md)** —
+  the August 2026 maturation audit: findings, fixes, validation, remaining
+  limitations, and where an external reviewer should spend their first hours.
 
 - **DNS Daddy Threat Observatory as a first-class feed.**
   [threats.dnsdaddy.dev](https://threats.dnsdaddy.dev) is now in the shipped

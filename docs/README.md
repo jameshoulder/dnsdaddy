@@ -28,7 +28,9 @@ intention, and everything else here is expected to agree with it.
 | | |
 |---|---|
 | [capabilities.md](capabilities.md) | **Available / experimental / planned.** Read this first. |
+| [assurance.md](assurance.md) | What is checked, by what, and what none of it proves |
 | [threat-model.md](threat-model.md) | Assets, boundaries, actors, threats, mitigations, and residual risk |
+| [audit-2026-08.md](audit-2026-08.md) | August 2026 maturation audit: findings, fixes, and where a reviewer should start |
 | [roadmap.md](roadmap.md) | What might come next, and what would have to be true first |
 | [../SECURITY.md](../SECURITY.md) | Reporting a vulnerability |
 | [security/](security/) | Point-in-time security review records |

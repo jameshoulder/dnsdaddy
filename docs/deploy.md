@@ -454,6 +454,59 @@ Take a backup first anyway.
 
 ## Troubleshooting
 
+### Start here: `dnsdaddy doctor`
+
+```bash
+sudo dnsdaddy doctor                              # native install
+docker compose exec dnsdaddy dnsdaddy doctor      # docker
+```
+
+It reads your configuration, reads the database, and sends real DNS queries at
+your own listeners. It changes nothing, and it exits non-zero if any check
+fails, so it can gate a deployment script. `--json` emits the same findings for
+a monitoring system.
+
+Under Docker it must be run **inside the container**: the dashboard is published
+on loopback only and the database lives in a named volume, so a run on the host
+would report failures that are artefacts of where it was run. Each affected
+check says so rather than reporting a false failure.
+
+What it tells apart, which `dig` alone cannot:
+
+| Symptom | What doctor says |
+|---|---|
+| Clients get no answer at all | whether **nothing is listening** or **another process holds the port** — and names that process |
+| Clients get `REFUSED` | that the resolver is **working and declining this source address**, and which ranges it will accept |
+| A network exists but gets nothing | that the network is **not in `dns.allowed_client_cidrs`**, with both values quoted |
+| Everything resolves, nothing blocked | that the **threat index is empty**, or is enforcing last-known-good data that is stale |
+| Names fail intermittently | which **upstreams** answered and which did not |
+
+### The most common first-install failure
+
+**Symptom.** The dashboard loads, `/api/v1/health` reports `ok`, `docker ps`
+says healthy, you have added your network — and every client says the DNS server
+is not responding, or `dig` returns `REFUSED`.
+
+**Cause.** A **Network** in the dashboard and `dns.allowed_client_cidrs` are two
+different settings. The network decides *which policy* an address gets once it
+is allowed to resolve. `dns.allowed_client_cidrs` decides *whether it may
+resolve at all*, and it is checked first, before anything else happens. Adding a
+network does not grant access.
+
+**Check.** `dnsdaddy doctor`, or `GET /api/v1/diagnostics`, or the
+`dnsdaddy_client_refused_total` metric — a number climbing there means clients
+are being turned away on their source address, which rules out firewalls,
+routing and port conflicts in one step.
+
+**Fix.** Add the range to `DNSDADDY_ALLOWED_CLIENT_CIDRS` (or
+`dns.allowed_client_cidrs`) and restart. Note that setting this variable
+**replaces** the built-in list rather than adding to it — the built-in list
+already covers loopback, every RFC 1918 range, carrier-grade NAT, link-local,
+the IPv6 equivalents and the Docker bridge, so on a LAN you should usually not
+set it at all.
+
+### Other symptoms
+
 **`bind: address already in use` on :53**
 
 `systemd-resolved`. The installer handles this; manually:

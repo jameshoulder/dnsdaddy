@@ -32,11 +32,20 @@ ships with its own dashboard and a documented REST API.
 
 It started as a personal project built while studying cybersecurity at
 Master's level, as a way to learn DNS internals, Go, and secure-by-default
-system design in practice. Large parts of it were written with extensive
-AI assistance ("vibe coded") — that made it possible to build something this
-size as a side project, but it also means it has **not** had the kind of
-independent, adversarial security review that production security software
-needs before you should trust it with anything that matters.
+system design in practice.
+
+**DNS Daddy is an AI-assisted open-source project.** That is stated plainly
+rather than hidden, because the useful answer to "was this written with an LLM?"
+is evidence, not reassurance. Security claims here are backed where possible by
+tests, reproducible runs and written-down design decisions —
+[docs/assurance.md](docs/assurance.md) lists exactly what is checked, by what,
+and, just as importantly, what none of it proves.
+
+**It has not had an independent professional security audit.** Nobody outside
+the project has adversarially reviewed the DNS parser, the resolver, policy
+attribution or the authentication code. That is the largest gap in this project
+and no amount of CI substitutes for it. Until it is closed, do not trust DNS
+Daddy with anything that matters.
 
 **This is not currently represented as a finished, audited, or
 enterprise-ready product.** It is free, open source (Apache-2.0), and
