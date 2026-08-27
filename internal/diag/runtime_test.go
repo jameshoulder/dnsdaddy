@@ -104,7 +104,7 @@ func TestPortConflictRecognisesOtherResolvers(t *testing.T) {
 
 func TestUpstreamsFailOnlyWhenEveryForwarderIsDown(t *testing.T) {
 	partial := Upstreams([]UpstreamProbe{
-		{Spec: "tls://9.9.9.9:853", Elapsed: 20 * time.Millisecond},
+		{Spec: "tls://9.9.9.9:853", Rcode: "NOERROR", Elapsed: 20 * time.Millisecond},
 		{Spec: "tls://1.1.1.1:853", Err: errors.New("i/o timeout")},
 	})
 	if Worst(partial) != StatusWarn {
@@ -189,5 +189,35 @@ func TestPortConflictNamesTheProtocol(t *testing.T) {
 	tcp := PortConflict("tcp", "0.0.0.0:53", true, nil)
 	if udp.Name == tcp.Name {
 		t.Errorf("both protocols produced the same check name %q", udp.Name)
+	}
+}
+
+// An upstream that answers is not necessarily an upstream that works. One
+// returning REFUSED or SERVFAIL to everything is reachable and useless, and a
+// connection-only probe could not tell the difference.
+func TestUpstreamsTreatANonSuccessRcodeAsUnusable(t *testing.T) {
+	for _, rcode := range []string{"REFUSED", "SERVFAIL"} {
+		t.Run(rcode, func(t *testing.T) {
+			checks := Upstreams([]UpstreamProbe{{Spec: "udp://10.0.0.1:53", Rcode: rcode}})
+			if Worst(checks) == StatusPass {
+				t.Fatalf("an upstream answering %s was reported as healthy", rcode)
+			}
+			if !strings.Contains(checks[0].Summary, rcode) {
+				t.Errorf("summary does not name the rcode: %q", checks[0].Summary)
+			}
+			if !strings.Contains(checks[0].Action, "not a firewall") {
+				t.Errorf("action does not distinguish this from a reachability problem: %q", checks[0].Action)
+			}
+		})
+	}
+
+	// And the tally must count it: every upstream answering REFUSED means no
+	// name resolves, which is a failure, not a pair of warnings.
+	all := Upstreams([]UpstreamProbe{
+		{Spec: "udp://10.0.0.1:53", Rcode: "REFUSED"},
+		{Spec: "udp://10.0.0.2:53", Rcode: "SERVFAIL"},
+	})
+	if Worst(all) != StatusFail {
+		t.Errorf("Worst = %s, want fail when no upstream can resolve anything", Worst(all))
 	}
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
+	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
@@ -379,54 +380,63 @@ func queryResolver(ctx context.Context, proto, addr string, timeout time.Duratio
 	return p
 }
 
-// probeUpstream opens a connection to a configured forwarder.
+// probeUpstream sends a real DNS question through a configured forwarder.
 //
-// It dials rather than resolving: the question is whether this machine can
-// reach the address at all, and a full exchange over DNS-over-TLS would
-// conflate a blocked port with a certificate problem.
+// It goes through resolver.ParseUpstream and Upstream.Exchange — the same
+// transport the resolver itself uses — rather than a second client stack of
+// its own. That is what makes the answer mean anything: a UDP "connection" is
+// only a local socket association, so net.Dial succeeds without a packet
+// leaving the machine and a silent or absent resolver looks reachable. A TCP
+// accept proves a socket opened, not that DNS is spoken over it, and it says
+// nothing at all about whether a DoT certificate verifies or a DoH endpoint
+// serves anything.
+//
+// Using the resolver's own transport also means DoT verification, the DoH
+// request shape, and the truncation retry are exercised exactly as they are in
+// production, and cannot drift away from it.
 func probeUpstream(spec string, timeout time.Duration) diag.UpstreamProbe {
 	p := diag.UpstreamProbe{Spec: spec}
 
-	network, host := upstreamDialTarget(spec)
-	start := time.Now()
-	conn, err := net.DialTimeout(network, host, timeout)
-	p.Elapsed = time.Since(start)
+	u, err := resolver.ParseUpstream(spec, timeout)
 	if err != nil {
 		p.Err = err
 		return p
 	}
-	_ = conn.Close()
+	defer u.Close()
+
+	m := new(dns.Msg)
+	m.SetQuestion(doctorProbeName, dns.TypeA)
+	m.RecursionDesired = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	start := time.Now()
+	resp, err := u.Exchange(ctx, m)
+	p.Elapsed = time.Since(start)
+
+	switch {
+	case err != nil:
+		p.Err = err
+	case resp == nil:
+		p.Err = errors.New("upstream returned no message")
+	case !answersQuestion(resp, m.Question[0]):
+		// miekg/dns matches the transaction ID; the question is ours to check.
+		// Something answering with a different question is not serving us.
+		p.Err = errors.New("upstream answered a different question")
+	default:
+		p.Rcode = dns.RcodeToString[resp.Rcode]
+	}
 	return p
 }
 
-// upstreamDialTarget reduces an upstream spec to something net.Dial accepts.
-func upstreamDialTarget(spec string) (network, address string) {
-	// Strip the "#hostname" TLS verification suffix, which is not part of the
-	// address.
-	if i := strings.Index(spec, "#"); i >= 0 {
-		spec = spec[:i]
+// answersQuestion reports whether resp addresses the question we asked.
+func answersQuestion(resp *dns.Msg, q dns.Question) bool {
+	if len(resp.Question) != 1 {
+		return false
 	}
-
-	network = "udp"
-	defaultPort := "53"
-	switch {
-	case strings.HasPrefix(spec, "tls://"):
-		spec, network, defaultPort = strings.TrimPrefix(spec, "tls://"), "tcp", "853"
-	case strings.HasPrefix(spec, "https://"):
-		spec, network, defaultPort = strings.TrimPrefix(spec, "https://"), "tcp", "443"
-		if i := strings.Index(spec, "/"); i >= 0 {
-			spec = spec[:i]
-		}
-	case strings.HasPrefix(spec, "tcp://"):
-		spec, network = strings.TrimPrefix(spec, "tcp://"), "tcp"
-	case strings.HasPrefix(spec, "udp://"):
-		spec = strings.TrimPrefix(spec, "udp://")
-	}
-
-	if _, _, err := net.SplitHostPort(spec); err != nil {
-		spec = net.JoinHostPort(spec, defaultPort)
-	}
-	return network, spec
+	got := resp.Question[0]
+	return strings.EqualFold(got.Name, q.Name) && got.Qtype == q.Qtype && got.Qclass == q.Qclass
 }
 
 // probeTarget turns a listen address into one a client can connect to.

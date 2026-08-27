@@ -169,10 +169,22 @@ func hasOwner(owners []string, name string) bool {
 	return false
 }
 
-// UpstreamProbe is the outcome of testing one configured forwarder.
+// UpstreamProbe is the outcome of exchanging a real DNS question with one
+// configured forwarder.
+//
+// A connection test would not do. A UDP "connection" is a local socket
+// association that succeeds without a packet leaving the machine, so a silent
+// or absent resolver looks reachable; a TCP accept proves a socket opened, not
+// that DNS is spoken over it. Only an answer proves an answer.
 type UpstreamProbe struct {
-	Spec    string
-	Err     error
+	Spec string
+	// Err is a transport failure: nothing answered, TLS did not verify, the
+	// reply was unreadable, or it addressed a different question.
+	Err error
+	// Rcode is the response code name when one came back. An upstream that
+	// answers REFUSED or SERVFAIL to everything is reachable and useless, and
+	// those are different problems from silence.
+	Rcode   string
 	Elapsed time.Duration
 }
 
@@ -196,16 +208,31 @@ func Upstreams(probes []UpstreamProbe) []Check {
 	failed := 0
 	for _, p := range probes {
 		c := Check{Section: SectionUpstream, Name: "Upstream " + p.Spec}
-		if p.Err != nil {
+		switch {
+		case p.Err != nil:
 			failed++
 			c.Status = StatusWarn
-			c.Summary = fmt.Sprintf("Upstream %s did not answer.", p.Spec)
+			c.Summary = fmt.Sprintf("Upstream %s did not answer a test query.", p.Spec)
 			c.Evidence = []string{"error: " + p.Err.Error()}
-			c.Action = "Check outbound access to this address and port. DNS-over-TLS upstreams " +
-				"use port 853, which some networks block."
-		} else {
+			c.Action = "Check outbound access to this address and port. DNS-over-TLS upstreams use " +
+				"port 853 and DNS-over-HTTPS uses 443, both of which some networks block; a DoT " +
+				"upstream also needs a certificate name it can verify (the \"#name\" suffix)."
+
+		case p.Rcode != "NOERROR":
+			// Reachable, and refusing or failing. Counted as failed for the
+			// "is any upstream usable" tally below, because a forwarder that
+			// answers SERVFAIL to everything resolves nothing.
+			failed++
+			c.Status = StatusWarn
+			c.Summary = fmt.Sprintf("Upstream %s answered %s rather than resolving the test name.", p.Spec, p.Rcode)
+			c.Evidence = []string{"rcode: " + p.Rcode, "elapsed: " + formatElapsed(p.Elapsed)}
+			c.Action = "The transport works, so this is not a firewall. A resolver that REFUSES " +
+				"suggests it does not serve this client; one that SERVFAILs has its own upstream " +
+				"problem."
+
+		default:
 			c.Status = StatusPass
-			c.Summary = fmt.Sprintf("Upstream %s answered in %s.", p.Spec, formatElapsed(p.Elapsed))
+			c.Summary = fmt.Sprintf("Upstream %s resolved a test query in %s.", p.Spec, formatElapsed(p.Elapsed))
 		}
 		checks = append(checks, c)
 	}
@@ -215,7 +242,7 @@ func Upstreams(probes []UpstreamProbe) []Check {
 			Section: SectionUpstream,
 			Name:    "At least one upstream usable",
 			Status:  StatusFail,
-			Summary: "Every configured upstream failed, so no name can be resolved.",
+			Summary: "No configured upstream resolved a test query, so no name can be resolved.",
 			Action: "Until one answers, DNS Daddy will return SERVFAIL for everything that is not " +
 				"already cached. Check this machine's own outbound DNS and network access.",
 		})
