@@ -113,6 +113,12 @@ func (h *Handler) clientAllowed(addr netip.Addr) bool {
 	if addr.Is4In6() {
 		addr = addr.Unmap()
 	}
+	// A link-local peer is reported with a scope zone ("fe80::1%eth0"), and
+	// netip.Prefix.Contains rejects any zoned address outright because
+	// prefixes carry no zone. The zone names the interface the address was
+	// seen on, not the address's membership of a prefix, so dropping it is
+	// what makes fe80::/10 — shipped in the default ACL — mean what it says.
+	addr = addr.WithZone("")
 	for _, p := range h.allowedClients {
 		if p.Addr().Is4() != addr.Is4() {
 			continue

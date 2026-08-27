@@ -32,11 +32,20 @@ ships with its own dashboard and a documented REST API.
 
 It started as a personal project built while studying cybersecurity at
 Master's level, as a way to learn DNS internals, Go, and secure-by-default
-system design in practice. Large parts of it were written with extensive
-AI assistance ("vibe coded") — that made it possible to build something this
-size as a side project, but it also means it has **not** had the kind of
-independent, adversarial security review that production security software
-needs before you should trust it with anything that matters.
+system design in practice.
+
+**DNS Daddy is an AI-assisted open-source project.** That is stated plainly
+rather than hidden, because the useful answer to "was this written with an LLM?"
+is evidence, not reassurance. Security claims here are backed where possible by
+tests, reproducible runs and written-down design decisions —
+[docs/assurance.md](docs/assurance.md) lists exactly what is checked, by what,
+and, just as importantly, what none of it proves.
+
+**It has not had an independent professional security audit.** Nobody outside
+the project has adversarially reviewed the DNS parser, the resolver, policy
+attribution or the authentication code. That is the largest gap in this project
+and no amount of CI substitutes for it. Until it is closed, do not trust DNS
+Daddy with anything that matters.
 
 **This is not currently represented as a finished, audited, or
 enterprise-ready product.** It is free, open source (Apache-2.0), and
@@ -141,15 +150,24 @@ See [labs/README.md](labs/README.md).
 git clone https://github.com/jameshoulder/dnsdaddy.git
 cd dnsdaddy
 cp .env.example .env
-$EDITOR .env            # set DNSDADDY_ALLOWED_CLIENT_CIDRS — see below
 docker compose up -d
+docker compose exec dnsdaddy dnsdaddy doctor
 docker compose logs dnsdaddy | grep password
 ```
 
-> **Set `DNSDADDY_ALLOWED_CLIENT_CIDRS` before you rely on this.** The built-in
-> default serves loopback and the private ranges only. On a VPS your clients
-> arrive from public addresses, so leaving it unset means every real query is
-> answered `REFUSED` — while the dashboard still reports itself healthy.
+**On a LAN or in a VM there is nothing to edit.** The built-in client ACL
+already serves loopback, every private range, carrier-grade NAT, link-local and
+the IPv6 equivalents.
+
+**On a public VPS you must set `DNSDADDY_ALLOWED_CLIENT_CIDRS` in `.env`.** Your
+clients arrive from public addresses, which the default does not cover, so every
+real query is answered `REFUSED`. Setting it *replaces* the default rather than
+adding to it.
+
+Either way, `dnsdaddy doctor` is the check that matters: it compares the
+networks in your dashboard against the addresses actually permitted to resolve,
+and says so in plain English when they disagree. Run it before you point any
+client at the resolver.
 
 **The dashboard is published on `127.0.0.1:8080` only.** `http://<server>:8080`
 will not connect from another machine, and that is deliberate: it keeps an

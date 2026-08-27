@@ -169,6 +169,24 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Overview" }
 
+  /api/v1/diagnostics:
+    get:
+      tags: [Status]
+      summary: Why DNS is not working
+      description: >
+        Checks the resolver's configuration against its live counters and
+        reports, in plain English, anything that would stop clients resolving.
+        Chiefly: whether the networks configured here are actually permitted to
+        send queries by dns.allowed_client_cidrs, which are two independent
+        settings that look like one. `dnsdaddy doctor` renders the same checks
+        at the command line.
+      responses:
+        "200":
+          description: Every check, worst status first in the `status` field
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Diagnostics" }
+
   /api/v1/activity/queries:
     get:
       tags: [Metrics]
@@ -861,6 +879,35 @@ components:
       type: object
       properties:
         error: { type: string }
+
+    Diagnostics:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pass, warn, fail]
+          description: The worst verdict across every check.
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/DiagnosticCheck" }
+
+    DiagnosticCheck:
+      type: object
+      properties:
+        section: { type: string, example: CLIENT ACCESS }
+        name: { type: string, example: 'Network "Home" can resolve' }
+        status: { type: string, enum: [pass, warn, fail] }
+        summary:
+          type: string
+          description: A whole sentence, read by somebody already having a bad time.
+          example: Network "Home" exists in the dashboard, but DNS queries from it are REFUSED.
+        evidence:
+          type: array
+          description: The values the verdict was reached from, so the operator can disagree.
+          items: { type: string }
+        action:
+          type: string
+          description: The next thing to do.
 
     Overview:
       type: object

@@ -83,6 +83,10 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/auth/password", a.handleChangePassword)
 
 	api.HandleFunc("GET /api/v1/overview", a.handleOverview)
+
+	// Why DNS is not working. Reads configuration and live counters and says
+	// so in plain English; `dnsdaddy doctor` renders the same checks.
+	api.HandleFunc("GET /api/v1/diagnostics", a.handleDiagnostics)
 	api.HandleFunc("GET /api/v1/activity/queries", a.handleQueryActivity)
 	api.HandleFunc("GET /api/v1/threats/categories", a.handleThreatsByCategory)
 	api.HandleFunc("GET /api/v1/threats/top-domains", a.handleTopBlocked)

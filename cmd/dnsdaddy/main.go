@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
+	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
@@ -34,10 +36,59 @@ import (
 )
 
 func main() {
+	// Subcommands are matched before flag parsing so that `dnsdaddy doctor`
+	// can take its own flags without the daemon's set getting in the way.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "doctor":
+			if err := runDoctor(os.Args[2:]); err != nil {
+				// runDoctor has already printed its findings; this is the exit
+				// status, not a second explanation.
+				os.Exit(1)
+			}
+			return
+		case "help", "-h", "--help":
+			usage(os.Stdout)
+			return
+		}
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// usage describes the two things this binary does.
+func usage(w io.Writer) {
+	fmt.Fprint(w, `dnsdaddy — a self-hosted protective DNS resolver
+
+Usage:
+  dnsdaddy [flags]          run the resolver
+  dnsdaddy doctor [flags]   diagnose a deployment and exit
+  dnsdaddy help             show this message
+
+Run flags:
+  -config path              config file (default /etc/dnsdaddy/config.yaml)
+  -log-level level          debug, info, warn, error
+  -log-format format        text or json
+  -version                  print the version and exit
+
+Doctor flags:
+  -config path              config file
+  -json                     emit findings as JSON
+  -timeout duration         per-probe timeout (default 5s)
+
+Doctor exits non-zero when a check fails, so it can gate a deployment.
+`)
+}
+
+// newFlagSet returns a flag set for a subcommand that reports its own errors
+// rather than exiting from inside the flag package.
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	return fs
 }
 
 func run() error {
@@ -157,6 +208,11 @@ func run() error {
 	allowedClients := cfg.AllowedClientPrefixes()
 	if len(allowedClients) > 0 {
 		log.Info("dns client ACL active", "allowed_cidrs", cfg.DNS.AllowedClientCIDRs)
+		// A network configured in the dashboard whose addresses the ACL does
+		// not permit is the single most confusing state this software can be
+		// in: everything reports healthy and every client is REFUSED. Say so
+		// at startup, where `docker compose logs` will find it.
+		reportClientAccess(context.Background(), st, cfg, log)
 	} else if cfg.DNS.AllowPublicResolver {
 		log.Warn("running as a PUBLIC resolver: dns.allow_public_resolver is set and no client ACL " +
 			"is configured. An open resolver will be found and abused for DNS amplification; " +
@@ -285,6 +341,35 @@ func run() error {
 
 	log.Info("stopped")
 	return nil
+}
+
+// reportClientAccess logs any network that cannot actually reach the resolver.
+//
+// It is advisory, not fatal. An operator may legitimately have a network
+// defined ahead of opening the ACL to it, and refusing to start would turn a
+// warning into an outage.
+func reportClientAccess(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) {
+	networks, err := st.ListNetworks(ctx)
+	if err != nil {
+		log.Warn("could not check network reachability", "error", err)
+		return
+	}
+	policies, err := st.ListPolicies(ctx)
+	if err != nil {
+		log.Warn("could not check network reachability", "error", err)
+		return
+	}
+
+	checks := diag.ClientAccess(diag.ClientAccessInput{
+		AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
+		Networks:            diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
+		AllowPublicResolver: cfg.DNS.AllowPublicResolver,
+		RefusedQueries:      nil, // nothing has been served yet
+	})
+
+	for _, c := range diag.Failures(checks) {
+		log.Warn(c.Summary, "evidence", strings.Join(c.Evidence, "; "), "action", c.Action)
+	}
 }
 
 // buildDetector assembles the behavioural detection engine from configuration.

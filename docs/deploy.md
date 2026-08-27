@@ -452,7 +452,115 @@ enabled/disabled choices are preserved.
 
 Take a backup first anyway.
 
+## 12. Uninstalling
+
+Two different operations. Be deliberate about which one you are performing —
+the data volume holds your configuration, your policies, your query history and
+your findings, and nothing warns you twice.
+
+### Keep the data
+
+Stops DNS Daddy and leaves everything recoverable. Bringing it back is
+`docker compose up -d` or `systemctl start dnsdaddy`.
+
+```bash
+# Docker
+docker compose down                 # NOT -v; that deletes the volume
+# The named volume dnsdaddy-data survives.
+
+# systemd
+sudo systemctl disable --now dnsdaddy
+sudo rm /etc/systemd/system/dnsdaddy.service /usr/local/bin/dnsdaddy
+sudo systemctl daemon-reload
+# /var/lib/dnsdaddy and /etc/dnsdaddy survive.
+```
+
+**Give the network its DNS back first.** Point DHCP at your router or a public
+resolver and confirm one client resolves *before* you stop DNS Daddy. Otherwise
+you take the network's name resolution down with it.
+
+If the installer disabled the systemd-resolved stub listener, restore it:
+
+```bash
+sudo rm /etc/systemd/resolved.conf.d/dnsdaddy.conf
+sudo systemctl restart systemd-resolved
+```
+
+### Delete everything, permanently
+
+Irreversible. Take a backup first (§10) if there is any chance you want the
+history.
+
+```bash
+# Docker
+docker compose down -v              # -v deletes the named volume
+docker volume rm dnsdaddy-data 2>/dev/null || true
+
+# systemd — after the removal steps above
+sudo rm -rf /var/lib/dnsdaddy /etc/dnsdaddy
+sudo userdel dnsdaddy
+```
+
+This removes the database, the session key, cached feeds, the generated
+password, and every stored finding.
+
+---
+
 ## Troubleshooting
+
+### Start here: `dnsdaddy doctor`
+
+```bash
+sudo dnsdaddy doctor                              # native install
+docker compose exec dnsdaddy dnsdaddy doctor      # docker
+```
+
+It reads your configuration, reads the database, and sends real DNS queries — at
+your own listeners and through each configured upstream. It changes nothing (the
+database is opened strictly read-only), and it exits non-zero if any check
+fails, so it can gate a deployment script. `--json` emits the same findings for
+a monitoring system.
+
+Under Docker it must be run **inside the container**: the dashboard is published
+on loopback only and the database lives in a named volume, so a run on the host
+would report failures that are artefacts of where it was run. Each affected
+check says so rather than reporting a false failure.
+
+What it tells apart, which `dig` alone cannot:
+
+| Symptom | What doctor says |
+|---|---|
+| Clients get no answer at all | whether **nothing is listening** or **another process holds the port** — and names that process |
+| Clients get `REFUSED` | that the resolver is **working and declining this source address**, and which ranges it will accept |
+| A network exists but gets nothing | that the network is **not in `dns.allowed_client_cidrs`**, with both values quoted |
+| Everything resolves, nothing blocked | that the **threat index is empty**, or is enforcing last-known-good data that is stale |
+| Names fail intermittently | which **upstreams** resolved a real test query and which did not — and, for one that answered `REFUSED` or `SERVFAIL`, that the transport is fine and the problem is the resolver itself |
+
+### The most common first-install failure
+
+**Symptom.** The dashboard loads, `/api/v1/health` reports `ok`, `docker ps`
+says healthy, you have added your network — and every client says the DNS server
+is not responding, or `dig` returns `REFUSED`.
+
+**Cause.** A **Network** in the dashboard and `dns.allowed_client_cidrs` are two
+different settings. The network decides *which policy* an address gets once it
+is allowed to resolve. `dns.allowed_client_cidrs` decides *whether it may
+resolve at all*, and it is checked first, before anything else happens. Adding a
+network does not grant access.
+
+**Check.** `dnsdaddy doctor`, or `GET /api/v1/diagnostics`, or the
+`dnsdaddy_client_refused_total` metric — a number climbing there means clients
+are being turned away on their source address, which rules out firewalls,
+routing and port conflicts in one step.
+
+**Fix.** Add the range to `DNSDADDY_ALLOWED_CLIENT_CIDRS` (or
+`dns.allowed_client_cidrs`) and restart. Note that setting this variable
+**replaces** the built-in list rather than adding to it — the built-in list
+already covers loopback, every RFC 1918 range, carrier-grade NAT, link-local,
+the IPv6 equivalents and the Docker bridge, so on a LAN you should usually not
+set it at all.
+
+### Other symptoms
 
 **`bind: address already in use` on :53**
 
