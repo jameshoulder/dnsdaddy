@@ -622,13 +622,13 @@ func TestRecordFeedRefreshTracksLastSuccessSeparately(t *testing.T) {
 }
 
 // The dashboard shows a "no devices have used this yet" card while this is
-// zero, so what it counts decides whether a working install looks working.
+// false, so what it counts decides whether a working install looks working.
 //
 // Loopback is the trap. A container health check, `dnsdaddy doctor` and the
-// operator's own dig from the server all arrive from 127.0.0.1; counting them
-// would retire the onboarding card before anything on the actual network had
-// ever resolved a name through the resolver.
-func TestDistinctClientsSinceExcludesLoopback(t *testing.T) {
+// operator's own dig from the server all arrive from 127.0.0.1; treating those
+// as clients would retire the onboarding card before anything on the actual
+// network had ever resolved a name through the resolver.
+func TestAnyClientSinceExcludesLoopback(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -642,37 +642,36 @@ func TestDistinctClientsSinceExcludesLoopback(t *testing.T) {
 		t.Fatalf("InsertQueryBatch: %v", err)
 	}
 
-	n, err := st.DistinctClientsSince(ctx, now.Add(-time.Hour))
+	seen, err := st.AnyClientSince(ctx, now.Add(-time.Hour))
 	if err != nil {
-		t.Fatalf("DistinctClientsSince: %v", err)
+		t.Fatalf("AnyClientSince: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("counted %d clients from loopback and unattributed rows alone, want 0", n)
+	if seen {
+		t.Fatal("loopback and unattributed rows alone were reported as a client on the network")
 	}
 
-	// Two real devices, one of them querying twice.
 	if err := st.InsertQueryBatch(ctx, []QueryEvent{
 		{Time: now, ClientIP: "192.168.1.20", Domain: "example.com", QType: "A", Action: ActionAllowed},
-		{Time: now, ClientIP: "192.168.1.20", Domain: "example.org", QType: "A", Action: ActionAllowed},
-		{Time: now, ClientIP: "192.168.1.21", Domain: "example.com", QType: "A", Action: ActionAllowed},
 	}, true); err != nil {
 		t.Fatalf("InsertQueryBatch: %v", err)
 	}
 
-	n, err = st.DistinctClientsSince(ctx, now.Add(-time.Hour))
+	seen, err = st.AnyClientSince(ctx, now.Add(-time.Hour))
 	if err != nil {
-		t.Fatalf("DistinctClientsSince: %v", err)
+		t.Fatalf("AnyClientSince: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("DistinctClientsSince = %d, want 2 distinct devices", n)
+	if !seen {
+		t.Error("a real device on the network was not reported")
 	}
 
-	// Outside the window.
-	n, err = st.DistinctClientsSince(ctx, now.Add(time.Hour))
+	// The window must actually bound. query_log.ts is milliseconds; comparing
+	// it against a seconds-based cutoff made every row look newer than any
+	// cutoff, which this catches.
+	seen, err = st.AnyClientSince(ctx, now.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("DistinctClientsSince: %v", err)
+		t.Fatalf("AnyClientSince: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("DistinctClientsSince = %d for a future window, want 0", n)
+	if seen {
+		t.Error("a future window reported a client, so the time bound is not applied")
 	}
 }

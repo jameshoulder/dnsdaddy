@@ -249,29 +249,43 @@ func (s *Store) TotalsSince(ctx context.Context, t time.Time) (Totals, error) {
 	return out, err
 }
 
-// DistinctClientsSince counts the separate client addresses seen since t.
+// AnyClientSince reports whether any device on the network has used the
+// resolver since t.
 //
-// Loopback is excluded deliberately. A health check, `dnsdaddy doctor` and the
-// operator's own `dig` from the server all arrive from 127.0.0.1, and counting
-// them would let the dashboard tell somebody their network is using the
-// resolver when the only thing that has ever queried it is the server itself.
+// A bounded existence check rather than a count, because the only question
+// asked of it is "has anything at all turned up yet?" and the honest answer
+// costs one row. COUNT(DISTINCT client_ip) over the same window would visit
+// every row in it — on the 1 vCPU reference deployment at a million queries a
+// day, that is a full scan of the last 24 hours on every dashboard load, to
+// produce a number nothing displays.
 //
-// Returns 0 when client-IP logging is off, because then there is nothing to
-// count — callers must not read that as "no clients". Overview reports the
-// setting alongside the number so the dashboard can tell the two apart.
-func (s *Store) DistinctClientsSince(ctx context.Context, t time.Time) (int, error) {
-	var n int
+// Both cases are cheap. Where real clients exist the newest row is almost
+// always one of them, so the scan stops immediately; where none exist there is
+// nothing but loopback health checks to scan.
+//
+// Loopback is excluded deliberately. A container health check, `dnsdaddy
+// doctor` and the operator's own dig from the server all arrive from
+// 127.0.0.1, and counting them would tell somebody their network was using the
+// resolver when the only thing that had ever queried it was the server itself.
+//
+// Always false when client-IP logging is off, because then there is nothing to
+// look at — callers must not read that as "no clients". Overview reports the
+// setting alongside it so the dashboard can tell the two apart.
+func (s *Store) AnyClientSince(ctx context.Context, t time.Time) (bool, error) {
+	var found int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT client_ip) FROM query_log
-		WHERE ts >= ?
-		  AND client_ip != ''
-		  AND client_ip NOT LIKE '127.%'
-		  AND client_ip != '::1'`,
-		// query_log.ts is milliseconds, not seconds. Comparing against
-		// Unix() here made every row look newer than any cutoff, so the
-		// 24-hour window silently counted the entire retained log.
-		unixMilli(t)).Scan(&n)
-	return n, err
+		SELECT EXISTS(
+			SELECT 1 FROM query_log
+			WHERE ts >= ?
+			  AND client_ip != ''
+			  AND client_ip NOT LIKE '127.%'
+			  AND client_ip != '::1'
+			LIMIT 1)`,
+		// query_log.ts is milliseconds, not seconds. Comparing against Unix()
+		// here made every row look newer than any cutoff, so the 24-hour
+		// window silently covered the entire retained log.
+		unixMilli(t)).Scan(&found)
+	return found == 1, err
 }
 
 // ActivityBucket is one hour of the query-activity chart.

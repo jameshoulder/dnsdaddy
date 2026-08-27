@@ -355,7 +355,8 @@ function diagnosticsBanner(diagnostics) {
  * activity that has not happened.
  */
 function firstClientCard(overview) {
-  if (!overview || overview.clientsSeen24h > 0) return '';
+  if (typeof window === 'undefined') return '';
+  if (!overview || overview.hasSeenClients) return '';
 
   // Client addresses are not recorded, so "no clients" would be a statement
   // about the privacy setting rather than about the network.

@@ -567,7 +567,7 @@ function withHostname(host, fn) {
 
 test('the card appears when no client has been seen, naming the dashboard host', () => {
   const out = withHostname('192.168.1.75', () =>
-    firstClientCard({ clientsSeen24h: 0, clientAttribution: true }));
+    firstClientCard({ hasSeenClients: false, clientAttribution: true }));
 
   assert.match(out, /No devices have used this resolver yet/);
   assert.match(out, /nslookup example\.com 192\.168\.1\.75/,
@@ -577,7 +577,7 @@ test('the card appears when no client has been seen, naming the dashboard host',
 
 test('the card disappears as soon as a real client exists', () => {
   const out = withHostname('192.168.1.75', () =>
-    firstClientCard({ clientsSeen24h: 1, clientAttribution: true }));
+    firstClientCard({ hasSeenClients: true, clientAttribution: true }));
   assert.strictEqual(out, '', 'onboarding must not outlive its usefulness');
 });
 
@@ -586,14 +586,14 @@ test('the card is silent when client addresses are not recorded', () => {
   // there would be a statement about the setting, not about the network — and
   // it would never stop being shown.
   const out = withHostname('192.168.1.75', () =>
-    firstClientCard({ clientsSeen24h: 0, clientAttribution: false }));
+    firstClientCard({ hasSeenClients: false, clientAttribution: false }));
   assert.strictEqual(out, '');
 });
 
 test('over an SSH tunnel it does not claim loopback is the DNS address', () => {
   for (const host of ['127.0.0.1', 'localhost']) {
     const out = withHostname(host, () =>
-      firstClientCard({ clientsSeen24h: 0, clientAttribution: true }));
+      firstClientCard({ hasSeenClients: false, clientAttribution: true }));
 
     assert.doesNotMatch(out, /nslookup example\.com 127\.0\.0\.1/,
       'handing a client 127.0.0.1 as its DNS server would be actively wrong');
