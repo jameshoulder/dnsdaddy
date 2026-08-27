@@ -250,6 +250,39 @@ func Upstreams(probes []UpstreamProbe) []Check {
 	return checks
 }
 
+// ManagementExposure reports plaintext management access from the internet.
+//
+// Evidence, not inference. The process cannot see its own Docker port
+// publishing or the host firewall, so it does not guess at them; this fires
+// only when a request has actually arrived over plain HTTP from a public
+// address, which means the port is reachable from the internet and session
+// cookies are crossing it in the clear.
+//
+// A LAN dashboard over plain HTTP is a supported deployment and is silent
+// here, because a private source address is not evidence of anything wrong.
+func ManagementExposure(publicPlaintextRequests uint64, lastAddr string) Check {
+	c := Check{Section: SectionWeb, Name: "Management surface not publicly exposed in plaintext"}
+
+	if publicPlaintextRequests == 0 {
+		c.Status = StatusPass
+		c.Summary = "No management request has arrived from a public address over plain HTTP."
+		return c
+	}
+
+	c.Status = StatusFail
+	c.Summary = fmt.Sprintf(
+		"The dashboard has been reached from the public internet over plain HTTP %d time(s): "+
+			"credentials and session cookies are crossing the internet unencrypted.", publicPlaintextRequests)
+	if lastAddr != "" {
+		c.Evidence = []string{"most recent public source: " + lastAddr}
+	}
+	c.Action = "Publish the dashboard port on loopback or a LAN address rather than 0.0.0.0, or put " +
+		"a reverse proxy with TLS in front and set http.secure_cookies to \"always\". Docker's port " +
+		"publishing bypasses ufw, so a host firewall rule alone will not close this. Change the admin " +
+		"password afterwards: assume it has been observed."
+	return c
+}
+
 // ThreatIndex reports whether the resolver is actually filtering.
 //
 // A resolver with an empty index answers every question and blocks nothing.

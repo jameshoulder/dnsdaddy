@@ -50,6 +50,10 @@ type Deps struct {
 // API is the HTTP surface.
 type API struct {
 	Deps
+
+	// exposure records evidence that the management surface is reachable in
+	// plaintext from the public internet. See internal/api/exposure.go.
+	exposure exposureWatch
 }
 
 // New returns an API bound to deps.
@@ -141,7 +145,7 @@ func (a *API) Handler() http.Handler {
 	// --- Dashboard ----------------------------------------------------------
 	mux.Handle("/", web.Handler())
 
-	return a.withRecovery(a.withLogging(mux))
+	return a.withRecovery(a.withLogging(a.withExposureWatch(mux)))
 }
 
 // requireAuth rejects unauthenticated calls to the management API, and

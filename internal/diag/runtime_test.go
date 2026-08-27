@@ -221,3 +221,40 @@ func TestUpstreamsTreatANonSuccessRcodeAsUnusable(t *testing.T) {
 		t.Errorf("Worst = %s, want fail when no upstream can resolve anything", Worst(all))
 	}
 }
+
+// This check exists to catch one thing: a management port reachable from the
+// internet in plaintext. It must be silent otherwise, because a LAN dashboard
+// over plain HTTP is a supported deployment and a diagnostic that cries wolf
+// gets ignored on the day it is right.
+func TestManagementExposureIsSilentWithoutEvidence(t *testing.T) {
+	c := ManagementExposure(0, "")
+	if c.Status != StatusPass {
+		t.Fatalf("status = %s, want pass when nothing public has been observed", c.Status)
+	}
+	if c.Action != "" {
+		t.Errorf("a passing check carries an action the renderer will not print: %q", c.Action)
+	}
+}
+
+func TestManagementExposureReportsObservedPublicPlaintextAccess(t *testing.T) {
+	c := ManagementExposure(3, "203.0.113.9")
+
+	if c.Status != StatusFail {
+		t.Fatalf("status = %s, want fail", c.Status)
+	}
+	if !strings.Contains(c.Summary, "unencrypted") {
+		t.Errorf("summary does not say what is at stake: %q", c.Summary)
+	}
+	if !strings.Contains(strings.Join(c.Evidence, " "), "203.0.113.9") {
+		t.Errorf("evidence does not name the source the operator has to recognise: %v", c.Evidence)
+	}
+	// Docker's port publishing bypasses ufw, so "add a firewall rule" is not a
+	// fix here and the action must not let the operator believe it is.
+	if !strings.Contains(c.Action, "bypasses ufw") {
+		t.Errorf("action does not warn that a host firewall rule will not close this: %q", c.Action)
+	}
+	// Anything that crossed the internet in the clear should be assumed seen.
+	if !strings.Contains(c.Action, "password") {
+		t.Errorf("action does not tell the operator to rotate the credential: %q", c.Action)
+	}
+}

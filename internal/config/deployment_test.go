@@ -81,3 +81,46 @@ func TestEnvExampleDoesNotNarrowTheClientACL(t *testing.T) {
 		t.Fatalf("scan .env.example: %v", err)
 	}
 }
+
+// The dashboard bind address is the one deployment setting where the default
+// must stay closed and the easy change must stay safe.
+//
+// Loopback by default: a fresh `docker compose up -d` must not publish an
+// authenticated, plaintext management API anywhere reachable. Overridable by
+// DNSDADDY_DASHBOARD_BIND: without that, a LAN operator who wants their own
+// dashboard has to edit the Compose file, and the edit most people reach for
+// is "8080:8080" — which on a VPS is the exact exposure the loopback default
+// existed to prevent.
+func TestComposePublishesTheDashboardOnLoopbackByDefault(t *testing.T) {
+	compose := repoFile(t, "docker-compose.yml")
+
+	re := regexp.MustCompile(`"\$\{DNSDADDY_DASHBOARD_BIND:-([^}]*)\}:8080:8080"`)
+	m := re.FindStringSubmatch(compose)
+	if m == nil {
+		t.Fatal("docker-compose.yml no longer publishes the dashboard as " +
+			"\"${DNSDADDY_DASHBOARD_BIND:-<default>}:8080:8080\"; if the exposure model has " +
+			"changed deliberately, update this test to describe the new contract")
+	}
+
+	if got := m[1]; got != "127.0.0.1" {
+		t.Errorf("the dashboard's default bind address is %q, want 127.0.0.1.\n"+
+			"A stock install must not publish the management API beyond loopback.", got)
+	}
+
+	// The unqualified form binds every interface, which is the one publication
+	// that turns a VPS deployment into a public plaintext admin panel.
+	//
+	// Comments are stripped first: the file explains that "8080:8080" is the
+	// mapping to avoid, and a check that cannot tell configuration from prose
+	// fails on the documentation warning against the very thing it is
+	// policing.
+	for i, line := range strings.Split(compose, "\n") {
+		code, _, _ := strings.Cut(line, "#")
+		if strings.Contains(code, `"8080:8080"`) || strings.Contains(code, `"0.0.0.0:8080:8080"`) {
+			t.Errorf("docker-compose.yml:%d publishes the dashboard on every interface: %s\n"+
+				"That exposes an authenticated plaintext management API, and Docker's port "+
+				"publishing bypasses ufw so a firewall rule does not contain it.",
+				i+1, strings.TrimSpace(line))
+		}
+	}
+}

@@ -45,13 +45,25 @@ services:
       # itself, so the host's 53 is published to the container's 5353.
       - "53:5353/udp"
       - "53:5353/tcp"
-      # Dashboard and API — loopback only, on purpose.
+      # Dashboard and API. Loopback by default; set DNSDADDY_DASHBOARD_BIND in
+      # .env to this machine's LAN address to reach it from your own network.
       #
-      # Do NOT change this to "8080:8080" to make the dashboard reachable. That
-      # publishes an authenticated-but-plaintext management API to the whole
-      # internet, and Docker's port publishing bypasses ufw. The supported way
-      # to reach it remotely is a reverse proxy terminating TLS on 443.
-      - "127.0.0.1:8080:8080"
+      # The address matters more than the port. "192.168.1.75:8080:8080" is
+      # reachable from your LAN and from nowhere else, because a private
+      # address is not routable from the internet — that is a supported
+      # deployment and how most self-hosted dashboards work.
+      #
+      # "0.0.0.0:8080:8080" (or the bare "8080:8080", which means the same
+      # thing) is the one to avoid: on a public VPS it publishes an
+      # authenticated-but-plaintext management API to the whole internet, and
+      # Docker's port publishing bypasses ufw so a firewall rule will not save
+      # you. For a public deployment, terminate TLS in front instead —
+      # deploy/Caddyfile.example.
+      #
+      # DNS Daddy reports it if this goes wrong: a management request arriving
+      # over plain HTTP from a public address is recorded and raised on the
+      # dashboard and at /api/v1/diagnostics.
+      - "${DNSDADDY_DASHBOARD_BIND:-127.0.0.1}:8080:8080"
 
     environment:
       # ---- Who may use this resolver -------------------------------------
