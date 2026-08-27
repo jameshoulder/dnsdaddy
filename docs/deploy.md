@@ -452,6 +452,60 @@ enabled/disabled choices are preserved.
 
 Take a backup first anyway.
 
+## 12. Uninstalling
+
+Two different operations. Be deliberate about which one you are performing —
+the data volume holds your configuration, your policies, your query history and
+your findings, and nothing warns you twice.
+
+### Keep the data
+
+Stops DNS Daddy and leaves everything recoverable. Bringing it back is
+`docker compose up -d` or `systemctl start dnsdaddy`.
+
+```bash
+# Docker
+docker compose down                 # NOT -v; that deletes the volume
+# The named volume dnsdaddy-data survives.
+
+# systemd
+sudo systemctl disable --now dnsdaddy
+sudo rm /etc/systemd/system/dnsdaddy.service /usr/local/bin/dnsdaddy
+sudo systemctl daemon-reload
+# /var/lib/dnsdaddy and /etc/dnsdaddy survive.
+```
+
+**Give the network its DNS back first.** Point DHCP at your router or a public
+resolver and confirm one client resolves *before* you stop DNS Daddy. Otherwise
+you take the network's name resolution down with it.
+
+If the installer disabled the systemd-resolved stub listener, restore it:
+
+```bash
+sudo rm /etc/systemd/resolved.conf.d/dnsdaddy.conf
+sudo systemctl restart systemd-resolved
+```
+
+### Delete everything, permanently
+
+Irreversible. Take a backup first (§10) if there is any chance you want the
+history.
+
+```bash
+# Docker
+docker compose down -v              # -v deletes the named volume
+docker volume rm dnsdaddy-data 2>/dev/null || true
+
+# systemd — after the removal steps above
+sudo rm -rf /var/lib/dnsdaddy /etc/dnsdaddy
+sudo userdel dnsdaddy
+```
+
+This removes the database, the session key, cached feeds, the generated
+password, and every stored finding.
+
+---
+
 ## Troubleshooting
 
 ### Start here: `dnsdaddy doctor`

@@ -16,8 +16,10 @@ intention, and everything else here is expected to agree with it.
 
 | | |
 |---|---|
-| [deploy.md](deploy.md) | Nanode walkthrough, TLS, firewalling, backups, upgrades |
+| [deploy.md](deploy.md) | Nanode walkthrough, TLS, firewalling, backups, upgrades, uninstall |
+| [deployment-matrix.md](deployment-matrix.md) | Acceptance checklist for clean machines, VMs and VPSes — and what has actually been run |
 | [integrations.md](integrations.md) | pfSense, OPNsense, UniFi, FortiGate, Windows, roaming clients, stopping DoH bypass |
+| [pi-hole.md](pi-hole.md) | Running alongside Pi-hole: which order, and what each one costs |
 | [threat-intel.md](threat-intel.md) | Every default feed, where it comes from, and handling a false positive |
 | [privacy.md](privacy.md) | What is stored, for how long, and how to store less |
 | [architecture.md](architecture.md) | How a query flows through the system, and why it is built this way |
