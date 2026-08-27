@@ -72,6 +72,16 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Session and bearer-token authentication | Bcrypt password, rate-limited login, same-origin checks on cookie-authenticated writes. |
 | Single static binary | `CGO_ENABLED=0`, pure-Go SQLite, cross-compiles from a laptop. |
 
+### Diagnostics
+
+| Capability | Notes |
+|---|---|
+| `dnsdaddy doctor` | Reads configuration and the database, and sends real DNS queries at the configured listeners and through each upstream. Reports SYSTEM, DATABASE, DNS LISTENER, CLIENT ACCESS, UPSTREAM, WEB INTERFACE and THREAT INTELLIGENCE as PASS/WARN/FAIL with the evidence behind each verdict. Changes nothing — the database is opened read-only — and exits non-zero on failure. `--json` for machine consumption. |
+| Client-access cross-check | Reports a network configured in the dashboard whose addresses `dns.allowed_client_cidrs` does not permit. Surfaced at startup, at `GET /api/v1/diagnostics`, and on the dashboard. Coverage is decided by single-prefix containment, so two allowed prefixes that between them cover a network are reported as *partial* rather than *full* — it over-warns in a rare case rather than under-warning in a common one. |
+| Port-conflict attribution | When nothing answers, distinguishes "nothing is listening" from "another process holds the port" and names that process by reading `/proc` socket inodes. Naming a process owned by another user needs root; without it the check says so rather than guessing. |
+| Management-exposure detection | Records management requests arriving over plain HTTP from a public address and raises them as a failure. Evidence, not inference: the process cannot see its own port publishing, so this fires only on traffic that has actually arrived. Silent for private, loopback and carrier-grade-NAT sources, for TLS, and for `/dns-query`. |
+| `dnsdaddy_client_refused_total` | Queries rejected on their source address, in `/metrics`. Deliberately unlabelled by address: the refusal path writes no query-log row so an unauthorised source cannot fill the disk, and a metric label would reintroduce that. |
+
 ### DNSSEC — read this carefully
 
 DNS Daddy sets the AD bit on outgoing queries ([RFC 6840] §5.7) so a validating
@@ -182,6 +192,9 @@ curl -H "Authorization: Bearer dnsd_…" https://your-server/api/v1/detectors | 
 
 # The API surface this build actually serves
 curl https://your-server/openapi.yaml
+
+# What this build says about its own configuration and health
+dnsdaddy doctor --json
 ```
 
 Both are generated from the running code, so they cannot drift from it the way

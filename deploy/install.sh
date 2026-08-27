@@ -107,6 +107,28 @@ fi
 log "Installed $($BIN_PATH -version)"
 
 # --- 5. configuration --------------------------------------------------------
+
+# Where the dashboard listens depends on whether this machine faces the
+# internet. Binding every interface on a public host publishes an
+# authenticated but PLAINTEXT management API, which is the same exposure
+# docs/deploy.md tells VPS operators to avoid — so the installer must not
+# create it by default.
+PRIMARY_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || true)
+[[ -n "$PRIMARY_IP" ]] || PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+
+HTTP_LISTEN="127.0.0.1:8080"
+DASHBOARD_NOTE="loopback only — reach it over an SSH tunnel, or put TLS in front (docs/deploy.md)"
+case "$PRIMARY_IP" in
+  10.*|192.168.*|127.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)
+    # A private address: this machine is not directly reachable from the
+    # internet, so a LAN dashboard is the expected and supported deployment.
+    HTTP_LISTEN=":8080"
+    DASHBOARD_NOTE="reachable from your LAN"
+    ;;
+esac
+# Override for anyone who knows better: DNSDADDY_HTTP_LISTEN=... sudo -E ./install.sh
+HTTP_LISTEN="${DNSDADDY_HTTP_LISTEN:-$HTTP_LISTEN}"
+
 if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
   if [[ -f "${SCRIPT_DIR}/../dnsdaddy.example.yaml" ]]; then
     install -m 0644 "${SCRIPT_DIR}/../dnsdaddy.example.yaml" "${CONFIG_DIR}/config.yaml"
@@ -120,12 +142,17 @@ dns:
     - "tls://9.9.9.9:853#dns.quad9.net"
     - "tls://1.1.1.1:853#cloudflare-dns.com"
 http:
-  listen: ":8080"
+  listen: "${HTTP_LISTEN}"
 EOF
   fi
-  log "Wrote ${CONFIG_DIR}/config.yaml"
+  # The example config ships with ":8080" so a LAN install works out of the
+  # box; rewrite it when this host looks internet-facing.
+  sed -i -E "s|^(\s*)listen: \"?:?8080\"?|\1listen: \"${HTTP_LISTEN}\"|" "${CONFIG_DIR}/config.yaml" 2>/dev/null || true
+  log "Wrote ${CONFIG_DIR}/config.yaml (dashboard: ${HTTP_LISTEN})"
 else
   log "Keeping existing ${CONFIG_DIR}/config.yaml"
+  HTTP_LISTEN=$(grep -oP '^\s*listen:\s*"?\K[^"\s]+' "${CONFIG_DIR}/config.yaml" | tail -1)
+  [[ -n "$HTTP_LISTEN" ]] || HTTP_LISTEN=":8080"
 fi
 
 # --- 6. systemd unit ---------------------------------------------------------
@@ -151,11 +178,18 @@ fi
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 : "${IP:=<this-server>}"
 
+case "$HTTP_LISTEN" in
+  127.*|localhost*) DASHBOARD_URL="http://${HTTP_LISTEN}" ;;
+  :8080)            DASHBOARD_URL="http://${IP}:8080" ;;
+  *)                DASHBOARD_URL="http://${HTTP_LISTEN}" ;;
+esac
+
 cat <<EOF
 
   DNS Daddy is running.
 
-  Dashboard   http://${IP}:8080
+  Dashboard   ${DASHBOARD_URL}
+              ${DASHBOARD_NOTE}
   Resolver    ${IP}  (set this as your DNS server)
 
 EOF
@@ -178,7 +212,12 @@ cat <<EOF
   Logs        journalctl -u dnsdaddy -f
   Restart     systemctl restart dnsdaddy
 
-  Before exposing the dashboard beyond your LAN, put TLS in front of it —
-  see docs/deploy.md.
+  The dashboard is authenticated but travels in plaintext. That is fine on a
+  LAN and not fine across the internet: before reaching it from outside your
+  own network, put TLS in front of it — see docs/deploy.md.
+
+  DNS Daddy reports it if this goes wrong: a management request arriving over
+  plain HTTP from a public address is raised on the dashboard and at
+  /api/v1/diagnostics.
 
 EOF

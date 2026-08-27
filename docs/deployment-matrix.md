@@ -75,7 +75,9 @@ that the machine still resolves names for itself afterwards, and that
 
 | # | Host | Method | Client | Status |
 |---|---|---|---|---|
+| B0 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh` | same subnet | ☐ not run |
 | B1 | Ubuntu 24.04 + Docker | `cp .env.example .env && docker compose up -d`, no edits | same subnet | ☐ not run |
+| B4 | Ubuntu 24.04 + Docker | LAN dashboard: `DNSDADDY_DASHBOARD_BIND=<lan-ip>` | browser on another machine | ☐ not run |
 | B2 | Debian 12 + Docker | same | another private subnet, routed | ☐ not run |
 | B3 | Ubuntu + Docker | same, then `docker compose down && up -d` | same subnet | ☐ not run |
 
@@ -84,6 +86,16 @@ path with no edits must produce a resolver that serves the LAN. Check
 specifically that the Query log attributes queries to **real client addresses**
 and not to a Docker bridge address — if every client shows as `172.x.x.x`,
 Docker is translating the source and per-client attribution is lost.
+
+**B0 is the guided installer**, and has never been executed against a real
+Docker daemon — only its `--dry-run` path has. Its detection routines (host
+address, port 53 and 8080, systemd-resolved) and everything after the checks
+are unverified on real hardware.
+
+**B4 checks the LAN dashboard.** `DNSDADDY_DASHBOARD_BIND` must make
+`http://<lan-ip>:8080` reachable from another machine on the same network, and
+must leave it unreachable from anywhere else. Confirm the login works and the
+session persists.
 
 **B3 checks persistence.** Networks, policies, query history and findings must
 survive. `docker compose down -v` would delete them, which is the point of

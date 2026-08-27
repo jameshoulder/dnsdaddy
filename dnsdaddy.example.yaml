@@ -85,8 +85,17 @@ dns:
   dnssec_telemetry: true
 
 http:
-  # Dashboard and management API. Bind to loopback and put a reverse proxy in
-  # front if this server faces the internet.
+  # Dashboard and management API.
+  #
+  #   ":8080"             every interface — right on a LAN, wrong on a VPS
+  #   "192.168.1.75:8080" one interface
+  #   "127.0.0.1:8080"    loopback only — the correct choice on anything
+  #                       internet-facing, with a TLS reverse proxy in front
+  #
+  # The API is authenticated but travels in plaintext, so what matters is who
+  # can reach the port. deploy/install.sh picks loopback automatically when
+  # this machine's primary address is public, and DNS Daddy reports it if a
+  # management request ever arrives over plain HTTP from a public address.
   listen: ":8080"
 
   # Leave empty and a password is generated on first run, written to
