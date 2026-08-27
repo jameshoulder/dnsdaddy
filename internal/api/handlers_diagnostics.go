@@ -40,6 +40,12 @@ func (a *API) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		RefusedQueries:      &refused,
 	})
 
+	// Evidence the process has actually gathered about its own exposure. It
+	// belongs beside the client-access checks: both answer "is this reachable
+	// by the people it should be, and only by them?".
+	exposureCount, exposureAddr := a.exposure.snapshot()
+	checks = append(checks, diag.ManagementExposure(exposureCount, exposureAddr))
+
 	writeJSON(w, http.StatusOK, DiagnosticsResponse{
 		Status: diag.Worst(checks),
 		Checks: checks,

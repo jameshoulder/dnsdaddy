@@ -704,3 +704,18 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   overflow-wrap: anywhere;
 }
 .diag-action { margin-top: 0.35rem; font-size: 0.85rem; }
+
+/* --- First-client onboarding -------------------------------------------- */
+/* Shown only until a real device has used the resolver. Informational, not an
+   alarm: nothing is wrong, there is just nothing to show yet. */
+.first-client { margin-bottom: 1.25rem; border-left: 3px solid var(--info); }
+.first-client-title { font-weight: 600; margin-bottom: 0.35rem; }
+.first-client-cmd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  padding: 0.6rem 0.8rem;
+  margin: 0.4rem 0 0.6rem;
+  border-radius: 6px;
+  background: rgb(255 255 255 / 0.04);
+  overflow-x: auto;
+}

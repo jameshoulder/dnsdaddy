@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -38,6 +39,51 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// settingFirstClientSeen records the first time a device on the network used
+// this resolver. Its presence is the answer; its value is for a human reading
+// the settings table.
+const settingFirstClientSeen = "first_client_seen_at"
+
+// everSeenAClient reports whether a non-loopback client has ever used this
+// resolver, latching the answer once it is true.
+//
+// The query log only reaches back as far as log.retention_days, so it cannot
+// answer "ever" on its own — and asking it about a fixed recent window means a
+// quiet network eventually looks like a fresh install. Once a real client has
+// been observed the fact is written to the settings table, where it outlives
+// both the retention window and any quiet period.
+//
+// The seeding query is deliberately unbounded rather than the cheap 24-hour
+// lookback. On an upgrade to this version the setting does not exist yet, and
+// an established resolver whose network happened to be quiet that day would
+// otherwise be told nothing had ever used it despite the evidence sitting in
+// query_log. It runs only until the latch is set, and the case where it scans
+// most is the case where the table holds almost nothing.
+//
+// Errors are swallowed on purpose. This drives an onboarding hint; the rest of
+// the overview is worth serving regardless, and the worst outcome of a failed
+// read is that the hint shows for one more page load.
+func (a *API) everSeenAClient(ctx context.Context) bool {
+	if v, err := a.Store.GetSetting(ctx, settingFirstClientSeen); err == nil && v != "" {
+		return true
+	}
+
+	seen, err := a.Store.AnyClientSince(ctx, time.Time{}) // all retained history
+	if err != nil {
+		a.Log.Debug("check for observed clients", "error", err)
+		return false
+	}
+	if !seen {
+		return false
+	}
+
+	// First sighting: latch it, so a later quiet day cannot un-see it.
+	if err := a.Store.SetSetting(ctx, settingFirstClientSeen, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		a.Log.Debug("record first client sighting", "error", err)
+	}
+	return true
+}
+
 // Overview is the dashboard's headline block.
 type Overview struct {
 	ProtectionStatus  string     `json:"protectionStatus"`
@@ -51,6 +97,23 @@ type Overview struct {
 	LastFeedRefresh   *time.Time `json:"lastFeedRefresh"`
 	UptimeSeconds     int64      `json:"uptimeSeconds"`
 	Version           string     `json:"version"`
+
+	// HasSeenClients reports whether a non-loopback client has EVER used this
+	// resolver, not whether one has recently. False means nothing on the
+	// network has ever pointed at it, which is the most common reason a new
+	// operator thinks it is broken.
+	//
+	// Deliberately a latch rather than a rolling window: a resolver whose
+	// network was quiet for a day — a holiday, a powered-down lab — would
+	// otherwise start telling its operator that no device had ever used it,
+	// which is both false and indistinguishable from a fresh install.
+	HasSeenClients bool `json:"hasSeenClients"`
+	// ClientAttribution reports whether client addresses are recorded at all.
+	// When it is false, ClientsSeen24h is always zero and means nothing —
+	// without this flag the dashboard would tell an operator who has
+	// deliberately turned off client logging that no device is using their
+	// resolver, forever.
+	ClientAttribution bool `json:"clientAttribution"`
 }
 
 func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +136,9 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	blocklistSize := a.Lists.Load().Len()
+
+	attribution := a.Config.Log.QueryLog && a.Config.Log.LogClientIP
+	seenClients := attribution && a.everSeenAClient(ctx)
 
 	// "Protected" requires both a loaded blocklist and at least one policy
 	// actually enforcing a category. A resolver with feeds loaded but every
@@ -128,6 +194,8 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 		LastFeedRefresh:   lastRefresh,
 		UptimeSeconds:     int64(time.Since(a.StartedAt).Seconds()),
 		Version:           version.String(),
+		HasSeenClients:    seenClients,
+		ClientAttribution: attribution,
 	})
 }
 

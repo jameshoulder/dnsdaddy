@@ -20,7 +20,20 @@ should be swapping a binary, not restoring a backup.
 
 ---
 
-## [Unreleased]
+## [0.2.0-alpha.1] — unreleased
+
+**Maturation release.** Less feature work, more finding out where DNS Daddy was
+quietly wrong. Full notes: [docs/releases/v0.2.0-alpha.1.md](docs/releases/v0.2.0-alpha.1.md).
+
+| | |
+|---|---|
+| **Fixed** | The documented Docker install refused every LAN client while reporting itself healthy. A network could exist in the dashboard and be unable to resolve, with nothing saying so. Link-local IPv6 clients were refused and misattributed. Upstream checks proved connectivity, not resolution. Stale threat intelligence could be reported as fresh. |
+| **Added** | `dnsdaddy doctor`; `GET /api/v1/diagnostics`; configuration warnings on the dashboard; `dnsdaddy_client_refused_total`; a reachable LAN dashboard via `DNSDADDY_DASHBOARD_BIND`; a guided Docker installer; first-client onboarding. |
+| **Security** | `doctor` no longer migrates the database it inspects. Plaintext management access from a public address is detected and reported. `golang.org/x/mod` updated for CVE-2026-56864 and CVE-2026-56865. Deployment artefacts pinned to the binary's defaults by test. |
+| **Documentation** | `docs/assurance.md`, `docs/audit-2026-08.md`, `docs/pi-hole.md`, `docs/deployment-matrix.md`, `docs/screenshots.md`. Uninstall documented. README rewritten around a first-time visitor. |
+| **Known limitations** | No independent security review. The deployment matrix has not been executed — every row is *not run*. Pi-hole coexistence is analysed, not measured. Detectors have no measured real-world false-positive rate. DNSSEC is not validated locally. |
+
+The detail behind each line follows.
 
 ### Fixed
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
@@ -18,6 +19,19 @@ func (h *harness) diagnostics(t *testing.T) DiagnosticsResponse {
 		t.Fatalf("GET /api/v1/diagnostics = %d: %s", resp.StatusCode, raw)
 	}
 	var got DiagnosticsResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return got
+}
+
+func (h *harness) overview(t *testing.T) Overview {
+	t.Helper()
+	resp, raw := h.do("GET", "/api/v1/overview", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/v1/overview = %d: %s", resp.StatusCode, raw)
+	}
+	var got Overview
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -105,3 +119,47 @@ func TestMetricsExposeClientRefusals(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// Onboarding answers "has anything on the network ever used this?", not "has
+// anything used it lately". A resolver whose network went quiet for a day — a
+// holiday, a powered-down lab — must not start telling its operator that no
+// device has ever used it: that is false, and indistinguishable from a fresh
+// install.
+//
+// The upgrade case is the one that first shipped broken. On an upgrade the
+// latch does not exist yet, so it has to be seeded from retained history; an
+// earlier version seeded it from a 24-hour lookback and therefore re-ran
+// onboarding on an established-but-quiet resolver whose evidence was sitting
+// in query_log the whole time.
+func TestOnboardingDoesNotResetAfterAQuietDay(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	ctx := context.Background()
+
+	if h.overview(t).HasSeenClients {
+		t.Fatal("a fresh install reported that a client had already been seen")
+	}
+
+	// An established resolver, upgrading: a real device queried two days ago,
+	// nothing since, and no latch has ever been written.
+	if err := h.store.InsertQueryBatch(ctx, []store.QueryEvent{
+		{Time: time.Now().UTC().Add(-48 * time.Hour), ClientIP: "192.168.1.20",
+			Domain: "example.com", QType: "A", Action: store.ActionAllowed},
+	}, true); err != nil {
+		t.Fatalf("InsertQueryBatch: %v", err)
+	}
+
+	if !h.overview(t).HasSeenClients {
+		t.Fatal("an upgrade with a two-day-old client in retained history re-ran onboarding; " +
+			"the latch must be seeded from history, not from a recent-activity window")
+	}
+
+	// Now drop every row, as retention eventually would. The latch must hold
+	// on its own once the evidence is gone.
+	if _, err := h.store.DB().ExecContext(ctx, "DELETE FROM query_log"); err != nil {
+		t.Fatalf("clear query_log: %v", err)
+	}
+	if !h.overview(t).HasSeenClients {
+		t.Error("onboarding reappeared once the query log was pruned; it claims no device has EVER used this resolver")
+	}
+}
