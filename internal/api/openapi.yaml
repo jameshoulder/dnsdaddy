@@ -928,6 +928,23 @@ components:
         lastFeedRefresh: { type: [string, "null"], format: date-time }
         uptimeSeconds: { type: integer, format: int64 }
         version: { type: string }
+        hasSeenClients:
+          type: boolean
+          description: |
+            Whether any non-loopback client has used the resolver in the last
+            24 hours. Loopback is excluded deliberately: health checks,
+            `dnsdaddy doctor` and the operator's own `dig` from the server all
+            arrive from 127.0.0.1, and counting them would report that the
+            network is using the resolver when only the server is.
+
+            Always false when `clientAttribution` is false — read the two
+            together.
+        clientAttribution:
+          type: boolean
+          description: |
+            Whether client addresses are recorded at all (`log.query_log` and
+            `log.log_client_ip`). When false, `hasSeenClients` says nothing
+            about the network, only about the privacy setting.
 
     ActivityBucket:
       type: object
