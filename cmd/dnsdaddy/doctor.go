@@ -49,11 +49,22 @@ func runDoctor(args []string) error {
 	var checks []diag.Check
 	cfg, cfgChecks := doctorConfig(*configPath)
 	checks = append(checks, cfgChecks...)
-	checks = append(checks, doctorStorage(ctx, cfg)...)
+	checks = append(checks, doctorDataDir(cfg))
+
+	// One handle, shared by every check that needs it. Opening the database
+	// three times would be wasteful, and — because store.Open creates and
+	// seeds a missing file — would have this diagnostic write a database into
+	// a mistyped data directory. openExistingStore refuses to create one.
+	st, dbCheck := openExistingStore(ctx, cfg)
+	if st != nil {
+		defer st.Close()
+	}
+
+	checks = append(checks, dbCheck)
 	checks = append(checks, doctorListeners(ctx, cfg, *timeout)...)
-	checks = append(checks, doctorClientAccess(ctx, cfg)...)
+	checks = append(checks, doctorClientAccess(ctx, st, cfg)...)
 	checks = append(checks, doctorUpstreams(cfg, *timeout)...)
-	checks = append(checks, doctorWeb(ctx, cfg, *timeout)...)
+	checks = append(checks, doctorWeb(ctx, st, cfg, *timeout)...)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -99,52 +110,70 @@ func doctorConfig(path string) (config.Config, []diag.Check) {
 	return cfg, []diag.Check{c}
 }
 
-// doctorStorage checks the data directory and the database.
-func doctorStorage(ctx context.Context, cfg config.Config) []diag.Check {
-	var checks []diag.Check
+// doctorDataDir checks that persistence has somewhere to go.
+func doctorDataDir(cfg config.Config) diag.Check {
+	c := diag.Check{Section: diag.SectionSystem, Name: "Data directory writable"}
 
-	dirCheck := diag.Check{Section: diag.SectionSystem, Name: "Data directory writable"}
 	probe := filepath.Join(cfg.DataDir, ".dnsdaddy-doctor")
-	switch f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); {
-	case err != nil:
-		dirCheck.Status = diag.StatusFail
-		dirCheck.Summary = "The data directory is not writable, so nothing can be persisted."
-		dirCheck.Evidence = []string{"data_dir: " + cfg.DataDir, "error: " + err.Error()}
-		dirCheck.Action = "Check ownership and permissions. Under systemd the directory belongs to " +
-			"the dnsdaddy user; under Docker it is the named volume."
-	default:
-		_ = f.Close()
-		_ = os.Remove(probe)
-		dirCheck.Status = diag.StatusPass
-		dirCheck.Summary = "The data directory is writable."
-		dirCheck.Evidence = []string{"data_dir: " + cfg.DataDir}
-	}
-	checks = append(checks, dirCheck)
-
-	dbCheck := diag.Check{Section: diag.SectionDatabase, Name: "Database readable"}
-	st, err := store.Open(cfg.DBPath())
+	f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- path built from the operator's own data_dir
 	if err != nil {
-		dbCheck.Status = diag.StatusFail
-		dbCheck.Summary = "The database could not be opened."
-		dbCheck.Evidence = []string{"path: " + cfg.DBPath(), "error: " + err.Error()}
-		dbCheck.Action = "If DNS Daddy is running in a container, run this command inside it: " +
-			"`docker compose exec dnsdaddy dnsdaddy doctor`."
-		return append(checks, dbCheck)
+		c.Status = diag.StatusFail
+		c.Summary = "The data directory is not writable, so nothing can be persisted."
+		c.Evidence = []string{"data_dir: " + cfg.DataDir, "error: " + err.Error()}
+		c.Action = "Check ownership and permissions. Under systemd the directory belongs to " +
+			"the dnsdaddy user; under Docker it is the named volume."
+		return c
 	}
-	defer st.Close()
+	_ = f.Close()
+	_ = os.Remove(probe)
+
+	c.Status = diag.StatusPass
+	c.Summary = "The data directory is writable."
+	c.Evidence = []string{"data_dir: " + cfg.DataDir}
+	return c
+}
+
+// openExistingStore opens the database only if it already exists.
+//
+// store.Open creates and seeds a missing file, which is right for the daemon
+// and wrong here: a diagnostic run against a mistyped data directory must
+// report that there is no database, not quietly manufacture one and then
+// pronounce it healthy. A nil store is returned when there is nothing to open,
+// and every caller tolerates it.
+func openExistingStore(ctx context.Context, cfg config.Config) (*store.Store, diag.Check) {
+	c := diag.Check{Section: diag.SectionDatabase, Name: "Database readable"}
+	path := cfg.DBPath()
+
+	if _, err := os.Stat(path); err != nil {
+		c.Status = diag.StatusFail
+		c.Summary = "There is no database at the configured path."
+		c.Evidence = []string{"path: " + path}
+		c.Action = "On a first run this is expected until DNS Daddy has started once. Otherwise " +
+			"data_dir points somewhere other than the running instance — under Docker the " +
+			"database lives in a volume, so run `docker compose exec dnsdaddy dnsdaddy doctor`."
+		return nil, c
+	}
+
+	st, err := store.Open(path)
+	if err != nil {
+		c.Status = diag.StatusFail
+		c.Summary = "The database exists but could not be opened."
+		c.Evidence = []string{"path: " + path, "error: " + err.Error()}
+		return nil, c
+	}
 
 	networks, err := st.ListNetworks(ctx)
 	if err != nil {
-		dbCheck.Status = diag.StatusFail
-		dbCheck.Summary = "The database opened but could not be read."
-		dbCheck.Evidence = []string{"error: " + err.Error()}
-		return append(checks, dbCheck)
+		c.Status = diag.StatusFail
+		c.Summary = "The database opened but could not be read."
+		c.Evidence = []string{"path: " + path, "error: " + err.Error()}
+		return st, c
 	}
 
-	dbCheck.Status = diag.StatusPass
-	dbCheck.Summary = fmt.Sprintf("Database readable, holding %d network(s).", len(networks))
-	dbCheck.Evidence = []string{"path: " + cfg.DBPath()}
-	return append(checks, dbCheck)
+	c.Status = diag.StatusPass
+	c.Summary = fmt.Sprintf("Database readable, holding %d network(s).", len(networks))
+	c.Evidence = []string{"path: " + path}
+	return st, c
 }
 
 // doctorListeners establishes whether anything is serving DNS, and if not,
@@ -182,13 +211,16 @@ func doctorListeners(ctx context.Context, cfg config.Config, timeout time.Durati
 
 // doctorClientAccess is the configuration cross-check: which of the networks
 // in the dashboard are actually permitted to send queries.
-func doctorClientAccess(ctx context.Context, cfg config.Config) []diag.Check {
-	st, err := store.Open(cfg.DBPath())
-	if err != nil {
-		// doctorStorage has already reported this.
-		return nil
+func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
+	if st == nil {
+		// Without the database we cannot know which networks are configured,
+		// but the ACL itself is in the config and is still worth reporting.
+		return diag.ClientAccess(diag.ClientAccessInput{
+			AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
+			AllowPublicResolver: cfg.DNS.AllowPublicResolver,
+			RefusedQueries:      -1,
+		})
 	}
-	defer st.Close()
 
 	networks, err := st.ListNetworks(ctx)
 	if err != nil {
@@ -219,7 +251,7 @@ func doctorUpstreams(cfg config.Config, timeout time.Duration) []diag.Check {
 }
 
 // doctorWeb checks the dashboard and reads the live threat-index size from it.
-func doctorWeb(ctx context.Context, cfg config.Config, timeout time.Duration) []diag.Check {
+func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration) []diag.Check {
 	target := probeTarget(cfg.HTTP.Listen)
 	url := "http://" + target + "/api/v1/health"
 
@@ -233,7 +265,7 @@ func doctorWeb(ctx context.Context, cfg config.Config, timeout time.Duration) []
 		c.Status = diag.StatusFail
 		c.Summary = "The dashboard address could not be used."
 		c.Evidence = []string{"listen: " + cfg.HTTP.Listen, "error: " + err.Error()}
-		return []diag.Check{c}
+		return []diag.Check{c, intelUnknown()}
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -244,7 +276,7 @@ func doctorWeb(ctx context.Context, cfg config.Config, timeout time.Duration) []
 		c.Action = "If DNS Daddy runs in a container, the dashboard is published on loopback only " +
 			"and this must be run inside the container: " +
 			"`docker compose exec dnsdaddy dnsdaddy doctor`."
-		return []diag.Check{c}
+		return []diag.Check{c, intelUnknown()}
 	}
 	defer resp.Body.Close()
 
@@ -253,7 +285,7 @@ func doctorWeb(ctx context.Context, cfg config.Config, timeout time.Duration) []
 		c.Status = diag.StatusFail
 		c.Summary = fmt.Sprintf("The dashboard answered HTTP %d.", resp.StatusCode)
 		c.Evidence = []string{"url: " + url}
-		return []diag.Check{c}
+		return []diag.Check{c, intelUnknown()}
 	}
 
 	var health struct {
@@ -264,7 +296,7 @@ func doctorWeb(ctx context.Context, cfg config.Config, timeout time.Duration) []
 		c.Status = diag.StatusWarn
 		c.Summary = "The dashboard responded, but the health payload was not readable."
 		c.Evidence = []string{"url: " + url}
-		return []diag.Check{c}
+		return []diag.Check{c, intelUnknown()}
 	}
 
 	c.Status = diag.StatusPass
@@ -273,15 +305,14 @@ func doctorWeb(ctx context.Context, cfg config.Config, timeout time.Duration) []
 
 	// The running process owns the live index, so its size is only knowable
 	// from the API. Feed timestamps come from the database.
-	return []diag.Check{c, doctorIntel(ctx, cfg, health.BlocklistSize)}
+	return []diag.Check{c, doctorIntel(ctx, st, cfg, health.BlocklistSize)}
 }
 
 // doctorIntel reports whether filtering is actually in force.
-func doctorIntel(ctx context.Context, cfg config.Config, indexed int) diag.Check {
+func doctorIntel(ctx context.Context, st *store.Store, cfg config.Config, indexed int) diag.Check {
 	var last time.Time
 
-	if st, err := store.Open(cfg.DBPath()); err == nil {
-		defer st.Close()
+	if st != nil {
 		if feeds, err := st.ListFeeds(ctx); err == nil {
 			// LastSuccess, not LastRefresh. A feed that has errored since
 			// Tuesday has a refresh timestamp of a minute ago and
@@ -303,6 +334,23 @@ func doctorIntel(ctx context.Context, cfg config.Config, indexed int) diag.Check
 		staleAfter = 48 * time.Hour
 	}
 	return diag.ThreatIndex(indexed, last, time.Now(), staleAfter)
+}
+
+// intelUnknown stands in when the live index size could not be read.
+//
+// The index belongs to the running process, so only its API can report it.
+// Omitting the section when the API is unreachable would leave the reader to
+// infer that filtering was checked and found fine, which is the misleading
+// green this whole command exists to remove.
+func intelUnknown() diag.Check {
+	return diag.Check{
+		Section: diag.SectionIntel,
+		Name:    "Threat index loaded",
+		Status:  diag.StatusWarn,
+		Summary: "Whether filtering is in force could not be determined.",
+		Action: "The live index is only readable from the running process, and its API did not " +
+			"answer — see the WEB INTERFACE check above.",
+	}
 }
 
 // --- probes -----------------------------------------------------------------

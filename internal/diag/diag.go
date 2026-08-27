@@ -107,12 +107,16 @@ func ClientAccess(in ClientAccessInput) []Check {
 				"Set dns.allowed_client_cidrs to the networks you serve unless you genuinely intend this.",
 		})
 	case len(allowed) == 0:
+		// The caveat belongs in the summary, not the action: a renderer that
+		// only prints actions for non-passing checks would otherwise drop the
+		// one sentence that makes this verdict conditional.
 		checks = append(checks, Check{
 			Section: sectionClientAccess,
 			Name:    "Client ACL configured",
 			Status:  StatusPass,
-			Summary: "No client ACL is configured, so no query is refused on its source address.",
-			Action:  "This is only safe while the DNS listeners are loopback-only.",
+			Summary: "No client ACL is configured, so no query is refused on its source address. " +
+				"That is safe only because the DNS listeners are loopback-only — config validation " +
+				"refuses any other combination without dns.allow_public_resolver.",
 		})
 	default:
 		checks = append(checks, Check{

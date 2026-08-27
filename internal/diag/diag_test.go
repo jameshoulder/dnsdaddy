@@ -198,3 +198,22 @@ func TestFailuresSelectsOnlyFailures(t *testing.T) {
 		t.Errorf("failures out of section order: %v", got)
 	}
 }
+
+// A caveat that qualifies a passing verdict has to live in the summary. The
+// renderer only prints actions for checks that did not pass, so a caveat
+// carried in Action would silently vanish from exactly the output it matters
+// in.
+func TestPassingChecksCarryTheirCaveatInTheSummary(t *testing.T) {
+	checks := ClientAccess(ClientAccessInput{AllowedCIDRs: nil, RefusedQueries: -1})
+
+	for _, c := range checks {
+		if c.Status == StatusPass && c.Action != "" {
+			t.Errorf("passing check %q carries an action the renderer will not print: %q", c.Name, c.Action)
+		}
+	}
+
+	c := find(t, checks, "Client ACL configured")
+	if !strings.Contains(c.Summary, "loopback-only") {
+		t.Errorf("summary lost the condition the verdict depends on: %q", c.Summary)
+	}
+}
