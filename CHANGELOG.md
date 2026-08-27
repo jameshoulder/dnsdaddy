@@ -73,6 +73,10 @@ should be swapping a binary, not restoring a backup.
   reported at startup, at `GET /api/v1/diagnostics`, and by `dnsdaddy doctor`,
   naming the network, its policy, and both CIDR lists.
 
+  The dashboard now shows these as a **configuration problem** above
+  everything else, with the evidence behind the verdict and what to do about
+  it. It is an exception report: when nothing is wrong, nothing is shown.
+
 - **`dnsdaddy_client_refused_total`** in `/metrics` — queries rejected on their
   source address. A number climbing here rules out firewalls, routing and port
   conflicts in one step. The counter already existed and was read by nothing.

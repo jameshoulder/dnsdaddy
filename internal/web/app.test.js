@@ -28,6 +28,7 @@ const {
   observatoryCard,
   feedStatusBadge,
   threatIntelPanel,
+  diagnosticsBanner,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -439,4 +440,103 @@ test('the connecting state is painted while waiting behind another refresh', asy
     notify: () => {},
   });
   assert.ok(painted >= 1, 'the card must show work in progress while queued behind another refresh');
+});
+
+
+/*
+ * The configuration-problem banner.
+ *
+ * These exist because of a real deployment failure: the resolver reported
+ * itself operational, the dashboard showed the network as protected, and every
+ * client on it was answered REFUSED. A green tick above a broken deployment is
+ * worse than no tick at all.
+ */
+
+function check(overrides = {}) {
+  return {
+    section: 'CLIENT ACCESS',
+    name: 'Network "Home" can resolve',
+    status: 'pass',
+    summary: 'Network "Home" is permitted to send queries.',
+    evidence: [],
+    action: '',
+    ...overrides,
+  };
+}
+
+test('the banner is absent when nothing is wrong', () => {
+  const out = diagnosticsBanner({ status: 'pass', checks: [check(), check()] });
+  assert.strictEqual(out, '', 'a healthy deployment must not carry a banner');
+});
+
+test('the banner is absent when diagnostics could not be fetched', () => {
+  // An older server, or a failed request. The dashboard must still render.
+  assert.strictEqual(diagnosticsBanner(null), '');
+  assert.strictEqual(diagnosticsBanner(undefined), '');
+  assert.strictEqual(diagnosticsBanner({}), '');
+});
+
+test('a failing check is shown with its evidence and its action', () => {
+  const out = diagnosticsBanner({
+    status: 'fail',
+    checks: [
+      check(),
+      check({
+        status: 'fail',
+        summary: 'Network "Home" exists in the dashboard, but DNS queries from it are REFUSED.',
+        evidence: ['network: 192.168.1.0/24', 'dns.allowed_client_cidrs: 127.0.0.0/8'],
+        action: 'Adding a network assigns it a policy; it does not permit it to resolve.',
+      }),
+    ],
+  });
+
+  assert.match(out, /CONFIGURATION PROBLEM/);
+  assert.match(out, /REFUSED/);
+  assert.match(out, /192\.168\.1\.0\/24/, 'the evidence must be shown so the operator can check our working');
+  assert.match(out, /does not permit it to resolve/, 'the action must be shown');
+  assert.match(out, /diag-fail/, 'a failure must not be styled as a warning');
+});
+
+test('passing checks are not listed alongside problems', () => {
+  const out = diagnosticsBanner({
+    status: 'fail',
+    checks: [
+      check({ summary: 'All quiet on the western front.' }),
+      check({ status: 'fail', summary: 'Something is broken.' }),
+    ],
+  });
+
+  assert.match(out, /Something is broken/);
+  assert.doesNotMatch(out, /western front/, 'this is an exception report, not a status page');
+});
+
+test('a warning is styled and worded as a warning, not a failure', () => {
+  const out = diagnosticsBanner({
+    status: 'warn',
+    checks: [check({ status: 'warn', summary: 'Only part of network "Home" may resolve.' })],
+  });
+
+  assert.match(out, /CONFIGURATION WARNING/);
+  assert.match(out, /diag-warn/);
+  assert.doesNotMatch(out, /diag-fail/);
+});
+
+test('server-supplied text is escaped', () => {
+  // Network names are operator-supplied and reach this through the API.
+  const out = diagnosticsBanner({
+    status: 'fail',
+    checks: [
+      check({
+        status: 'fail',
+        summary: 'Network "<img src=x onerror=alert(1)>" is REFUSED.',
+        evidence: ['<script>alert(2)</script>'],
+        action: '<b>do a thing</b>',
+      }),
+    ],
+  });
+
+  assert.doesNotMatch(out, /<img/, 'summary was not escaped');
+  assert.doesNotMatch(out, /<script/, 'evidence was not escaped');
+  assert.doesNotMatch(out, /<b>/, 'action was not escaped');
+  assert.match(out, /&lt;img/);
 });

@@ -297,6 +297,54 @@ function statusBadge(status) {
   return html`<span class="badge ${cls}">${text}</span>`;
 }
 
+/**
+ * Renders configuration problems that stop the resolver serving clients.
+ *
+ * This is the dashboard's answer to a resolver that reports itself
+ * operational while refusing every real query. A green tick above a broken
+ * deployment is worse than no tick at all, so anything the server reports as
+ * warn or fail is shown here, above everything else, with the evidence it was
+ * reached from and what to do about it.
+ *
+ * Passing checks are deliberately not listed: this is an exception report, not
+ * a status page.
+ */
+function diagnosticsBanner(diagnostics) {
+  if (!diagnostics || !Array.isArray(diagnostics.checks)) return '';
+
+  const problems = diagnostics.checks.filter((c) => c.status === 'fail' || c.status === 'warn');
+  if (problems.length === 0) return '';
+
+  const failed = problems.some((c) => c.status === 'fail');
+  const items = problems
+    .map(
+      (c) => html`
+        <li class="diag-item">
+          <span class="badge ${c.status === 'fail' ? 'bad' : 'warn'}">${c.status.toUpperCase()}</span>
+          <div>
+            <div class="diag-summary">${c.summary}</div>
+            ${raw((c.evidence || []).map((e) => html`<div class="diag-evidence">${e}</div>`).join(''))}
+            ${raw(c.action ? html`<div class="diag-action">${c.action}</div>` : '')}
+          </div>
+        </li>`,
+    )
+    .join('');
+
+  return html`
+    <div class="card diag-banner ${failed ? 'diag-fail' : 'diag-warn'}">
+      <div class="diag-title">
+        ${failed ? 'CONFIGURATION PROBLEM' : 'CONFIGURATION WARNING'}
+      </div>
+      <p class="muted small diag-lede">
+        ${failed
+          ? 'DNS Daddy is running, but part of this configuration stops clients using it.'
+          : 'DNS Daddy is serving clients, but something here is worth knowing about.'}
+      </p>
+      <ul class="diag-list">${raw(items)}</ul>
+      <p class="muted small">Run <code>dnsdaddy doctor</code> on the server for the full report.</p>
+    </div>`;
+}
+
 function categoryBadge(category, label) {
   if (!category) return html`<span class="muted">—</span>`;
   return html`<span class="badge" data-fg="${colourFor(category)}">${label || category}</span>`;
@@ -804,12 +852,16 @@ pages.dashboard = {
   title: 'Dashboard',
   subtitle: 'What your network asked for, and what was stopped.',
   async render() {
-    const [overview, activity, categories, top, feeds] = await Promise.all([
+    const [overview, activity, categories, top, feeds, diagnostics] = await Promise.all([
       apiGet('/overview'),
       apiGet('/activity/queries?hours=24'),
       apiGet('/threats/categories?hours=24'),
       apiGet('/threats/top-domains?days=7&limit=8'),
       apiGet('/feeds'),
+      // Tolerate failure: a dashboard that will not load because the
+      // diagnostics endpoint is unavailable is a worse outcome than a
+      // dashboard without a banner.
+      apiGet('/diagnostics').catch(() => null),
     ]);
     this.feeds = feeds;
 
@@ -820,6 +872,7 @@ pages.dashboard = {
     }));
 
     return html`
+      ${raw(diagnosticsBanner(diagnostics))}
       <div class="section grid grid-4">
         ${raw(metricCard({
           label: 'Protection',
@@ -2227,5 +2280,6 @@ if (typeof module !== 'undefined' && module.exports) {
     observatoryCard,
     feedStatusBadge,
     threatIntelPanel,
+    diagnosticsBanner,
   };
 }

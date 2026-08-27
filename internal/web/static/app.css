@@ -684,3 +684,23 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 
 .intel-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .intel-status { flex: 0 0 auto; }
+
+/* --- Configuration problems -------------------------------------------- */
+/* Shown above everything on the dashboard. A resolver that reports itself
+   operational while refusing every client is the failure this exists to make
+   impossible, so these are loud on purpose. */
+.diag-banner { margin-bottom: 1.25rem; border-left: 3px solid var(--warn); }
+.diag-banner.diag-fail { border-left-color: var(--danger); }
+.diag-title { font-weight: 600; letter-spacing: 0.04em; font-size: 0.8rem; color: var(--warn); }
+.diag-fail .diag-title { color: var(--danger); }
+.diag-lede { margin: 0.35rem 0 0.75rem; }
+.diag-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.75rem; }
+.diag-item { display: flex; gap: 0.6rem; align-items: flex-start; }
+.diag-summary { font-weight: 500; }
+.diag-evidence {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.diag-action { margin-top: 0.35rem; font-size: 0.85rem; }
