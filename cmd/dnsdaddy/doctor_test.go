@@ -141,3 +141,15 @@ func TestProbeUpstreamReportsAnUnparseableSpec(t *testing.T) {
 		t.Errorf("the finding does not name the spec it came from: %q", p.Spec)
 	}
 }
+
+// dns.RcodeToString has no entry for a code it does not know, and an empty
+// rcode rendered into a finding reads as a bug in the diagnostic rather than
+// as news about the upstream.
+func TestRcodeNameNeverReturnsEmpty(t *testing.T) {
+	if got := rcodeName(dns.RcodeSuccess); got != "NOERROR" {
+		t.Errorf("rcodeName(0) = %q, want NOERROR", got)
+	}
+	if got := rcodeName(4095); got == "" {
+		t.Error("an unknown rcode rendered as an empty string")
+	}
+}

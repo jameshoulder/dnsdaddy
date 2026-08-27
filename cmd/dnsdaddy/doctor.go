@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -432,9 +433,19 @@ func probeUpstream(spec string, timeout time.Duration) diag.UpstreamProbe {
 		// Something answering with a different question is not serving us.
 		p.Err = errors.New("upstream answered a different question")
 	default:
-		p.Rcode = dns.RcodeToString[resp.Rcode]
+		p.Rcode = rcodeName(resp.Rcode)
 	}
 	return p
+}
+
+// rcodeName never returns an empty string. dns.RcodeToString has no entry for
+// a code it does not know, and an empty rcode rendered into a finding reads as
+// a bug in the diagnostic rather than as news about the upstream.
+func rcodeName(rcode int) string {
+	if s, ok := dns.RcodeToString[rcode]; ok {
+		return s
+	}
+	return "RCODE" + strconv.Itoa(rcode)
 }
 
 // answersQuestion reports whether resp addresses the question we asked.
