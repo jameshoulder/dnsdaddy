@@ -33,6 +33,15 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metric(&b, "dnsdaddy_errors_total", "DNS questions that failed to resolve", "counter",
 		fmt.Sprintf("dnsdaddy_errors_total %d", errs))
 
+	// A rising count here means clients are being turned away on their source
+	// address — the difference between "the resolver is broken" and "the
+	// resolver is working and does not believe it should answer you". It is
+	// deliberately not labelled by address: the refusal path writes no query
+	// log, so an unauthorised source cannot fill the disk, and giving it a
+	// metric label would reintroduce exactly that.
+	metric(&b, "dnsdaddy_client_refused_total", "DNS questions refused because the source address is not in dns.allowed_client_cidrs", "counter",
+		fmt.Sprintf("dnsdaddy_client_refused_total %d", a.DNS.RefusedClients()))
+
 	metric(&b, "dnsdaddy_cache_entries", "Answers currently cached", "gauge",
 		fmt.Sprintf("dnsdaddy_cache_entries %d", cacheSize))
 	metric(&b, "dnsdaddy_cache_hits_total", "Cache hits", "counter",

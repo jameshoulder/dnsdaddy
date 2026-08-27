@@ -24,6 +24,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
+	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
@@ -157,6 +158,11 @@ func run() error {
 	allowedClients := cfg.AllowedClientPrefixes()
 	if len(allowedClients) > 0 {
 		log.Info("dns client ACL active", "allowed_cidrs", cfg.DNS.AllowedClientCIDRs)
+		// A network configured in the dashboard whose addresses the ACL does
+		// not permit is the single most confusing state this software can be
+		// in: everything reports healthy and every client is REFUSED. Say so
+		// at startup, where `docker compose logs` will find it.
+		reportClientAccess(context.Background(), st, cfg, log)
 	} else if cfg.DNS.AllowPublicResolver {
 		log.Warn("running as a PUBLIC resolver: dns.allow_public_resolver is set and no client ACL " +
 			"is configured. An open resolver will be found and abused for DNS amplification; " +
@@ -285,6 +291,35 @@ func run() error {
 
 	log.Info("stopped")
 	return nil
+}
+
+// reportClientAccess logs any network that cannot actually reach the resolver.
+//
+// It is advisory, not fatal. An operator may legitimately have a network
+// defined ahead of opening the ACL to it, and refusing to start would turn a
+// warning into an outage.
+func reportClientAccess(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) {
+	networks, err := st.ListNetworks(ctx)
+	if err != nil {
+		log.Warn("could not check network reachability", "error", err)
+		return
+	}
+	policies, err := st.ListPolicies(ctx)
+	if err != nil {
+		log.Warn("could not check network reachability", "error", err)
+		return
+	}
+
+	checks := diag.ClientAccess(diag.ClientAccessInput{
+		AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
+		Networks:            diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
+		AllowPublicResolver: cfg.DNS.AllowPublicResolver,
+		RefusedQueries:      -1, // nothing has been served yet
+	})
+
+	for _, c := range diag.Failures(checks) {
+		log.Warn(c.Summary, "evidence", strings.Join(c.Evidence, "; "), "action", c.Action)
+	}
 }
 
 // buildDetector assembles the behavioural detection engine from configuration.
