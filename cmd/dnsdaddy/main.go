@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -35,10 +36,59 @@ import (
 )
 
 func main() {
+	// Subcommands are matched before flag parsing so that `dnsdaddy doctor`
+	// can take its own flags without the daemon's set getting in the way.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "doctor":
+			if err := runDoctor(os.Args[2:]); err != nil {
+				// runDoctor has already printed its findings; this is the exit
+				// status, not a second explanation.
+				os.Exit(1)
+			}
+			return
+		case "help", "-h", "--help":
+			usage(os.Stdout)
+			return
+		}
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// usage describes the two things this binary does.
+func usage(w io.Writer) {
+	fmt.Fprint(w, `dnsdaddy — a self-hosted protective DNS resolver
+
+Usage:
+  dnsdaddy [flags]          run the resolver
+  dnsdaddy doctor [flags]   diagnose a deployment and exit
+  dnsdaddy help             show this message
+
+Run flags:
+  -config path              config file (default /etc/dnsdaddy/config.yaml)
+  -log-level level          debug, info, warn, error
+  -log-format format        text or json
+  -version                  print the version and exit
+
+Doctor flags:
+  -config path              config file
+  -json                     emit findings as JSON
+  -timeout duration         per-probe timeout (default 5s)
+
+Doctor exits non-zero when a check fails, so it can gate a deployment.
+`)
+}
+
+// newFlagSet returns a flag set for a subcommand that reports its own errors
+// rather than exiting from inside the flag package.
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	return fs
 }
 
 func run() error {
