@@ -23,6 +23,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/api"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
@@ -205,25 +206,38 @@ func run() error {
 		return fmt.Errorf("http.trusted_proxy_cidrs: %w", err)
 	}
 
-	allowedClients := cfg.AllowedClientPrefixes()
-	if len(allowedClients) > 0 {
-		log.Info("dns client ACL active", "allowed_cidrs", cfg.DNS.AllowedClientCIDRs)
+	// The effective client ACL: the bootstrap list from configuration, plus
+	// whatever the dashboard has been told to permit. It is reloaded, not
+	// re-read from config, whenever networks change — so permitting a network
+	// takes effect on the next query rather than the next container restart.
+	acl := clientacl.NewController(cfg.DNS.AllowedClientCIDRs, cfg.DNS.AllowPublicResolver,
+		storeNetworkLoader(st))
+	if err := acl.Reload(context.Background()); err != nil {
+		return fmt.Errorf("load client access: %w", err)
+	}
+
+	if acl.Current().Unrestricted() {
+		if cfg.DNS.AllowPublicResolver {
+			log.Warn("running as a PUBLIC resolver: dns.allow_public_resolver is set and no client ACL " +
+				"is configured. An open resolver will be found and abused for DNS amplification; " +
+				"make sure a firewall restricts port 53 to networks you serve")
+		}
+	} else {
+		log.Info("dns client ACL active",
+			"bootstrap_cidrs", cfg.DNS.AllowedClientCIDRs,
+			"dashboard_permitted", len(acl.Current().Grants()))
 		// A network configured in the dashboard whose addresses the ACL does
 		// not permit is the single most confusing state this software can be
 		// in: everything reports healthy and every client is REFUSED. Say so
 		// at startup, where `docker compose logs` will find it.
-		reportClientAccess(context.Background(), st, cfg, log)
-	} else if cfg.DNS.AllowPublicResolver {
-		log.Warn("running as a PUBLIC resolver: dns.allow_public_resolver is set and no client ACL " +
-			"is configured. An open resolver will be found and abused for DNS amplification; " +
-			"make sure a firewall restricts port 53 to networks you serve")
+		reportClientAccess(context.Background(), st, acl.Current(), log)
 	}
 
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
 		Timeout:         cfg.DNS.Timeout.D() + time.Second,
-		AllowedClients:  allowedClients,
+		ClientACL:       acl,
 		RefuseANY:       cfg.DNS.RefuseANY,
 		Detector:        detector,
 	})
@@ -272,6 +286,7 @@ func run() error {
 		Detector:       detector,
 		Auth:           auth,
 		Log:            log,
+		ClientACL:      acl,
 		StartedAt:      time.Now(),
 		TrustedProxies: trustedProxies,
 	})
@@ -343,12 +358,27 @@ func run() error {
 	return nil
 }
 
+// storeNetworkLoader adapts the database to what the ACL controller needs.
+//
+// The adapter lives here rather than in internal/clientacl because that
+// package is imported by internal/store for its write-time validation rules,
+// and a dependency the other way would close the loop.
+func storeNetworkLoader(st *store.Store) clientacl.Loader {
+	return func(ctx context.Context) ([]clientacl.Network, error) {
+		networks, err := st.ListNetworks(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return store.ClientACLNetworks(networks), nil
+	}
+}
+
 // reportClientAccess logs any network that cannot actually reach the resolver.
 //
 // It is advisory, not fatal. An operator may legitimately have a network
-// defined ahead of opening the ACL to it, and refusing to start would turn a
-// warning into an outage.
-func reportClientAccess(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) {
+// defined ahead of permitting it, and refusing to start would turn a warning
+// into an outage.
+func reportClientAccess(ctx context.Context, st *store.Store, acl *clientacl.Set, log *slog.Logger) {
 	networks, err := st.ListNetworks(ctx)
 	if err != nil {
 		log.Warn("could not check network reachability", "error", err)
@@ -361,10 +391,9 @@ func reportClientAccess(ctx context.Context, st *store.Store, cfg config.Config,
 	}
 
 	checks := diag.ClientAccess(diag.ClientAccessInput{
-		AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
-		Networks:            diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
-		AllowPublicResolver: cfg.DNS.AllowPublicResolver,
-		RefusedQueries:      nil, // nothing has been served yet
+		ACL:            acl,
+		Networks:       diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
+		RefusedQueries: nil, // nothing has been served yet
 	})
 
 	for _, c := range diag.Failures(checks) {

@@ -17,6 +17,8 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 )
 
 // Status is a check's verdict.
@@ -53,18 +55,22 @@ type Network struct {
 	Name       string
 	PolicyName string
 	Enabled    bool
-	CIDRs      []string
+	// AllowResolver is the network's own "allow this network to use DNS
+	// Daddy" permission, as set in the dashboard.
+	AllowResolver bool
+	CIDRs         []string
 }
 
 // ClientAccessInput is the state the client-access checks read.
 type ClientAccessInput struct {
-	// AllowedCIDRs is dns.allowed_client_cidrs as the operator wrote it,
-	// kept in string form so the evidence quotes them back.
-	AllowedCIDRs []string
+	// ACL is the effective client ACL: the bootstrap list from configuration
+	// unioned with the dashboard-managed permissions. Reporting one source
+	// alone was the previous behaviour and was actively misleading once the
+	// dashboard could grant access — an operator would be told their network
+	// was refused by a resolver that was serving it.
+	ACL *clientacl.Set
 	// Networks are the networks configured in the dashboard.
 	Networks []Network
-	// AllowPublicResolver is dns.allow_public_resolver.
-	AllowPublicResolver bool
 	// RefusedQueries is how many queries the ACL has rejected since start.
 	// Nil means not measured — a caller with no running handler, such as a
 	// startup check or `dnsdaddy doctor` in its own process. A pointer rather
@@ -78,60 +84,33 @@ const sectionClientAccess = "CLIENT ACCESS"
 // ClientAccess reports whether the networks configured in the dashboard can
 // actually send queries.
 //
-// These are two independent settings that look like one. A Network says which
-// policy an address gets once it is allowed to resolve;
-// dns.allowed_client_cidrs says whether it may resolve at all. Adding a
-// network does not permit it, and until this check existed nothing in the
-// product told anyone that.
+// Two settings decide this, and until they were brought together in the
+// dashboard they looked like one. A Network says which policy an address gets
+// once it is allowed to resolve; the client ACL says whether it may resolve at
+// all. Both are now set from the same screen, and this check is what says so
+// when they disagree.
 func ClientAccess(in ClientAccessInput) []Check {
-	allowed, bad := parsePrefixes(in.AllowedCIDRs)
+	acl := in.ACL
+	if acl == nil {
+		acl = clientacl.Compute(nil, false, nil)
+	}
 
 	var checks []Check
 
-	for _, raw := range bad {
+	for _, raw := range acl.Invalid() {
 		checks = append(checks, Check{
 			Section: sectionClientAccess,
 			Name:    "Client ACL parses",
 			Status:  StatusFail,
-			Summary: fmt.Sprintf("%q in dns.allowed_client_cidrs is not a valid address or CIDR, so it permits nothing.", raw),
+			Summary: fmt.Sprintf("%q is not a valid address or CIDR, so it permits nothing.", raw),
 			Action:  "Correct or remove the entry.",
 		})
 	}
 
-	switch {
-	case len(allowed) == 0 && in.AllowPublicResolver:
-		checks = append(checks, Check{
-			Section:  sectionClientAccess,
-			Name:     "Client ACL configured",
-			Status:   StatusWarn,
-			Summary:  "Any address on the internet may use this resolver.",
-			Evidence: []string{"dns.allowed_client_cidrs is empty", "dns.allow_public_resolver is true"},
-			Action: "An open resolver is found and conscripted into amplification attacks within days. " +
-				"Set dns.allowed_client_cidrs to the networks you serve unless you genuinely intend this.",
-		})
-	case len(allowed) == 0:
-		// The caveat belongs in the summary, not the action: a renderer that
-		// only prints actions for non-passing checks would otherwise drop the
-		// one sentence that makes this verdict conditional.
-		checks = append(checks, Check{
-			Section: sectionClientAccess,
-			Name:    "Client ACL configured",
-			Status:  StatusPass,
-			Summary: "No client ACL is configured, so no query is refused on its source address. " +
-				"That is safe only because the DNS listeners are loopback-only — config validation " +
-				"refuses any other combination without dns.allow_public_resolver.",
-		})
-	default:
-		checks = append(checks, Check{
-			Section:  sectionClientAccess,
-			Name:     "Client ACL configured",
-			Status:   StatusPass,
-			Summary:  fmt.Sprintf("%d address range(s) may send queries; everything else is REFUSED.", len(allowed)),
-			Evidence: in.AllowedCIDRs,
-		})
-	}
-
-	checks = append(checks, networkReachability(in, allowed)...)
+	checks = append(checks, aclSummary(acl))
+	checks = append(checks, publicAccessWarnings(acl)...)
+	checks = append(checks, networkReachability(in, acl)...)
+	checks = append(checks, shadowNotes(acl)...)
 
 	if in.RefusedQueries != nil && *in.RefusedQueries > 0 {
 		n := *in.RefusedQueries
@@ -139,31 +118,141 @@ func ClientAccess(in ClientAccessInput) []Check {
 			Section: sectionClientAccess,
 			Name:    "Queries refused by the client ACL",
 			Status:  StatusWarn,
-			Summary: fmt.Sprintf("%d quer%s been REFUSED because the source address is not in dns.allowed_client_cidrs.", n, plural(n, "y has", "ies have")),
-			Action: "If clients report that DNS is not working, this is why. The refused addresses are " +
-				"not recorded — an unauthorised source could otherwise fill the log — so compare the " +
-				"address your client actually has against the ranges above.",
+			Summary: fmt.Sprintf("%d quer%s been REFUSED because the source address is not permitted to use this resolver.", n, plural(n, "y has", "ies have")),
+			Action: "If clients report that DNS is not working, this is why. The refused addresses " +
+				"are not recorded — an unauthorised source could otherwise fill the log — so " +
+				"compare the address your client actually has against the ranges above, and add " +
+				"it under Networks with \"Allow this network to use DNS Daddy\" ticked.",
 		})
 	}
 
 	return checks
 }
 
-// networkReachability compares each configured network against the ACL.
+// aclSummary states who may resolve, and from which of the two sources.
+func aclSummary(acl *clientacl.Set) Check {
+	c := Check{Section: sectionClientAccess, Name: "Client ACL configured"}
+
+	if acl.Unrestricted() {
+		if acl.AllowPublicResolver() {
+			c.Status = StatusWarn
+			c.Summary = "Any address on the internet may use this resolver."
+			c.Evidence = []string{
+				"dns.allowed_client_cidrs is empty",
+				"dns.allow_public_resolver is true",
+			}
+			c.Action = "An open resolver is found and conscripted into amplification attacks " +
+				"within days. Set dns.allowed_client_cidrs to the networks you serve unless you " +
+				"genuinely intend this."
+			return c
+		}
+		// The caveat belongs in the summary, not the action: a renderer that
+		// only prints actions for non-passing checks would otherwise drop the
+		// one sentence that makes this verdict conditional.
+		c.Status = StatusPass
+		c.Summary = "No client ACL is configured, so no query is refused on its source address. " +
+			"That is safe only because the DNS listeners are loopback-only — config validation " +
+			"refuses any other combination without dns.allow_public_resolver."
+		if n := len(acl.Grants()); n > 0 {
+			c.Evidence = []string{fmt.Sprintf(
+				"%d network range(s) are permitted in the dashboard; they add nothing while "+
+					"everything is already accepted, and take effect if an ACL is configured", n)}
+		}
+		return c
+	}
+
+	c.Status = StatusPass
+	c.Summary = fmt.Sprintf("%d address range(s) may send queries; everything else is REFUSED.",
+		len(acl.Effective()))
+	c.Evidence = []string{
+		"from configuration (" + clientacl.SourceBootstrap + "): " + orNone(strings.Join(acl.Bootstrap(), ", ")),
+		"from the dashboard: " + orNone(strings.Join(grantCIDRs(acl.Grants()), ", ")),
+	}
+	return c
+}
+
+// publicAccessWarnings names each permitted range that is reachable from the
+// internet.
 //
-// An empty ACL is not a narrow ACL, and the difference matters: Handler.
-// clientAllowed returns true the moment len(allowedClients) is zero, whatever
-// the source address. Comparing networks against an empty prefix list would
-// therefore report every one of them as REFUSED when every one of them is in
-// fact permitted — a false failure on two supported configurations, a
-// deliberate public resolver and loopback-only listeners, and one that made
-// `dnsdaddy doctor` exit non-zero on a working deployment.
-//
-// Whether an empty ACL is *wise* is a separate question, and the check above
-// answers it.
-func networkReachability(in ClientAccessInput, allowed []netip.Prefix) []Check {
-	if len(in.Networks) == 0 || len(allowed) == 0 {
+// Deliberately a warning that never resolves itself: DNS Daddy cannot see a
+// cloud provider's security group or a host firewall, so it can report what it
+// has been told to accept and nothing more. Claiming the port was open, or
+// closed, would be inventing a measurement.
+func publicAccessWarnings(acl *clientacl.Set) []Check {
+	public := acl.PublicGrants()
+	if len(public) == 0 {
 		return nil
+	}
+	var ranges []string
+	for _, g := range public {
+		ranges = append(ranges, fmt.Sprintf("%s (network %q)", g.CIDR, g.NetworkName))
+	}
+	return []Check{{
+		Section:  sectionClientAccess,
+		Name:     "Publicly routable ranges are permitted",
+		Status:   StatusWarn,
+		Summary:  fmt.Sprintf("%d publicly routable range(s) are permitted to query DNS Daddy.", len(public)),
+		Evidence: ranges,
+		Action: "That is a supported deployment, and it is the right one for a VPS serving your " +
+			"own sites. Confirm your provider's firewall or security group restricts TCP and UDP " +
+			"port 53 to those addresses — DNS Daddy cannot see that firewall and has not checked " +
+			"it, and it does not change it for you.",
+	}}
+}
+
+// shadowNotes reports networks that can resolve without their own permission.
+func shadowNotes(acl *clientacl.Set) []Check {
+	var checks []Check
+	for _, sh := range acl.Shadowed() {
+		checks = append(checks, Check{
+			Section: sectionClientAccess,
+			Name:    fmt.Sprintf("Network %q resolves via a wider range", sh.NetworkName),
+			Status:  StatusWarn,
+			Summary: fmt.Sprintf(
+				"Network %q is not itself permitted to use DNS Daddy, but its clients can resolve anyway.",
+				sh.NetworkName),
+			Evidence: []string{
+				sh.CIDR + " is inside " + sh.CoveredBy,
+				"permitted by: " + sh.Source,
+			},
+			Action: "Client access has no deny rules: a permission grants, and a narrower network " +
+				"without one does not carve a hole in it. If these clients should not resolve, " +
+				"narrow or remove the wider range rather than leaving this network unticked.",
+		})
+	}
+	return checks
+}
+
+func grantCIDRs(grants []clientacl.Grant) []string {
+	out := make([]string, 0, len(grants))
+	for _, g := range grants {
+		out = append(out, g.CIDR)
+	}
+	return out
+}
+
+// networkReachability compares each configured network against the effective ACL.
+//
+// An unrestricted ACL is not a narrow one, and the difference matters:
+// admission returns true the moment nothing is configured, whatever the source
+// address. Comparing networks against an empty prefix list would report every
+// one of them as REFUSED when every one of them is in fact permitted — a false
+// failure on two supported configurations, a deliberate public resolver and
+// loopback-only listeners, and one that made `dnsdaddy doctor` exit non-zero on
+// a working deployment.
+//
+// Whether an unrestricted ACL is *wise* is a separate question, and aclSummary
+// answers it.
+func networkReachability(in ClientAccessInput, acl *clientacl.Set) []Check {
+	if len(in.Networks) == 0 || acl.Unrestricted() {
+		return nil
+	}
+
+	allowed := make([]netip.Prefix, 0, len(acl.Effective()))
+	for _, raw := range acl.Effective() {
+		if p, err := clientacl.ParsePrefix(raw); err == nil {
+			allowed = append(allowed, p)
+		}
 	}
 
 	var checks []Check
@@ -176,7 +265,7 @@ func networkReachability(in ClientAccessInput, allowed []netip.Prefix) []Check {
 
 		var refused, partial []string
 		for _, raw := range n.CIDRs {
-			p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+			p, err := clientacl.ParsePrefix(raw)
 			if err != nil {
 				continue
 			}
@@ -199,12 +288,9 @@ func networkReachability(in ClientAccessInput, allowed []netip.Prefix) []Check {
 				Evidence: []string{
 					"network: " + strings.Join(refused, ", "),
 					"policy: " + orNone(n.PolicyName),
-					"dns.allowed_client_cidrs: " + strings.Join(in.AllowedCIDRs, ", "),
+					"permitted: " + strings.Join(acl.Effective(), ", "),
 				},
-				Action: fmt.Sprintf(
-					"Adding a network assigns it a policy; it does not permit it to resolve. "+
-						"Add %s to dns.allowed_client_cidrs (DNSDADDY_ALLOWED_CLIENT_CIDRS) if this is a "+
-						"network you trust, then restart.", strings.Join(refused, " and ")),
+				Action: refusedAction(n),
 			})
 		case len(partial) > 0:
 			checks = append(checks, Check{
@@ -214,10 +300,11 @@ func networkReachability(in ClientAccessInput, allowed []netip.Prefix) []Check {
 				Summary: fmt.Sprintf("Only part of network %q may resolve; the rest is REFUSED.", n.Name),
 				Evidence: []string{
 					"partly permitted: " + strings.Join(partial, ", "),
-					"dns.allowed_client_cidrs: " + strings.Join(in.AllowedCIDRs, ", "),
+					"permitted: " + strings.Join(acl.Effective(), ", "),
 				},
-				Action: "Widen dns.allowed_client_cidrs to cover the whole range, or narrow the network " +
-					"to the part that is permitted, so the two agree.",
+				Action: "Tick \"Allow this network to use DNS Daddy\" on this network so its whole " +
+					"range is permitted, or narrow the network to the part that already is, so the " +
+					"two agree.",
 			})
 		default:
 			checks = append(checks, Check{
@@ -230,6 +317,24 @@ func networkReachability(in ClientAccessInput, allowed []netip.Prefix) []Check {
 		}
 	}
 	return checks
+}
+
+// refusedAction says how to fix a refused network, and the answer now depends
+// on whether the operator has already asked for it.
+//
+// The old advice — edit DNSDADDY_ALLOWED_CLIENT_CIDRS and restart — is still
+// correct for a headless deployment, and is still wrong as the first thing to
+// tell somebody sitting in front of the dashboard with a tick-box that does
+// the same job without a restart.
+func refusedAction(n Network) string {
+	if !n.AllowResolver {
+		return "Adding a network assigns it a policy; it does not by itself permit it to resolve. " +
+			"Open Networks, edit this network and tick \"Allow this network to use DNS Daddy\". " +
+			"It takes effect immediately — no restart."
+	}
+	return "This network is marked as permitted, so the effective ACL above should already " +
+		"include it. If it does not, the permission has not been reloaded: check the DNS Daddy " +
+		"log for a client-access reload error, and report this."
 }
 
 type cover int
@@ -267,33 +372,6 @@ func coverage(p netip.Prefix, allowed []netip.Prefix) cover {
 		return coverPartial
 	}
 	return coverNone
-}
-
-// parsePrefixes splits a CIDR list into what parsed and what did not, so a
-// typo is reported rather than silently permitting less than intended.
-func parsePrefixes(cidrs []string) (ok []netip.Prefix, bad []string) {
-	for _, raw := range cidrs {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		if !strings.Contains(raw, "/") {
-			addr, err := netip.ParseAddr(raw)
-			if err != nil {
-				bad = append(bad, raw)
-				continue
-			}
-			ok = append(ok, netip.PrefixFrom(addr, addr.BitLen()))
-			continue
-		}
-		p, err := netip.ParsePrefix(raw)
-		if err != nil {
-			bad = append(bad, raw)
-			continue
-		}
-		ok = append(ok, p.Masked())
-	}
-	return ok, bad
 }
 
 // Worst returns the most severe status across checks, or StatusPass when there

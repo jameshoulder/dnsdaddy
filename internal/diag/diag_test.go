@@ -3,6 +3,8 @@ package diag
 import (
 	"strings"
 	"testing"
+
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 )
 
 // find returns the first check whose Name contains sub.
@@ -26,7 +28,7 @@ func find(t *testing.T, checks []Check, sub string) Check {
 // This is the check that would have said so.
 func TestClientAccessFailsWhenNetworkIsOutsideTheACL(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs: []string{"127.0.0.0/8", "172.16.0.0/12"},
+		ACL: clientacl.Compute([]string{"127.0.0.0/8", "172.16.0.0/12"}, false, nil),
 		Networks: []Network{{
 			ID: "n_home", Name: "Home", PolicyName: "Standard",
 			Enabled: true, CIDRs: []string{"192.168.1.0/24"},
@@ -48,8 +50,13 @@ func TestClientAccessFailsWhenNetworkIsOutsideTheACL(t *testing.T) {
 			t.Errorf("evidence is missing %q:\n%s", want, joined)
 		}
 	}
-	if !strings.Contains(c.Action, "does not permit it to resolve") {
+	if !strings.Contains(c.Action, "does not by itself permit it to resolve") {
 		t.Errorf("action does not correct the misconception that adding a network grants access: %q", c.Action)
+	}
+	// The remedy has to be the one the operator can actually reach: a tick-box
+	// in the dashboard, not an environment variable and a container restart.
+	if !strings.Contains(c.Action, "Allow this network to use DNS Daddy") {
+		t.Errorf("action does not point at the dashboard permission: %q", c.Action)
 	}
 	if Worst(checks) != StatusFail {
 		t.Error("Worst did not report the failure")
@@ -58,7 +65,7 @@ func TestClientAccessFailsWhenNetworkIsOutsideTheACL(t *testing.T) {
 
 func TestClientAccessPassesWhenNetworkIsInsideTheACL(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs: []string{"192.168.0.0/16"},
+		ACL: clientacl.Compute([]string{"192.168.0.0/16"}, false, nil),
 		Networks: []Network{{
 			Name: "Home", PolicyName: "Standard", Enabled: true, CIDRs: []string{"192.168.1.0/24"},
 		}},
@@ -77,7 +84,7 @@ func TestClientAccessPassesWhenNetworkIsInsideTheACL(t *testing.T) {
 // clients work and some do not, which reads as an intermittent fault.
 func TestClientAccessWarnsOnPartialCoverage(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs: []string{"192.168.1.0/24"},
+		ACL: clientacl.Compute([]string{"192.168.1.0/24"}, false, nil),
 		Networks: []Network{{
 			Name: "Home", Enabled: true, CIDRs: []string{"192.168.0.0/16"},
 		}},
@@ -97,7 +104,7 @@ func TestClientAccessWarnsOnPartialCoverage(t *testing.T) {
 // address range to compare. Neither should produce noise.
 func TestClientAccessIgnoresDisabledAndCatchAllNetworks(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs: []string{"10.0.0.0/8"},
+		ACL: clientacl.Compute([]string{"10.0.0.0/8"}, false, nil),
 		Networks: []Network{
 			{Name: "Retired", Enabled: false, CIDRs: []string{"192.168.1.0/24"}},
 			{Name: "Default", Enabled: true, CIDRs: nil},
@@ -117,7 +124,7 @@ func TestClientAccessIgnoresDisabledAndCatchAllNetworks(t *testing.T) {
 
 func TestClientAccessReportsAnUnparseableEntry(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs: []string{"192.168.1.0/24", "192.168.2.0/33"},
+		ACL: clientacl.Compute([]string{"192.168.1.0/24", "192.168.2.0/33"}, false, nil),
 	})
 
 	c := find(t, checks, "Client ACL parses")
@@ -131,8 +138,7 @@ func TestClientAccessReportsAnUnparseableEntry(t *testing.T) {
 
 func TestClientAccessWarnsAboutAnOpenResolver(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs:        nil,
-		AllowPublicResolver: true,
+		ACL: clientacl.Compute(nil, true, nil),
 	})
 
 	c := find(t, checks, "Client ACL configured")
@@ -149,7 +155,7 @@ func TestClientAccessWarnsAboutAnOpenResolver(t *testing.T) {
 // was collected and never shown to anybody.
 func TestClientAccessReportsObservedRefusals(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs:   []string{"10.0.0.0/8"},
+		ACL:            clientacl.Compute([]string{"10.0.0.0/8"}, false, nil),
 		RefusedQueries: refusals(1240),
 	})
 
@@ -161,7 +167,7 @@ func TestClientAccessReportsObservedRefusals(t *testing.T) {
 		t.Errorf("summary does not carry the count: %q", c.Summary)
 	}
 
-	quiet := ClientAccess(ClientAccessInput{AllowedCIDRs: []string{"10.0.0.0/8"}, RefusedQueries: refusals(0)})
+	quiet := ClientAccess(ClientAccessInput{ACL: clientacl.Compute([]string{"10.0.0.0/8"}, false, nil), RefusedQueries: refusals(0)})
 	for _, c := range quiet {
 		if strings.Contains(c.Name, "Queries refused") {
 			t.Error("reported refusals when none have happened")
@@ -173,7 +179,7 @@ func TestClientAccessReportsObservedRefusals(t *testing.T) {
 // is not covered by 0.0.0.0/0 and a v4 one is not covered by ::/0.
 func TestClientAccessDoesNotMixAddressFamilies(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs:   []string{"10.0.0.0/8"},
+		ACL:            clientacl.Compute([]string{"10.0.0.0/8"}, false, nil),
 		Networks:       []Network{{Name: "v6", Enabled: true, CIDRs: []string{"fd00::/64"}}},
 		RefusedQueries: nil,
 	})
@@ -204,7 +210,7 @@ func TestFailuresSelectsOnlyFailures(t *testing.T) {
 // carried in Action would silently vanish from exactly the output it matters
 // in.
 func TestPassingChecksCarryTheirCaveatInTheSummary(t *testing.T) {
-	checks := ClientAccess(ClientAccessInput{AllowedCIDRs: nil})
+	checks := ClientAccess(ClientAccessInput{ACL: clientacl.Compute(nil, false, nil)})
 
 	for _, c := range checks {
 		if c.Status == StatusPass && c.Action != "" {
@@ -238,8 +244,7 @@ func TestClientAccessDoesNotReportFailuresWhenTheACLIsEmpty(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			checks := ClientAccess(ClientAccessInput{
-				AllowedCIDRs:        nil,
-				AllowPublicResolver: tt.public,
+				ACL: clientacl.Compute(nil, tt.public, nil),
 				Networks: []Network{
 					{Name: "Home", PolicyName: "Standard", Enabled: true, CIDRs: []string{"192.168.1.0/24"}},
 					{Name: "Branch", PolicyName: "Strict", Enabled: true, CIDRs: []string{"203.0.113.0/24"}},
@@ -262,8 +267,8 @@ func TestClientAccessDoesNotReportFailuresWhenTheACLIsEmpty(t *testing.T) {
 // check that started this whole audit has to keep working.
 func TestClientAccessStillReportsUnreachableNetworksWithAnACL(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		AllowedCIDRs: []string{"127.0.0.0/8"},
-		Networks:     []Network{{Name: "Home", Enabled: true, CIDRs: []string{"192.168.1.0/24"}}},
+		ACL:      clientacl.Compute([]string{"127.0.0.0/8"}, false, nil),
+		Networks: []Network{{Name: "Home", Enabled: true, CIDRs: []string{"192.168.1.0/24"}}},
 	})
 	if Worst(checks) != StatusFail {
 		t.Fatalf("Worst = %s, want fail", Worst(checks))

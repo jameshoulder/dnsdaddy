@@ -7,12 +7,14 @@ import (
 	"net/netip"
 	"strings"
 	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 )
 
 // ListNetworks returns every network with its CIDR list attached.
 func (s *Store) ListNetworks(ctx context.Context) ([]Network, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, location, policy_id, COALESCE(token, ''), enabled, created_at, updated_at
+		SELECT id, name, location, policy_id, COALESCE(token, ''), enabled, allow_resolver, created_at, updated_at
 		FROM networks ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -24,16 +26,19 @@ func (s *Store) ListNetworks(ctx context.Context) ([]Network, error) {
 	for rows.Next() {
 		var (
 			n                Network
-			enabled          int
+			enabled, allow   int
 			created, updated int64
 		)
-		if err := rows.Scan(&n.ID, &n.Name, &n.Location, &n.PolicyID, &n.Token, &enabled, &created, &updated); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.Location, &n.PolicyID, &n.Token,
+			&enabled, &allow, &created, &updated); err != nil {
 			return nil, err
 		}
 		n.Enabled = enabled == 1
+		n.AllowResolver = allow == 1
 		n.CreatedAt = fromUnixMilli(created)
 		n.UpdatedAt = fromUnixMilli(updated)
 		n.CIDRs = []string{}
+		n.AcknowledgedPublicCIDRs = []string{}
 		byID[n.ID] = len(out)
 		out = append(out, n)
 	}
@@ -41,18 +46,27 @@ func (s *Store) ListNetworks(ctx context.Context) ([]Network, error) {
 		return nil, err
 	}
 
-	crows, err := s.db.QueryContext(ctx, "SELECT network_id, cidr FROM network_cidrs ORDER BY cidr")
+	crows, err := s.db.QueryContext(ctx,
+		"SELECT network_id, cidr, public_ack FROM network_cidrs ORDER BY cidr")
 	if err != nil {
 		return nil, err
 	}
 	defer crows.Close()
 	for crows.Next() {
-		var nid, cidr string
-		if err := crows.Scan(&nid, &cidr); err != nil {
+		var (
+			nid, cidr string
+			ack       int
+		)
+		if err := crows.Scan(&nid, &cidr, &ack); err != nil {
 			return nil, err
 		}
-		if i, ok := byID[nid]; ok {
-			out[i].CIDRs = append(out[i].CIDRs, cidr)
+		i, ok := byID[nid]
+		if !ok {
+			continue
+		}
+		out[i].CIDRs = append(out[i].CIDRs, cidr)
+		if ack == 1 {
+			out[i].AcknowledgedPublicCIDRs = append(out[i].AcknowledgedPublicCIDRs, cidr)
 		}
 	}
 	return out, crows.Err()
@@ -73,12 +87,120 @@ func (s *Store) GetNetwork(ctx context.Context, id string) (Network, error) {
 }
 
 // NetworkInput carries the mutable fields of a network.
+//
+// Pointers throughout, so a PATCH that mentions only one field leaves the rest
+// alone. That matters more than usual for AllowResolver: a client updating a
+// network's name must not silently revoke its resolver access because it did
+// not think to send the field.
 type NetworkInput struct {
 	Name     *string
 	Location *string
 	PolicyID *string
 	CIDRs    *[]string
 	Enabled  *bool
+
+	// AllowResolver permits this network's addresses to query the resolver.
+	AllowResolver *bool
+
+	// PublicAck is the operator's affirmation, made in this request, that the
+	// publicly routable ranges it results in may reach the resolver.
+	//
+	// Request-scoped rather than stored directly: what is persisted is the set
+	// of ranges that were acknowledged, so a later edit that touches nothing
+	// public does not ask again, and one that introduces a new public range
+	// does. An affirmation that a *different* range was safe is not an
+	// affirmation about this one.
+	PublicAck *bool
+}
+
+// ErrPublicAckRequired reports that permitting these ranges needs an explicit
+// acknowledgement. It is a distinct type so the API can answer with the
+// offending ranges rather than only with prose, and the dashboard can name
+// them in its confirmation.
+type ErrPublicAckRequired struct {
+	CIDRs []string
+}
+
+func (e *ErrPublicAckRequired) Error() string {
+	return fmt.Sprintf("%s is publicly routable: permitting DNS queries from it means DNS Daddy "+
+		"will accept requests from the internet. Confirm you intend this, and make sure your "+
+		"VPS or cloud firewall restricts TCP and UDP port 53 to addresses you trust — DNS Daddy "+
+		"does not change your provider firewall.", strings.Join(e.CIDRs, ", "))
+}
+
+// PublicCIDRs returns the ranges needing acknowledgement.
+func (e *ErrPublicAckRequired) PublicCIDRs() []string { return append([]string(nil), e.CIDRs...) }
+
+// resolverAccessPlan is the validated outcome of a write, holding which ranges
+// end up acknowledged.
+type resolverAccessPlan struct {
+	acked map[string]bool
+}
+
+// planResolverAccess enforces the resolver-access rules server-side.
+//
+// Server-side, and in the store rather than in a handler, because this is the
+// rule that keeps DNS Daddy from becoming an open resolver: any future caller
+// — a second API version, a CLI, a test fixture, an import — goes through
+// here. UI validation is a convenience for the person typing; it is not a
+// control.
+//
+// The rules, in the order they are checked:
+//
+//  1. A network that is not permitted to resolve needs no checks at all. In
+//     particular 0.0.0.0/0 remains a legal *policy* range, because "everything
+//     that is already allowed in gets this policy" is a reasonable thing to
+//     express and rejecting it would break existing configurations.
+//  2. A default route may never be permitted. There is already an authority
+//     for "I intend to run a public resolver" — dns.allow_public_resolver, set
+//     in configuration with a restart attached — and a second, easier route to
+//     the same outcome through a web form would make it decorative.
+//  3. A publicly routable range needs the operator's affirmation, either
+//     carried in this request or remembered from when they made it.
+func planResolverAccess(allow bool, cidrs []string, alreadyAcked map[string]bool, ackNow bool) (resolverAccessPlan, error) {
+	plan := resolverAccessPlan{acked: map[string]bool{}}
+	if !allow {
+		// Acknowledgements are still carried forward: revoking access and
+		// restoring it later should not re-prompt for a range the operator
+		// already affirmed, and nothing is exposed by remembering it.
+		for c := range alreadyAcked {
+			plan.acked[c] = true
+		}
+		return plan, nil
+	}
+
+	var needAck []string
+	for _, raw := range cidrs {
+		p, err := clientacl.ParsePrefix(raw)
+		if err != nil {
+			return plan, err
+		}
+		canon := p.String()
+
+		if clientacl.IsUniversal(p) {
+			return plan, fmt.Errorf(
+				"%s would allow DNS queries from every address on the internet, which is what an "+
+					"open resolver is. DNS Daddy will not do that from the dashboard: an open "+
+					"resolver is found and conscripted into amplification attacks within days. "+
+					"If you genuinely intend to run one, set dns.allow_public_resolver "+
+					"(DNSDADDY_ALLOW_PUBLIC_RESOLVER) in configuration, where it is a deliberate "+
+					"act with a restart attached", canon)
+		}
+
+		if !clientacl.PrefixIsPublic(p) {
+			continue
+		}
+		switch {
+		case alreadyAcked[canon], ackNow:
+			plan.acked[canon] = true
+		default:
+			needAck = append(needAck, canon)
+		}
+	}
+	if len(needAck) > 0 {
+		return plan, &ErrPublicAckRequired{CIDRs: needAck}
+	}
+	return plan, nil
 }
 
 // CreateNetwork inserts a network and issues it a DoH/DoT token.
@@ -99,6 +221,13 @@ func (s *Store) CreateNetwork(ctx context.Context, in NetworkInput) (Network, er
 		return Network{}, err
 	}
 
+	enabled := derefBoolDefault(in.Enabled, true)
+	allowResolver := derefBoolDefault(in.AllowResolver, false)
+	plan, err := planResolverAccess(allowResolver, cidrs, nil, derefBoolDefault(in.PublicAck, false))
+	if err != nil {
+		return Network{}, err
+	}
+
 	id := NewID("n")
 	now := unixMilli(time.Now())
 
@@ -109,13 +238,13 @@ func (s *Store) CreateNetwork(ctx context.Context, in NetworkInput) (Network, er
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO networks (id, name, location, policy_id, token, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO networks (id, name, location, policy_id, token, enabled, allow_resolver, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, strings.TrimSpace(*in.Name), derefString(in.Location), policyID, NewToken(10),
-		boolToInt(derefBoolDefault(in.Enabled, true)), now, now); err != nil {
+		boolToInt(enabled), boolToInt(allowResolver), now, now); err != nil {
 		return Network{}, err
 	}
-	if err := replaceCIDRs(ctx, tx, id, cidrs); err != nil {
+	if err := replaceCIDRs(ctx, tx, id, cidrs, plan.acked); err != nil {
 		return Network{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -142,12 +271,28 @@ func (s *Store) UpdateNetwork(ctx context.Context, id string, in NetworkInput) (
 	}
 	defer tx.Rollback()
 
-	var exists int
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM networks WHERE id = ?", id).Scan(&exists); err != nil {
+	// Read the current state inside the transaction and validate the *result*
+	// of the merge, not the request in isolation. A PATCH that only flips
+	// allowResolver has to be judged against the CIDRs already stored, and one
+	// that only adds a CIDR against the permission already granted — otherwise
+	// either half of a two-step change slips past the open-resolver and
+	// public-address rules.
+	current, err := loadNetworkForUpdate(ctx, tx, id)
+	if err != nil {
 		return Network{}, err
 	}
-	if exists == 0 {
-		return Network{}, ErrNotFound
+
+	resultCIDRs := current.cidrs
+	if in.CIDRs != nil {
+		resultCIDRs = cidrs
+	}
+	resultAllow := current.allowResolver
+	if in.AllowResolver != nil {
+		resultAllow = *in.AllowResolver
+	}
+	plan, err := planResolverAccess(resultAllow, resultCIDRs, current.acked, derefBoolDefault(in.PublicAck, false))
+	if err != nil {
+		return Network{}, err
 	}
 
 	sets := []string{"updated_at = ?"}
@@ -171,6 +316,10 @@ func (s *Store) UpdateNetwork(ctx context.Context, id string, in NetworkInput) (
 		sets = append(sets, "enabled = ?")
 		args = append(args, boolToInt(*in.Enabled))
 	}
+	if in.AllowResolver != nil {
+		sets = append(sets, "allow_resolver = ?")
+		args = append(args, boolToInt(*in.AllowResolver))
+	}
 	args = append(args, id)
 
 	// #nosec G202 -- sets holds only hardcoded column fragments ("name = ?");
@@ -178,8 +327,12 @@ func (s *Store) UpdateNetwork(ctx context.Context, id string, in NetworkInput) (
 	if _, err := tx.ExecContext(ctx, "UPDATE networks SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...); err != nil {
 		return Network{}, err
 	}
-	if in.CIDRs != nil {
-		if err := replaceCIDRs(ctx, tx, id, cidrs); err != nil {
+	// The acknowledgement set can change without the CIDR list changing —
+	// permitting a network whose public range was already stored is exactly
+	// that case — so the rows are rewritten whenever the plan differs from
+	// what is on disk, not only when in.CIDRs was supplied.
+	if in.CIDRs != nil || !sameStringSet(plan.acked, current.acked) {
+		if err := replaceCIDRs(ctx, tx, id, resultCIDRs, plan.acked); err != nil {
 			return Network{}, err
 		}
 	}
@@ -187,6 +340,60 @@ func (s *Store) UpdateNetwork(ctx context.Context, id string, in NetworkInput) (
 		return Network{}, err
 	}
 	return s.GetNetwork(ctx, id)
+}
+
+// networkForUpdate is the stored state a write is merged onto.
+type networkForUpdate struct {
+	cidrs         []string
+	acked         map[string]bool
+	allowResolver bool
+}
+
+func loadNetworkForUpdate(ctx context.Context, tx *sql.Tx, id string) (networkForUpdate, error) {
+	var out networkForUpdate
+
+	var allow int
+	err := tx.QueryRowContext(ctx, "SELECT allow_resolver FROM networks WHERE id = ?", id).Scan(&allow)
+	if err == sql.ErrNoRows {
+		return out, ErrNotFound
+	}
+	if err != nil {
+		return out, err
+	}
+	out.allowResolver = allow == 1
+	out.acked = map[string]bool{}
+
+	rows, err := tx.QueryContext(ctx, "SELECT cidr, public_ack FROM network_cidrs WHERE network_id = ?", id)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cidr string
+			ack  int
+		)
+		if err := rows.Scan(&cidr, &ack); err != nil {
+			return out, err
+		}
+		out.cidrs = append(out.cidrs, cidr)
+		if ack == 1 {
+			out.acked[cidr] = true
+		}
+	}
+	return out, rows.Err()
+}
+
+func sameStringSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // DeleteNetwork removes a network. The last remaining network cannot be
@@ -233,6 +440,13 @@ func (s *Store) assertPolicyExists(ctx context.Context, id string) error {
 	return nil
 }
 
+// normalizeCIDRs canonicalises the stored form of a network's ranges.
+//
+// It shares clientacl.ParsePrefix with the admission check on purpose. Two
+// canonicalisations that agree "usually" is how an acknowledgement recorded
+// against "192.168.0.0/24" fails to match a row stored as
+// "::ffff:192.168.0.0/120" — the permission silently does nothing, which is
+// the whole class of bug this work exists to remove. One function, one answer.
 func normalizeCIDRs(in *[]string) ([]string, error) {
 	if in == nil {
 		return nil, nil
@@ -240,24 +454,14 @@ func normalizeCIDRs(in *[]string) ([]string, error) {
 	out := make([]string, 0, len(*in))
 	seen := map[string]bool{}
 	for _, raw := range *in {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
+		if strings.TrimSpace(raw) == "" {
 			continue
 		}
-		// Accept a bare address as a single-host prefix, which is what people
-		// type when they mean "just this machine".
-		if !strings.Contains(raw, "/") {
-			addr, err := netip.ParseAddr(raw)
-			if err != nil {
-				return nil, fmt.Errorf("invalid address %q", raw)
-			}
-			raw = fmt.Sprintf("%s/%d", addr.String(), addr.BitLen())
-		}
-		p, err := netip.ParsePrefix(raw)
+		p, err := clientacl.ParsePrefix(raw)
 		if err != nil {
-			return nil, fmt.Errorf("invalid CIDR %q", raw)
+			return nil, err
 		}
-		canon := p.Masked().String()
+		canon := p.String()
 		if !seen[canon] {
 			seen[canon] = true
 			out = append(out, canon)
@@ -266,13 +470,14 @@ func normalizeCIDRs(in *[]string) ([]string, error) {
 	return out, nil
 }
 
-func replaceCIDRs(ctx context.Context, tx *sql.Tx, networkID string, cidrs []string) error {
+func replaceCIDRs(ctx context.Context, tx *sql.Tx, networkID string, cidrs []string, acked map[string]bool) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM network_cidrs WHERE network_id = ?", networkID); err != nil {
 		return err
 	}
 	for _, c := range cidrs {
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO network_cidrs (network_id, cidr) VALUES (?, ?)", networkID, c); err != nil {
+			"INSERT INTO network_cidrs (network_id, cidr, public_ack) VALUES (?, ?, ?)",
+			networkID, c, boolToInt(acked[c])); err != nil {
 			return err
 		}
 	}
@@ -316,4 +521,25 @@ func (s *Store) SetClientName(ctx context.Context, ip, name string) error {
 		ON CONFLICT(ip) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
 		addr.String(), name, unixMilli(time.Now()))
 	return err
+}
+
+// ClientACLNetworks reduces stored networks to what admission needs.
+//
+// The adapter lives here, in the package that already imports internal/clientacl
+// for its write-time rules, rather than in clientacl itself: clientacl is read
+// on the DNS hot path and by `dnsdaddy doctor`, and giving it a dependency on
+// persistence would put the database behind an import that has no business
+// needing one.
+func ClientACLNetworks(networks []Network) []clientacl.Network {
+	out := make([]clientacl.Network, 0, len(networks))
+	for _, n := range networks {
+		out = append(out, clientacl.Network{
+			ID:            n.ID,
+			Name:          n.Name,
+			Enabled:       n.Enabled,
+			AllowResolver: n.AllowResolver,
+			CIDRs:         n.CIDRs,
+		})
+	}
+	return out
 }

@@ -42,11 +42,16 @@ type Handler struct {
 	refuseANY       bool
 	timeout         time.Duration
 
-	// allowedClients restricts which source addresses may resolve at all.
-	// Empty means no restriction; config.validateNotAnOpenResolver refuses to
-	// start with a public listener and an empty list unless the operator has
-	// explicitly opted in.
-	allowedClients []netip.Prefix
+	// acl decides which source addresses may resolve at all. Nil means no
+	// restriction; config.validateNotAnOpenResolver refuses to start with a
+	// public listener and no ACL unless the operator has explicitly opted in.
+	//
+	// An interface, and read on every query rather than snapshotted here,
+	// because the set behind it changes at runtime: permitting a network in
+	// the dashboard has to take effect on the next query, not on the next
+	// container restart. The implementation is one atomic pointer load — see
+	// clientacl.Controller.
+	acl ClientACL
 
 	queries atomic.Uint64
 	blocked atomic.Uint64
@@ -63,8 +68,10 @@ type HandlerOptions struct {
 	// the operator has disabled instance-wide.
 	QueryLogEnabled bool
 	Timeout         time.Duration
-	// AllowedClients restricts which source addresses may resolve.
-	AllowedClients []netip.Prefix
+	// ClientACL restricts which source addresses may resolve. Nil permits
+	// everything, which config validation only allows for a loopback-only
+	// deployment or a deliberate public resolver.
+	ClientACL ClientACL
 	// RefuseANY answers ANY queries locally per RFC 8482 rather than
 	// forwarding them.
 	RefuseANY bool
@@ -95,39 +102,31 @@ func NewHandler(
 		logClientIP:     o.LogClientIP,
 		queryLogEnabled: o.QueryLogEnabled,
 		refuseANY:       o.RefuseANY,
-		allowedClients:  o.AllowedClients,
+		acl:             o.ClientACL,
 		detector:        o.Detector,
 		timeout:         timeout,
 	}
 }
 
-// clientAllowed reports whether a source address may use this resolver.
+// ClientACL decides which source addresses may use the resolver.
 //
-// An address we could not parse is allowed through: that only happens for
-// transports where the peer is identified some other way (a DoH token), and
-// failing those closed would break roaming clients for no security gain.
+// An interface so this package stays out of the question of where the answer
+// comes from — configuration, the database, or both — and so a test can supply
+// a fixed set without building a controller. internal/clientacl provides both
+// implementations: *Set for a fixed one and *Controller for the live one.
+type ClientACL interface {
+	// Allows reports whether addr may resolve. Implementations must tolerate
+	// an invalid address and must normalise IPv4-mapped and zoned addresses;
+	// clientacl.Normalize is what does that.
+	Allows(addr netip.Addr) bool
+}
+
+// clientAllowed reports whether a source address may use this resolver.
 func (h *Handler) clientAllowed(addr netip.Addr) bool {
-	if len(h.allowedClients) == 0 || !addr.IsValid() {
+	if h.acl == nil {
 		return true
 	}
-	if addr.Is4In6() {
-		addr = addr.Unmap()
-	}
-	// A link-local peer is reported with a scope zone ("fe80::1%eth0"), and
-	// netip.Prefix.Contains rejects any zoned address outright because
-	// prefixes carry no zone. The zone names the interface the address was
-	// seen on, not the address's membership of a prefix, so dropping it is
-	// what makes fe80::/10 — shipped in the default ACL — mean what it says.
-	addr = addr.WithZone("")
-	for _, p := range h.allowedClients {
-		if p.Addr().Is4() != addr.Is4() {
-			continue
-		}
-		if p.Contains(addr) {
-			return true
-		}
-	}
-	return false
+	return h.acl.Allows(addr)
 }
 
 // RefusedClients returns how many queries were rejected by the client ACL.

@@ -5,6 +5,7 @@ import (
 	"net/url"
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -22,11 +23,32 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	acl := a.ClientACL.Current()
+
 	type row struct {
 		store.Network
 		Queries24h int64  `json:"queries24h"`
 		Blocked24h int64  `json:"blocked24h"`
 		Status     string `json:"status"`
+
+		// PublicCIDRs are this network's ranges that are reachable from the
+		// internet, so the dashboard can mark them without re-implementing
+		// the classification the server enforces.
+		PublicCIDRs []string `json:"publicCidrs"`
+		// CanResolve is whether this network's clients can actually reach the
+		// resolver right now, by any route. It is not the same field as
+		// allowResolver: a network inside a broader permitted range resolves
+		// without a permission of its own, and one whose permission has not
+		// been reloaded would show the reverse.
+		CanResolve bool `json:"canResolve"`
+		// ResolvesVia names the wider range responsible when CanResolve is
+		// true but allowResolver is false. Empty otherwise.
+		ResolvesVia string `json:"resolvesVia,omitempty"`
+	}
+
+	shadows := map[string]string{}
+	for _, sh := range acl.Shadowed() {
+		shadows[sh.NetworkID] = sh.CoveredBy + " (" + sh.Source + ")"
 	}
 
 	out := make([]row, 0, len(networks))
@@ -42,14 +64,65 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 			// somebody's firewall change did not take.
 			status = "no-traffic"
 		}
-		out = append(out, row{
-			Network:    n,
-			Queries24h: act.Queries,
-			Blocked24h: act.Blocked,
-			Status:     status,
-		})
+
+		r := row{
+			Network:     n,
+			Queries24h:  act.Queries,
+			Blocked24h:  act.Blocked,
+			Status:      status,
+			PublicCIDRs: []string{},
+			ResolvesVia: shadows[n.ID],
+		}
+		for _, raw := range n.CIDRs {
+			if p, err := clientacl.ParsePrefix(raw); err == nil && clientacl.PrefixIsPublic(p) {
+				r.PublicCIDRs = append(r.PublicCIDRs, p.String())
+			}
+		}
+		r.CanResolve = networkCanResolve(acl, n)
+		out = append(out, r)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"networks": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"networks": out,
+		"clientAccess": map[string]any{
+			"unrestricted":        acl.Unrestricted(),
+			"allowPublicResolver": acl.AllowPublicResolver(),
+			"bootstrapCidrs":      acl.Bootstrap(),
+			"effectiveCidrs":      acl.Effective(),
+		},
+	})
+}
+
+// networkCanResolve reports whether every one of a network's ranges is
+// admitted by the live ACL.
+//
+// Every range, not any: a network half of whose addresses are refused is not
+// working, and reporting it green would recreate in the dashboard exactly the
+// misleading health this whole line of work exists to remove.
+func networkCanResolve(acl *clientacl.Set, n store.Network) bool {
+	if !n.Enabled {
+		return false
+	}
+	if acl.Unrestricted() {
+		return true
+	}
+	if len(n.CIDRs) == 0 {
+		// The catch-all has no range of its own; whether its clients are
+		// admitted depends entirely on where they arrive from.
+		return true
+	}
+	for _, raw := range n.CIDRs {
+		p, err := clientacl.ParsePrefix(raw)
+		if err != nil {
+			return false
+		}
+		// The base address stands in for the range. Sound for the common case
+		// and for every case the ACL can produce, because a permitted prefix
+		// either contains the whole range or none of its base.
+		if !acl.Allows(p.Addr()) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *API) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
@@ -67,15 +140,27 @@ type networkBody struct {
 	PolicyID *string   `json:"policyId"`
 	CIDRs    *[]string `json:"cidrs"`
 	Enabled  *bool     `json:"enabled"`
+
+	// AllowResolver permits this network's addresses to query the resolver.
+	// Omitted leaves the stored value alone, so a client that updates a name
+	// cannot silently revoke access it never mentioned.
+	AllowResolver *bool `json:"allowResolver"`
+
+	// PublicAck affirms, in this request, that the publicly routable ranges
+	// it results in may reach the resolver. Without it the write is refused
+	// with 409 and the ranges in question.
+	PublicAck *bool `json:"publicAck"`
 }
 
 func (b networkBody) toInput() store.NetworkInput {
 	return store.NetworkInput{
-		Name:     b.Name,
-		Location: b.Location,
-		PolicyID: b.PolicyID,
-		CIDRs:    b.CIDRs,
-		Enabled:  b.Enabled,
+		Name:          b.Name,
+		Location:      b.Location,
+		PolicyID:      b.PolicyID,
+		CIDRs:         b.CIDRs,
+		Enabled:       b.Enabled,
+		AllowResolver: b.AllowResolver,
+		PublicAck:     b.PublicAck,
 	}
 }
 
@@ -90,7 +175,7 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	writeJSON(w, http.StatusCreated, n)
+	writeNetwork(w, http.StatusCreated, n, a.reloadAccess(r))
 }
 
 func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +189,7 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	writeJSON(w, http.StatusOK, n)
+	writeNetwork(w, http.StatusOK, n, a.reloadAccess(r))
 }
 
 func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +198,10 @@ func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
+	// Deleting a network revokes whatever it permitted, so the reload matters
+	// as much here as on an update. A 204 has no body to carry a warning in,
+	// so a failure is logged by reloadAccess and reported by the diagnostics.
+	_ = a.reloadAccess(r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -596,6 +685,41 @@ func (a *API) reloadEngine(r *http.Request) {
 	if err := a.Engine.Reload(r.Context()); err != nil {
 		a.Log.Error("reload policy engine", "error", err)
 	}
+}
+
+// reloadAccess republishes the effective client ACL and returns a warning to
+// hand back to the caller if it could not.
+//
+// Unlike a policy reload, a failure here is not merely late: it means a
+// permission the operator just revoked is still being honoured, or one they
+// just granted is not. The write is already committed, so failing the request
+// would invite a retry that creates a second network — hence a successful
+// response carrying an explicit warning rather than a 500. The condition also
+// shows up in `dnsdaddy doctor` and at /api/v1/diagnostics, where the
+// effective ACL is what is reported.
+func (a *API) reloadAccess(r *http.Request) string {
+	if a.ClientACL == nil {
+		return ""
+	}
+	if err := a.ClientACL.Reload(r.Context()); err != nil {
+		a.Log.Error("reload client access", "error", err)
+		return "Saved, but the resolver's client access could not be reloaded, so this change is " +
+			"not yet in force. Retry the change, or restart DNS Daddy."
+	}
+	return ""
+}
+
+// writeNetwork answers a network write, attaching a warning when the change is
+// stored but not yet enforced.
+func writeNetwork(w http.ResponseWriter, status int, n store.Network, warning string) {
+	if warning == "" {
+		writeJSON(w, status, n)
+		return
+	}
+	writeJSON(w, status, struct {
+		store.Network
+		Warning string `json:"warning"`
+	}{Network: n, Warning: warning})
 }
 
 func (a *API) handleOpenAPI(w http.ResponseWriter, r *http.Request) {

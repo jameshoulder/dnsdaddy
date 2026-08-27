@@ -10,11 +10,12 @@ func FromStoreNetworks(networks []store.Network, policyNames map[string]string) 
 	out := make([]Network, 0, len(networks))
 	for _, n := range networks {
 		out = append(out, Network{
-			ID:         n.ID,
-			Name:       n.Name,
-			PolicyName: policyNames[n.PolicyID],
-			Enabled:    n.Enabled,
-			CIDRs:      n.CIDRs,
+			ID:            n.ID,
+			Name:          n.Name,
+			PolicyName:    policyNames[n.PolicyID],
+			Enabled:       n.Enabled,
+			AllowResolver: n.AllowResolver,
+			CIDRs:         n.CIDRs,
 		})
 	}
 	return out

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
@@ -36,9 +37,16 @@ type Deps struct {
 	QueryLog *querylog.Logger
 	// Detector is the behavioural detection engine, or nil when detection is
 	// switched off. Every handler that touches it must tolerate nil.
-	Detector  *detect.Engine
-	Auth      *Auth
-	Log       *slog.Logger
+	Detector *detect.Engine
+	Auth     *Auth
+	Log      *slog.Logger
+
+	// ClientACL is the live effective client ACL. Writes that change which
+	// networks may resolve reload it, so a permission granted or revoked in
+	// the dashboard takes effect on the next query rather than the next
+	// restart.
+	ClientACL *clientacl.Controller
+
 	StartedAt time.Time
 
 	// TrustedProxies bounds which peers' forwarding headers are believed,
@@ -251,9 +259,20 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // writeStoreError maps store errors onto HTTP status codes.
 func writeStoreError(w http.ResponseWriter, err error) {
+	var needAck *store.ErrPublicAckRequired
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.As(err, &needAck):
+		// 409, not 400: the request is well-formed and the caller may resend
+		// it verbatim with publicAck set. A dashboard needs the ranges
+		// themselves to name them in its confirmation, so they are returned
+		// alongside the prose rather than only inside it.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":             needAck.Error(),
+			"publicAckRequired": true,
+			"publicCidrs":       needAck.PublicCIDRs(),
+		})
 	default:
 		writeError(w, http.StatusBadRequest, err.Error())
 	}

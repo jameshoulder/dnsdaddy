@@ -1,0 +1,389 @@
+// Package clientacl decides which source addresses may query the resolver.
+//
+// This is deliberately a package of its own, and not a corner of the policy
+// engine, because the two answer different questions and conflating them is
+// the specific confusion this code exists to remove:
+//
+//	policy      what DNS Daddy does with a client's queries once it accepts them
+//	clientacl   whether DNS Daddy accepts queries from that client at all
+//
+// A network added in the dashboard has always done the first. Until now it did
+// not do the second, so an operator could add their network, see it listed,
+// and still be answered REFUSED by a resolver that reported itself healthy on
+// every other surface.
+//
+// # The effective ACL
+//
+// Two sources, combined by union:
+//
+//	bootstrap   dns.allowed_client_cidrs / DNSDADDY_ALLOWED_CLIENT_CIDRS.
+//	            Config and environment, read once at startup. This is what
+//	            headless and automated deployments set, and what existing
+//	            installations already have.
+//	managed     networks created in the dashboard that carry an explicit
+//	            "allow this network to use DNS Daddy" permission. Stored in
+//	            SQLite, changeable at runtime.
+//
+// Union, rather than intersection or replacement, for reasons worth stating:
+//
+//   - Intersection is unusable. The shipped bootstrap ACL is the private
+//     ranges, so a VPS operator permitting their own public address in the
+//     dashboard would be permitted nothing, which is exactly the failure this
+//     work exists to fix.
+//   - Replacement — migrate the environment value into the database and stop
+//     reading it — makes a later edit of .env silently do nothing. That trades
+//     one invisible source of truth for another, and breaks every deployment
+//     whose configuration is managed by Ansible or a Compose file.
+//   - Union has one rule an operator can hold in their head: a permission
+//     grants, and nothing else revokes it. Each source stays separately
+//     inspectable, in `dnsdaddy doctor` and at /api/v1/diagnostics.
+//
+// The consequence, stated plainly because it can surprise: there are no deny
+// rules. A narrower network without permission does not carve a hole in a
+// broader permitted range. Set.Shadowed reports exactly that situation so the
+// product can say so rather than leaving it to be discovered.
+//
+// # An empty bootstrap ACL stays unrestricted
+//
+// An empty dns.allowed_client_cidrs means "refuse nothing", and config
+// validation only permits it alongside loopback-only listeners or an explicit
+// dns.allow_public_resolver. Adding the first dashboard permission must not
+// silently convert that into "refuse everything except this one range" — that
+// would narrow a running deployment's behaviour as a side effect of an
+// unrelated click. So an unrestricted set stays unrestricted, permissions are
+// recorded for when the ACL is populated, and the diagnostics say what is
+// happening.
+package clientacl
+
+import (
+	"fmt"
+	"net/netip"
+	"strings"
+)
+
+// Network is a configured network reduced to what admission needs.
+type Network struct {
+	ID   string
+	Name string
+	// Enabled is the network's own on/off switch. A disabled network permits
+	// nothing, on the principle that "disabled" should not leave a hole open.
+	Enabled bool
+	// AllowResolver is the operator's explicit "allow this network to use DNS
+	// Daddy". False — the default for every network that predates this
+	// feature — grants nothing.
+	AllowResolver bool
+	CIDRs         []string
+}
+
+// Grant is one permitted range, carrying where it came from so a diagnostic
+// can name the network an operator should go and look at.
+type Grant struct {
+	NetworkID   string       `json:"networkId"`
+	NetworkName string       `json:"networkName"`
+	CIDR        string       `json:"cidr"`
+	Public      bool         `json:"public"`
+	Prefix      netip.Prefix `json:"-"`
+}
+
+// Shadow records a network that is reachable even though it was never given
+// permission, because some broader permitted range already covers it.
+//
+// Not an error and not a fault: a /32 exists inside a permitted /24 to give
+// one host a different policy, and that is a perfectly reasonable thing to
+// want. It is reported because "I did not tick the box and it still works" is
+// otherwise indistinguishable from a bug in the ACL.
+type Shadow struct {
+	NetworkID   string `json:"networkId"`
+	NetworkName string `json:"networkName"`
+	CIDR        string `json:"cidr"`
+	// CoveredBy is the permitted range that already contains CIDR.
+	CoveredBy string `json:"coveredBy"`
+	// Source names where CoveredBy came from: a network's name, or
+	// SourceBootstrap.
+	Source string `json:"source"`
+}
+
+// SourceBootstrap names the configuration-file/environment source in evidence
+// strings, so an operator knows which of the two places to go and edit.
+const SourceBootstrap = "dns.allowed_client_cidrs"
+
+// Set is an immutable snapshot of the effective ACL.
+//
+// Built once per configuration change and read from the DNS hot path, so
+// everything it needs at query time is precomputed.
+type Set struct {
+	unrestricted bool
+	bootstrap    []netip.Prefix
+	bootstrapRaw []string
+	grants       []Grant
+	shadowed     []Shadow
+	// all is the union, deduplicated: what Allows scans.
+	all []netip.Prefix
+	// invalid holds entries that did not parse, so a typo is reported rather
+	// than silently permitting less than the operator wrote.
+	invalid []string
+	// allowPublic is dns.allow_public_resolver. It changes nothing about who
+	// is admitted — an empty ACL admits everyone either way — but it is the
+	// difference between a deliberate public resolver and a loopback-only
+	// deployment, and a diagnostic that cannot tell those apart has to hedge
+	// on both.
+	allowPublic bool
+}
+
+// Compute builds the effective ACL from its two sources.
+//
+// It never fails: a malformed entry is collected into Set.Invalid rather than
+// rejecting the whole configuration, because the alternative on a reload is a
+// resolver that keeps a stale ACL and says nothing. Bootstrap CIDRs are
+// validated at config load, and managed CIDRs at write time, so anything
+// arriving here malformed is already an anomaly worth reporting.
+func Compute(bootstrapCIDRs []string, allowPublicResolver bool, networks []Network) *Set {
+	s := &Set{bootstrapRaw: trimAll(bootstrapCIDRs), allowPublic: allowPublicResolver}
+
+	for _, raw := range s.bootstrapRaw {
+		p, err := ParsePrefix(raw)
+		if err != nil {
+			s.invalid = append(s.invalid, raw)
+			continue
+		}
+		s.bootstrap = append(s.bootstrap, p)
+	}
+
+	for _, n := range networks {
+		if !n.Enabled || !n.AllowResolver {
+			continue
+		}
+		for _, raw := range n.CIDRs {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			p, err := ParsePrefix(raw)
+			if err != nil {
+				s.invalid = append(s.invalid, raw)
+				continue
+			}
+			s.grants = append(s.grants, Grant{
+				NetworkID:   n.ID,
+				NetworkName: n.Name,
+				CIDR:        p.String(),
+				Public:      PrefixIsPublic(p),
+				Prefix:      p,
+			})
+		}
+	}
+
+	// An empty bootstrap ACL means "refuse nothing", which config validation
+	// only allows for loopback-only listeners or a deliberate public
+	// resolver. Permissions are still recorded above — they are what the
+	// dashboard shows and what takes effect the moment an ACL is set — but
+	// they must not narrow a deployment that currently refuses nothing.
+	if len(s.bootstrap) == 0 {
+		s.unrestricted = true
+		return s
+	}
+
+	seen := make(map[netip.Prefix]bool, len(s.bootstrap)+len(s.grants))
+	for _, p := range s.bootstrap {
+		if !seen[p] {
+			seen[p] = true
+			s.all = append(s.all, p)
+		}
+	}
+	for _, g := range s.grants {
+		if !seen[g.Prefix] {
+			seen[g.Prefix] = true
+			s.all = append(s.all, g.Prefix)
+		}
+	}
+
+	s.shadowed = findShadowed(s, networks)
+	return s
+}
+
+// findShadowed reports networks that can resolve without having been given
+// permission, because a broader permitted range already covers them.
+func findShadowed(s *Set, networks []Network) []Shadow {
+	var out []Shadow
+	for _, n := range networks {
+		if !n.Enabled || n.AllowResolver {
+			continue
+		}
+		for _, raw := range n.CIDRs {
+			p, err := ParsePrefix(strings.TrimSpace(raw))
+			if err != nil {
+				continue
+			}
+			if cover, src, ok := coveringPrefix(s, p); ok {
+				out = append(out, Shadow{
+					NetworkID:   n.ID,
+					NetworkName: n.Name,
+					CIDR:        p.String(),
+					CoveredBy:   cover,
+					Source:      src,
+				})
+			}
+		}
+	}
+	return out
+}
+
+// coveringPrefix finds a permitted range that wholly contains p, and names
+// where it came from. Bootstrap is checked first so the evidence points at the
+// configuration file when both could explain it — that is the source an
+// operator is least likely to be looking at.
+func coveringPrefix(s *Set, p netip.Prefix) (cidr, source string, ok bool) {
+	for _, b := range s.bootstrap {
+		if covers(b, p) {
+			return b.String(), SourceBootstrap, true
+		}
+	}
+	for _, g := range s.grants {
+		if covers(g.Prefix, p) {
+			return g.CIDR, "network " + quoteName(g.NetworkName), true
+		}
+	}
+	return "", "", false
+}
+
+// quoteName renders a network name for an evidence string.
+func quoteName(name string) string {
+	if name == "" {
+		return "(unnamed)"
+	}
+	return "\"" + name + "\""
+}
+
+// covers reports whether outer wholly contains inner.
+func covers(outer, inner netip.Prefix) bool {
+	if outer.Addr().Is4() != inner.Addr().Is4() {
+		return false
+	}
+	return outer.Bits() <= inner.Bits() && outer.Contains(inner.Addr())
+}
+
+// Allows reports whether addr may use this resolver.
+//
+// An address we could not parse is allowed through: that only happens for
+// transports where the peer is identified some other way (a DoH token), and
+// failing those closed would break roaming clients for no security gain.
+func (s *Set) Allows(addr netip.Addr) bool {
+	if s == nil || s.unrestricted || !addr.IsValid() {
+		return true
+	}
+	addr = Normalize(addr)
+	for _, p := range s.all {
+		if p.Addr().Is4() != addr.Is4() {
+			continue
+		}
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// Normalize puts a peer address into the form prefix matching expects.
+//
+// Two adjustments, both load-bearing:
+//
+//	Is4In6   a v4 client arriving over a dual-stack socket is reported as
+//	         ::ffff:10.0.0.1, which no 10.0.0.0/8 prefix contains.
+//	zone     a link-local peer is reported with a scope zone ("fe80::1%eth0"),
+//	         and netip.Prefix.Contains rejects any zoned address outright
+//	         because prefixes carry no zone. The zone names the interface the
+//	         address was seen on, not the address's membership of a prefix, so
+//	         dropping it is what makes fe80::/10 mean what it says.
+//
+// The limitation the second one leaves is honest: the same fe80:: address can
+// exist on two interfaces, so link-local cannot be told apart by interface.
+func Normalize(addr netip.Addr) netip.Addr {
+	if addr.Is4In6() {
+		addr = addr.Unmap()
+	}
+	return addr.WithZone("")
+}
+
+// Unrestricted reports whether every source address is accepted.
+func (s *Set) Unrestricted() bool { return s != nil && s.unrestricted }
+
+// AllowPublicResolver reports the operator's explicit opt-in to running a
+// public resolver.
+func (s *Set) AllowPublicResolver() bool { return s != nil && s.allowPublic }
+
+// Bootstrap returns the configured CIDRs as the operator wrote them.
+func (s *Set) Bootstrap() []string { return append([]string(nil), s.bootstrapRaw...) }
+
+// Grants returns the dashboard-managed permissions.
+func (s *Set) Grants() []Grant { return append([]Grant(nil), s.grants...) }
+
+// Shadowed returns networks reachable without their own permission.
+func (s *Set) Shadowed() []Shadow { return append([]Shadow(nil), s.shadowed...) }
+
+// Invalid returns entries that did not parse.
+func (s *Set) Invalid() []string { return append([]string(nil), s.invalid...) }
+
+// Effective returns the union that Allows scans, as strings, sorted for stable
+// output. Empty when the set is unrestricted, which is not the same thing as
+// permitting nothing — check Unrestricted first.
+func (s *Set) Effective() []string {
+	out := make([]string, 0, len(s.all))
+	for _, p := range s.all {
+		out = append(out, p.String())
+	}
+	return out
+}
+
+// PublicGrants returns the permitted ranges that are publicly routable. These
+// are the ones whose exposure depends on a firewall DNS Daddy cannot see.
+func (s *Set) PublicGrants() []Grant {
+	var out []Grant
+	for _, g := range s.grants {
+		if g.Public {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// ParsePrefix accepts a CIDR or a bare address, returning the masked prefix.
+// A bare address becomes a single-host prefix, which is what people type when
+// they mean "just this machine".
+func ParsePrefix(raw string) (netip.Prefix, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return netip.Prefix{}, fmt.Errorf("empty address")
+	}
+	if !strings.Contains(raw, "/") {
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("invalid address %q", raw)
+		}
+		addr = Normalize(addr)
+		return netip.PrefixFrom(addr, addr.BitLen()), nil
+	}
+	p, err := netip.ParsePrefix(raw)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid CIDR %q", raw)
+	}
+	// An IPv4-mapped prefix ("::ffff:10.0.0.0/104") would never match a
+	// normalised v4 peer. Unmapping the base address keeps the two comparable.
+	if p.Addr().Is4In6() {
+		bits := p.Bits() - 96
+		if bits < 0 {
+			return netip.Prefix{}, fmt.Errorf("invalid CIDR %q", raw)
+		}
+		p = netip.PrefixFrom(p.Addr().Unmap(), bits)
+	}
+	return p.Masked(), nil
+}
+
+func trimAll(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}

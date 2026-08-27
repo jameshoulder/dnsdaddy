@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 )
 
 func allowClients(cidrs ...string) func(*HandlerOptions) {
 	return func(o *HandlerOptions) {
-		for _, c := range cidrs {
-			o.AllowedClients = append(o.AllowedClients, netip.MustParsePrefix(c))
-		}
+		o.ClientACL = clientacl.Compute(cidrs, false, nil)
 	}
 }
 

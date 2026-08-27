@@ -157,6 +157,15 @@ var addedColumns = []struct{ table, column, definition string }{
 	// cannot answer the question an operator actually asks of a feed that is
 	// erroring: how old is the intelligence still being enforced.
 	{"feeds", "last_success_at", "INTEGER"},
+	// Whether a network's addresses may query the resolver, as distinct from
+	// which policy they get. Defaults to 0: an upgrade must not grant a
+	// permission nobody asked for, so every pre-existing network starts
+	// unpermitted and the bootstrap ACL alone keeps admitting exactly who it
+	// admitted before. See internal/clientacl.
+	{"networks", "allow_resolver", "INTEGER NOT NULL DEFAULT 0"},
+	// The operator's affirmation that a specific publicly routable range may
+	// reach the resolver.
+	{"network_cidrs", "public_ack", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func migrate(db *sql.DB) error {

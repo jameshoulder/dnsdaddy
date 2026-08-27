@@ -16,6 +16,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
@@ -62,9 +63,15 @@ func runDoctor(args []string) error {
 		defer st.Close()
 	}
 
+	// The effective ACL, computed once: the same union of configuration and
+	// dashboard permissions the daemon admits on. Every check that quotes "who
+	// may resolve" quotes this, so the listener probe and the client-access
+	// section cannot disagree with each other or with the running resolver.
+	acl := doctorACL(ctx, st, cfg)
+
 	checks = append(checks, dbCheck)
-	checks = append(checks, doctorListeners(ctx, cfg, *timeout)...)
-	checks = append(checks, doctorClientAccess(ctx, st, cfg)...)
+	checks = append(checks, doctorListeners(ctx, cfg, acl, *timeout)...)
+	checks = append(checks, doctorClientAccess(ctx, st, cfg, acl)...)
 	checks = append(checks, doctorUpstreams(cfg, *timeout)...)
 	checks = append(checks, doctorWeb(ctx, st, cfg, *timeout)...)
 
@@ -187,7 +194,7 @@ func openExistingStore(ctx context.Context, cfg config.Config) (*store.Store, di
 
 // doctorListeners establishes whether anything is serving DNS, and if not,
 // what is in the way.
-func doctorListeners(ctx context.Context, cfg config.Config, timeout time.Duration) []diag.Check {
+func doctorListeners(ctx context.Context, cfg config.Config, acl *clientacl.Set, timeout time.Duration) []diag.Check {
 	var checks []diag.Check
 
 	for _, l := range []struct {
@@ -202,7 +209,7 @@ func doctorListeners(ctx context.Context, cfg config.Config, timeout time.Durati
 		}
 		target := probeTarget(l.addr)
 		probe := queryResolver(ctx, l.proto, target, timeout)
-		c := diag.ResolverReachability(probe, cfg.DNS.AllowedClientCIDRs)
+		c := diag.ResolverReachability(probe, acl.Effective())
 
 		// Nothing answered. Distinguish "not running" from "something else has
 		// the port", which are different problems with different remedies.
@@ -218,36 +225,53 @@ func doctorListeners(ctx context.Context, cfg config.Config, timeout time.Durati
 	return checks
 }
 
-// doctorClientAccess is the configuration cross-check: which of the networks
-// in the dashboard are actually permitted to send queries.
-func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
+// doctorClientAccess is the cross-check that answers the question an operator
+// actually has: who may use this resolver, and does that include the networks
+// they configured?
+//
+// It computes the same effective ACL the daemon runs on — the bootstrap list
+// from configuration unioned with the dashboard's permissions — rather than
+// reporting either source alone. Reporting configuration alone was the old
+// behaviour and would now be worse than useless: it would tell an operator
+// their network was refused by a resolver that is serving it.
+func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config, acl *clientacl.Set) []diag.Check {
+	in := diag.ClientAccessInput{
+		ACL: acl,
+		// This process has served nothing; the live counter is on the running
+		// daemon and reaches the operator through /metrics and the dashboard.
+		RefusedQueries: nil,
+	}
 	if st == nil {
-		// Without the database we cannot know which networks are configured,
-		// but the ACL itself is in the config and is still worth reporting.
-		return diag.ClientAccess(diag.ClientAccessInput{
-			AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
-			AllowPublicResolver: cfg.DNS.AllowPublicResolver,
-			RefusedQueries:      nil,
-		})
+		return diag.ClientAccess(in)
 	}
 
 	networks, err := st.ListNetworks(ctx)
 	if err != nil {
-		return nil
+		return diag.ClientAccess(in)
 	}
 	policies, err := st.ListPolicies(ctx)
 	if err != nil {
-		return nil
+		return diag.ClientAccess(in)
 	}
+	in.Networks = diag.FromStoreNetworks(networks, diag.PolicyNames(policies))
+	return diag.ClientAccess(in)
+}
 
-	return diag.ClientAccess(diag.ClientAccessInput{
-		AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
-		Networks:            diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
-		AllowPublicResolver: cfg.DNS.AllowPublicResolver,
-		// This process has served nothing; the live counter is on the running
-		// daemon and reaches the operator through /metrics and the dashboard.
-		RefusedQueries: nil,
-	})
+// doctorACL rebuilds the effective client ACL from configuration and the
+// database.
+//
+// Without a readable database only the bootstrap half is knowable. That is
+// reported honestly — the summary names its source — rather than being
+// presented as the whole answer, because a doctor that quietly reports half an
+// ACL is how an operator concludes their permission did not save.
+func doctorACL(ctx context.Context, st *store.Store, cfg config.Config) *clientacl.Set {
+	var networks []clientacl.Network
+	if st != nil {
+		if stored, err := st.ListNetworks(ctx); err == nil {
+			networks = store.ClientACLNetworks(stored)
+		}
+	}
+	return clientacl.Compute(cfg.DNS.AllowedClientCIDRs, cfg.DNS.AllowPublicResolver, networks)
 }
 
 // doctorUpstreams tests each configured forwarder.
