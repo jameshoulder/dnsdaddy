@@ -208,6 +208,31 @@ func TestMatchClientHandlesIPv4MappedAddresses(t *testing.T) {
 	}
 }
 
+// A link-local IPv6 client is reported by the kernel with a scope zone
+// ("fe80::1%eth0"). netip.Prefix carries no zone and its Contains rejects any
+// zoned address outright, so such a client fell through every configured
+// network onto the catch-all and silently picked up the wrong policy —
+// attribution failing quietly, which is worse than failing loudly.
+func TestMatchClientHandlesZonedLinkLocalIPv6(t *testing.T) {
+	e, st, _ := newEngine(t, nil)
+	ctx := context.Background()
+
+	n, err := st.CreateNetwork(ctx, store.NetworkInput{
+		Name: ptr("Link-local"), CIDRs: &[]string{"fe80::/10"}, PolicyID: ptr("p_strict"),
+	})
+	if err != nil {
+		t.Fatalf("CreateNetwork: %v", err)
+	}
+	if err := e.Reload(ctx); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	m := e.MatchClient(netip.MustParseAddr("fe80::1%eth0"))
+	if m.NetworkID != n.ID {
+		t.Errorf("zoned link-local client matched %q, want %q", m.NetworkID, n.ID)
+	}
+}
+
 func TestMatchNetworkID(t *testing.T) {
 	e, _, _ := newEngine(t, nil)
 

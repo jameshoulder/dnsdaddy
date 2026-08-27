@@ -182,3 +182,36 @@ func TestNormalLengthNameIsAccepted(t *testing.T) {
 		t.Errorf("a %d-byte name was rejected as malformed", len(name))
 	}
 }
+
+// A link-local IPv6 client arrives with a scope zone: the kernel reports the
+// peer as "fe80::1%eth0", and netip.ParseAddrPort keeps the zone. netip.Prefix
+// strips zones and its Contains reports false for any zoned address, so a
+// client the shipped ACL plainly intends to serve — fe80::/10 is in
+// config.DefaultAllowedClientCIDRs — was refused.
+//
+// Link-local is how a router advertises a resolver over RFC 8106 RDNSS, so
+// this is a real deployment, not a curiosity.
+func TestClientACLAllowsZonedLinkLocalIPv6(t *testing.T) {
+	h := newHarnessWithOptions(t, nil, allowClients("fe80::/10", "192.168.0.0/16"))
+
+	meta := requestMeta{clientAddr: netip.MustParseAddr("fe80::1%eth0"), proto: "udp"}
+	resp := h.handler.Handle(context.Background(), query("example.com", dns.TypeA), meta)
+	if resp.Rcode == dns.RcodeRefused {
+		t.Fatal("a link-local IPv6 client inside fe80::/10 was REFUSED because its address carried a scope zone")
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+}
+
+// The same zone must not become a way around the ACL: an address outside every
+// configured prefix stays refused whether or not it carries one.
+func TestClientACLStillRefusesZonedAddressOutsidePrefixes(t *testing.T) {
+	h := newHarnessWithOptions(t, nil, allowClients("fe80::/10"))
+
+	meta := requestMeta{clientAddr: netip.MustParseAddr("2001:db8::1%eth0"), proto: "udp"}
+	resp := h.handler.Handle(context.Background(), query("example.com", dns.TypeA), meta)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED for a zoned address outside the ACL", dns.RcodeToString[resp.Rcode])
+	}
+}

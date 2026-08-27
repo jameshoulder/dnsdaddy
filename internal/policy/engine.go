@@ -315,6 +315,14 @@ func prefixContains(p netip.Prefix, addr netip.Addr) bool {
 	if p.Addr().Is4() && addr.Is4In6() {
 		addr = addr.Unmap()
 	}
+	// netip.Prefix.Contains reports false for any address carrying a scope
+	// zone, so a link-local client ("fe80::1%eth0") would match no network at
+	// all and land on the catch-all. Strip it: the zone identifies the local
+	// interface, not the address's place in a prefix.
+	//
+	// The limitation this leaves is honest — the same fe80:: address can exist
+	// on two interfaces, so link-local attribution cannot distinguish them.
+	addr = addr.WithZone("")
 	if p.Addr().Is4() != addr.Is4() {
 		return false
 	}
