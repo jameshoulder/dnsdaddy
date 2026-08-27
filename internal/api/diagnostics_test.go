@@ -125,6 +125,12 @@ func strPtr(s string) *string { return &s }
 // holiday, a powered-down lab — must not start telling its operator that no
 // device has ever used it: that is false, and indistinguishable from a fresh
 // install.
+//
+// The upgrade case is the one that first shipped broken. On an upgrade the
+// latch does not exist yet, so it has to be seeded from retained history; an
+// earlier version seeded it from a 24-hour lookback and therefore re-ran
+// onboarding on an established-but-quiet resolver whose evidence was sitting
+// in query_log the whole time.
 func TestOnboardingDoesNotResetAfterAQuietDay(t *testing.T) {
 	h := newHarness(t)
 	h.login()
@@ -134,36 +140,26 @@ func TestOnboardingDoesNotResetAfterAQuietDay(t *testing.T) {
 		t.Fatal("a fresh install reported that a client had already been seen")
 	}
 
-	// A real device, two days ago — outside the 24-hour lookback.
-	twoDaysAgo := time.Now().UTC().Add(-48 * time.Hour)
+	// An established resolver, upgrading: a real device queried two days ago,
+	// nothing since, and no latch has ever been written.
 	if err := h.store.InsertQueryBatch(ctx, []store.QueryEvent{
-		{Time: twoDaysAgo, ClientIP: "192.168.1.20", Domain: "example.com", QType: "A", Action: store.ActionAllowed},
+		{Time: time.Now().UTC().Add(-48 * time.Hour), ClientIP: "192.168.1.20",
+			Domain: "example.com", QType: "A", Action: store.ActionAllowed},
 	}, true); err != nil {
 		t.Fatalf("InsertQueryBatch: %v", err)
 	}
 
-	// Nothing since. The rolling window alone cannot see it, so this is the
-	// state that used to re-run onboarding on an established resolver.
-	if h.overview(t).HasSeenClients {
-		t.Log("note: the 24h window did not see the old row, as expected")
-	}
-
-	// Now a device turns up today, and the sighting is latched.
-	if err := h.store.InsertQueryBatch(ctx, []store.QueryEvent{
-		{Time: time.Now().UTC(), ClientIP: "192.168.1.21", Domain: "example.com", QType: "A", Action: store.ActionAllowed},
-	}, true); err != nil {
-		t.Fatalf("InsertQueryBatch: %v", err)
-	}
 	if !h.overview(t).HasSeenClients {
-		t.Fatal("a client that just queried was not reported")
+		t.Fatal("an upgrade with a two-day-old client in retained history re-ran onboarding; " +
+			"the latch must be seeded from history, not from a recent-activity window")
 	}
 
-	// Simulate the quiet day: drop every recent row, leaving nothing inside
-	// the lookback window. The latch must hold.
+	// Now drop every row, as retention eventually would. The latch must hold
+	// on its own once the evidence is gone.
 	if _, err := h.store.DB().ExecContext(ctx, "DELETE FROM query_log"); err != nil {
 		t.Fatalf("clear query_log: %v", err)
 	}
 	if !h.overview(t).HasSeenClients {
-		t.Error("onboarding reappeared after a quiet period; it claims no device has EVER used this resolver")
+		t.Error("onboarding reappeared once the query log was pruned; it claims no device has EVER used this resolver")
 	}
 }

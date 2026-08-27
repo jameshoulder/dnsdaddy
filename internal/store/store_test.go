@@ -674,4 +674,48 @@ func TestAnyClientSinceExcludesLoopback(t *testing.T) {
 	if seen {
 		t.Error("a future window reported a client, so the time bound is not applied")
 	}
+
+	// A zero time means "anything still retained", which is what seeding the
+	// first-client latch on an upgrade needs: the evidence may be older than
+	// any window worth asking about.
+	old := now.Add(-30 * 24 * time.Hour)
+	if err := st.InsertQueryBatch(ctx, []QueryEvent{
+		{Time: old, ClientIP: "192.168.1.99", Domain: "example.com", QType: "A", Action: ActionAllowed},
+	}, true); err != nil {
+		t.Fatalf("InsertQueryBatch: %v", err)
+	}
+
+	if seen, err = st.AnyClientSince(ctx, now.Add(-time.Hour)); err != nil {
+		t.Fatalf("AnyClientSince: %v", err)
+	} else if !seen {
+		t.Error("the recent window stopped seeing the recent clients")
+	}
+
+	if seen, err = st.AnyClientSince(ctx, time.Time{}); err != nil {
+		t.Fatalf("AnyClientSince(zero): %v", err)
+	} else if !seen {
+		t.Error("a zero time did not search all retained history")
+	}
+}
+
+// A zero time must not turn into "everything matches": loopback stays excluded
+// however far back the search reaches.
+func TestAnyClientSinceUnboundedStillExcludesLoopback(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.InsertQueryBatch(ctx, []QueryEvent{
+		{Time: time.Now().UTC().Add(-90 * 24 * time.Hour), ClientIP: "127.0.0.1",
+			Domain: "example.com", QType: "A", Action: ActionAllowed},
+	}, true); err != nil {
+		t.Fatalf("InsertQueryBatch: %v", err)
+	}
+
+	seen, err := st.AnyClientSince(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("AnyClientSince: %v", err)
+	}
+	if seen {
+		t.Error("an unbounded search counted a loopback row as a client on the network")
+	}
 }

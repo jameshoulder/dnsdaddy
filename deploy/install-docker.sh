@@ -222,10 +222,32 @@ fi
 # --- 5. .env -----------------------------------------------------------------
 head_ "Configuration"
 
-ENV_LINES=""
-if [[ -n "$DASHBOARD_BIND" ]]; then
-  ENV_LINES="DNSDADDY_DASHBOARD_BIND=${DASHBOARD_BIND}"
-fi
+# Reconcile the key with the chosen deployment rather than only ever adding it.
+#
+# Preserving an existing DNSDADDY_DASHBOARD_BIND unconditionally meant choosing
+# the closed option left a previously-published address in place: the script
+# said "the dashboard will stay on loopback", `docker compose up` republished
+# on the old address, and re-running the fixed installer did not actually close
+# a dashboard an earlier version had opened. Choosing the LAN option had the
+# mirror-image bug — an existing line with a different address was left alone,
+# so the address reported and the address published disagreed.
+env_set() { # key value file
+  local key="$1" val="$2" file="$3"
+  if grep -q "^${key}=" "$file"; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+  else
+    printf '\n# Set by install-docker.sh — dashboard on this machine'"'"'s LAN address.\n%s=%s\n' \
+      "$key" "$val" >> "$file"
+  fi
+}
+
+# Comments out an active key. Returns 1 when there was nothing to do, so the
+# caller only reports a change it actually made.
+env_disable() { # key file
+  local key="$1" file="$2"
+  grep -q "^${key}=" "$file" || return 1
+  sed -i "s|^${key}=|# disabled by install-docker.sh (dashboard kept on loopback): ${key}=|" "$file"
+}
 
 if [[ "$CHOICE" == "2" ]]; then
   cat <<'EOF'
@@ -238,11 +260,13 @@ EOF
 fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
-  printf '\n  Would write to .env:\n'
-  if [[ -n "$ENV_LINES" ]]; then
-    printf '    %s\n' "$ENV_LINES"
+  printf '\n  Would change in .env:\n'
+  if [[ -n "$DASHBOARD_BIND" ]]; then
+    printf '    DNSDADDY_DASHBOARD_BIND=%s\n' "$DASHBOARD_BIND"
+  elif [[ -f .env ]] && grep -q '^DNSDADDY_DASHBOARD_BIND=' .env; then
+    printf '    comment out DNSDADDY_DASHBOARD_BIND (currently publishing the dashboard)\n'
   else
-    printf '    (defaults from .env.example only)\n'
+    printf '    (nothing — defaults from .env.example only)\n'
   fi
   printf '\n  Dry run complete. Nothing was changed.\n\n'
   exit 0
@@ -250,18 +274,18 @@ fi
 
 if [[ -f .env ]]; then
   pass "Keeping your existing .env"
-  if [[ -n "$ENV_LINES" ]] && ! grep -q '^DNSDADDY_DASHBOARD_BIND=' .env; then
-    printf '\n# Added by install-docker.sh — dashboard on this machine'"'"'s LAN address.\n%s\n' \
-      "$ENV_LINES" >> .env
-    pass "Appended DNSDADDY_DASHBOARD_BIND"
-  fi
 else
   cp .env.example .env || die "Could not create .env from .env.example."
-  if [[ -n "$ENV_LINES" ]]; then
-    printf '\n# Set by install-docker.sh — dashboard on this machine'"'"'s LAN address.\n%s\n' \
-      "$ENV_LINES" >> .env
-  fi
   pass "Wrote .env"
+fi
+
+if [[ -n "$DASHBOARD_BIND" ]]; then
+  env_set DNSDADDY_DASHBOARD_BIND "$DASHBOARD_BIND" .env
+  pass "DNSDADDY_DASHBOARD_BIND=${DASHBOARD_BIND}"
+elif env_disable DNSDADDY_DASHBOARD_BIND .env; then
+  warn "Your .env published the dashboard on a specific address. That line is now"
+  warn "commented out, so the dashboard returns to loopback. If it was reachable"
+  warn "from the internet, change the admin password: assume it has been seen."
 fi
 
 # --- 6. start ----------------------------------------------------------------

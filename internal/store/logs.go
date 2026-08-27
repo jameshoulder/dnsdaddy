@@ -272,19 +272,24 @@ func (s *Store) TotalsSince(ctx context.Context, t time.Time) (Totals, error) {
 // look at — callers must not read that as "no clients". Overview reports the
 // setting alongside it so the dashboard can tell the two apart.
 func (s *Store) AnyClientSince(ctx context.Context, t time.Time) (bool, error) {
-	var found int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM query_log
-			WHERE ts >= ?
-			  AND client_ip != ''
-			  AND client_ip NOT LIKE '127.%'
-			  AND client_ip != '::1'
-			LIMIT 1)`,
+	// A zero time means "anything still retained", which is what a caller
+	// asking "has this resolver ever served a device?" needs. Any fixed
+	// window answers a different question, and on an upgrade after a quiet
+	// period the two disagree.
+	const filter = `client_ip != '' AND client_ip NOT LIKE '127.%' AND client_ip != '::1'`
+
+	query := "SELECT EXISTS(SELECT 1 FROM query_log WHERE " + filter + " LIMIT 1)"
+	var args []any
+	if !t.IsZero() {
+		query = "SELECT EXISTS(SELECT 1 FROM query_log WHERE ts >= ? AND " + filter + " LIMIT 1)"
 		// query_log.ts is milliseconds, not seconds. Comparing against Unix()
 		// here made every row look newer than any cutoff, so the 24-hour
 		// window silently covered the entire retained log.
-		unixMilli(t)).Scan(&found)
+		args = append(args, unixMilli(t))
+	}
+
+	var found int
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&found)
 	return found == 1, err
 }
 

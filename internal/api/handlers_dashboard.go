@@ -53,6 +53,13 @@ const settingFirstClientSeen = "first_client_seen_at"
 // been observed the fact is written to the settings table, where it outlives
 // both the retention window and any quiet period.
 //
+// The seeding query is deliberately unbounded rather than the cheap 24-hour
+// lookback. On an upgrade to this version the setting does not exist yet, and
+// an established resolver whose network happened to be quiet that day would
+// otherwise be told nothing had ever used it despite the evidence sitting in
+// query_log. It runs only until the latch is set, and the case where it scans
+// most is the case where the table holds almost nothing.
+//
 // Errors are swallowed on purpose. This drives an onboarding hint; the rest of
 // the overview is worth serving regardless, and the worst outcome of a failed
 // read is that the hint shows for one more page load.
@@ -61,7 +68,7 @@ func (a *API) everSeenAClient(ctx context.Context) bool {
 		return true
 	}
 
-	seen, err := a.Store.AnyClientSince(ctx, time.Now().Add(-24*time.Hour))
+	seen, err := a.Store.AnyClientSince(ctx, time.Time{}) // all retained history
 	if err != nil {
 		a.Log.Debug("check for observed clients", "error", err)
 		return false

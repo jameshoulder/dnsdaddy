@@ -48,10 +48,13 @@ services:
       # Dashboard and API. Loopback by default; set DNSDADDY_DASHBOARD_BIND in
       # .env to this machine's LAN address to reach it from your own network.
       #
-      # The address matters more than the port. "192.168.1.75:8080:8080" is
-      # reachable from your LAN and from nowhere else, because a private
-      # address is not routable from the internet — that is a supported
-      # deployment and how most self-hosted dashboards work.
+      # The address matters more than the port. "192.168.1.75:8080:8080" is a
+      # supported deployment and how most self-hosted dashboards work — but
+      # ONLY on a machine with no public address. On most cloud providers the
+      # instance holds a private address with the public one NATed onto it, so
+      # binding that private address still publishes the dashboard to the
+      # internet. A private address on the NIC is not evidence that a host is
+      # private.
       #
       # "0.0.0.0:8080:8080" (or the bare "8080:8080", which means the same
       # thing) is the one to avoid: on a public VPS it publishes an

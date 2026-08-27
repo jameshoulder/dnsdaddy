@@ -124,24 +124,40 @@ docker compose logs dnsdaddy | grep -i password
 already serves loopback, every private range, carrier-grade NAT, link-local and
 the IPv6 equivalents.
 
-**To open the dashboard from your laptop**, set your machine's LAN address in
-`.env` and restart:
+**To open the dashboard from your laptop**, on a machine that has **no public
+address** — a home server, a LAN VM, a box behind your router — set its LAN
+address in `.env` and restart:
 
 ```bash
 echo "DNSDADDY_DASHBOARD_BIND=$(hostname -I | awk '{print $1}')" >> .env
 docker compose up -d
 ```
 
-That publishes the dashboard on your LAN and nowhere else — a private address
-is not routable from the internet. Do **not** set it to `0.0.0.0`: that puts an
-authenticated but *plaintext* management API on every interface, and Docker's
-port publishing bypasses `ufw`.
+> **Check this is not a cloud VPS first.** On AWS, GCP, Azure, Hetzner Cloud and
+> most providers the instance holds a *private* address and the public one is
+> NATed onto it, so `ip addr` shows `10.x` or `172.x` while the machine is fully
+> reachable from the internet. Binding the dashboard to that private address
+> publishes an authenticated but **plaintext** management API to the world.
+> A private address on the NIC is not evidence that a host is private.
+>
+> Never set it to `0.0.0.0` either — and note Docker's port publishing bypasses
+> `ufw`, so a firewall rule will not contain it.
 
-**On a public VPS**, leave the dashboard on loopback, put TLS in front
-([`deploy/Caddyfile.example`](deploy/Caddyfile.example)), and set
-`DNSDADDY_ALLOWED_CLIENT_CIDRS` — your clients arrive from public addresses,
-which the default does not cover, so every real query would be answered
-`REFUSED`.
+**On a public VPS or any host with a public address**, leave the dashboard on
+loopback and reach it over an SSH tunnel:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 you@your-server
+```
+
+or put TLS in front ([`deploy/Caddyfile.example`](deploy/Caddyfile.example)).
+You must also set `DNSDADDY_ALLOWED_CLIENT_CIDRS` there — your clients arrive
+from public addresses, which the default does not cover, so every real query
+would be answered `REFUSED`.
+
+If it does go wrong, DNS Daddy says so: a management request arriving over plain
+HTTP from a public address is raised on the dashboard and at
+`/api/v1/diagnostics`.
 
 ## What success looks like
 
