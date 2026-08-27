@@ -108,26 +108,19 @@ log "Installed $($BIN_PATH -version)"
 
 # --- 5. configuration --------------------------------------------------------
 
-# Where the dashboard listens depends on whether this machine faces the
-# internet. Binding every interface on a public host publishes an
-# authenticated but PLAINTEXT management API, which is the same exposure
-# docs/deploy.md tells VPS operators to avoid — so the installer must not
-# create it by default.
-PRIMARY_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || true)
-[[ -n "$PRIMARY_IP" ]] || PRIMARY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-
-HTTP_LISTEN="127.0.0.1:8080"
-DASHBOARD_NOTE="loopback only — reach it over an SSH tunnel, or put TLS in front (docs/deploy.md)"
-case "$PRIMARY_IP" in
-  10.*|192.168.*|127.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)
-    # A private address: this machine is not directly reachable from the
-    # internet, so a LAN dashboard is the expected and supported deployment.
-    HTTP_LISTEN=":8080"
-    DASHBOARD_NOTE="reachable from your LAN"
-    ;;
-esac
-# Override for anyone who knows better: DNSDADDY_HTTP_LISTEN=... sudo -E ./install.sh
-HTTP_LISTEN="${DNSDADDY_HTTP_LISTEN:-$HTTP_LISTEN}"
+# The dashboard is authenticated but travels in plaintext, so what matters is
+# who can reach the port. This installer runs non-interactively (curl | sudo
+# bash), so it cannot ask — and it must therefore fail closed.
+#
+# Loopback, always, unless the operator says otherwise. A private address on
+# the default route is NOT evidence that a machine has no public reachability:
+# on AWS, GCP, Azure, and most cloud providers the instance NIC holds an RFC
+# 1918 address and the public address is 1:1 NATed onto it. Binding every
+# interface there publishes the management API to the internet, which is the
+# exact condition this choice exists to prevent, and nothing visible from
+# inside the host distinguishes it from a LAN machine.
+HTTP_LISTEN="${DNSDADDY_HTTP_LISTEN:-127.0.0.1:8080}"
+DASHBOARD_NOTE=""
 
 if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
   if [[ -f "${SCRIPT_DIR}/../dnsdaddy.example.yaml" ]]; then
@@ -145,13 +138,16 @@ http:
   listen: "${HTTP_LISTEN}"
 EOF
   fi
-  # The example config ships with ":8080" so a LAN install works out of the
-  # box; rewrite it when this host looks internet-facing.
+  # The example config ships with ":8080"; rewrite it to whatever was chosen.
   sed -i -E "s|^(\s*)listen: \"?:?8080\"?|\1listen: \"${HTTP_LISTEN}\"|" "${CONFIG_DIR}/config.yaml" 2>/dev/null || true
   log "Wrote ${CONFIG_DIR}/config.yaml (dashboard: ${HTTP_LISTEN})"
 else
   log "Keeping existing ${CONFIG_DIR}/config.yaml"
-  HTTP_LISTEN=$(grep -oP '^\s*listen:\s*"?\K[^"\s]+' "${CONFIG_DIR}/config.yaml" | tail -1)
+  # `|| true` is load-bearing: a config that relies on the built-in default
+  # has no listen: line at all, grep exits 1, and under `set -e` the bare
+  # assignment would kill the installer here — on an upgrade, after the new
+  # binary is already in place and before the service is restarted.
+  HTTP_LISTEN=$(grep -oP '^\s*listen:\s*"?\K[^"\s]+' "${CONFIG_DIR}/config.yaml" 2>/dev/null | tail -1 || true)
   [[ -n "$HTTP_LISTEN" ]] || HTTP_LISTEN=":8080"
 fi
 
@@ -179,9 +175,18 @@ IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 : "${IP:=<this-server>}"
 
 case "$HTTP_LISTEN" in
-  127.*|localhost*) DASHBOARD_URL="http://${HTTP_LISTEN}" ;;
-  :8080)            DASHBOARD_URL="http://${IP}:8080" ;;
-  *)                DASHBOARD_URL="http://${HTTP_LISTEN}" ;;
+  127.*|localhost*)
+    DASHBOARD_URL="http://${HTTP_LISTEN}"
+    DASHBOARD_NOTE="loopback only. See \"Opening the dashboard\" below."
+    ;;
+  :8080)
+    DASHBOARD_URL="http://${IP}:8080"
+    DASHBOARD_NOTE="every interface — make sure this machine has no public address"
+    ;;
+  *)
+    DASHBOARD_URL="http://${HTTP_LISTEN}"
+    DASHBOARD_NOTE="as configured"
+    ;;
 esac
 
 cat <<EOF
@@ -212,9 +217,22 @@ cat <<EOF
   Logs        journalctl -u dnsdaddy -f
   Restart     systemctl restart dnsdaddy
 
-  The dashboard is authenticated but travels in plaintext. That is fine on a
-  LAN and not fine across the internet: before reaching it from outside your
-  own network, put TLS in front of it — see docs/deploy.md.
+  Opening the dashboard
+
+    The dashboard is authenticated but travels in plaintext, so it is bound to
+    loopback until you say otherwise. Reach it now with an SSH tunnel:
+
+      ssh -L 8080:127.0.0.1:8080 ${USER:-you}@${IP}
+
+    On a LAN machine with no public address, publish it on your network:
+
+      sudo sed -i 's|listen: "127.0.0.1:8080"|listen: ":8080"|' ${CONFIG_DIR}/config.yaml
+      sudo systemctl restart dnsdaddy
+
+    Do NOT do that on a cloud VPS. Most providers give the instance a private
+    address and NAT a public one onto it, so ":8080" is reachable from the
+    internet even though \`ip addr\` shows only 10.x or 172.x. There, put TLS in
+    front instead — see docs/deploy.md.
 
   DNS Daddy reports it if this goes wrong: a management request arriving over
   plain HTTP from a public address is raised on the dashboard and at

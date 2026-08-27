@@ -407,7 +407,9 @@ curl -fsSL https://raw.githubusercontent.com/jameshoulder/dnsdaddy/main/deploy/i
 ```
 
 Creates a service account, frees port 53 from `systemd-resolved`, installs a
-hardened unit, and starts it.
+hardened unit, and starts it. The dashboard is bound to loopback — the script
+runs non-interactively and cannot ask, so it fails closed; it prints how to
+open it on a LAN, and why you should not do that on a cloud VPS.
 
 > Pick **one** of Docker or systemd. Both bind port 53 and port 8080, and
 > running both leaves whichever started second failing on "address already in

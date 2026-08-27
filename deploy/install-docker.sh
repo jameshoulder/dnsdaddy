@@ -167,21 +167,34 @@ fi
 # --- 4. deployment type ------------------------------------------------------
 head_ "Deployment"
 
+# The default is always the closed one. A private address on the default route
+# is NOT evidence that a machine has no public reachability: on AWS, GCP, Azure
+# and most cloud providers the instance NIC holds an RFC 1918 address and the
+# public address is 1:1 NATed onto it, so publishing the dashboard on that
+# private address makes it reachable from the internet. Nothing visible from
+# inside the host tells the two apart, so opening it up has to be a person's
+# explicit choice rather than a guess this script makes for them.
+DEFAULT_CHOICE=2
 if [[ $IS_PRIVATE -eq 1 ]]; then
-  DEFAULT_CHOICE=1
-  printf '  This looks like a %sprivate network%s (%s).\n' "$BOLD" "$OFF" "${HOST_IP:-unknown}"
+  printf '  This machine has a %sprivate address%s (%s).\n' "$BOLD" "$OFF" "${HOST_IP:-unknown}"
 else
-  DEFAULT_CHOICE=2
-  printf '  This looks like a %spublic address%s (%s).\n' "$BOLD" "$OFF" "${HOST_IP:-unknown}"
+  printf '  This machine has a %spublic address%s (%s).\n' "$BOLD" "$OFF" "${HOST_IP:-unknown}"
 fi
 
 cat <<EOF
 
-  1. LAN / homelab / VM  — dashboard reachable from your own network
-  2. Public VPS          — dashboard stays private; put TLS in front yourself
+  1. LAN / homelab / VM  — dashboard published on ${HOST_IP:-this machine}:8080.
+                           Choose this ONLY if the machine has no public
+                           address. Most cloud VPSes show a private address
+                           here and are still reachable from the internet.
+  2. Public VPS, or unsure — dashboard stays on loopback; reach it over an SSH
+                           tunnel, or put TLS in front. (default)
 
 EOF
 
+# --yes and a non-interactive run both take the default, which is why the
+# default must be the safe one: an unattended install must never end up
+# publishing a management API.
 CHOICE="$DEFAULT_CHOICE"
 if [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 && -t 0 ]]; then
   read -r -p "  Deployment type [${DEFAULT_CHOICE}]: " reply

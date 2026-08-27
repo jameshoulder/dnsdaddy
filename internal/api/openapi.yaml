@@ -931,11 +931,16 @@ components:
         hasSeenClients:
           type: boolean
           description: |
-            Whether any non-loopback client has used the resolver in the last
-            24 hours. Loopback is excluded deliberately: health checks,
-            `dnsdaddy doctor` and the operator's own `dig` from the server all
-            arrive from 127.0.0.1, and counting them would report that the
-            network is using the resolver when only the server is.
+            Whether a non-loopback client has **ever** used this resolver.
+
+            A latch, not a rolling window: once a device has been seen the fact
+            is recorded, so a network that goes quiet for a day does not start
+            reporting that nothing has ever used the resolver.
+
+            Loopback is excluded deliberately: health checks, `dnsdaddy doctor`
+            and the operator's own `dig` from the server all arrive from
+            127.0.0.1, and counting them would report that the network is using
+            the resolver when only the server is.
 
             Always false when `clientAttribution` is false — read the two
             together.

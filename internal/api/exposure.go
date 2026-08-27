@@ -49,10 +49,17 @@ func (e *exposureWatch) observe(r *http.Request, trusted *httpx.TrustedProxies) 
 		return
 	}
 
-	// The peer, not the forwarded client: a forwarding header is only believed
-	// from a trusted proxy, and a trusted proxy in front is the arrangement
-	// this check exists to recommend.
-	addr := httpx.PeerAddr(r)
+	// The forwarded client where a trusted proxy vouches for it, the peer
+	// otherwise — httpx.ClientAddr enforces exactly that, so a header from an
+	// untrusted peer still cannot influence this.
+	//
+	// Using the peer unconditionally looked safer and was not. A trusted proxy
+	// that reports X-Forwarded-Proto: http is telling us it served the
+	// dashboard publicly in the clear; checking its own private address there
+	// discards the one report that identifies both the public client and the
+	// insecure scheme, and the exposure goes unnoticed precisely because a
+	// proxy — the thing this check recommends — is in front of it.
+	addr := httpx.ClientAddr(r, trusted)
 	if !addr.IsValid() || !isPublicAddr(addr) {
 		return
 	}
