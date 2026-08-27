@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -79,6 +80,59 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("seed defaults: %w", err)
 	}
 	return s, nil
+}
+
+// OpenReadOnly opens an existing database for inspection, and changes nothing.
+//
+// Open is the wrong tool for a diagnostic. It applies the schema, runs
+// migrations, seeds first-run defaults and switches journalling to WAL — all
+// correct for the daemon that owns the database, and all of it a modification
+// made by a command whose whole promise is that it makes none. Running a newer
+// binary's `dnsdaddy doctor` against an older live deployment would have
+// migrated it.
+//
+// Two independent guarantees, because one of them is a pragma the driver could
+// in principle ignore:
+//
+//	mode=ro     SQLite opens the file read-only and never creates it, so a
+//	            mistyped data_dir reports "no database" instead of quietly
+//	            manufacturing an empty one.
+//	query_only  any statement that would write fails rather than being
+//	            attempted.
+//
+// journal_mode is deliberately not set. Setting it writes to the database
+// header, which is precisely the mutation being avoided; the mode already
+// recorded in the file is used as-is, and a WAL database opened this way reads
+// correctly both while the daemon holds it open and after a clean shutdown.
+func OpenReadOnly(path string) (*Store, error) {
+	// Checked before the DSN is built so the error names the real problem.
+	// mode=ro would report "unable to open database file", which is true of a
+	// permissions fault and a missing file alike.
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(true)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+
+	// A diagnostic issues a handful of queries and exits. Two connections is
+	// ample, and keeps it out of the way of a daemon that is serving.
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(2)
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping sqlite read-only: %w", err)
+	}
+
+	// No schema, no migrations, no seeding. If the database predates a column
+	// this binary knows about, a query naming it fails and the caller reports
+	// that — which is the honest outcome, and better than silently upgrading
+	// a deployment somebody was only trying to inspect.
+	return &Store{db: db}, nil
 }
 
 // addedColumns are columns introduced after the initial release.

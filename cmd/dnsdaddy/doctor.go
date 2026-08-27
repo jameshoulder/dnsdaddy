@@ -52,10 +52,10 @@ func runDoctor(args []string) error {
 	checks = append(checks, cfgChecks...)
 	checks = append(checks, doctorDataDir(cfg))
 
-	// One handle, shared by every check that needs it. Opening the database
-	// three times would be wasteful, and — because store.Open creates and
-	// seeds a missing file — would have this diagnostic write a database into
-	// a mistyped data directory. openExistingStore refuses to create one.
+	// One read-only handle, shared by every check that needs it. See
+	// openExistingStore for why it is not store.Open: this command promises to
+	// change nothing, and that promise has to hold against an older
+	// deployment's database as well as a missing one.
 	st, dbCheck := openExistingStore(ctx, cfg)
 	if st != nil {
 		defer st.Close()
@@ -134,13 +134,18 @@ func doctorDataDir(cfg config.Config) diag.Check {
 	return c
 }
 
-// openExistingStore opens the database only if it already exists.
+// openExistingStore opens the database for inspection, without changing it.
 //
-// store.Open creates and seeds a missing file, which is right for the daemon
-// and wrong here: a diagnostic run against a mistyped data directory must
-// report that there is no database, not quietly manufacture one and then
-// pronounce it healthy. A nil store is returned when there is nothing to open,
-// and every caller tolerates it.
+// store.OpenReadOnly, not store.Open. Open is right for the daemon that owns
+// the database and wrong here: it applies the schema, runs migrations, seeds
+// defaults and switches journalling to WAL, so a newer binary's doctor run
+// against an older live deployment would have migrated it — a modification
+// made by the one command that promises to make none. It also creates a
+// missing file, so a mistyped data_dir was answered with a manufactured empty
+// database rather than with the truth.
+//
+// A nil store is returned when there is nothing to open, and every caller
+// tolerates it.
 func openExistingStore(ctx context.Context, cfg config.Config) (*store.Store, diag.Check) {
 	c := diag.Check{Section: diag.SectionDatabase, Name: "Database readable"}
 	path := cfg.DBPath()
@@ -155,11 +160,13 @@ func openExistingStore(ctx context.Context, cfg config.Config) (*store.Store, di
 		return nil, c
 	}
 
-	st, err := store.Open(path)
+	st, err := store.OpenReadOnly(path)
 	if err != nil {
 		c.Status = diag.StatusFail
-		c.Summary = "The database exists but could not be opened."
+		c.Summary = "The database exists but could not be opened for reading."
 		c.Evidence = []string{"path: " + path, "error: " + err.Error()}
+		c.Action = "Check that this user can read the file. Under systemd the database belongs " +
+			"to the dnsdaddy user, so this normally wants sudo."
 		return nil, c
 	}
 
