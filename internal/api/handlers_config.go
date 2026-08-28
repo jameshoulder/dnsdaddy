@@ -154,6 +154,21 @@ type networkBody struct {
 	PublicAck *bool `json:"publicAck"`
 }
 
+// affectsAccess reports whether this write can change who the resolver admits.
+//
+// The fields are exactly the ones store.ClientACLNetworks reads: a network's
+// CIDRs, whether it is enabled, and whether it is permitted. Name, location
+// and policy reach the ACL snapshot too, but only as labels in diagnostics
+// evidence — they decide nothing about admission.
+//
+// Mentioning a field counts, even if the value is unchanged. Erring towards
+// "this could have changed access" is the safe direction: the cost is a
+// warning that turns out to be unnecessary, where the other way round is a
+// revocation nobody is told failed.
+func (b networkBody) affectsAccess() bool {
+	return b.CIDRs != nil || b.Enabled != nil || b.AllowResolver != nil
+}
+
 func (b networkBody) toInput() store.NetworkInput {
 	return store.NetworkInput{
 		Name:          b.Name,
@@ -177,7 +192,8 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	writeNetwork(w, http.StatusCreated, n, a.reloadAccess(r))
+	// A new network always could: it may arrive already permitted.
+	writeNetwork(w, http.StatusCreated, n, a.reloadAccess(r, true))
 }
 
 func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -191,7 +207,7 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	writeNetwork(w, http.StatusOK, n, a.reloadAccess(r))
+	writeNetwork(w, http.StatusOK, n, a.reloadAccess(r, body.affectsAccess()))
 }
 
 func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +227,7 @@ func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 	// controller, so `dnsdaddy doctor` and /api/v1/diagnostics keep reporting
 	// it until a reload succeeds — a warning in one HTTP response is easy to
 	// miss, and this outlives the request that caused it.
-	if warning := a.reloadAccess(r); warning != "" {
+	if warning := a.reloadAccess(r, true); warning != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "deleted",
 			"warning": warning,
@@ -713,12 +729,26 @@ func (a *API) reloadEngine(r *http.Request) {
 // response carrying an explicit warning rather than a 500. The condition also
 // shows up in `dnsdaddy doctor` and at /api/v1/diagnostics, where the
 // effective ACL is what is reported.
-func (a *API) reloadAccess(r *http.Request) string {
+//
+// affectsAccess says whether the write could have changed who is admitted. A
+// rename that fails to reload leaves the enforced ACL correct in every respect
+// that matters, so it is reported but does not raise the standing warning that
+// a revocation may not have taken.
+func (a *API) reloadAccess(r *http.Request, affectsAccess bool) string {
 	if a.ClientACL == nil {
 		return ""
 	}
-	if err := a.ClientACL.Reload(r.Context()); err != nil {
-		a.Log.Error("reload client access", "error", err)
+	reload := a.ClientACL.Reload
+	if !affectsAccess {
+		reload = a.ClientACL.ReloadMetadata
+	}
+	if err := reload(r.Context()); err != nil {
+		a.Log.Error("reload client access", "error", err, "affects_access", affectsAccess)
+		if !affectsAccess {
+			return "Saved, but the change could not be applied to the running resolver. Nothing " +
+				"about who may use it has changed, so no client is affected; the label will " +
+				"catch up on the next change."
+		}
 		// The controller records the failure too, so the diagnostics keep
 		// reporting it after this response has been closed and forgotten.
 		return "Saved, but the resolver's client access could not be reloaded, so this change is " +

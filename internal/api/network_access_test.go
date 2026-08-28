@@ -523,3 +523,110 @@ func TestDeleteReportsAFailedReload(t *testing.T) {
 		t.Errorf("no diagnostics check reports the stale ACL: %s", raw)
 	}
 }
+
+// A rename changes nothing about who is admitted, so a reload failure on one
+// must not raise the standing "a revocation may not have taken" alarm —
+// which nothing clears until an unrelated write succeeds or the daemon
+// restarts.
+func TestMetadataOnlyWriteDoesNotMarkTheACLStale(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Benchmark lab",
+		"cidrs": []string{"198.18.0.0/15"},
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("PATCH", "/api/v1/networks/"+id, map[string]any{"location": "Leeds"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	if h.acl.Stale() {
+		t.Error("a location change marked the ACL stale; admission is unchanged, so the " +
+			"diagnostics would raise a revocation warning that is simply not true")
+	}
+
+	// The caller is still told, in terms that do not overstate it.
+	warning, _ := decode[map[string]any](t, raw)["warning"].(string)
+	if warning == "" {
+		t.Error("the failure was not reported to the caller at all")
+	}
+	if strings.Contains(warning, "not yet in force") {
+		t.Errorf("the warning claims client access is not in force, which it is: %q", warning)
+	}
+
+	h.failACLReload.Store(false)
+}
+
+// The same failure on a write that *can* change admission still does.
+func TestAccessChangingWriteMarksTheACLStale(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Benchmark lab",
+		"cidrs": []string{"198.18.0.0/15"},
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	h.failACLReload.Store(true)
+	// publicAck because 198.18.0.0/15 is publicly routable; without it the
+	// write is refused before the reload is ever attempted.
+	resp, raw := h.do("PATCH", "/api/v1/networks/"+id, map[string]any{
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	if !h.acl.Stale() {
+		t.Fatal("a permission change whose reload failed was not recorded as stale")
+	}
+	warning, _ := decode[map[string]any](t, raw)["warning"].(string)
+	if !strings.Contains(warning, "not yet in force") {
+		t.Errorf("warning = %q, want it to say the change is not in force", warning)
+	}
+
+	h.failACLReload.Store(false)
+}
+
+// doctor runs as a separate process and rebuilds the ACL from configuration
+// and the database — the desired state, not the enforced one. The health
+// endpoint is the only place the running daemon's reload failure is visible,
+// which is why the flag is there rather than only behind authentication.
+func TestHealthReportsAStaleClientACL(t *testing.T) {
+	h := newHarness(t)
+
+	var health map[string]any
+	h.getJSON("/api/v1/health", &health)
+	if health["clientAclStale"] != false {
+		t.Errorf("clientAclStale = %v on a healthy instance, want false", health["clientAclStale"])
+	}
+
+	h.login()
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Benchmark lab",
+		"cidrs": []string{"198.18.0.0/15"},
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	h.failACLReload.Store(true)
+	h.do("PATCH", "/api/v1/networks/"+id, map[string]any{
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+
+	// Unauthenticated, deliberately: this is what doctor can reach.
+	resp, raw := h.do("GET", "/api/v1/health", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	if decode[map[string]any](t, raw)["clientAclStale"] != true {
+		t.Errorf("health does not report the stale ACL, so `dnsdaddy doctor` would exit zero "+
+			"while the daemon enforces an out-of-date ACL: %s", raw)
+	}
+
+	h.failACLReload.Store(false)
+}

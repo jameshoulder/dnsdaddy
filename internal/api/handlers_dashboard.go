@@ -21,6 +21,23 @@ type HealthResponse struct {
 	Version       string `json:"version"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
 	BlocklistSize int    `json:"blocklistSize"`
+
+	// ClientACLStale reports that a change to who may use the resolver could
+	// not be applied, so the rules being enforced may be older than what is
+	// stored.
+	//
+	// Here, on the unauthenticated endpoint, because it is the only way
+	// `dnsdaddy doctor` can see it. doctor runs as a separate process and
+	// rebuilds the ACL from configuration and the database — that is the
+	// *desired* state, and this flag lives only in the running daemon's
+	// memory. Without it doctor would exit zero while the daemon honoured a
+	// prefix the operator had deleted, which is exactly the misleading green
+	// that command exists to remove.
+	//
+	// It reveals nothing: a boolean saying a reload failed, not what the ACL
+	// contains. The same endpoint already reports the blocklist size for the
+	// same reason.
+	ClientACLStale bool `json:"clientAclStale"`
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -32,10 +49,11 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 		status = "degraded"
 	}
 	writeJSON(w, http.StatusOK, HealthResponse{
-		Status:        status,
-		Version:       version.String(),
-		UptimeSeconds: int64(time.Since(a.StartedAt).Seconds()),
-		BlocklistSize: size,
+		Status:         status,
+		Version:        version.String(),
+		UptimeSeconds:  int64(time.Since(a.StartedAt).Seconds()),
+		BlocklistSize:  size,
+		ClientACLStale: a.ClientACL.Stale(),
 	})
 }
 

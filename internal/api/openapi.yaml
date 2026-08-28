@@ -88,6 +88,18 @@ paths:
                   version: { type: string }
                   uptimeSeconds: { type: integer, format: int64 }
                   blocklistSize: { type: integer }
+        clientAclStale:
+          type: boolean
+          description: |
+            A change to which networks may use the resolver could not be
+            applied, so the rules being enforced may be older than what is
+            stored.
+
+            On the unauthenticated endpoint because it is the only way
+            `dnsdaddy doctor` can see it: doctor runs as a separate process
+            and rebuilds the ACL from configuration and the database, which
+            is the *desired* state, while this flag lives in the running
+            daemon's memory. It reveals nothing about what the ACL contains.
 
   /api/v1/auth/login:
     post:
@@ -392,8 +404,10 @@ paths:
           description: >-
             Deleted, but the resolver's client access could not be reloaded, so
             the network's addresses may still be being served. The condition is
-            also reported by `dnsdaddy doctor` and `GET /api/v1/diagnostics`
-            until a reload succeeds.
+            also reported by `GET /api/v1/diagnostics`, by `GET
+            /api/v1/health` as `clientAclStale`, and by `dnsdaddy doctor`
+            (which reads it from health, since the state lives in the running
+            daemon's memory) — until a reload succeeds.
           content:
             application/json:
               schema:

@@ -3,6 +3,7 @@ package clientacl
 import (
 	"context"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 )
 
@@ -22,6 +23,20 @@ type Loader func(ctx context.Context) ([]Network, error)
 // which half an update is in force.
 type Controller struct {
 	snap atomic.Pointer[Set]
+
+	// reloading serialises load, compute and publish.
+	//
+	// Without it two concurrent writes can publish out of order: request A
+	// reads the database, request B reads it, commits and publishes, and then
+	// A publishes the snapshot it read *before* B's change. B's grant or
+	// revocation is silently absent from the live ACL, and — worse — the stale
+	// flag is clear, so everything downstream reports it as current. The
+	// window is small and the API handlers really do run concurrently.
+	//
+	// Held across the database read on purpose, so the last writer in wins
+	// rather than the last reader. Reload happens only on configuration
+	// writes; the DNS hot path reads Current, which stays lock-free.
+	reloading sync.Mutex
 
 	// stale records that the last reload failed, so the snapshot in force may
 	// be older than what is stored.
@@ -60,19 +75,45 @@ func NewController(bootstrapCIDRs []string, allowPublicResolver bool, load Loade
 // a transient database error must not drop every client's permission, and it
 // must not silently widen the ACL either.
 func (c *Controller) Reload(ctx context.Context) error {
+	return c.reload(ctx, true)
+}
+
+// ReloadMetadata republishes after a write that cannot change who is admitted
+// — a rename, a policy reassignment, a location.
+//
+// A failure here does not mark the controller stale. The enforced ACL still
+// matches the stored one in every respect that decides admission, and raising
+// "a permission you revoked may still be honoured" over a renamed network
+// would be a false alarm — and a persistent one, since nothing clears it until
+// an unrelated write succeeds or the daemon restarts. The reload is still
+// attempted, because the network's name reaches the diagnostics through this
+// snapshot.
+func (c *Controller) ReloadMetadata(ctx context.Context) error {
+	return c.reload(ctx, false)
+}
+
+func (c *Controller) reload(ctx context.Context, marksStale bool) error {
 	if c == nil {
 		return nil
 	}
+
+	c.reloading.Lock()
+	defer c.reloading.Unlock()
+
 	var networks []Network
 	if c.load != nil {
 		var err error
 		networks, err = c.load(ctx)
 		if err != nil {
-			c.stale.Store(true)
+			if marksStale {
+				c.stale.Store(true)
+			}
 			return err
 		}
 	}
 	c.snap.Store(Compute(c.bootstrap, c.allowPublic, networks))
+	// Cleared on any successful publish: whatever went wrong before, the
+	// snapshot now in force was built from the current database.
 	c.stale.Store(false)
 	return nil
 }

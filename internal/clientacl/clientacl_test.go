@@ -6,7 +6,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func allows(t *testing.T, s *Set, addr string) bool {
@@ -705,5 +707,132 @@ func TestNilControllerIsNotStale(t *testing.T) {
 	var c *Controller
 	if c.Stale() {
 		t.Error("a nil Controller reported itself stale")
+	}
+}
+
+// Load, compute and publish must be serialised.
+//
+// Without it two concurrent writes can publish out of order: request A reads
+// the database, request B reads it, commits and publishes, and then A
+// publishes the snapshot it read *before* B's change. B's revocation is
+// silently absent from the live ACL and the stale flag is clear, so everything
+// downstream reports it as current.
+//
+// Asserted as the invariant rather than by racing two reloads and hoping they
+// interleave the wrong way: overlapping loads are what makes the reordering
+// possible, so "no two loads overlap" fails reliably when the lock is missing
+// where a timing race would only fail sometimes.
+func TestReloadsDoNotOverlap(t *testing.T) {
+	var (
+		inFlight   atomic.Int32
+		overlapped atomic.Bool
+		loads      atomic.Int32
+	)
+	c := NewController([]string{"127.0.0.0/8"}, false, func(context.Context) ([]Network, error) {
+		if inFlight.Add(1) > 1 {
+			overlapped.Store(true)
+		}
+		// Wide enough that unsynchronised callers will certainly be inside
+		// this window together.
+		time.Sleep(2 * time.Millisecond)
+		inFlight.Add(-1)
+		loads.Add(1)
+		return []Network{permitted("n1", "Home", "192.168.1.0/24")}, nil
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := c.Reload(context.Background()); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if overlapped.Load() {
+		t.Error("two reloads read the database at once; the later one can be overwritten by " +
+			"the earlier one's snapshot, losing a grant or a revocation silently")
+	}
+	if got := loads.Load(); got != 16 {
+		t.Errorf("loads = %d, want 16 — every reload must actually re-read", got)
+	}
+	if !c.Allows(netip.MustParseAddr("192.168.1.50")) {
+		t.Error("the final published snapshot does not reflect the loader's state")
+	}
+}
+
+// The ordering that matters, stated directly: whatever the loader returned
+// last is what ends up in force.
+func TestTheLastReloadWins(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		granted = true
+	)
+	c := NewController([]string{"127.0.0.0/8"}, false, func(context.Context) ([]Network, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !granted {
+			return []Network{unpermitted("n1", "Home", "192.168.1.0/24")}, nil
+		}
+		return []Network{permitted("n1", "Home", "192.168.1.0/24")}, nil
+	})
+
+	if err := c.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if !c.Allows(netip.MustParseAddr("192.168.1.50")) {
+		t.Fatal("precondition: the permitted network should resolve")
+	}
+
+	mu.Lock()
+	granted = false
+	mu.Unlock()
+	if err := c.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if c.Allows(netip.MustParseAddr("192.168.1.50")) {
+		t.Error("the revocation is not in force after the reload that followed it")
+	}
+}
+
+// A rename cannot change who is admitted, so a failure to apply it must not
+// raise the standing "a revocation may not have taken" warning — which nothing
+// clears until an unrelated write succeeds or the daemon restarts.
+func TestMetadataReloadFailureDoesNotMarkStale(t *testing.T) {
+	fail := true
+	c := NewController([]string{"127.0.0.0/8"}, false, func(context.Context) ([]Network, error) {
+		if fail {
+			return nil, context.DeadlineExceeded
+		}
+		return nil, nil
+	})
+
+	if err := c.ReloadMetadata(context.Background()); err == nil {
+		t.Fatal("the failure was not reported to the caller")
+	}
+	if c.Stale() {
+		t.Error("a metadata reload failure marked the ACL stale; admission is unchanged, so " +
+			"that is a false alarm and a persistent one")
+	}
+
+	// The strict path still does, on the same failure.
+	if err := c.Reload(context.Background()); err == nil {
+		t.Fatal("the failure was not reported to the caller")
+	}
+	if !c.Stale() {
+		t.Error("an access-relevant reload failure was not recorded")
+	}
+
+	// And any successful publish clears it, whichever path did it.
+	fail = false
+	if err := c.ReloadMetadata(context.Background()); err != nil {
+		t.Fatalf("ReloadMetadata: %v", err)
+	}
+	if c.Stale() {
+		t.Error("a successful metadata reload did not clear the stale flag; the snapshot in " +
+			"force was still rebuilt from the current database")
 	}
 }
