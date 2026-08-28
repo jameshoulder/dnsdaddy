@@ -30,6 +30,10 @@ type prodDeploy struct {
 	vol  string
 	bin  string
 	env  []string
+	// Paths to make unreadable to the unprivileged uid, applied after the
+	// readability fixups below. Mode 000 denies the owner too, so this works
+	// whether runAsNonRoot dropped privileges or never had any.
+	unreadable []string
 }
 
 func newProdDeploy(t *testing.T) *prodDeploy {
@@ -116,6 +120,7 @@ func (p *prodDeploy) run(args ...string) (string, int) {
 func (p *prodDeploy) runAsNonRoot(args ...string) (out string, code int, ok bool) {
 	p.t.Helper()
 	if os.Geteuid() != 0 {
+		p.lockDown()
 		out, code = p.exec(nil, args...)
 		return out, code, true
 	}
@@ -138,8 +143,22 @@ func (p *prodDeploy) runAsNonRoot(args ...string) (out string, code int, ok bool
 		}
 		return os.Chmod(path, mode)
 	}))
+	p.lockDown()
 	out, code = p.exec([]string{setpriv, "--reuid=65534", "--regid=65534", "--clear-groups"}, args...)
 	return out, code, true
+}
+
+// lockDown denies the paths a test asked to be unreadable, last, so the
+// readability sweep above cannot undo them. TempDir's own cleanup cannot list a
+// mode-000 directory, so each is restored first — Cleanup runs LIFO and TempDir
+// registered its removal earlier, so these run before it.
+func (p *prodDeploy) lockDown() {
+	p.t.Helper()
+	for _, path := range p.unreadable {
+		path := path
+		p.t.Cleanup(func() { _ = os.Chmod(path, 0o755) })
+		must(p.t, os.Chmod(path, 0))
+	}
 }
 
 func (p *prodDeploy) exec(prefix []string, args ...string) (string, int) {
@@ -267,7 +286,7 @@ func TestADryRunDoesNotNeedRoot(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	contains(t, out, "a real deploy would need sudo")
+	contains(t, out, "not running as root")
 }
 
 // "*** DRY RUN — nothing will be changed ***" has to be true of the filesystem
@@ -288,4 +307,27 @@ func TestADryRunDoesNotCreateEnv(t *testing.T) {
 	if _, err := os.Stat(env); !os.IsNotExist(err) {
 		t.Errorf("the dry run created .env, having said it would change nothing\n%s", out)
 	}
+}
+
+// The standard deployment keeps the database in a named volume under Docker's
+// root-owned store, so an unprivileged dry run cannot read it however freely it
+// may run. What it must not do is call that a wrong path: the old message was
+// "this is not the data volume", which sends the operator hunting for a path
+// problem they do not have while the database sits right where it belongs. The
+// rest of this suite cannot catch it — the fixture is made readable so the
+// other tests can run at all.
+func TestAnUnreadableVolumeSaysSoRatherThanBlamingThePath(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_PERMITTED=10.0.10.0/24")
+	p.unreadable = append(p.unreadable, p.vol)
+
+	out, code, ok := p.runAsNonRoot("--dry-run")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("dry run claimed to read a volume it has no permission to read\n%s", out)
+	}
+	contains(t, out, "Docker's own volume directory")
+	notContains(t, out, "this is not the data volume")
 }

@@ -3,8 +3,11 @@
 # DNS Daddy — one-command production deployment.
 #
 #   cd /root/dnsdaddy && sudo ./deploy/production-deploy.sh
-#   ./deploy/production-deploy.sh --dry-run          # decide nothing, change nothing
-#                                                   # (no sudo needed: it changes nothing)
+#   sudo ./deploy/production-deploy.sh --dry-run     # decide nothing, change nothing
+#
+# A dry run changes nothing, so it does not need root to write. It still needs
+# to read the database, and a named volume lives under Docker's root-owned
+# store — so keep the sudo unless the data volume is one your own user can read.
 #
 # Does the whole job: investigate, back up, derive the client ACL from the
 # database, build, deploy onto the EXISTING volume, install Caddy, wire up boot
@@ -67,7 +70,7 @@ step "1. Preflight"
 # script testable, which is why the check is written this way and not inlined.
 if [[ $EUID -ne 0 ]]; then
   [[ $DRY_RUN -eq 1 ]] || die "run with sudo"
-  warn "not running as root — a real deploy would need sudo"
+  warn "not running as root — fine for a dry run, if the data volume is readable by this user"
 fi
 command -v docker >/dev/null || die "docker is not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose v2 is not available"
@@ -99,6 +102,14 @@ ok "type=$VOL_TYPE  name=$VOL_NAME"
 ok "host path=$VOL_SRC"
 
 DB="$VOL_SRC/dnsdaddy.db"
+# Tell "not allowed" apart from "not there" before reporting either. A named
+# volume lands under Docker's root-owned store, so an unprivileged dry run
+# cannot read the database even though it is sitting right there — and saying
+# "this is not the data volume" would send the operator hunting for a path
+# problem they do not have.
+if [[ $EUID -ne 0 && ! -r "$DB" && ! -r "$VOL_SRC" ]]; then
+  die "cannot read $VOL_SRC as an unprivileged user — it is Docker's own volume directory, so even a dry run over it needs sudo"
+fi
 [[ -f "$DB" ]] || die "no database at $DB — this is not the data volume"
 DB_BYTES=$(stat -c %s "$DB")
 (( DB_BYTES > 65536 )) || die "database is only $DB_BYTES bytes — refusing to proceed"
