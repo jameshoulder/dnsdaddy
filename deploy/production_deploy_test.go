@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -513,4 +514,57 @@ func TestAnUnreadableHostnameSourceIsNotReportedAsNoHostname(t *testing.T) {
 	// the real run may not follow.
 	notContains(t, out, "DNSDADDY_SECURE_COOKIES")
 	notContains(t, out, "caddy")
+}
+
+// The two deploy scripts share a vocabulary — ok, warn, die, step — and each
+// has helpers the other lacks: note and pass belong to the installer, act and
+// step to production-deploy. Code has moved between them during this change,
+// and calling a helper the file does not define is invisible to bash -n, to
+// the linters, and to every test that does not reach the branch: it is a
+// runtime "command not found".
+//
+// It is not hypothetical. A warning branch here called note(), which only the
+// installer defines, and under set -e that path exited 127 for two commits —
+// aborting by accident, in a shape that made the regression test for it pass
+// for the wrong reason.
+//
+// This checks calls written at the start of a line, which is where helpers are
+// invoked and where prose mentioning the same word is not. It would have caught
+// that bug.
+func TestNoScriptCallsAHelperItDoesNotDefine(t *testing.T) {
+	repo := repoRoot(t)
+	scripts := map[string]string{}
+	for _, name := range []string{"install-docker.sh", "production-deploy.sh"} {
+		b, err := os.ReadFile(filepath.Join(repo, "deploy", name))
+		must(t, err)
+		scripts[name] = string(b)
+	}
+
+	defines := regexp.MustCompile(`(?m)^([a-z_][a-z0-9_]*)\(\)`)
+	calls := regexp.MustCompile(`(?m)^[ \t]*([a-z_][a-z0-9_]*)[ \t]`)
+
+	defined := map[string]map[string]bool{}
+	every := map[string]bool{}
+	for name, body := range scripts {
+		defined[name] = map[string]bool{}
+		for _, m := range defines.FindAllStringSubmatch(body, -1) {
+			defined[name][m[1]] = true
+			every[m[1]] = true
+		}
+	}
+
+	for name, body := range scripts {
+		for i, line := range strings.Split(body, "\n") {
+			m := calls.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			if every[m[1]] && !defined[name][m[1]] {
+				t.Errorf("%s:%d calls %s(), which this script does not define — "+
+					"it is defined only in the other one, so this is a runtime "+
+					"\"command not found\" in whatever branch reaches it:\n  %s",
+					name, i+1, m[1], strings.TrimSpace(line))
+			}
+		}
+	}
 }
