@@ -75,6 +75,36 @@ type Network struct {
 	CIDRs         []string
 }
 
+// prefixes returns what n contributes to the effective ACL, alongside any
+// entries that did not parse.
+//
+// The three conditions are the whole of the rule, and they live here so that
+// Compute and the "could this write change who is admitted?" question below
+// cannot drift apart: a disabled network permits nothing, an unpermitted one
+// permits nothing, and a permitted one with no ranges — the catch-all — has
+// none to contribute. A range that fails to parse is reported rather than
+// quietly permitting less than the operator wrote, but only for a network that
+// would otherwise have granted something; a typo in a disabled network is not
+// yet anybody's problem.
+func (n Network) prefixes() (prefixes []netip.Prefix, invalid []string) {
+	if !n.Enabled || !n.AllowResolver {
+		return nil, nil
+	}
+	for _, raw := range n.CIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		p, err := ParsePrefix(raw)
+		if err != nil {
+			invalid = append(invalid, raw)
+			continue
+		}
+		prefixes = append(prefixes, p)
+	}
+	return prefixes, invalid
+}
+
 // Grant is one permitted range, carrying where it came from so a diagnostic
 // can name the network an operator should go and look at.
 type Grant struct {
@@ -170,19 +200,9 @@ func Compute(bootstrapCIDRs []string, allowPublicResolver bool, networks []Netwo
 	}
 
 	for _, n := range networks {
-		if !n.Enabled || !n.AllowResolver {
-			continue
-		}
-		for _, raw := range n.CIDRs {
-			raw = strings.TrimSpace(raw)
-			if raw == "" {
-				continue
-			}
-			p, err := ParsePrefix(raw)
-			if err != nil {
-				s.invalid = append(s.invalid, raw)
-				continue
-			}
+		prefixes, invalid := n.prefixes()
+		s.invalid = append(s.invalid, invalid...)
+		for _, p := range prefixes {
 			s.grants = append(s.grants, Grant{
 				NetworkID:   n.ID,
 				NetworkName: n.Name,
@@ -489,6 +509,108 @@ func (s *Set) Cover(p netip.Prefix) Cover {
 		return CoverPartial
 	}
 	return CoverNone
+}
+
+// AdmissionChangesFor reports whether storing n in the state described could
+// change who this snapshot admits.
+//
+// AdmissionChangesWithout asks the same question for removing a network
+// entirely.
+//
+// This exists because "did the write touch a field that decides admission?" is
+// the wrong question, and answering it produced two false alarms. A network
+// permitted in a deployment whose bootstrap ACL is empty changes nothing —
+// an unrestricted ACL refuses nobody, so a grant has nothing to add. Neither
+// does one whose ranges some other permitted network, or the bootstrap list,
+// already covers. In both cases a failed reload was raising "a permission you
+// revoked may still be honoured", which stands until an unrelated write
+// succeeds, over a change that could not have altered admission at all — and
+// DELETE was answering 200 to say client access might be out of date when the
+// enforced and desired sets were provably identical.
+//
+// The comparison is against the snapshot in force rather than against the
+// database, which is what makes it the right question: if the ACL being
+// enforced already admits exactly who the stored state calls for, then a
+// reload failing to publish leaves nothing wrong to warn about. It also means
+// a concurrent writer that has already published a snapshot including this
+// change is correctly read as "in force".
+//
+// Coverage uses the same single-prefix containment rule as Cover, so two
+// permitted halves that between them cover a range do not count as covering
+// it. That errs towards "this could have changed access", which is the safe
+// direction: the cost is a warning that turns out to be unnecessary, where the
+// other way round is a revocation nobody is told failed.
+func (s *Set) AdmissionChangesFor(n Network) bool {
+	prefixes, _ := n.prefixes()
+	return s.admissionChanges(n.ID, prefixes)
+}
+
+// AdmissionChangesWithout reports whether removing this network altogether
+// could change who this snapshot admits.
+func (s *Set) AdmissionChangesWithout(networkID string) bool {
+	return s.admissionChanges(networkID, nil)
+}
+
+// admissionChanges compares the admission set this snapshot enforces against
+// the one it would enforce with networkID contributing exactly after.
+//
+// Both sets share every prefix from the bootstrap list and from other
+// networks, so only the two differing contributions need testing: each prefix
+// leaving has to still be covered by what remains, and each arriving has to
+// have been covered already.
+func (s *Set) admissionChanges(networkID string, after []netip.Prefix) bool {
+	if s == nil || s.unrestricted {
+		// An unrestricted ACL refuses nobody, and Compute keeps it that way no
+		// matter what is permitted, so no grant can change admission.
+		return false
+	}
+
+	var before []netip.Prefix
+	rest := make([]netip.Prefix, 0, len(s.bootstrap)+len(s.grants))
+	rest = append(rest, s.bootstrap...)
+	for _, g := range s.grants {
+		if g.NetworkID == networkID {
+			before = append(before, g.Prefix)
+			continue
+		}
+		rest = append(rest, g.Prefix)
+	}
+	if len(before) == 0 && len(after) == 0 {
+		return false
+	}
+
+	// Built with their own backing arrays: rest has spare capacity, and
+	// appending to it twice would have the second write clobber the first.
+	afterAll := concat(rest, after)
+	beforeAll := concat(rest, before)
+
+	for _, p := range before {
+		if !coveredBy(afterAll, p) {
+			return true
+		}
+	}
+	for _, p := range after {
+		if !coveredBy(beforeAll, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func concat(a, b []netip.Prefix) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(a)+len(b))
+	out = append(out, a...)
+	return append(out, b...)
+}
+
+// coveredBy reports whether some prefix in list wholly contains p.
+func coveredBy(list []netip.Prefix, p netip.Prefix) bool {
+	for _, a := range list {
+		if covers(a, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ServesOnlyLoopback reports that nothing but this machine itself may resolve.

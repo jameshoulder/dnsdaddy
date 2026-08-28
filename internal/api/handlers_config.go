@@ -154,36 +154,30 @@ type networkBody struct {
 	PublicAck *bool `json:"publicAck"`
 }
 
-// affectsAccess reports whether this write can change who the resolver admits.
+// accessAffected reports whether a network write could have changed who the
+// resolver admits, by comparing the ACL in force against the one the stored
+// state calls for.
 //
-// The fields are exactly the ones store.ClientACLNetworks reads: a network's
-// CIDRs, whether it is enabled, and whether it is permitted. Name, location
-// and policy reach the ACL snapshot too, but only as labels in diagnostics
-// evidence — they decide nothing about admission.
+// The question is asked of the live snapshot rather than of the request,
+// because the request cannot answer it: mentioning allowResolver says nothing
+// about whether the resulting grant adds anything the bootstrap list or
+// another network did not already permit, and in a deployment whose bootstrap
+// ACL is empty — unrestricted, refusing nobody — no grant changes admission at
+// all. Getting this wrong is not free in either direction. Too eager, and a
+// failed reload raises "a permission you revoked may still be honoured", which
+// stands until an unrelated write succeeds, over a change that could not have
+// altered admission; too shy, and a revocation that never took effect is
+// reported as done.
 //
-// Mentioning a field counts, even if the value is unchanged. Erring towards
-// "this could have changed access" is the safe direction: the cost is a
-// warning that turns out to be unnecessary, where the other way round is a
-// revocation nobody is told failed.
-func (b networkBody) affectsAccess() bool {
-	return b.CIDRs != nil || b.Enabled != nil || b.AllowResolver != nil
+// Read immediately before the reload, so a concurrent writer that has already
+// published a snapshot including this change is correctly read as "in force".
+func (a *API) accessAffected(n store.Network) bool {
+	return a.ClientACL.Current().AdmissionChangesFor(store.ClientACLNetwork(n))
 }
 
-// networkGrantsAccess reports whether a stored network contributes anything to
-// the effective ACL.
-//
-// All three conditions, because clientacl.Compute skips a network failing any
-// of them: a disabled network permits nothing, an unpermitted one permits
-// nothing, and a permitted one with no CIDRs — the catch-all — has no range to
-// contribute. Creating or deleting such a network cannot change who is
-// admitted, so a failed reload around one is not evidence that a permission is
-// wrong.
-//
-// Used where the stored state is known exactly. A PATCH uses affectsAccess
-// instead, which reasons about the request rather than the result, because the
-// merge happens inside the store.
-func networkGrantsAccess(n store.Network) bool {
-	return n.Enabled && n.AllowResolver && len(n.CIDRs) > 0
+// accessAffectedByRemoving is accessAffected for a network that is now gone.
+func (a *API) accessAffectedByRemoving(networkID string) bool {
+	return a.ClientACL.Current().AdmissionChangesWithout(networkID)
 }
 
 func (b networkBody) toInput() store.NetworkInput {
@@ -210,10 +204,11 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	a.reloadEngine(r)
 	// Derived from what was actually stored, not assumed. A network created
-	// unpermitted — the default — changes nothing about who is admitted, so a
-	// failed reload after one must not raise the standing "a revocation may
+	// unpermitted — the default — changes nothing about who is admitted, and
+	// neither does a permitted one whose ranges are already covered, so a
+	// failed reload after either must not raise the standing "a revocation may
 	// still be honoured" warning.
-	writeNetwork(w, http.StatusCreated, n, a.reloadAccess(r, networkGrantsAccess(n)))
+	writeNetwork(w, http.StatusCreated, n, a.reloadAccess(r, a.accessAffected(n)))
 }
 
 func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -227,47 +222,43 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	writeNetwork(w, http.StatusOK, n, a.reloadAccess(r, body.affectsAccess()))
+	// n is the merged row the store committed, so this compares the ACL in
+	// force against the result of the write rather than guessing from which
+	// fields the request happened to mention.
+	writeNetwork(w, http.StatusOK, n, a.reloadAccess(r, a.accessAffected(n)))
 }
 
 func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
-	// Read it before it is gone, for the same reason the create path reads
-	// what it stored: deleting a network that granted nothing cannot change
-	// who is admitted, and marking the ACL stale there is a false alarm that
-	// persists until an unrelated write succeeds. A missing network is left
-	// for DeleteNetwork to report, so the 404 stays where it was.
-	granted := false
-	if existing, err := a.Store.GetNetwork(r.Context(), r.PathValue("id")); err == nil {
-		granted = networkGrantsAccess(existing)
-	}
-
-	if err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id")); err != nil {
+	// DeleteNetwork reads the row inside the transaction that removes it, so
+	// what comes back is what was deleted rather than what happened to be
+	// stored a moment earlier. A missing network is still reported by the
+	// store, so the 404 stays where it was.
+	deleted, err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id"))
+	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	a.reloadEngine(r)
-	// Deleting a network revokes whatever it permitted, so a failed reload
-	// here is the worst case of the three: the permission is still being
-	// honoured and the row that would have shown it is gone. Answering 204
-	// and dropping the warning told the caller the revocation had taken
-	// effect, which is a security-relevant false success.
+
+	// Deleting a network that permitted something is the worst of the three
+	// failure cases: the permission is still being honoured and the row that
+	// would have shown it is gone. Answering 204 and dropping the warning told
+	// the caller the revocation had taken effect, which is a security-relevant
+	// false success. So that case answers 200 with the warning, and the
+	// controller records it too, so `dnsdaddy doctor` and /api/v1/diagnostics
+	// keep reporting it until a reload succeeds — a warning in one HTTP
+	// response is easy to miss, and this outlives the request that caused it.
 	//
-	// So the success case keeps its documented 204, and the failure case
-	// answers 200 with the warning. The condition is also recorded on the
-	// controller, so `dnsdaddy doctor` and /api/v1/diagnostics keep reporting
-	// it until a reload succeeds — a warning in one HTTP response is easy to
-	// miss, and this outlives the request that caused it.
-	// 200 is reserved for the case it was introduced for: client access may
-	// not be in force. Deleting a network that granted nothing cannot leave a
-	// permission behind, so that stays a 204 — vacuously, the revocation is in
-	// force, because there was none to make. The reload failure is still
-	// logged by reloadAccess.
-	//
-	// Widening 200 to cover a failure that affects nobody would train the one
-	// caller who checks for it to stop checking, which costs more than the
-	// notice is worth.
-	warning := a.reloadAccess(r, granted)
-	if granted && warning != "" {
+	// 200 is reserved for the meaning it was introduced for: client access may
+	// not be in force. A deletion that provably cannot change who is admitted
+	// — an unpermitted network, or one whose ranges the bootstrap list or
+	// another permitted network still covers — stays 204, vacuously in force,
+	// with the reload failure still logged. Widening 200 to cover a failure
+	// that affects nobody would train the one caller who checks for it to stop
+	// checking, which costs more than the notice is worth.
+	affects := a.accessAffectedByRemoving(deleted.ID)
+	warning := a.reloadAccess(r, affects)
+	if affects && warning != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "deleted",
 			"warning": warning,

@@ -403,15 +403,18 @@ paths:
         "204":
           description: >-
             Deleted, and whatever the network permitted is no longer in force.
-            Also returned when the network permitted nothing — a disabled or
-            unpermitted one, or a catch-all with no ranges — since there was no
-            permission to withdraw.
+            Also returned when the deletion cannot have changed who is admitted
+            — the network permitted nothing (disabled, unpermitted, or a
+            catch-all with no ranges), or its ranges are still covered by
+            `dns.allowed_client_cidrs` or by another permitted network — since
+            there was no permission to withdraw.
         "200":
           description: >-
             Deleted, but the resolver's client access could not be reloaded, so
             the network's addresses may still be being served. Returned only
-            when the network actually permitted something; a failed reload that
-            cannot have changed admission answers 204 and is logged. The condition is
+            when the deletion actually withdrew admission that nothing else
+            grants; a failed reload that cannot have changed admission answers
+            204 and is logged. The condition is
             also reported by `GET /api/v1/diagnostics`, by `GET
             /api/v1/health` as `clientAclStale`, and by `dnsdaddy doctor`
             (which reads it from health, since the state lives in the running
@@ -1157,8 +1160,9 @@ components:
           type: string
           description: >-
             Present only on a write that was stored but could not be applied to
-            the running resolver — the change is persisted and is not yet in
-            force. Absent otherwise.
+            the running resolver. The text says which of the two cases it is:
+            the change is not yet in force, or it could not have changed who is
+            admitted and so no client is affected. Absent otherwise.
 
     NetworkWithActivity:
       allOf:

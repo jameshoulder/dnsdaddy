@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func mustCreateNetwork(t *testing.T, st *Store, in NetworkInput) Network {
@@ -416,4 +419,81 @@ func TestLegacyCIDRSpellingDoesNotLoseTheAcknowledgement(t *testing.T) {
 	if !renamed.AllowResolver || len(renamed.AcknowledgedPublicCIDRs) != 1 {
 		t.Errorf("state after an unrelated edit = %+v", renamed)
 	}
+}
+
+// Deleting a network has to report the row as it was deleted, not as it was
+// some moments earlier, because the caller decides from that report whether a
+// permission was revoked — and therefore whether a failed ACL reload has left
+// one in force.
+//
+// Reading before deleting left a window: a PATCH landing in between could
+// permit the network and publish that snapshot, and the delete would then
+// report "unpermitted", so the reload failure would be recorded as affecting
+// nobody and the response would be a 204 saying the revocation had taken.
+//
+// The invariant this pins is the one the window broke. If both writes succeed,
+// the update must have committed first — a transaction that read before the
+// update cannot then commit a delete over it — so the deleted row has to carry
+// the permission the update granted.
+func TestDeleteReportsTheNetworkAsItWasDeletedUnderAConcurrentPermit(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	var deletes, races int
+	for i := 0; i < 200; i++ {
+		created, err := st.CreateNetwork(ctx, NetworkInput{
+			Name:  ptr(fmt.Sprintf("Branch %d", i)),
+			CIDRs: ptr([]string{"192.168.7.0/24"}),
+		})
+		if err != nil {
+			t.Fatalf("CreateNetwork: %v", err)
+		}
+
+		var (
+			wg        sync.WaitGroup
+			updateErr error
+			deleted   Network
+			deleteErr error
+		)
+		wg.Add(2)
+		// Swept rather than simultaneous. Started together, the delete's
+		// transaction always opened first and the update always lost, so the
+		// interleaving this exists to pin was never reached — the test passed
+		// while proving nothing. The sweep walks the update across the
+		// delete's whole window, from well before it to inside it.
+		delay := time.Duration(i%20) * 50 * time.Microsecond
+		go func() {
+			defer wg.Done()
+			_, updateErr = st.UpdateNetwork(ctx, created.ID, NetworkInput{AllowResolver: ptr(true)})
+		}()
+		go func() {
+			defer wg.Done()
+			time.Sleep(delay)
+			deleted, deleteErr = st.DeleteNetwork(ctx, created.ID)
+		}()
+		wg.Wait()
+
+		if deleteErr == nil {
+			deletes++
+			if updateErr == nil {
+				races++
+				if !deleted.AllowResolver {
+					t.Fatalf("round %d: the update granted resolver access and committed, and "+
+						"the delete then succeeded, but reported the network as unpermitted — "+
+						"a failed reload here would leave the grant in force with nothing said",
+						i)
+				}
+			}
+		}
+
+		// Whichever way the round went, do not leave the row behind.
+		if deleteErr != nil {
+			_, _ = st.DeleteNetwork(ctx, created.ID)
+		}
+	}
+
+	if deletes == 0 {
+		t.Fatal("no round managed to delete anything, so the invariant was never exercised")
+	}
+	t.Logf("%d/200 rounds deleted, %d of those with a concurrently committed permit", deletes, races)
 }

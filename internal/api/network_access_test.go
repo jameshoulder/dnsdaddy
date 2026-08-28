@@ -718,3 +718,120 @@ func TestDeletingAnUnpermittedNetworkDoesNotMarkTheACLStale(t *testing.T) {
 	}
 	h.failACLReload.Store(false)
 }
+
+// The shipped bootstrap ACL permits every private range, so permitting a
+// network inside one grants nothing that was not already granted. A failed
+// reload there was raising the standing "a permission you revoked may still be
+// honoured" alarm — which nothing clears until an unrelated write succeeds —
+// over a change that could not have altered admission.
+func TestPermittingARangeTheBootstrapACLCoversDoesNotMarkTheACLStale(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Office",
+		"cidrs":         []string{"10.10.0.0/16"},
+		"allowResolver": true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	if h.acl.Stale() {
+		t.Error("permitting 10.10.0.0/16 marked the ACL stale, but the bootstrap ACL already " +
+			"permits 10.0.0.0/8; every address in it could resolve before and after")
+	}
+
+	warning, _ := decode[map[string]any](t, raw)["warning"].(string)
+	if strings.Contains(warning, "not yet in force") {
+		t.Errorf("the warning claims client access is not in force, which it is: %q", warning)
+	}
+	h.failACLReload.Store(false)
+}
+
+// And deleting it revokes nothing, so the response must not claim client
+// access may be out of date. 200 on this endpoint means exactly that, and
+// widening it to failures that affect nobody trains the one caller who checks
+// for it to stop checking.
+func TestDeletingANetworkTheBootstrapACLStillCoversAnswers204(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Office",
+		"cidrs":         []string{"10.10.0.0/16"},
+		"allowResolver": true,
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("DELETE", "/api/v1/networks/"+id, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status %d, want 204 — the bootstrap ACL still permits 10.0.0.0/8, so nothing "+
+			"was revoked; body %s", resp.StatusCode, raw)
+	}
+	if h.acl.Stale() {
+		t.Error("deleting a network whose range the bootstrap ACL still covers marked the ACL stale")
+	}
+	h.failACLReload.Store(false)
+}
+
+// The safe direction is preserved: a range the bootstrap ACL does not cover is
+// a real grant, and losing the reload on one is a real revocation that never
+// took effect.
+func TestDeletingTheOnlyGrantForARangeStillAnswers200(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Benchmark lab",
+		"cidrs":         []string{"198.18.0.0/15"},
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("DELETE", "/api/v1/networks/"+id, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200 with a warning — the permission is still in force and the "+
+			"row that would show it is gone; body %s", resp.StatusCode, raw)
+	}
+	if !h.acl.Stale() {
+		t.Error("a revocation whose reload failed was not recorded as stale")
+	}
+	warning, _ := decode[map[string]any](t, raw)["warning"].(string)
+	if warning == "" {
+		t.Error("the 200 carried no warning, which is the only reason it is a 200")
+	}
+	h.failACLReload.Store(false)
+}
+
+// A PATCH is judged on the row the store committed, not on which fields the
+// request happened to mention. Naming allowResolver while leaving it as it was
+// changes nothing, and must not raise the alarm.
+func TestAPatchThatChangesNothingAboutAdmissionDoesNotMarkTheACLStale(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Benchmark lab",
+		"cidrs":         []string{"198.18.0.0/15"},
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("PATCH", "/api/v1/networks/"+id, map[string]any{
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	if h.acl.Stale() {
+		t.Error("re-asserting a permission the network already had marked the ACL stale")
+	}
+	h.failACLReload.Store(false)
+}

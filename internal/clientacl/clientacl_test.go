@@ -836,3 +836,181 @@ func TestMetadataReloadFailureDoesNotMarkStale(t *testing.T) {
 			"force was still rebuilt from the current database")
 	}
 }
+
+// The question a network write actually needs answered is not "did this touch
+// a field that decides admission?" but "would the ACL admit anyone different?".
+// Asking the first produced two standing false alarms, and these pin the cases
+// that separate them.
+
+func admissionSet(t *testing.T, bootstrap []string, networks ...Network) *Set {
+	t.Helper()
+	return Compute(bootstrap, false, networks)
+}
+
+// The shipped bootstrap ACL already permits every private range, so permitting
+// a network inside one adds nothing. A failed reload around it was raising "a
+// permission you revoked may still be honoured" — which nothing clears until
+// an unrelated write succeeds — over a change that could not have altered
+// admission.
+func TestPermittingARangeTheBootstrapACLAlreadyCoversChangesNothing(t *testing.T) {
+	s := admissionSet(t, []string{"10.0.0.0/8"})
+
+	n := Network{ID: "n1", Name: "Office", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"10.10.0.0/16"}}
+	if s.AdmissionChangesFor(n) {
+		t.Error("permitting 10.10.0.0/16 under a bootstrap ACL of 10.0.0.0/8 was reported as " +
+			"changing admission; every address in it could already resolve")
+	}
+}
+
+func TestPermittingARangeNothingCoversChangesAdmission(t *testing.T) {
+	s := admissionSet(t, []string{"10.0.0.0/8"})
+
+	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	if !s.AdmissionChangesFor(n) {
+		t.Error("permitting a range outside the ACL was reported as changing nothing")
+	}
+}
+
+// A network permitted but not yet covering anything new, then removed: the
+// bootstrap list still covers it, so the deletion revokes nothing and DELETE
+// must not claim client access may be out of date.
+func TestRemovingANetworkTheBootstrapACLCoversChangesNothing(t *testing.T) {
+	n := Network{ID: "n1", Name: "Office", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"10.10.0.0/16"}}
+	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
+
+	if s.AdmissionChangesWithout("n1") {
+		t.Error("removing a network whose range the bootstrap ACL still covers was reported " +
+			"as changing admission; nothing was revoked")
+	}
+}
+
+// Two networks permitting the same range: removing one leaves the other, so
+// admission is unchanged.
+func TestRemovingOneOfTwoNetworksPermittingTheSameRangeChangesNothing(t *testing.T) {
+	a := Network{ID: "n1", Name: "Branch A", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	b := Network{ID: "n2", Name: "Branch B", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	s := admissionSet(t, []string{"10.0.0.0/8"}, a, b)
+
+	if s.AdmissionChangesWithout("n1") {
+		t.Error("removing one of two networks permitting the same range was reported as " +
+			"revoking it")
+	}
+}
+
+func TestRemovingTheOnlyGrantForARangeChangesAdmission(t *testing.T) {
+	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
+
+	if !s.AdmissionChangesWithout("n1") {
+		t.Error("removing the only grant for a range was reported as changing nothing — a " +
+			"revocation that never took effect would be reported as done")
+	}
+}
+
+// An unrestricted ACL refuses nobody, and Compute keeps it that way however
+// many networks are permitted. So no grant can change admission, and a stock
+// loopback-only deployment must never be told a permission may be missing.
+func TestNoGrantChangesAdmissionUnderAnUnrestrictedACL(t *testing.T) {
+	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	s := admissionSet(t, nil, n)
+
+	if !s.Unrestricted() {
+		t.Fatal("an empty bootstrap ACL did not produce an unrestricted set")
+	}
+	if s.AdmissionChangesFor(n) {
+		t.Error("a grant was reported as changing admission under an unrestricted ACL")
+	}
+	if s.AdmissionChangesWithout("n1") {
+		t.Error("a revocation was reported as changing admission under an unrestricted ACL")
+	}
+}
+
+// Renaming reaches the snapshot as a label and decides nothing.
+func TestRenamingANetworkChangesNoAdmission(t *testing.T) {
+	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
+
+	renamed := n
+	renamed.Name = "Frankfurt VPS"
+	if s.AdmissionChangesFor(renamed) {
+		t.Error("a rename was reported as changing admission")
+	}
+}
+
+// Narrowing and widening both change who resolves, in opposite directions, and
+// both must be caught: one leaves clients refused that were not, the other
+// admits clients that were not.
+func TestNarrowingAndWideningARangeBothChangeAdmission(t *testing.T) {
+	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
+
+	narrower := n
+	narrower.CIDRs = []string{"203.0.113.0/25"}
+	if !s.AdmissionChangesFor(narrower) {
+		t.Error("narrowing a permitted range was reported as changing nothing; half the " +
+			"network would start being refused")
+	}
+
+	wider := n
+	wider.CIDRs = []string{"203.0.112.0/23"}
+	if !s.AdmissionChangesFor(wider) {
+		t.Error("widening a permitted range was reported as changing nothing")
+	}
+}
+
+// Disabling is a revocation, and unpermitting is a revocation. Both reach the
+// same three conditions Compute applies.
+func TestDisablingOrUnpermittingIsARevocation(t *testing.T) {
+	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
+
+	disabled := n
+	disabled.Enabled = false
+	if !s.AdmissionChangesFor(disabled) {
+		t.Error("disabling a permitted network was reported as changing nothing")
+	}
+
+	unpermitted := n
+	unpermitted.AllowResolver = false
+	if !s.AdmissionChangesFor(unpermitted) {
+		t.Error("unpermitting a network was reported as changing nothing")
+	}
+}
+
+// A network that never granted anything, written again unchanged.
+func TestAnUnpermittedNetworkNeverChangesAdmission(t *testing.T) {
+	n := Network{ID: "n1", Name: "Guest", Enabled: true, CIDRs: []string{"203.0.113.0/24"}}
+	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
+
+	if s.AdmissionChangesFor(n) {
+		t.Error("storing an unpermitted network was reported as changing admission")
+	}
+	if s.AdmissionChangesWithout("n1") {
+		t.Error("deleting an unpermitted network was reported as changing admission")
+	}
+}
+
+// Coverage uses the same single-prefix containment rule as Cover, so two
+// permitted halves that between them cover a range are reported as not
+// covering it. That over-warns rather than under-warns, and the direction is
+// the point: an unnecessary warning costs a line of output, the other way
+// round costs a revocation nobody is told failed.
+func TestSplitCoverageErrsTowardsWarning(t *testing.T) {
+	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+	s := admissionSet(t, []string{"203.0.113.0/25", "203.0.113.128/25"}, n)
+
+	if !s.AdmissionChangesWithout("n1") {
+		t.Error("split coverage was treated as full; the safe direction here is to warn")
+	}
+}

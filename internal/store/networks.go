@@ -432,22 +432,84 @@ func sameStringSet(a, b map[string]bool) bool {
 
 // DeleteNetwork removes a network. The last remaining network cannot be
 // deleted, because the resolver needs somewhere to attribute unmatched clients.
-func (s *Store) DeleteNetwork(ctx context.Context, id string) error {
+func (s *Store) DeleteNetwork(ctx context.Context, id string) (Network, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Network{}, err
+	}
+	defer tx.Rollback()
+
 	var count int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM networks").Scan(&count); err != nil {
-		return err
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM networks").Scan(&count); err != nil {
+		return Network{}, err
 	}
 	if count <= 1 {
-		return fmt.Errorf("cannot delete the only network")
+		return Network{}, fmt.Errorf("cannot delete the only network")
 	}
-	res, err := s.db.ExecContext(ctx, "DELETE FROM networks WHERE id = ?", id)
+
+	// Read inside the transaction that removes it, so what is returned is what
+	// was deleted. Reading first and deleting after left a window: a PATCH
+	// landing between the two could permit the network and publish that
+	// snapshot, and the delete would then report the state it saw before —
+	// unpermitted — so a failed reload would leave the grant in force with
+	// nothing marked stale and a 204 saying the revocation had taken.
+	deleted, err := loadNetworkTx(ctx, tx, id)
 	if err != nil {
-		return err
+		return Network{}, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	if _, err := tx.ExecContext(ctx, "DELETE FROM networks WHERE id = ?", id); err != nil {
+		return Network{}, err
 	}
-	return nil
+	if err := tx.Commit(); err != nil {
+		return Network{}, err
+	}
+	return deleted, nil
+}
+
+// loadNetworkTx reads one network, with its ranges, inside a transaction.
+func loadNetworkTx(ctx context.Context, tx *sql.Tx, id string) (Network, error) {
+	var (
+		n                Network
+		enabled, allow   int
+		created, updated int64
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT id, name, location, policy_id, COALESCE(token, ''), enabled, allow_resolver, created_at, updated_at
+		FROM networks WHERE id = ?`, id).
+		Scan(&n.ID, &n.Name, &n.Location, &n.PolicyID, &n.Token, &enabled, &allow, &created, &updated)
+	if err == sql.ErrNoRows {
+		return Network{}, ErrNotFound
+	}
+	if err != nil {
+		return Network{}, err
+	}
+	n.Enabled = enabled == 1
+	n.AllowResolver = allow == 1
+	n.CreatedAt = fromUnixMilli(created)
+	n.UpdatedAt = fromUnixMilli(updated)
+	n.CIDRs = []string{}
+	n.AcknowledgedPublicCIDRs = []string{}
+
+	rows, err := tx.QueryContext(ctx,
+		"SELECT cidr, public_ack FROM network_cidrs WHERE network_id = ? ORDER BY cidr", id)
+	if err != nil {
+		return Network{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cidr string
+			ack  int
+		)
+		if err := rows.Scan(&cidr, &ack); err != nil {
+			return Network{}, err
+		}
+		n.CIDRs = append(n.CIDRs, cidr)
+		if ack == 1 {
+			n.AcknowledgedPublicCIDRs = append(n.AcknowledgedPublicCIDRs, cidr)
+		}
+	}
+	return n, rows.Err()
 }
 
 // RotateNetworkToken issues a fresh DoH/DoT token, invalidating the old one.
@@ -567,13 +629,20 @@ func (s *Store) SetClientName(ctx context.Context, ip, name string) error {
 func ClientACLNetworks(networks []Network) []clientacl.Network {
 	out := make([]clientacl.Network, 0, len(networks))
 	for _, n := range networks {
-		out = append(out, clientacl.Network{
-			ID:            n.ID,
-			Name:          n.Name,
-			Enabled:       n.Enabled,
-			AllowResolver: n.AllowResolver,
-			CIDRs:         n.CIDRs,
-		})
+		out = append(out, ClientACLNetwork(n))
 	}
 	return out
+}
+
+// ClientACLNetwork projects one network onto the fields admission is decided
+// from. Shared with the plural form so a caller asking "what would this one
+// network contribute?" cannot answer it from a different set of fields.
+func ClientACLNetwork(n Network) clientacl.Network {
+	return clientacl.Network{
+		ID:            n.ID,
+		Name:          n.Name,
+		Enabled:       n.Enabled,
+		AllowResolver: n.AllowResolver,
+		CIDRs:         n.CIDRs,
+	}
 }
