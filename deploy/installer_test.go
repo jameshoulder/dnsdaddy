@@ -1066,3 +1066,43 @@ func TestDryRunChangesNothingOnDisk(t *testing.T) {
 		}
 	}
 }
+
+// env_set is the other half of env_disable's problem. A fresh --lan install
+// over a readable but unwritable .env cannot delete the old line or append the
+// new one, and reported the address it had been asked for regardless — while
+// compose would read the old, public one. An exit status only says the command
+// ran, so the value is read back.
+func TestFreshInstallAbortsWhenItCannotWriteTheBind(t *testing.T) {
+	in := newInstall(t)
+	in.writeEnv("DNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
+	in.denyWrite(in.root)
+
+	out, code, ok := in.runAsNonRoot("--lan", "--yes")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("install succeeded without writing the bind it announced\n%s", out)
+	}
+	contains(t, out, "Could not write DNSDADDY_DASHBOARD_BIND")
+	notContains(t, in.composeLog(), "up -d")
+}
+
+// A dry run that finds a public bind this installer wrote must say it would
+// close it. Staying silent shows the operator an unsafe address and no plan to
+// deal with it, which reads as "this run intends to leave it published" — and
+// it is the one security-relevant edit of the upgrade, so it is the one most
+// worth reviewing before it happens.
+func TestDryRunUpgradeSaysItWouldCloseAPublicBind(t *testing.T) {
+	in := newInstall(t)
+	in.writeEnv("# managed by install-docker.sh\nDNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
+
+	out, code := in.run("--upgrade", "--yes", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "public address")
+	contains(t, out, "comment out DNSDADDY_DASHBOARD_BIND=203.0.113.20")
+	// And it is still a dry run: the line is untouched.
+	contains(t, in.readEnv(), "\nDNSDADDY_DASHBOARD_BIND=203.0.113.20")
+}

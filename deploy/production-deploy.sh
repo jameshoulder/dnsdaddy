@@ -150,8 +150,12 @@ step "4. Derive the client ACL from configured networks"
 CFG_CIDRS=""
 CFG_LEGACY=0
 if command -v sqlite3 >/dev/null; then
-  SQL_ERR="$(mktemp)"
-  trap 'rm -f "$SQL_ERR"' EXIT
+  PERMITTED_Q="SELECT DISTINCT c.cidr FROM network_cidrs c
+       JOIN networks n ON n.id = c.network_id
+      WHERE n.enabled = 1 AND n.allow_resolver = 1 AND c.cidr <> '';"
+  ALL_Q="SELECT DISTINCT c.cidr FROM network_cidrs c
+       JOIN networks n ON n.id = c.network_id
+      WHERE n.enabled = 1 AND c.cidr <> '';"
 
   # The read is authoritative, and only one failure means "old database": the
   # allow_resolver column is not there. Everything else — SQLITE_BUSY, a
@@ -162,26 +166,28 @@ if command -v sqlite3 >/dev/null; then
   # every enabled range into the bootstrap list, where the dashboard can no
   # longer withdraw it. So anything unrecognised stops the deployment and
   # quotes what SQLite actually said.
-  if CFG_CIDRS=$(sqlite3 -readonly "$DB" \
-      "SELECT DISTINCT c.cidr FROM network_cidrs c
-         JOIN networks n ON n.id = c.network_id
-        WHERE n.enabled = 1 AND n.allow_resolver = 1 AND c.cidr <> '';" 2>"$SQL_ERR"); then
-    CFG_CIDRS=$(printf '%s' "$CFG_CIDRS" | tr '\n' ',' | sed 's/,$//')
-  elif grep -qi 'no such column' "$SQL_ERR" && grep -qi 'allow_resolver' "$SQL_ERR"; then
-    warn "this database predates per-network resolver access; using every enabled network"
-    # These ranges have to go into the bootstrap list, unlike the managed ones.
-    # The upgrade migrates every legacy network with allow_resolver = 0, so the
-    # database will grant none of them back — dropping them here would answer
-    # REFUSED to every client this deployment was already serving.
-    CFG_LEGACY=1
-    CFG_CIDRS=$(sqlite3 -readonly "$DB" \
-      "SELECT DISTINCT c.cidr FROM network_cidrs c
-         JOIN networks n ON n.id = c.network_id
-        WHERE n.enabled = 1 AND c.cidr <> '';" 2>"$SQL_ERR") ||
-      die "could not read the networks from $DB: $(tr '\n' ' ' <"$SQL_ERR")"
+  #
+  # The message is fetched by asking again rather than by capturing stderr to a
+  # temporary file. A temp file would be a real write, and a dry run here
+  # promises not to make any; the cost is one extra query on a path that has
+  # already failed.
+  if CFG_CIDRS=$(sqlite3 -readonly "$DB" "$PERMITTED_Q" 2>/dev/null); then
     CFG_CIDRS=$(printf '%s' "$CFG_CIDRS" | tr '\n' ',' | sed 's/,$//')
   else
-    die "could not read the client networks from $DB: $(tr '\n' ' ' <"$SQL_ERR")"
+    SQL_ERR=$(sqlite3 -readonly "$DB" "$PERMITTED_Q" 2>&1 >/dev/null || true)
+    if [[ "$SQL_ERR" == *"no such column"* && "$SQL_ERR" == *allow_resolver* ]]; then
+      warn "this database predates per-network resolver access; using every enabled network"
+      # These ranges have to go into the bootstrap list, unlike the managed
+      # ones. The upgrade migrates every legacy network with allow_resolver = 0,
+      # so the database will grant none of them back — dropping them here would
+      # answer REFUSED to every client this deployment was already serving.
+      CFG_LEGACY=1
+      CFG_CIDRS=$(sqlite3 -readonly "$DB" "$ALL_Q" 2>/dev/null) ||
+        die "could not read the networks from $DB: $(sqlite3 -readonly "$DB" "$ALL_Q" 2>&1 >/dev/null | tr '\n' ' ' || true)"
+      CFG_CIDRS=$(printf '%s' "$CFG_CIDRS" | tr '\n' ',' | sed 's/,$//')
+    else
+      die "could not read the client networks from $DB: $(printf '%s' "${SQL_ERR:-sqlite3 exited non-zero without a message}" | tr '\n' ' ')"
+    fi
   fi
 fi
 

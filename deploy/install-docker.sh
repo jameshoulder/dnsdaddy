@@ -185,12 +185,25 @@ env_is_managed() { # key
 # It does overwrite a line the operator set by hand — correctly, because
 # env_set is only reached when they have just chosen this value at the prompt
 # or with --lan. The upgrade path never calls it, and preserves hand-set lines.
+# Neither step is allowed to fail quietly. If the delete or the append does not
+# land — a readable but unwritable .env is the ordinary way — the caller goes on
+# to announce the value it asked for while compose reads the old one. For the
+# dashboard bind that means reporting a private address over a public one that
+# is still live, which is the same false all-clear env_disable used to give.
+# Confirmed by reading the value back, because an exit status only says the
+# command ran, not that the file now says what it should.
 env_set() { # key value
   local key="$1" val="$2"
   if [[ -f "$ENV_FILE" ]] && grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
-    sed -i -E "/^${key}=/d" "$ENV_FILE"
+    sed -i -E "/^${key}=/d" "$ENV_FILE" || env_set_failed "$key"
   fi
-  printf '\n%s\n%s=%s\n' "$ENV_MARKER" "$key" "$val" >> "$ENV_FILE"
+  printf '\n%s\n%s=%s\n' "$ENV_MARKER" "$key" "$val" >> "$ENV_FILE" || env_set_failed "$key"
+  [[ "$(env_value "$key")" == "$val" ]] || env_set_failed "$key"
+}
+
+env_set_failed() { # key
+  die "Could not write ${1} to $ENV_FILE." \
+    "Continuing would report a setting the file does not carry, and compose would start from the old value. Fix that file's permissions, then run this again."
 }
 
 # env_disable comments a key out, three-way on purpose: 0 disabled it, 1 there
@@ -761,6 +774,13 @@ do_upgrade() {
               "DNSDADDY_DASHBOARD_BIND=${bind} is still active, so continuing would republish it. Fix that file's permissions, or comment the line out by hand, then run the upgrade again."
             ;;
         esac
+      else
+        # A dry run that stays silent here shows the operator an unsafe bind
+        # and no plan to deal with it, which reads as "this run intends to
+        # leave it published". It is the security-relevant edit of the whole
+        # upgrade and the one most worth reviewing before it happens.
+        printf '\n  Would change in .env:\n'
+        printf '    comment out DNSDADDY_DASHBOARD_BIND=%s (dashboard returns to loopback)\n' "$bind"
       fi
     fi
   else

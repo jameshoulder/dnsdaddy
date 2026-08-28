@@ -57,6 +57,12 @@ func newProdDeploy(t *testing.T) *prodDeploy {
 	must(t, os.MkdirAll(vol, 0o755))
 	must(t, os.WriteFile(filepath.Join(vol, "dnsdaddy.db"), make([]byte, 100_000), 0o644))
 
+	// TMPDIR points inside the fixture so that a temp file counts as a write.
+	// It did not, and a mktemp added two commits ago sat in a dry run for two
+	// review rounds with a test watching the wrong tree: the promise is that
+	// the run creates nothing, not that it creates nothing *here*.
+	must(t, os.MkdirAll(filepath.Join(root, "tmp"), 0o777))
+
 	p := &prodDeploy{t: t, root: root, vol: vol, bin: filepath.Join(root, "stubbin")}
 	must(t, os.MkdirAll(p.bin, 0o755))
 	p.writeStubs()
@@ -201,6 +207,7 @@ func (p *prodDeploy) exec(prefix []string, args ...string) (string, int) {
 		"REPO=" + repo,
 		"BACKUP_DIR=" + p.root,
 		"STUB_VOL=" + p.vol,
+		"TMPDIR=" + filepath.Join(p.root, "tmp"),
 	}, p.env...)
 	out, err := cmd.CombinedOutput()
 	code := 0
