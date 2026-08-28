@@ -154,9 +154,17 @@ level of confirmation: `dns.allow_public_resolver` is the setting for that, it
 lives in configuration, and changing it is a deliberate act with a restart
 attached.
 
+**It is about source addresses, not about credentials.** A DNS-over-HTTPS or
+DNS-over-TLS client presenting a network's token is identified by that token
+rather than by where it connects from — which is the entire point of a roaming
+profile, and why the token in the URL is a credential. Such a client keeps
+resolving whether or not the network's addresses are permitted. To cut one off,
+disable the network or rotate its token.
+
 **Upgrading from an earlier version?** Nothing changes. Every network that
 predates this feature starts unpermitted, so your bootstrap ACL alone keeps
-admitting exactly who it admitted before.
+admitting exactly who it admitted before. DoH and DoT tokens are unaffected for
+the same reason: they never depended on the client ACL.
 
 ## 5. Put TLS in front of the dashboard
 

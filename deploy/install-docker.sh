@@ -42,6 +42,10 @@ DEPLOYMENT=""
 # so every path — install, upgrade — has a defined value before the closing
 # report reads it.
 DASHBOARD_BIND=""
+# 1 = LAN, 2 = loopback. Defined here because the upgrade path never asks, and
+# the closing report reads it. Loopback is the safe assumption when nobody has
+# said otherwise.
+CHOICE=2
 
 for arg in "$@"; do
   case "$arg" in
@@ -128,17 +132,21 @@ env_is_managed() { # key
   grep -B1 -E "^${1}=" "$ENV_FILE" 2>/dev/null | grep -qF "$ENV_MARKER"
 }
 
+# env_set writes a key this installer owns, replacing any existing active line.
+#
+# Delete-then-append rather than edit-in-place, so the marker and the value are
+# always adjacent and an upgrade can tell them apart. It also avoids inserting a
+# newline through sed, which is not portable across GNU, BSD and BusyBox.
+#
+# It does overwrite a line the operator set by hand — correctly, because
+# env_set is only reached when they have just chosen this value at the prompt
+# or with --lan. The upgrade path never calls it, and preserves hand-set lines.
 env_set() { # key value
   local key="$1" val="$2"
-  if grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
-    sed -i -E "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
-    # Make sure the marker is there, so a later upgrade knows this line is
-    # ours even if a previous version wrote it without one.
-    grep -B1 -E "^${key}=" "$ENV_FILE" | grep -qF "$ENV_MARKER" || \
-      sed -i -E "s|^${key}=|${ENV_MARKER}\n${key}=|" "$ENV_FILE"
-  else
-    printf '\n%s\n%s=%s\n' "$ENV_MARKER" "$key" "$val" >> "$ENV_FILE"
+  if [[ -f "$ENV_FILE" ]] && grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    sed -i -E "/^${key}=/d" "$ENV_FILE"
   fi
+  printf '\n%s\n%s=%s\n' "$ENV_MARKER" "$key" "$val" >> "$ENV_FILE"
 }
 
 # env_disable comments a key out. Returns 1 when there was nothing to do, so
@@ -426,7 +434,6 @@ EOF
   # default has to be the safe one: an unattended install must never end up
   # publishing a management API. --lan is the explicit way to ask for the
   # other answer, and being explicit is the whole point of it.
-  CHOICE=2
   case "$DEPLOYMENT" in
     lan) CHOICE=1; printf '  (--lan given)\n' ;;
     vps) CHOICE=2; printf '  (--vps given)\n' ;;
@@ -543,14 +550,6 @@ admin_password() {
     | grep -oP 'password: \K\S+' || true
 }
 
-# permitted_networks reports how many networks may currently query the
-# resolver, so the closing advice can be a test that works rather than one that
-# is guaranteed to fail.
-permitted_networks() {
-  "${COMPOSE[@]}" exec -T dnsdaddy wget -qO- http://127.0.0.1:8080/metrics 2>/dev/null \
-    | grep -oP '^dnsdaddy_networks_resolver_permitted \K[0-9]+' | tail -1 || true
-}
-
 run_doctor() {
   head_ "Readiness"
   "${COMPOSE[@]}" exec -T dnsdaddy dnsdaddy doctor
@@ -644,6 +643,7 @@ do_upgrade() {
     if is_private_addr "$bind"; then
       pass "Dashboard stays published on ${bind}:8080, as this installer configured"
       DASHBOARD_BIND="$bind"
+      CHOICE=1
     else
       # An earlier version of this installer inferred "private NIC means
       # private host" and could write a public address here. That inference
@@ -662,6 +662,7 @@ do_upgrade() {
     if is_private_addr "$bind"; then
       pass "Dashboard published on ${bind}:8080 (set in your .env; left as-is)"
       DASHBOARD_BIND="$bind"
+      CHOICE=1
     else
       warn "Dashboard is published on ${bind}:8080, which is a public address"
       note "This line is yours, not this installer's, so it has been left alone."
@@ -726,9 +727,8 @@ ssh_client_address() {
 }
 
 print_next_steps() {
-  local password permitted client dashboard
+  local password client dashboard
   password="$(admin_password)"
-  permitted="$(permitted_networks)"
   client="$(ssh_client_address)"
 
   dashboard="http://127.0.0.1:8080  (over an SSH tunnel)"
@@ -774,23 +774,36 @@ print_next_steps() {
     printf '    If you have lost it, see docs/deploy.md for how to reset it.\n'
   fi
 
+  # What to say next follows from the deployment, and is not guessed at.
+  #
+  # The shipped client ACL serves loopback and every private range, so on a LAN
+  # a test from another machine works right now. On a VPS it does not: clients
+  # arrive from public addresses, which that ACL does not cover, and printing a
+  # `nslookup` there would hand the operator a command guaranteed to answer
+  # REFUSED and no idea why. `dnsdaddy doctor` above has already reported which
+  # ranges are actually permitted; this section does not restate it as a
+  # measurement it has not made.
   printf '\n  %sNext%s\n' "$BOLD" "$OFF"
-  if [[ "${permitted:-0}" =~ ^[0-9]+$ ]] && [[ "${permitted:-0}" -gt 0 ]]; then
-    printf '    Test it from an allowed client:\n'
+  if [[ "$CHOICE" == "1" ]]; then
+    printf '    Your LAN is already permitted to use the resolver. Test it from\n'
+    printf '    another machine on the same network:\n'
     printf '      nslookup example.com %s\n' "${HOST_IP:-<this-server>}"
     printf '      dig @%s example.com\n' "${HOST_IP:-<this-server>}"
   else
-    printf '    No networks are permitted to use the resolver yet, so a test from\n'
-    printf '    another machine would be answered REFUSED.\n\n'
+    printf '    No external clients are permitted yet. The built-in list covers\n'
+    printf '    loopback and the private ranges only, so a test from another\n'
+    printf '    machine would be answered REFUSED — that is DNS Daddy working,\n'
+    printf '    not failing.\n\n'
     printf '    Open the dashboard, go to Networks, and add the client or network\n'
     printf '    that should use DNS Daddy. Tick:\n\n'
     printf '      [x] Allow this network to use DNS Daddy\n\n'
     printf '    It takes effect immediately — nothing to restart, no file to edit.\n'
     if [[ -n "$client" ]]; then
-      printf '\n    You are connected from %s%s%s. If that is the network that should\n' "$BOLD" "$client" "$OFF"
-      printf '    use DNS Daddy, that is the address to add.\n'
+      printf '\n    You are connected from %s%s%s. That is where this SSH session\n' "$BOLD" "$client" "$OFF"
+      printf '    came from, as this machine sees it — if that is the network that\n'
+      printf '    should use DNS Daddy, that is the address to add.\n'
     fi
-    printf '\n    Then test:\n'
+    printf '\n    Then test from it:\n'
     printf '      nslookup example.com %s\n' "${HOST_IP:-<this-server>}"
   fi
 

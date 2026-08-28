@@ -1064,6 +1064,9 @@ components:
             those queries once they are accepted. False, the default, grants
             nothing: the client ACL from configuration still applies on its
             own. Changing this takes effect on the next query, with no restart.
+            It governs source addresses only — a DoH or DoT client presenting
+            this network's token is identified by the token and resolves either
+            way. Disable the network, or rotate its token, to cut one off.
         cidrs:
           type: array
           items: { type: string }

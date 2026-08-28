@@ -183,6 +183,16 @@ func openExistingStore(ctx context.Context, cfg config.Config) (*store.Store, di
 		c.Status = diag.StatusFail
 		c.Summary = "The database opened but could not be read."
 		c.Evidence = []string{"path: " + path, "error: " + err.Error()}
+		// The likely cause of "no such column" is a half-finished upgrade:
+		// this binary is newer than the one that last opened the database, and
+		// nothing has applied the migration yet because doctor deliberately
+		// does not write. Saying so is more use than the raw SQLite error.
+		if strings.Contains(err.Error(), "no such column") {
+			c.Action = "This database was last written by an older DNS Daddy than this binary, and " +
+				"doctor will not migrate it — it changes nothing by design. Start the resolver " +
+				"once (`docker compose up -d`, or `systemctl start dnsdaddy`), which applies the " +
+				"migration, then run this again."
+		}
 		return st, c
 	}
 

@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -306,4 +307,78 @@ func TestDiagnosticsWarnAboutPermittedPublicRanges(t *testing.T) {
 		}
 	}
 	t.Errorf("no warning names the permitted public range: %s", raw)
+}
+
+// Adversarial scenario B: a public VPS permits exactly one client address.
+//
+// The claim being tested is narrow and is the only one DNS Daddy can make:
+// from the resolver's ACL perspective, that source is eligible and its
+// neighbours are not. Whether packets from it actually arrive depends on a
+// provider firewall this process cannot see, and nothing here asserts anything
+// about that.
+func TestPublicHostPermissionAdmitsOnlyThatHost(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Branch office",
+		"cidrs":         []string{"203.0.113.25/32"},
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+
+	if !permits(t, h, "203.0.113.25") {
+		t.Error("the permitted host is not admitted")
+	}
+	for _, neighbour := range []string{"203.0.113.24", "203.0.113.26", "203.0.113.1", "198.51.100.10"} {
+		if permits(t, h, neighbour) {
+			t.Errorf("%s was admitted by a /32 permission for 203.0.113.25", neighbour)
+		}
+	}
+}
+
+// Adversarial scenario C: the network exists, the box is unticked, and the
+// operator wants to know why their clients get REFUSED. Diagnostics must name
+// the network, name the remedy, and not offer a restart as the first answer.
+func TestDiagnosticsExplainAnUnpermittedNetwork(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	if _, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Branch office",
+		"cidrs": []string{"203.0.113.0/24"},
+	}); raw == nil {
+		t.Fatal("no response body")
+	}
+
+	_, raw := h.do("GET", "/api/v1/diagnostics", nil)
+	body := decode[struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Section string `json:"section"`
+			Status  string `json:"status"`
+			Summary string `json:"summary"`
+			Action  string `json:"action"`
+		} `json:"checks"`
+	}](t, raw)
+
+	for _, c := range body.Checks {
+		if c.Section != "CLIENT ACCESS" || c.Status != "fail" {
+			continue
+		}
+		if !strings.Contains(c.Summary, "Branch office") {
+			continue
+		}
+		if !strings.Contains(c.Action, "Allow this network to use DNS Daddy") {
+			t.Errorf("the remedy does not name the control that fixes it: %q", c.Action)
+		}
+		if !strings.Contains(c.Action, "no restart") {
+			t.Errorf("the remedy does not say it takes effect immediately: %q", c.Action)
+		}
+		return
+	}
+	t.Errorf("no client-access failure names the unpermitted network: %s", raw)
 }

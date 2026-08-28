@@ -493,3 +493,41 @@ func TestSourceBootstrapNamesSomethingAnOperatorCanFind(t *testing.T) {
 		t.Errorf("SourceBootstrap = %q, which does not name the setting to go and edit", SourceBootstrap)
 	}
 }
+
+// A nil Set is what a caller holding an unconfigured controller gets. Every
+// accessor has to tolerate it: a dashboard handler or a diagnostic panicking
+// on the way to explaining a misconfiguration is the worst possible moment for
+// it. Nil reads as "nothing configured", which is what Allows already did.
+func TestNilSetIsSafeToRead(t *testing.T) {
+	var s *Set
+	if !s.Allows(netip.MustParseAddr("203.0.113.1")) {
+		t.Error("a nil Set refused an address; it should restrict nothing")
+	}
+	if s.Unrestricted() {
+		t.Error("a nil Set reported itself as an unrestricted ACL")
+	}
+	if s.AllowPublicResolver() {
+		t.Error("a nil Set reported a deliberate public resolver")
+	}
+	// None of these may panic.
+	_ = s.Bootstrap()
+	_ = s.Grants()
+	_ = s.Shadowed()
+	_ = s.Invalid()
+	_ = s.Effective()
+	_ = s.PublicGrants()
+}
+
+// The same for a nil controller, which is what a Deps built without one holds.
+func TestNilControllerIsSafeToRead(t *testing.T) {
+	var c *Controller
+	if !c.Allows(netip.MustParseAddr("203.0.113.1")) {
+		t.Error("a nil Controller refused an address")
+	}
+	if c.Current() != nil {
+		t.Error("a nil Controller returned a non-nil snapshot")
+	}
+	if err := c.Reload(context.Background()); err != nil {
+		t.Errorf("Reload on a nil Controller: %v", err)
+	}
+}

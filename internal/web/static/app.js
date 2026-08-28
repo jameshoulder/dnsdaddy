@@ -1473,9 +1473,15 @@ function accessExplainer() {
         queries — what it blocks, what it logs.
       </p>
       <p class="small">
-        <strong>Access</strong> decides whether DNS Daddy accepts queries from
-        this network at all. Without it, clients here are answered
-        <code>REFUSED</code>.
+        <strong>Access</strong> decides whether DNS Daddy accepts queries
+        arriving <em>from this network's addresses</em> at all. Without it,
+        clients there are answered <code>REFUSED</code>.
+      </p>
+      <p class="small muted">
+        DNS-over-HTTPS and DNS-over-TLS clients holding this network's token are
+        identified by that token rather than by where they connect from, so they
+        keep working either way — that is what makes a roaming profile roam. To
+        cut one off, disable the network or rotate its token.
       </p>
     </div>`;
 }

@@ -90,10 +90,8 @@ if [[ "$1" == "compose" ]]; then
       case "${1:-}" in
         wget)
           [[ "${STUB_HEALTHY:-1}" == "1" ]] || exit 1
-          case "$*" in
-            *metrics*) printf 'dnsdaddy_networks_resolver_permitted %s\n' "${STUB_PERMITTED:-0}" ;;
-            *)         printf '{"status":"ok"}\n' ;;
-          esac
+          printf '{"status":"ok"}\n'
+          
           ;;
         cat)
           [[ -n "${STUB_ADMIN_PASSWORD:-}" ]] || exit 1
@@ -525,30 +523,64 @@ func TestNoPasswordIsInventedWhenNoneWasGenerated(t *testing.T) {
 
 // A test command that is guaranteed to be answered REFUSED is worse than no
 // test command: it sends the operator to debug a network fault that does not
-// exist.
-func TestNoPermittedNetworksGivesTheDashboardStepNotAFailingTest(t *testing.T) {
+// exist. On a VPS the shipped ACL covers loopback and the private ranges only,
+// so that is exactly what `nslookup` from a public client would get.
+func TestVPSInstallGivesTheDashboardStepNotAFailingTest(t *testing.T) {
 	in := newInstall(t)
-	in.setenv("STUB_PERMITTED=0", "STUB_ADMIN_PASSWORD=test-password-1234")
+	in.setenv("STUB_ADMIN_PASSWORD=test-password-1234")
 
-	out, code := in.run("--yes")
+	out, code := in.run("--vps", "--yes")
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	contains(t, out, "No networks are permitted")
+	contains(t, out, "No external clients are permitted yet")
 	contains(t, out, "Allow this network to use DNS Daddy")
 	contains(t, out, "nothing to restart")
+	// And it must not present the refusal as a fault.
+	contains(t, out, "that is DNS Daddy working")
 }
 
-func TestPermittedNetworksGivesTheExactTestCommand(t *testing.T) {
+// On a LAN the shipped ACL already covers the client, so the test works and
+// the operator should be given it.
+func TestLANInstallGivesTheExactTestCommand(t *testing.T) {
 	in := newInstall(t)
-	in.setenv("STUB_PERMITTED=2", "STUB_ADMIN_PASSWORD=test-password-1234")
+	in.setenv("STUB_ADMIN_PASSWORD=test-password-1234")
 
-	out, code := in.run("--yes")
+	out, code := in.run("--lan", "--yes")
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
 	contains(t, out, "nslookup example.com 192.168.1.75")
 	contains(t, out, "dig @192.168.1.75 example.com")
+	notContains(t, out, "No external clients are permitted yet")
+}
+
+// Over SSH the kernel knows where the operator connected from, which is the
+// one address on this machine that honestly answers "which public address
+// should I allow?" — a NATed cloud NIC does not know its own.
+func TestSSHClientAddressIsOfferedOnAVPSInstall(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_ADMIN_PASSWORD=test-password-1234", "SSH_CLIENT=203.0.113.77 51234 22")
+
+	out, code := in.run("--vps", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "203.0.113.77")
+	contains(t, out, "as this machine sees it")
+}
+
+// It must not be printed when there is no reliable source for it — guessing
+// from a local interface address is the inference that caused a real problem.
+func TestNoClientAddressIsInventedWithoutSSH(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_ADMIN_PASSWORD=test-password-1234")
+
+	out, code := in.run("--vps", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	notContains(t, out, "That is where this SSH session")
 }
 
 func TestSummaryIsPrintedAtTheEnd(t *testing.T) {

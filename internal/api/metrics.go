@@ -158,31 +158,36 @@ func metric(b *strings.Builder, name, help, typ string, lines ...string) {
 // permitted at all, and has public exposure changed — and the dashboard and
 // /api/v1/diagnostics answer the rest, authenticated.
 func (a *API) writeAccessMetrics(ctx context.Context, b *strings.Builder) {
+	// Everything derivable from the live snapshot is written first and
+	// unconditionally. A database hiccup must not put a gap in a series an
+	// operator is alerting on — "the number of publicly permitted ranges
+	// stopped being reported" and "it went to zero" look the same on a graph
+	// and mean opposite things.
 	acl := a.ClientACL.Current()
 
-	networks, err := a.Store.ListNetworks(ctx)
-	if err != nil {
-		// Metrics are best-effort; a scrape must not fail because the database
-		// was momentarily busy. The counters above are already written.
-		return
-	}
-	permitted := 0
-	for _, n := range networks {
-		if n.Enabled && n.AllowResolver {
-			permitted++
-		}
+	permitted := map[string]bool{}
+	for _, g := range acl.Grants() {
+		permitted[g.NetworkID] = true
 	}
 
-	metric(b, "dnsdaddy_networks_total", "Networks configured in the dashboard", "gauge",
-		fmt.Sprintf("dnsdaddy_networks_total %d", len(networks)))
 	metric(b, "dnsdaddy_networks_resolver_permitted", "Networks permitted to query the resolver", "gauge",
-		fmt.Sprintf("dnsdaddy_networks_resolver_permitted %d", permitted))
+		fmt.Sprintf("dnsdaddy_networks_resolver_permitted %d", len(permitted)))
 	metric(b, "dnsdaddy_client_acl_prefixes", "Address ranges in the effective client ACL, from configuration and the dashboard combined", "gauge",
 		fmt.Sprintf("dnsdaddy_client_acl_prefixes %d", len(acl.Effective())))
 	metric(b, "dnsdaddy_client_acl_public_prefixes", "Permitted address ranges that are reachable from the public internet", "gauge",
 		fmt.Sprintf("dnsdaddy_client_acl_public_prefixes %d", len(acl.PublicGrants())))
 	metric(b, "dnsdaddy_client_acl_unrestricted", "1 when no client ACL is configured and every source address is accepted", "gauge",
 		fmt.Sprintf("dnsdaddy_client_acl_unrestricted %d", boolGauge(acl.Unrestricted())))
+
+	// The total needs the database, and is the one value worth omitting rather
+	// than guessing at.
+	networks, err := a.Store.ListNetworks(ctx)
+	if err != nil {
+		a.Log.Debug("count networks for metrics", "error", err)
+		return
+	}
+	metric(b, "dnsdaddy_networks_total", "Networks configured in the dashboard", "gauge",
+		fmt.Sprintf("dnsdaddy_networks_total %d", len(networks)))
 }
 
 func boolGauge(b bool) int {

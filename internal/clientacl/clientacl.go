@@ -311,22 +311,50 @@ func (s *Set) Unrestricted() bool { return s != nil && s.unrestricted }
 // public resolver.
 func (s *Set) AllowPublicResolver() bool { return s != nil && s.allowPublic }
 
+// Every accessor tolerates a nil receiver. A nil Set is what a caller holding
+// an unconfigured controller gets, and a diagnostic or a dashboard handler
+// panicking on the way to explaining a misconfiguration would be a poor joke.
+// Nil reads as "nothing configured", which is also what Allows does.
+
 // Bootstrap returns the configured CIDRs as the operator wrote them.
-func (s *Set) Bootstrap() []string { return append([]string(nil), s.bootstrapRaw...) }
+func (s *Set) Bootstrap() []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string(nil), s.bootstrapRaw...)
+}
 
 // Grants returns the dashboard-managed permissions.
-func (s *Set) Grants() []Grant { return append([]Grant(nil), s.grants...) }
+func (s *Set) Grants() []Grant {
+	if s == nil {
+		return nil
+	}
+	return append([]Grant(nil), s.grants...)
+}
 
 // Shadowed returns networks reachable without their own permission.
-func (s *Set) Shadowed() []Shadow { return append([]Shadow(nil), s.shadowed...) }
+func (s *Set) Shadowed() []Shadow {
+	if s == nil {
+		return nil
+	}
+	return append([]Shadow(nil), s.shadowed...)
+}
 
 // Invalid returns entries that did not parse.
-func (s *Set) Invalid() []string { return append([]string(nil), s.invalid...) }
+func (s *Set) Invalid() []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string(nil), s.invalid...)
+}
 
-// Effective returns the union that Allows scans, as strings, sorted for stable
-// output. Empty when the set is unrestricted, which is not the same thing as
-// permitting nothing — check Unrestricted first.
+// Effective returns the union that Allows scans, as strings. Empty when the
+// set is unrestricted, which is not the same thing as permitting nothing —
+// check Unrestricted first.
 func (s *Set) Effective() []string {
+	if s == nil {
+		return nil
+	}
 	out := make([]string, 0, len(s.all))
 	for _, p := range s.all {
 		out = append(out, p.String())
@@ -337,6 +365,9 @@ func (s *Set) Effective() []string {
 // PublicGrants returns the permitted ranges that are publicly routable. These
 // are the ones whose exposure depends on a firewall DNS Daddy cannot see.
 func (s *Set) PublicGrants() []Grant {
+	if s == nil {
+		return nil
+	}
 	var out []Grant
 	for _, g := range s.grants {
 		if g.Public {
