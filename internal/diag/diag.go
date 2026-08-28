@@ -107,9 +107,14 @@ func ClientAccess(in ClientAccessInput) []Check {
 		})
 	}
 
+	shadowed := make(map[string]bool, len(acl.Shadowed()))
+	for _, sh := range acl.Shadowed() {
+		shadowed[sh.NetworkID] = true
+	}
+
 	checks = append(checks, aclSummary(acl))
 	checks = append(checks, publicAccessWarnings(acl)...)
-	checks = append(checks, networkReachability(in, acl)...)
+	checks = append(checks, networkReachability(in, acl, shadowed)...)
 	checks = append(checks, shadowNotes(acl)...)
 
 	if in.RefusedQueries != nil && *in.RefusedQueries > 0 {
@@ -243,7 +248,7 @@ func grantCIDRs(grants []clientacl.Grant) []string {
 //
 // Whether an unrestricted ACL is *wise* is a separate question, and aclSummary
 // answers it.
-func networkReachability(in ClientAccessInput, acl *clientacl.Set) []Check {
+func networkReachability(in ClientAccessInput, acl *clientacl.Set, shadowed map[string]bool) []Check {
 	if len(in.Networks) == 0 || acl.Unrestricted() {
 		return nil
 	}
@@ -306,6 +311,11 @@ func networkReachability(in ClientAccessInput, acl *clientacl.Set) []Check {
 					"range is permitted, or narrow the network to the part that already is, so the " +
 					"two agree.",
 			})
+		case shadowed[n.ID]:
+			// Reachable, but not by its own permission. shadowNotes says so
+			// precisely; a bare "is permitted to send queries" beside that
+			// would contradict it in the reader's eye.
+
 		default:
 			checks = append(checks, Check{
 				Section:  sectionClientAccess,

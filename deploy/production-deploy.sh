@@ -119,12 +119,31 @@ step "4. Derive the client ACL from configured networks"
 # The administrator's intended client ranges live in network_cidrs. Query-log
 # source addresses are NOT used: the resolver is currently open, so that log is
 # full of scanners and copying it would whitelist the abuse.
+#
+# Only networks carrying the "allow this network to use DNS Daddy" permission
+# count. A network exists to attribute a policy as well as to grant access, and
+# writing every configured range into the ACL would overrule an operator who
+# deliberately left that box unticked — the opposite of what this script is for.
 CFG_CIDRS=""
 if command -v sqlite3 >/dev/null; then
   CFG_CIDRS=$(sqlite3 -readonly "$DB" \
     "SELECT DISTINCT c.cidr FROM network_cidrs c
        JOIN networks n ON n.id = c.network_id
-      WHERE n.enabled = 1 AND c.cidr <> '';" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || true)
+      WHERE n.enabled = 1 AND n.allow_resolver = 1 AND c.cidr <> '';" 2>/dev/null \
+    | tr '\n' ',' | sed 's/,$//' || true)
+
+  # A database written by a binary that predates the permission has no such
+  # column, and the query above fails rather than returning nothing. Fall back
+  # to the older meaning and say so: silently failing closed here would refuse
+  # to deploy a working configuration and blame the operator for it.
+  if [[ -z "$CFG_CIDRS" ]] && ! sqlite3 -readonly "$DB" \
+       "SELECT allow_resolver FROM networks LIMIT 1;" >/dev/null 2>&1; then
+    warn "this database predates per-network resolver access; using every enabled network"
+    CFG_CIDRS=$(sqlite3 -readonly "$DB" \
+      "SELECT DISTINCT c.cidr FROM network_cidrs c
+         JOIN networks n ON n.id = c.network_id
+        WHERE n.enabled = 1 AND c.cidr <> '';" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || true)
+  fi
 fi
 
 BASE="127.0.0.0/8,172.16.0.0/12"
@@ -148,8 +167,14 @@ else
   changed; the existing container (if any) keeps running as-is.
 
   To fix this properly:
-    1. Open the dashboard and add your sites/ranges as Networks.
+    1. Open the dashboard and add your sites/ranges as Networks, ticking
+       "Allow this network to use DNS Daddy" on each one.
     2. Re-run this script — it will derive the ACL from them automatically.
+
+  On a running deployment that tick-box is enough on its own: it takes effect
+  on the next query. This script exists to bake the same ranges into .env as
+  bootstrap configuration, so a container that starts before the database is
+  read is already closed.
 
   Or set DNSDADDY_ALLOWED_CLIENT_CIDRS in .env yourself and run
   'docker compose up -d' directly.

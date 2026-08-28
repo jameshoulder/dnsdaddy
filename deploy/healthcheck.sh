@@ -109,8 +109,9 @@ if command -v dig >/dev/null 2>&1; then
       ;;
     REFUSED)
       # The single most likely cause of "DNS is down" after an upgrade.
-      fail "DNS returned REFUSED — this client is not in dns.allowed_client_cidrs"
-      say "      check DNSDADDY_ALLOWED_CLIENT_CIDRS includes 127.0.0.0/8 and your clients"
+      fail "DNS returned REFUSED — this client is not permitted to use the resolver"
+      say "      add it under Networks and tick \"Allow this network to use DNS Daddy\","
+      say "      or check DNSDADDY_ALLOWED_CLIENT_CIDRS includes 127.0.0.0/8 and your clients"
       ;;
     SERVFAIL)
       fail "DNS returned SERVFAIL for $PROBE_GOOD — upstream resolution is failing"
