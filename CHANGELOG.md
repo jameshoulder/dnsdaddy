@@ -65,6 +65,27 @@ let that network use the resolver.
   reconciles only the keys the installer owns. `--uninstall` keeps your data;
   `--purge` needs both the flag and a typed confirmation.
 
+### Changed
+
+- **`DELETE /api/v1/networks/{id}` can now answer `200` instead of `204`.**
+  Only in one case: the deletion committed but the resolver's client access
+  could not be reloaded, so the network's addresses may still be being served.
+  The body carries a `warning`, and the condition is reported by
+  `dnsdaddy doctor` and `GET /api/v1/diagnostics` until a reload succeeds.
+
+  `204` still means exactly what it meant — the revocation is in force — so
+  this is additive. A client that treats *any* non-`204` as failure will now
+  see a failure where it previously saw silent success, which is the correct
+  direction for it to be wrong in.
+
+- **The generated first-run admin password is no longer written to the log.**
+  It is written to `initial-password.txt` in the data volume with mode `0600`,
+  as before, and that is now the only place it appears.
+  `docker compose logs dnsdaddy | grep -i password` no longer finds it; use
+  `docker compose exec dnsdaddy cat /var/lib/dnsdaddy/initial-password.txt`,
+  or let the installer print it. A credential in the container log outlives
+  the session and reaches every log shipper pointed at it.
+
 ### Fixed
 
 - **`ss -lnp` without privilege lists a socket but cannot name its process**,
