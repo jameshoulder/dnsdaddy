@@ -824,8 +824,20 @@ print_next_steps() {
   # measurement it has not made.
   printf '\n  %sNext%s\n' "$BOLD" "$OFF"
   if [[ "$CHOICE" == "1" ]]; then
-    printf '    Your LAN is already permitted to use the resolver. Test it from\n'
-    printf '    another machine on the same network:\n'
+    # "Your LAN is permitted" is only true of the shipped ACL. A deployment
+    # that sets DNSDADDY_ALLOWED_CLIENT_CIDRS is permitted whatever that lists,
+    # and this installer preserves an existing .env rather than overwriting it
+    # — so on an upgrade, or a fresh install onto an existing file, the
+    # deployment choice says nothing about what is actually admitted. doctor
+    # has just printed the real list; point at it rather than assert over it.
+    if env_is_set DNSDADDY_ALLOWED_CLIENT_CIDRS; then
+      printf '    This deployment sets DNSDADDY_ALLOWED_CLIENT_CIDRS, so what may resolve\n'
+      printf '    is whatever that lists — CLIENT ACCESS above shows it. If your LAN is\n'
+      printf '    in there, test from another machine on the same network:\n'
+    else
+      printf '    Your LAN is already permitted to use the resolver. Test it from\n'
+      printf '    another machine on the same network:\n'
+    fi
     printf '      nslookup example.com %s\n' "${HOST_IP:-<this-server>}"
     printf '      dig @%s example.com\n' "${HOST_IP:-<this-server>}"
   else

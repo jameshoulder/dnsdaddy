@@ -867,3 +867,26 @@ func TestManagedLineAfterAHandSetOneIsStillReconciled(t *testing.T) {
 		t.Errorf("a public bind this installer generated is still active:\n%s", in.readEnv())
 	}
 }
+
+// "Your LAN is already permitted" is a claim about the effective ACL, and it
+// is only true of the shipped one. An operator who has set
+// DNSDADDY_ALLOWED_CLIENT_CIDRS is permitted whatever that lists, and this
+// installer preserves an existing .env rather than overwriting it — so the
+// deployment choice says nothing about what is actually admitted, and telling
+// them their LAN works could hand them a test command that answers REFUSED.
+func TestLANInstallDoesNotClaimTheLANIsPermittedWhenTheACLIsSet(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_ADMIN_PASSWORD=test-password-1234")
+	in.writeEnv("DNSDADDY_ALLOWED_CLIENT_CIDRS=203.0.113.0/24\n")
+
+	out, code := in.run("--lan", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	notContains(t, out, "Your LAN is already permitted")
+	contains(t, out, "CLIENT ACCESS above shows it")
+
+	// The test command is still given: the operator may well be in that list,
+	// and withholding it would trade one unmeasured claim for a dead end.
+	contains(t, out, "nslookup example.com 192.168.1.75")
+}
