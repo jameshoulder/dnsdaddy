@@ -30,6 +30,7 @@ const {
   threatIntelPanel,
   diagnosticsBanner,
   firstClientCard,
+  accessBadge,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -697,4 +698,61 @@ test('no branch claims loopback is the DNS address over an SSH tunnel', () => {
 test('the card tolerates a missing overview', () => {
   assert.strictEqual(withHostname('192.168.1.75', () => firstClientCard(null)), '');
   assert.strictEqual(withHostname('192.168.1.75', () => firstClientCard(undefined)), '');
+});
+
+// The Access column says what the resolver is doing, not what the row says.
+// Badging the stored intent made three different situations look identical to
+// a working one, and each of them is a client being refused while the
+// dashboard says otherwise.
+
+function network(overrides = {}) {
+  return {
+    name: 'HQ',
+    cidrs: ['10.0.10.0/24'],
+    allowResolver: true,
+    canResolve: true,
+    publicCidrs: [],
+    ...overrides,
+  };
+}
+
+test('a permitted network the resolver is enforcing reads as allowed', () => {
+  const out = accessBadge(network());
+  assert.match(out, /badge ok/);
+  assert.match(out, />Allowed</);
+});
+
+test('a public range is permitted but flagged', () => {
+  const out = accessBadge(network({ cidrs: ['203.0.113.0/24'], publicCidrs: ['203.0.113.0/24'] }));
+  assert.match(out, /badge warn/);
+  assert.match(out, /Allowed \(public\)/);
+});
+
+test('a grant the resolver is not enforcing does not read as allowed', () => {
+  // A stored permission whose reload failed, or one only partly covered by
+  // the ACL. Either way the database says yes and the resolver does not.
+  const out = accessBadge(network({ canResolve: false }));
+  assert.doesNotMatch(out, /badge ok/);
+  assert.match(out, /not in force/);
+});
+
+test('permitting a catch-all says it grants nothing, because it does', () => {
+  // A network with no ranges contributes none to the ACL, so ticking the box
+  // on one permits precisely nothing — and the form invites exactly this by
+  // defaulting the box on and offering an empty CIDR list as the catch-all.
+  const out = accessBadge(network({ cidrs: [] }));
+  assert.doesNotMatch(out, /badge ok/);
+  assert.doesNotMatch(out, />Allowed</);
+  assert.match(out, /Grants nothing/);
+});
+
+test('an unpermitted network covered by a wider range says so', () => {
+  const out = accessBadge(network({ allowResolver: false, resolvesVia: '10.0.0.0/8' }));
+  assert.match(out, /Via wider range/);
+});
+
+test('an unpermitted network nothing covers reads as refused', () => {
+  const out = accessBadge(network({ allowResolver: false }));
+  assert.match(out, /badge bad/);
+  assert.match(out, /Refused/);
 });

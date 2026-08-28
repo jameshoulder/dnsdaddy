@@ -402,8 +402,12 @@ paths:
       responses:
         "204":
           description: >-
-            Deleted, and the effective client ACL was republished, so whatever
-            the network permitted is no longer in force.
+            Deleted, and the effective client ACL was republished from what
+            remains. That does not necessarily mean the network's addresses are
+            now refused: the ACL is a union with no deny rules, so a range the
+            bootstrap list or another permitted network also covers goes on
+            being served. `GET /api/v1/networks` reports what is actually
+            admitted.
         "200":
           description: >-
             Deleted, but the resolver could not re-read its configuration, so

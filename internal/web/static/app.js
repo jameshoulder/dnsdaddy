@@ -1627,7 +1627,29 @@ async function sendNetwork(method, path, payload) {
   }
 }
 
+// The Access column reports what the resolver is doing, not what the row says.
+//
+// allowResolver is the stored intent; canResolve is computed from the ACL the
+// resolver is actually enforcing. They come apart in two ways that matter, and
+// badging the stored value made both of them look fine: a grant whose reload
+// failed is in the database and not in force, and a network only partly
+// covered by the ACL has most of its clients refused.
+//
+// A permitted catch-all is the third case and the sharpest, because it looks
+// like the others and is not: a network with no ranges contributes nothing to
+// the ACL at all, so ticking the box on one grants precisely nothing. Saying
+// "Allowed" there is how an operator ends up certain they have permitted a
+// client that is still being refused.
 function accessBadge(n) {
+  const catchAll = !(n.cidrs || []).length;
+  if (n.allowResolver && catchAll) {
+    return html`<span class="badge warn"
+      title="A catch-all has no ranges of its own, so permitting it grants nothing. Give it CIDRs, or permit the network the clients actually match.">Grants nothing</span>`;
+  }
+  if (n.allowResolver && !n.canResolve) {
+    return html`<span class="badge warn"
+      title="Stored, but the resolver is not enforcing all of it — see the client access summary above.">Allowed, not in force</span>`;
+  }
   if (n.allowResolver) {
     const tone = (n.publicCidrs || []).length ? 'warn' : 'ok';
     const label = (n.publicCidrs || []).length ? 'Allowed (public)' : 'Allowed';
@@ -1673,7 +1695,10 @@ pages.networks = {
             <input type="checkbox" name="allowResolver" checked>
             <span><strong>Allow this network to use DNS Daddy</strong>
               <span class="cat-desc">Permits DNS queries from these addresses. Leave it off and
-                clients here are answered REFUSED, whatever policy they have.</span></span>
+                clients here are answered REFUSED, whatever policy they have.</span>
+              <span class="cat-desc" id="access-needs-cidrs" hidden>This permits nothing while
+                the CIDR list is empty: a catch-all has no addresses of its own to permit.
+                Add a range above, or permit the network your clients actually match.</span></span>
           </label>
           ${raw(accessExplainer())}
           <button class="btn btn-primary" type="submit">Add network</button>
@@ -1729,6 +1754,21 @@ pages.networks = {
     `;
   },
   async mounted() {
+    // The tick box defaults on, and the field above invites an empty CIDR list
+    // to make a catch-all. Following both leaves a network that reads as
+    // permitted and grants nothing, because a network with no ranges
+    // contributes none to the ACL. The note appears exactly when that is the
+    // state being built, rather than after the row exists.
+    const cidrsField = $('#network-form [name="cidrs"]');
+    const needsCIDRs = $('#access-needs-cidrs');
+    const allowBox = $('#network-form [name="allowResolver"]');
+    const syncAccessNote = () => {
+      needsCIDRs.hidden = !(allowBox.checked && !cidrsField.value.trim());
+    };
+    cidrsField.addEventListener('input', syncAccessNote);
+    allowBox.addEventListener('change', syncAccessNote);
+    syncAccessNote();
+
     $('#network-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const form = new FormData(e.target);
@@ -2620,5 +2660,6 @@ if (typeof module !== 'undefined' && module.exports) {
     threatIntelPanel,
     diagnosticsBanner,
     firstClientCard,
+    accessBadge,
   };
 }
