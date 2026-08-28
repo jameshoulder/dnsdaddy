@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -496,4 +497,72 @@ func TestDeleteReportsTheNetworkAsItWasDeletedUnderAConcurrentPermit(t *testing.
 		t.Fatal("no round managed to delete anything, so the invariant was never exercised")
 	}
 	t.Logf("%d/200 rounds deleted, %d of those with a concurrently committed permit", deletes, races)
+}
+
+// loadNetworkTx and ListNetworks scan the same columns from the same tables,
+// which is duplication, and duplication of a row scan is how two reads of one
+// row start disagreeing: a column added to the model and to one scanner is
+// silently absent from the other, and the caller gets a Network with a zero
+// field it has no way to notice.
+//
+// Pinning the agreement is cheaper than removing the duplication, because the
+// transactional read has to happen on a *sql.Tx and the list read has to stay
+// a single pass over every network.
+func TestTheTransactionalReadAgreesWithTheListRead(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	// Every field the model carries, set to something distinguishable: a
+	// scanner that dropped one would otherwise match on zero values.
+	created, err := st.CreateNetwork(ctx, NetworkInput{
+		Name:          ptr("Frankfurt VPS"),
+		Location:      ptr("Hetzner FSN1"),
+		CIDRs:         ptr([]string{"192.168.30.0/24", "203.0.113.25/32"}),
+		Enabled:       ptr(true),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+	if err != nil {
+		t.Fatalf("CreateNetwork: %v", err)
+	}
+	if len(created.AcknowledgedPublicCIDRs) == 0 {
+		t.Fatal("the fixture recorded no acknowledgement, so that field is not being compared")
+	}
+
+	listed, err := st.GetNetwork(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetNetwork: %v", err)
+	}
+
+	tx, err := st.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer tx.Rollback()
+	loaded, err := loadNetworkTx(ctx, tx, created.ID)
+	if err != nil {
+		t.Fatalf("loadNetworkTx: %v", err)
+	}
+
+	if !reflect.DeepEqual(listed, loaded) {
+		t.Errorf("the two reads of one row disagree, so a delete reports a network the rest of "+
+			"the API would describe differently:\n  list: %+v\n    tx: %+v", listed, loaded)
+	}
+}
+
+// And that a missing row is reported the same way by both, since the delete
+// handler's 404 depends on it.
+func TestTheTransactionalReadReportsAMissingRowAsNotFound(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	tx, err := st.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := loadNetworkTx(ctx, tx, "n_nonexistent"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound — the delete handler's 404 comes from this", err)
+	}
 }
