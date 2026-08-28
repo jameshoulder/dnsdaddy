@@ -1797,8 +1797,9 @@ pages.networks = {
         if (!confirm(`Delete network "${btn.dataset.name}"? Query history is kept.`)) return;
         try {
           // A delete answers 204 on success and 200 with a warning when the
-          // resolver could not be reloaded — where the deleted network's
-          // clients are still being served.
+          // resolver could not be reloaded — where whether the deleted
+          // network's clients are still being served is exactly what could
+          // not be confirmed.
           const result = await apiSend('DELETE', `/networks/${btn.dataset.deleteNetwork}`);
           if (result && result.warning) {
             toast(result.warning, 'error');
