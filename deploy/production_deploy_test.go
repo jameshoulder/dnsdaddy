@@ -105,8 +105,49 @@ func (p *prodDeploy) setenv(kv ...string) { p.env = append(p.env, kv...) }
 
 func (p *prodDeploy) run(args ...string) (string, int) {
 	p.t.Helper()
+	return p.exec(nil, args...)
+}
+
+// runAsNonRoot runs the script as an unprivileged user. The test process itself
+// may be either — root in a container, unprivileged on a CI runner — so this
+// drops privileges when it has them and runs directly when it has none, and the
+// caller asserts the same thing either way. ok is false when neither is
+// possible (root, but no setpriv to drop with).
+func (p *prodDeploy) runAsNonRoot(args ...string) (out string, code int, ok bool) {
+	p.t.Helper()
+	if os.Geteuid() != 0 {
+		out, code = p.exec(nil, args...)
+		return out, code, true
+	}
+	setpriv, err := exec.LookPath("setpriv")
+	if err != nil {
+		return "", 0, false
+	}
+	// nobody must be able to traverse the fixture and read the script. TempDir
+	// hands back <parent>/001 with the parent at 0700, so that one is separate.
+	must(p.t, os.Chmod(filepath.Dir(p.root), 0o755))
+	must(p.t, filepath.WalkDir(p.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if d.IsDir() {
+			mode = 0o755
+		} else if info, ierr := d.Info(); ierr == nil && info.Mode()&0o100 != 0 {
+			mode = 0o755
+		}
+		return os.Chmod(path, mode)
+	}))
+	out, code = p.exec([]string{setpriv, "--reuid=65534", "--regid=65534", "--clear-groups"}, args...)
+	return out, code, true
+}
+
+func (p *prodDeploy) exec(prefix []string, args ...string) (string, int) {
+	p.t.Helper()
 	repo := filepath.Join(p.root, "repo")
-	cmd := exec.Command("bash", append([]string{filepath.Join(repo, "deploy", "production-deploy.sh")}, args...)...)
+	argv := append(append([]string{}, prefix...),
+		append([]string{"bash", filepath.Join(repo, "deploy", "production-deploy.sh")}, args...)...)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = repo
 	cmd.Env = append([]string{
 		"PATH=" + p.bin + ":/usr/bin:/bin",
@@ -193,5 +234,58 @@ func TestTheQueryLogIsNeverUsedAsASourceOfRanges(t *testing.T) {
 	if strings.Contains(string(b), "FROM query_log") || strings.Contains(string(b), "FROM queries") {
 		t.Error("the deploy script reads the query log; on a resolver that is currently open " +
 			"that whitelists whoever has been abusing it")
+	}
+}
+
+// A real deploy needs root; only --dry-run is exempt. Without this guard a
+// deploy run without sudo half-executes — docker, apt-get and systemctl failing
+// one at a time against a live container — instead of refusing up front.
+func TestARealDeployStillRefusesToRunWithoutRoot(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_PERMITTED=10.0.10.0/24")
+
+	out, code, ok := p.runAsNonRoot() // deliberately not --dry-run
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("a real deploy ran as an unprivileged user\n%s", out)
+	}
+	contains(t, out, "run with sudo")
+}
+
+// And the dry run is exempt, which is what lets the tests above run at all on a
+// CI runner. It says so rather than pretending it is a full deploy.
+func TestADryRunDoesNotNeedRoot(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_PERMITTED=10.0.10.0/24")
+
+	out, code, ok := p.runAsNonRoot("--dry-run")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "a real deploy would need sudo")
+}
+
+// "*** DRY RUN — nothing will be changed ***" has to be true of the filesystem
+// too. On a host with no .env yet, an unguarded touch in step 6 leaves an empty
+// one behind; on a host with one, an unguarded chmod restamps its mode. Both
+// were invisible while the script could only be run as root against a machine
+// it was about to change anyway.
+func TestADryRunDoesNotCreateEnv(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_PERMITTED=10.0.10.0/24")
+	env := filepath.Join(p.root, "repo", ".env")
+	must(t, os.Remove(env))
+
+	out, code := p.run("--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if _, err := os.Stat(env); !os.IsNotExist(err) {
+		t.Errorf("the dry run created .env, having said it would change nothing\n%s", out)
 	}
 }

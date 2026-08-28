@@ -3,7 +3,8 @@
 # DNS Daddy — one-command production deployment.
 #
 #   cd /root/dnsdaddy && sudo ./deploy/production-deploy.sh
-#   sudo ./deploy/production-deploy.sh --dry-run     # decide nothing, change nothing
+#   ./deploy/production-deploy.sh --dry-run          # decide nothing, change nothing
+#                                                   # (no sudo needed: it changes nothing)
 #
 # Does the whole job: investigate, back up, derive the client ACL from the
 # database, build, deploy onto the EXISTING volume, install Caddy, wire up boot
@@ -60,7 +61,14 @@ cd "$REPO" || die "repository not found at $REPO"
 # ---------------------------------------------------------------------------
 step "1. Preflight"
 # ---------------------------------------------------------------------------
-[[ $EUID -eq 0 ]] || die "run with sudo"
+# A real deploy needs root. A dry run does not: it changes nothing, every
+# mutating step goes through act(), and being able to ask what a deploy would
+# do without sudo is worth more than the uniformity. It is also what makes this
+# script testable, which is why the check is written this way and not inlined.
+if [[ $EUID -ne 0 ]]; then
+  [[ $DRY_RUN -eq 1 ]] || die "run with sudo"
+  warn "not running as root — a real deploy would need sudo"
+fi
 command -v docker >/dev/null || die "docker is not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose v2 is not available"
 systemctl is-active --quiet docker || die "the docker daemon is not running"
@@ -259,7 +267,9 @@ fi
 # ---------------------------------------------------------------------------
 step "6. Write .env (secrets preserved, never overwritten with examples)"
 # ---------------------------------------------------------------------------
-touch .env
+# A dry run must not create or restamp .env. The banner above promises nothing
+# changes, and on a host that has none yet, touch leaves an empty one behind.
+act touch .env
 set_env() {
   local k="$1" v="$2"
   if grep -qE "^${k}=" .env 2>/dev/null; then
@@ -296,7 +306,7 @@ if [[ -n "$HOSTNAME_FOUND" ]]; then
 else
   set_env DNSDADDY_SECURE_COOKIES "auto"
 fi
-chmod 600 .env 2>/dev/null || true
+[[ $DRY_RUN -eq 1 ]] || chmod 600 .env 2>/dev/null || true
 grep -q '^\.env$' .gitignore 2>/dev/null || warn ".env is not gitignored"
 
 # ---------------------------------------------------------------------------
