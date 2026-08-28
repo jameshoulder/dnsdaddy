@@ -299,9 +299,12 @@ fi
 HOSTNAME_FOUND="${HOSTNAME_FOUND#https://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND#http://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND%%/*}"
 
 if [[ -z "$HOSTNAME_FOUND" && -n "$UNREADABLE_SOURCE" ]]; then
-  warn "$UNREADABLE_SOURCE exists but could not be read by this user, so no hostname could be discovered"
-  note "  A real deploy runs as root and would read it. Re-run this preview with sudo"
-  note "  to see the plan it would actually follow."
+  # Warning and carrying on is not enough. Everything below here branches on
+  # the hostname — whether Caddy is configured, whether secure cookies are
+  # forced — so continuing would print a concrete plan that a real deploy,
+  # which runs as root and can read the file, may not follow. A preview that
+  # describes the wrong plan is worse than one that stops.
+  die "$UNREADABLE_SOURCE exists but could not be read by this user, so the hostname could not be determined — and every step below depends on it. A real deploy runs as root and would read it; re-run this preview with sudo to see the plan it would actually follow."
 elif [[ -n "$HOSTNAME_FOUND" ]]; then
   ok "hostname: $HOSTNAME_FOUND"
 else

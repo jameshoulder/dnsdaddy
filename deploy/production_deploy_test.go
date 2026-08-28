@@ -498,11 +498,19 @@ func TestAnUnreadableHostnameSourceIsNotReportedAsNoHostname(t *testing.T) {
 	p.setenv("STUB_PERMITTED=10.0.10.0/24")
 	p.unreadable = append(p.unreadable, filepath.Join(p.root, "repo", ".env"))
 
-	out, _, ok := p.runAsNonRoot("--dry-run")
+	out, code, ok := p.runAsNonRoot("--dry-run")
 	if !ok {
 		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("the preview finished, having failed to determine the hostname\n%s", out)
 	}
 	notContains(t, out, "can't read")
 	contains(t, out, "could not be read")
 	notContains(t, out, "no hostname configured — Caddy will be installed but left inactive")
+	// Warning and carrying on is not enough: the steps below the hostname print
+	// concrete plans that depend on it, and a preview must not describe a plan
+	// the real run may not follow.
+	notContains(t, out, "DNSDADDY_SECURE_COOKIES")
+	notContains(t, out, "caddy")
 }
