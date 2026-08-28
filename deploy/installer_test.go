@@ -890,3 +890,22 @@ func TestLANInstallDoesNotClaimTheLANIsPermittedWhenTheACLIsSet(t *testing.T) {
 	// and withholding it would trade one unmeasured claim for a dead end.
 	contains(t, out, "nslookup example.com 192.168.1.75")
 }
+
+// The installer invites a VPS operator to consider DNSDADDY_ALLOWED_CLIENT_CIDRS
+// and used to say only that "the two combine". True, and it omits the half that
+// matters: a range in the bootstrap list is permitted whatever the dashboard
+// says, so unticking the box cannot withdraw it. That is the same one-way door
+// production-deploy.sh was walking operators through automatically, offered
+// here for them to walk through by hand.
+func TestVPSInstallSaysABootstrapRangeCannotBeRevokedFromTheDashboard(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_ADMIN_PASSWORD=test-password-1234")
+
+	out, code := in.run("--vps", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "DNSDADDY_ALLOWED_CLIENT_CIDRS")
+	contains(t, out, "cannot withdraw it")
+	contains(t, out, "add it as a Network and leave it out of .env")
+}

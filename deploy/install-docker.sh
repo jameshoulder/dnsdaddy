@@ -922,8 +922,14 @@ if [[ "$CHOICE" == "2" ]]; then
   machine can use the resolver until you say so.
 
   You do that in the dashboard, under Networks, with no restart and no file to
-  edit. Whether you also set DNSDADDY_ALLOWED_CLIENT_CIDRS is up to you: it is
-  bootstrap configuration for automated deployments, and the two combine.
+  edit.
+
+  DNSDADDY_ALLOWED_CLIENT_CIDRS is the other way in, and it is for automated
+  deployments: Ansible, a Compose file, an image build. The two combine as a
+  union, so know which one you are using and why — a range listed there is
+  permitted no matter what the dashboard says about it, and unticking "Allow
+  this network to use DNS Daddy" cannot withdraw it. To keep a permission you
+  can revoke from the dashboard, add it as a Network and leave it out of .env.
 EOF
 fi
 

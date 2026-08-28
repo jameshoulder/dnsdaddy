@@ -129,6 +129,15 @@ separately by `dnsdaddy doctor`, at `GET /api/v1/diagnostics`, and on the
 Networks page, so you can always see which one is responsible for a given
 range.
 
+**That decides which source to put a range in.** A range in the bootstrap list
+is permitted whatever the dashboard says about it: unticking *Allow this
+network to use DNS Daddy*, disabling the network, or deleting it outright
+cannot withdraw a permission that configuration is also granting. So put a
+range in `.env` when you want it fixed by deployment — Ansible, a Compose file,
+an image build — and add it as a Network when you want to be able to revoke it
+from the dashboard. Putting it in both leaves you with a revocation control
+that appears to work and does not.
+
 A dashboard change is stored and then applied to the running resolver, and
 those are two steps. Normally the second follows immediately and the change is
 in force on the next query. If it fails — a transient database error between
