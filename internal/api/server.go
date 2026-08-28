@@ -65,29 +65,22 @@ type API struct {
 	exposure exposureWatch
 
 	// networkWrites serialises a network write with the ACL reload that
-	// follows it, so the row a handler reasons about cannot be superseded
-	// between the two.
+	// follows it.
 	//
-	// The reload republishes the whole effective ACL, and the handler then
-	// asks whether *its* write could have changed who is admitted by
-	// comparing the row it committed against the snapshot in force. Both
-	// halves stop being true if another write lands in between: an earlier
-	// handler holding a row that still carries a grant can reach the
-	// comparison after a later handler has revoked that grant and published
-	// the revocation, and would then report a change, mark the ACL stale and
-	// warn that access is not in force — with the database and the snapshot
-	// both already agreeing that it is not granted. The window is real: the
-	// policy engine is reloaded between the commit and the ACL reload.
+	// It was introduced to stop a handler comparing a row another request had
+	// already superseded. That comparison is gone — see clientacl.Reload — so
+	// this is no longer load-bearing for correctness: reloads are ordered by
+	// clientacl's own mutex, each loads the database after its own commit, and
+	// the effective ACL converges on the last load either way.
 	//
-	// Serialising here rather than generation-checking the row, because
-	// network writes are operator actions in a dashboard — a handful in a
-	// session — and the contention is nil. Queries never touch this; they
-	// read the published snapshot with one atomic load.
-	//
-	// Every handler that writes the networks tables takes it, token rotation
-	// included, so the invariant needs no case analysis over which columns
-	// decide admission. The remaining writer is the seed, which runs once at
-	// startup before anything is served.
+	// It is kept because it makes the write path trivial to reason about, at
+	// no cost worth measuring: network writes are operator actions in a
+	// dashboard, a handful in a session, and queries never touch it — they
+	// read the published snapshot with one atomic load. Every handler that
+	// writes the networks tables takes it, token rotation included, so the
+	// invariant needs no case analysis over which columns decide admission.
+	// The remaining writer is the seed, which runs once at startup before
+	// anything is served.
 	networkWrites sync.Mutex
 }
 

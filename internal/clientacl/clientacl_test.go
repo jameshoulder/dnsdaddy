@@ -798,68 +798,27 @@ func TestTheLastReloadWins(t *testing.T) {
 	}
 }
 
-// A rename cannot change who is admitted, so a failure to apply it must not
-// raise the standing "a revocation may not have taken" warning — which nothing
-// clears until an unrelated write succeeds or the daemon restarts.
-func TestAWriteThatChangesNoAdmissionDoesNotMarkStaleOnFailure(t *testing.T) {
-	fail := true
-	c := NewController([]string{"127.0.0.0/8"}, false, func(context.Context) ([]Network, error) {
-		if fail {
-			return nil, context.DeadlineExceeded
-		}
-		return nil, nil
-	})
-
-	renamed := Network{ID: "n1", Name: "Office", Enabled: true}
-	changed, err := c.ReloadAfterWrite(context.Background(), renamed)
-	if err == nil {
-		t.Fatal("the failure was not reported to the caller")
-	}
-	if changed {
-		t.Error("a rename was reported as changing admission")
-	}
-	if c.Stale() {
-		t.Error("a write that cannot change admission marked the ACL stale on failure; that is " +
-			"a false alarm and a persistent one")
-	}
-
-	// A write that can does, on the same failure.
-	permitted := Network{ID: "n2", Name: "VPS", Enabled: true, AllowResolver: true,
+// Every reload failure marks the ACL stale, because whether it mattered cannot
+// be worked out at the moment it happens: the read of the desired state is the
+// thing that failed.
+//
+// This is the sequence that settled it, and it is not exotic — two networks
+// permitting the same range is what you get from a branch office added twice,
+// or a range covered both by a network and by dns.allowed_client_cidrs. Each
+// is revoked in turn with the reload failing both times. Comparing against the
+// snapshot classified both as changing nothing: the first because the second
+// network still covered the range, and the second because the *snapshot* still
+// held the first network's grant, which the database no longer had. The
+// database then permitted neither, the resolver went on admitting the range,
+// and nothing anywhere said so.
+func TestSequentialFailedRevocationsCannotGoUnrecorded(t *testing.T) {
+	a := Network{ID: "n1", Name: "Branch A", Enabled: true, AllowResolver: true,
 		CIDRs: []string{"203.0.113.0/24"}}
-	changed, err = c.ReloadAfterWrite(context.Background(), permitted)
-	if err == nil {
-		t.Fatal("the failure was not reported to the caller")
-	}
-	if !changed {
-		t.Fatal("permitting a range outside the ACL was reported as changing nothing")
-	}
-	if !c.Stale() {
-		t.Error("an access-relevant reload failure was not recorded")
-	}
-
-	// And any successful publish clears it, whichever write did it.
-	fail = false
-	if _, err := c.ReloadAfterWrite(context.Background(), renamed); err != nil {
-		t.Fatalf("ReloadAfterWrite: %v", err)
-	}
-	if c.Stale() {
-		t.Error("a successful reload did not clear the stale flag; the snapshot in force was " +
-			"still rebuilt from the current database")
-	}
-}
-
-// A concurrent write's reload can publish after a deletion commits but before
-// the deletion's own reload takes the lock — the handler reloads the policy
-// engine in between, which is window enough. That snapshot has already applied
-// the revocation, so the deletion's reload failing afterwards leaves nothing
-// wrong, and saying otherwise raises an alarm that nothing clears until an
-// unrelated write succeeds.
-func TestADeletionAlreadyAppliedByAnotherPublishRaisesNoAlarm(t *testing.T) {
-	permitted := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+	b := Network{ID: "n2", Name: "Branch B", Enabled: true, AllowResolver: true,
 		CIDRs: []string{"203.0.113.0/24"}}
 
 	var (
-		networks = []Network{permitted}
+		networks = []Network{a, b}
 		fail     bool
 	)
 	c := NewController([]string{"127.0.0.0/8"}, false, func(context.Context) ([]Network, error) {
@@ -872,296 +831,49 @@ func TestADeletionAlreadyAppliedByAnotherPublishRaisesNoAlarm(t *testing.T) {
 		t.Fatalf("Reload: %v", err)
 	}
 	if !c.Allows(netip.MustParseAddr("203.0.113.5")) {
-		t.Fatal("the fixture never granted anything, so nothing below is being tested")
+		t.Fatal("the fixture never admitted the range, so nothing below is being tested")
 	}
 
-	// The row is deleted, and another request's reload publishes first.
-	networks = nil
-	if err := c.Reload(context.Background()); err != nil {
-		t.Fatalf("Reload: %v", err)
-	}
-	if c.Allows(netip.MustParseAddr("203.0.113.5")) {
-		t.Fatal("the concurrent publish did not apply the deletion")
-	}
-
-	// Now the deletion's own reload runs, and fails.
 	fail = true
-	changed, err := c.ReloadAfterDelete(context.Background(), permitted.ID)
-	if err == nil {
-		t.Fatal("the failure was not reported to the caller")
+	networks = []Network{b}
+	if err := c.Reload(context.Background()); err == nil {
+		t.Fatal("the first revocation's reload did not fail")
 	}
-	if changed {
-		t.Error("the deletion was reported as changing admission when the revocation was " +
-			"already in force; the caller would answer 200 saying it might not be")
+
+	networks = nil
+	if err := c.Reload(context.Background()); err == nil {
+		t.Fatal("the second revocation's reload did not fail")
 	}
-	if c.Stale() {
-		t.Error("a revocation that is already in force marked the ACL stale — a false alarm, " +
-			"and the kind nothing clears until an unrelated write succeeds")
+
+	if c.Allows(netip.MustParseAddr("203.0.113.5")) && !c.Stale() {
+		t.Error("the database permits neither network, the resolver still admits the range, " +
+			"and nothing is marked stale — an over-permission with no surface reporting it")
 	}
 }
 
-// The comparison has to happen under the same lock as the publish. Deciding it
-// from Current() beforehand read a snapshot a concurrent reload was already in
-// the middle of replacing: a PATCH that had loaded a newly permitted network
-// but not yet published it left the snapshot short of that grant, so a DELETE
-// of the same network concluded it withdrew nothing, and a reload failure
-// after the PATCH published left the grant in force with nothing marked stale.
-func TestTheAdmissionComparisonSeesNoPublishInFlight(t *testing.T) {
-	permitted := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-
-	var (
-		release   = make(chan struct{})
-		entered   = make(chan struct{})
-		once      sync.Once
-		failNext  atomic.Bool
-		compared  atomic.Bool
-		publishes atomic.Int32
-	)
-
+// And a successful reload clears it, whatever raised it.
+func TestASuccessfulReloadClearsStaleness(t *testing.T) {
+	fail := true
 	c := NewController([]string{"127.0.0.0/8"}, false, func(context.Context) ([]Network, error) {
-		// The first load is the "PATCH" reload: it holds the lock, blocks
-		// before publishing, and grants the network.
-		if publishes.Add(1) == 1 {
-			once.Do(func() { close(entered) })
-			<-release
-			return []Network{permitted}, nil
-		}
-		if failNext.Load() {
+		if fail {
 			return nil, context.DeadlineExceeded
 		}
 		return nil, nil
 	})
 
-	go func() {
-		_, _ = c.ReloadAfterWrite(context.Background(), permitted)
-	}()
-	<-entered
-
-	// The delete starts while that publish is still in flight. It must block
-	// on the lock rather than comparing against a snapshot about to change.
-	done := make(chan bool, 1)
-	go func() {
-		failNext.Store(true)
-		changed, _ := c.ReloadAfterDelete(context.Background(), permitted.ID)
-		compared.Store(true)
-		done <- changed
-	}()
-
-	// Give the delete a chance to compare too early, if it can.
-	time.Sleep(20 * time.Millisecond)
-	if compared.Load() {
-		t.Fatal("the delete compared while a publish was in flight; it must wait for the lock")
-	}
-	close(release)
-
-	if changed := <-done; !changed {
-		t.Error("the delete concluded it withdrew nothing while the grant it removed was being " +
-			"published; a failed reload here leaves that grant in force behind a 204")
+	if err := c.Reload(context.Background()); err == nil {
+		t.Fatal("the failure was not reported to the caller")
 	}
 	if !c.Stale() {
-		t.Error("the failed reload after a real revocation was not recorded as stale")
-	}
-}
-
-// The question a network write actually needs answered is not "did this touch
-// a field that decides admission?" but "would the ACL admit anyone different?".
-// Asking the first produced two standing false alarms, and these pin the cases
-// that separate them.
-
-func admissionSet(t *testing.T, bootstrap []string, networks ...Network) *Set {
-	t.Helper()
-	return Compute(bootstrap, false, networks)
-}
-
-// The shipped bootstrap ACL already permits every private range, so permitting
-// a network inside one adds nothing. A failed reload around it was raising "a
-// permission you revoked may still be honoured" — which nothing clears until
-// an unrelated write succeeds — over a change that could not have altered
-// admission.
-func TestPermittingARangeTheBootstrapACLAlreadyCoversChangesNothing(t *testing.T) {
-	s := admissionSet(t, []string{"10.0.0.0/8"})
-
-	n := Network{ID: "n1", Name: "Office", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"10.10.0.0/16"}}
-	if s.AdmissionChangesFor(n) {
-		t.Error("permitting 10.10.0.0/16 under a bootstrap ACL of 10.0.0.0/8 was reported as " +
-			"changing admission; every address in it could already resolve")
-	}
-}
-
-func TestPermittingARangeNothingCoversChangesAdmission(t *testing.T) {
-	s := admissionSet(t, []string{"10.0.0.0/8"})
-
-	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	if !s.AdmissionChangesFor(n) {
-		t.Error("permitting a range outside the ACL was reported as changing nothing")
-	}
-}
-
-// A network permitted but not yet covering anything new, then removed: the
-// bootstrap list still covers it, so the deletion revokes nothing and DELETE
-// must not claim client access may be out of date.
-func TestRemovingANetworkTheBootstrapACLCoversChangesNothing(t *testing.T) {
-	n := Network{ID: "n1", Name: "Office", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"10.10.0.0/16"}}
-	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
-
-	if s.AdmissionChangesWithout(n.ID) {
-		t.Error("removing a network whose range the bootstrap ACL still covers was reported " +
-			"as changing admission; nothing was revoked")
-	}
-}
-
-// Two networks permitting the same range: removing one leaves the other, so
-// admission is unchanged.
-func TestRemovingOneOfTwoNetworksPermittingTheSameRangeChangesNothing(t *testing.T) {
-	a := Network{ID: "n1", Name: "Branch A", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	b := Network{ID: "n2", Name: "Branch B", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	s := admissionSet(t, []string{"10.0.0.0/8"}, a, b)
-
-	if s.AdmissionChangesWithout(a.ID) {
-		t.Error("removing one of two networks permitting the same range was reported as " +
-			"revoking it")
-	}
-}
-
-func TestRemovingTheOnlyGrantForARangeChangesAdmission(t *testing.T) {
-	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
-
-	if !s.AdmissionChangesWithout(n.ID) {
-		t.Error("removing the only grant for a range was reported as changing nothing — a " +
-			"revocation that never took effect would be reported as done")
-	}
-}
-
-// An unrestricted ACL refuses nobody, and Compute keeps it that way however
-// many networks are permitted. So no grant can change admission, and a stock
-// loopback-only deployment must never be told a permission may be missing.
-func TestNoGrantChangesAdmissionUnderAnUnrestrictedACL(t *testing.T) {
-	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	s := admissionSet(t, nil, n)
-
-	if !s.Unrestricted() {
-		t.Fatal("an empty bootstrap ACL did not produce an unrestricted set")
-	}
-	if s.AdmissionChangesFor(n) {
-		t.Error("a grant was reported as changing admission under an unrestricted ACL")
-	}
-	if s.AdmissionChangesWithout(n.ID) {
-		t.Error("a revocation was reported as changing admission under an unrestricted ACL")
-	}
-}
-
-// Renaming reaches the snapshot as a label and decides nothing.
-func TestRenamingANetworkChangesNoAdmission(t *testing.T) {
-	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
-
-	renamed := n
-	renamed.Name = "Frankfurt VPS"
-	if s.AdmissionChangesFor(renamed) {
-		t.Error("a rename was reported as changing admission")
-	}
-}
-
-// Narrowing and widening both change who resolves, in opposite directions, and
-// both must be caught: one leaves clients refused that were not, the other
-// admits clients that were not.
-func TestNarrowingAndWideningARangeBothChangeAdmission(t *testing.T) {
-	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
-
-	narrower := n
-	narrower.CIDRs = []string{"203.0.113.0/25"}
-	if !s.AdmissionChangesFor(narrower) {
-		t.Error("narrowing a permitted range was reported as changing nothing; half the " +
-			"network would start being refused")
+		t.Fatal("a failed reload was not recorded")
 	}
 
-	wider := n
-	wider.CIDRs = []string{"203.0.112.0/23"}
-	if !s.AdmissionChangesFor(wider) {
-		t.Error("widening a permitted range was reported as changing nothing")
+	fail = false
+	if err := c.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
 	}
-}
-
-// Disabling is a revocation, and unpermitting is a revocation. Both reach the
-// same three conditions Compute applies.
-func TestDisablingOrUnpermittingIsARevocation(t *testing.T) {
-	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
-
-	disabled := n
-	disabled.Enabled = false
-	if !s.AdmissionChangesFor(disabled) {
-		t.Error("disabling a permitted network was reported as changing nothing")
-	}
-
-	unpermitted := n
-	unpermitted.AllowResolver = false
-	if !s.AdmissionChangesFor(unpermitted) {
-		t.Error("unpermitting a network was reported as changing nothing")
-	}
-}
-
-// A network that never granted anything, written again unchanged.
-func TestAnUnpermittedNetworkNeverChangesAdmission(t *testing.T) {
-	n := Network{ID: "n1", Name: "Guest", Enabled: true, CIDRs: []string{"203.0.113.0/24"}}
-	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
-
-	if s.AdmissionChangesFor(n) {
-		t.Error("storing an unpermitted network was reported as changing admission")
-	}
-	if s.AdmissionChangesWithout(n.ID) {
-		t.Error("deleting an unpermitted network was reported as changing admission")
-	}
-}
-
-// The mirror of the case I got wrong: a grant the snapshot does not hold is a
-// grant that is not being enforced, so withdrawing it changes nothing about
-// who is admitted.
-//
-// This matters because the snapshot can legitimately lack it for a reason that
-// is not a lag at all — a concurrent write's reload, publishing after the
-// deletion committed, has already applied it. Counting the deleted row's own
-// ranges regardless produced the standing "your revocation may not be in
-// force" alarm for a revocation that was.
-func TestDeletingAGrantTheSnapshotDoesNotHoldChangesNothing(t *testing.T) {
-	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-
-	// Computed without n: the snapshot holds no grant for it at all, which is
-	// what a concurrent reload that has already applied the deletion produces.
-	s := admissionSet(t, []string{"10.0.0.0/8"})
-
-	if s.AdmissionChangesWithout(n.ID) {
-		t.Error("deleting a network the enforced ACL was not granting anything for was " +
-			"reported as changing admission; a failed reload would then claim a revocation " +
-			"is not in force when another publish had already applied it")
-	}
-}
-
-// Coverage uses the same single-prefix containment rule as Cover, so two
-// permitted halves that between them cover a range are reported as not
-// covering it. That over-warns rather than under-warns, and the direction is
-// the point: an unnecessary warning costs a line of output, the other way
-// round costs a revocation nobody is told failed.
-func TestSplitCoverageErrsTowardsWarning(t *testing.T) {
-	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
-		CIDRs: []string{"203.0.113.0/24"}}
-	s := admissionSet(t, []string{"203.0.113.0/25", "203.0.113.128/25"}, n)
-
-	if !s.AdmissionChangesWithout(n.ID) {
-		t.Error("split coverage was treated as full; the safe direction here is to warn")
+	if c.Stale() {
+		t.Error("a successful reload did not clear the flag; the snapshot in force was rebuilt " +
+			"from the current database, so there is nothing left unconfirmed")
 	}
 }

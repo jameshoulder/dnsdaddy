@@ -71,9 +71,9 @@ type ClientAccessInput struct {
 	// Networks are the networks configured in the dashboard.
 	Networks []Network
 	// Stale reports that the live ACL could not be reloaded after a change, so
-	// what is being enforced may be older than what is stored. Nothing else
-	// can detect this: once a network is deleted there is no row left for the
-	// reachability checks to compare a stale grant against.
+	// what is being enforced could not be confirmed against what is stored.
+	// Nothing else can detect this: once a network is deleted there is no row
+	// left for the reachability checks to compare a stale grant against.
 	//
 	// Nil means not measured, which is a third answer and not the same as
 	// false. It lives in the running daemon's memory, so `dnsdaddy doctor`
@@ -139,8 +139,8 @@ func ClientAccess(in ClientAccessInput) []Check {
 			Section: sectionClientAccess,
 			Name:    "Client ACL is in force",
 			Status:  StatusFail,
-			Summary: "A change to which networks may use this resolver could not be applied, " +
-				"so the rules below may be older than what is stored.",
+			Summary: "DNS Daddy could not re-read its configuration after a change, so it " +
+				"cannot confirm that the rules below are the ones being enforced.",
 			Action: "A permission you granted may not be working, and — the reason this is a " +
 				"failure rather than a warning — one you revoked may still be honoured. Make " +
 				"any change under Networks to force a reload, or restart DNS Daddy. The log " +

@@ -181,13 +181,7 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	// Judged on what was actually stored, not on the request. A network
-	// created unpermitted — the default — changes nothing about who is
-	// admitted, and neither does a permitted one whose ranges the ACL already
-	// covers, so a failed reload after either must not raise the standing "a
-	// revocation may still be honoured" warning.
-	_, warning := a.reloadNetworkAccess(r, n, false)
-	writeNetwork(w, http.StatusCreated, n, warning)
+	writeNetwork(w, http.StatusCreated, n, a.reloadNetworkAccess(r))
 }
 
 func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -204,47 +198,31 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	// n is the merged row the store committed, and networkWrites guarantees no
-	// other network write has landed since, so this compares the ACL in force
-	// against the current stored state rather than against a row another
-	// request has already superseded.
-	_, warning := a.reloadNetworkAccess(r, n, false)
-	writeNetwork(w, http.StatusOK, n, warning)
+	writeNetwork(w, http.StatusOK, n, a.reloadNetworkAccess(r))
 }
 
 func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
-	// DeleteNetwork reads the row inside the transaction that removes it, so
-	// what comes back is what was deleted rather than what happened to be
-	// stored a moment earlier. A missing network is still reported by the
-	// store, so the 404 stays where it was.
 	a.networkWrites.Lock()
 	defer a.networkWrites.Unlock()
 
-	deleted, err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id"))
-	if err != nil {
+	// DeleteNetwork removes the row inside a transaction that reads it first,
+	// so the count check and the delete cannot disagree about what is there.
+	if _, err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id")); err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	a.reloadEngine(r)
 
-	// Deleting a network that permitted something is the worst of the three
-	// failure cases: the permission is still being honoured and the row that
-	// would have shown it is gone. Answering 204 and dropping the warning told
-	// the caller the revocation had taken effect, which is a security-relevant
-	// false success. So that case answers 200 with the warning, and the
-	// controller records it too, so `dnsdaddy doctor` and /api/v1/diagnostics
-	// keep reporting it until a reload succeeds — a warning in one HTTP
-	// response is easy to miss, and this outlives the request that caused it.
-	//
-	// 200 is reserved for the meaning it was introduced for: client access may
-	// not be in force. A deletion that provably cannot change who is admitted
-	// — an unpermitted network, or one whose ranges the bootstrap list or
-	// another permitted network still covers — stays 204, vacuously in force,
-	// with the reload failure still logged. Widening 200 to cover a failure
-	// that affects nobody would train the one caller who checks for it to stop
-	// checking, which costs more than the notice is worth.
-	affects, warning := a.reloadNetworkAccess(r, deleted, true)
-	if affects && warning != "" {
+	// Deletion is the failure case that matters most: whatever the network
+	// permitted may still be honoured, and the row that would have shown it is
+	// gone. Answering 204 and dropping the warning tells the caller the
+	// revocation took effect, which is a security-relevant false success — so
+	// a failed reload answers 200 with the warning instead. The controller
+	// records it too, so `dnsdaddy doctor` and /api/v1/diagnostics keep
+	// reporting it until a reload succeeds: a warning in one HTTP response is
+	// easy to miss, and this outlives the request that caused it.
+	warning := a.reloadNetworkAccess(r)
+	if warning != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "deleted",
 			"warning": warning,
@@ -748,52 +726,29 @@ func (a *API) reloadEngine(r *http.Request) {
 // write and returns a warning to hand back to the caller if it could not.
 //
 // Unlike a policy reload, a failure here is not merely late: it means a
-// permission the operator just revoked is still being honoured, or one they
-// just granted is not. The write is already committed, so failing the request
-// would invite a retry that creates a second network — hence a successful
-// response carrying an explicit warning rather than a 500. The condition also
-// shows up in `dnsdaddy doctor` and at /api/v1/diagnostics, where the
-// effective ACL is what is reported.
+// permission the operator just revoked may still be honoured, or one they just
+// granted may not be working. The write is already committed, so failing the
+// request would invite a retry that creates a second network — hence a
+// successful response carrying an explicit warning rather than a 500.
 //
-// removed marks a deletion: the network contributes nothing afterwards, and
-// what it was contributing is whatever the locked snapshot still holds for it.
-//
-// The returned bool says whether the write could have changed who is admitted.
-// The controller decides it under the same lock as the publish, so a
-// concurrent reload cannot slip a snapshot in between the two: deciding it out
-// here from Current() let a PATCH that had read a newly permitted network but
-// not yet published it leave a DELETE of that network concluding it withdrew
-// nothing. A rename, or a grant the ACL already covers, leaves the enforced
-// ACL correct in every respect that matters, so it is reported to the caller
-// but does not raise the standing warning that a revocation may not have taken.
-func (a *API) reloadNetworkAccess(r *http.Request, n store.Network, removed bool) (bool, string) {
+// The warning says what is known and no more. Earlier versions decided from
+// the write whether client access could have changed, and said either "this is
+// not yet in force" or "no client is affected"; both claims turned out to be
+// unsupportable, because working out which one applies needs the reading of
+// the stored state that has just failed. The condition also outlives this
+// response, on the controller, so `dnsdaddy doctor` and /api/v1/diagnostics
+// keep reporting it until a reload succeeds.
+func (a *API) reloadNetworkAccess(r *http.Request) string {
 	if a.ClientACL == nil {
-		return false, ""
+		return ""
 	}
-
-	var (
-		affected bool
-		err      error
-	)
-	if removed {
-		affected, err = a.ClientACL.ReloadAfterDelete(r.Context(), n.ID)
-	} else {
-		affected, err = a.ClientACL.ReloadAfterWrite(r.Context(), store.ClientACLNetwork(n))
+	if err := a.ClientACL.Reload(r.Context()); err != nil {
+		a.Log.Error("reload client access", "error", err)
+		return "Saved, but DNS Daddy could not re-read its configuration, so it cannot confirm " +
+			"that the client access it is enforcing matches what is stored. Retry the change, " +
+			"or restart DNS Daddy."
 	}
-	if err == nil {
-		return affected, ""
-	}
-
-	a.Log.Error("reload client access", "error", err, "affects_access", affected)
-	if !affected {
-		return false, "Saved, but the change could not be applied to the running resolver. Nothing " +
-			"about who may use it has changed, so no client is affected; the label will " +
-			"catch up on the next change."
-	}
-	// The controller records the failure too, so the diagnostics keep
-	// reporting it after this response has been closed and forgotten.
-	return true, "Saved, but the resolver's client access could not be reloaded, so this change is " +
-		"not yet in force. Retry the change, or restart DNS Daddy."
+	return ""
 }
 
 // writeNetwork answers a network write, attaching a warning when the change is

@@ -91,9 +91,9 @@ paths:
                   clientAclStale:
                     type: boolean
                     description: |
-                      A change to which networks may use the resolver could not
-                      be applied, so the rules being enforced may be older than
-                      what is stored.
+                      The resolver could not re-read its configuration after a
+                      change, so the client access it is enforcing could not be
+                      confirmed to match what is stored.
 
                       On the unauthenticated endpoint because it is the only
                       way `dnsdaddy doctor` can see it: doctor runs as a
@@ -402,23 +402,17 @@ paths:
       responses:
         "204":
           description: >-
-            Deleted, and whatever the network permitted is no longer in force.
-            Also returned when the deletion cannot have changed who is admitted
-            — the network permitted nothing (disabled, unpermitted, or a
-            catch-all with no ranges), or its ranges are still covered by
-            `dns.allowed_client_cidrs` or by another permitted network — since
-            there was no permission to withdraw.
+            Deleted, and the effective client ACL was republished, so whatever
+            the network permitted is no longer in force.
         "200":
           description: >-
-            Deleted, but the resolver's client access could not be reloaded, so
-            the network's addresses may still be being served. Returned only
-            when the deletion actually withdrew admission that nothing else
-            grants; a failed reload that cannot have changed admission answers
-            204 and is logged. The condition is
-            also reported by `GET /api/v1/diagnostics`, by `GET
-            /api/v1/health` as `clientAclStale`, and by `dnsdaddy doctor`
-            (which reads it from health, since the state lives in the running
-            daemon's memory) — until a reload succeeds.
+            Deleted, but the resolver could not re-read its configuration, so
+            whether the network's addresses are still being served could not be
+            confirmed. The condition is also reported by `GET
+            /api/v1/diagnostics`, by `GET /api/v1/health` as `clientAclStale`,
+            and by `dnsdaddy doctor` (which reads it from health, since the
+            state lives in the running daemon's memory) — until a reload
+            succeeds.
           content:
             application/json:
               schema:
@@ -1159,10 +1153,10 @@ components:
         warning:
           type: string
           description: >-
-            Present only on a write that was stored but could not be applied to
-            the running resolver. The text says which of the two cases it is:
-            the change is not yet in force, or it could not have changed who is
-            admitted and so no client is affected. Absent otherwise.
+            Present only on a write that was stored but could not be applied
+            to the running resolver, which means the client access being
+            enforced could not be confirmed to match what is stored. Absent
+            otherwise.
 
     NetworkWithActivity:
       allOf:

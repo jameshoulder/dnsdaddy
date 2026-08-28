@@ -71,64 +71,34 @@ func NewController(bootstrapCIDRs []string, allowPublicResolver bool, load Loade
 
 // Reload rebuilds the effective ACL from the current networks.
 //
-// On error the previous snapshot stays in force. That is the safe failure:
-// a transient database error must not drop every client's permission, and it
-// must not silently widen the ACL either.
+// On error the previous snapshot stays in force and the controller is marked
+// stale. Keeping the old snapshot is the safe failure: a transient database
+// error must not drop every client's permission, and it must not silently
+// widen the ACL either.
+//
+// Every failure marks stale, without trying to work out whether this
+// particular write could have changed who is admitted. Four review rounds
+// went into versions that did try, and each was wrong in one direction or the
+// other, because the question cannot be answered at the moment it is asked:
+// the thing that failed is the read of the desired state, so there is nothing
+// left to compare the enforced state against.
+//
+// The sequence that settled it: two networks permitting the same range, each
+// revoked in turn with the reload failing both times. Comparing against the
+// snapshot classified both as changing nothing — the first because the second
+// network still covered the range, the second because the *snapshot* still
+// held the first network's grant, which the database no longer had. The
+// database then permitted neither, the resolver went on admitting the range,
+// and nothing anywhere said so.
+//
+// So a failed reload records exactly what is known — that the snapshot in
+// force could not be confirmed against what is stored — and every surface
+// says that rather than asserting which way it went.
 func (c *Controller) Reload(ctx context.Context) error {
-	return c.reload(ctx, true)
+	return c.reload(ctx)
 }
 
-// ReloadAfterWrite republishes the effective ACL after a network write and
-// reports whether the write could have changed who is admitted.
-//
-// The two happen under one lock, and that is the point rather than an
-// implementation detail. Deciding from Current() before calling Reload read a
-// snapshot that a concurrent reload was already in the middle of replacing: a
-// PATCH that had loaded a newly permitted network but not yet published it
-// left the snapshot short of that grant, so a DELETE of the same network
-// concluded it was withdrawing nothing, and a reload failure after the PATCH
-// published left the grant in force behind a 204 with nothing marked stale.
-//
-// Holding the lock across the comparison closes it in both directions. Any
-// publish already in flight completes before the comparison sees the snapshot,
-// and any that starts afterwards reads the database after this write
-// committed, so it cannot reintroduce what this write removed.
-func (c *Controller) ReloadAfterWrite(ctx context.Context, n Network) (bool, error) {
-	after, _ := n.prefixes()
-	return c.reloadFor(ctx, n.ID, after)
-}
-
-// ReloadAfterDelete is ReloadAfterWrite for a network that has been removed:
-// it now contributes nothing, and what it was contributing is whatever the
-// snapshot under the lock still holds for it.
-func (c *Controller) ReloadAfterDelete(ctx context.Context, networkID string) (bool, error) {
-	return c.reloadFor(ctx, networkID, nil)
-}
-
-func (c *Controller) reloadFor(ctx context.Context, networkID string, after []netip.Prefix) (bool, error) {
-	if c == nil {
-		return false, nil
-	}
-
-	c.reloading.Lock()
-	defer c.reloading.Unlock()
-
-	changed := c.snap.Load().admissionChanges(networkID, after)
-	if err := c.publish(ctx); err != nil {
-		// A write that cannot have changed admission leaves the enforced ACL
-		// correct in every respect that decides it, and raising "a permission
-		// you revoked may still be honoured" over one would be a false alarm —
-		// and a persistent one, since nothing clears it until an unrelated
-		// write succeeds or the daemon restarts.
-		if changed {
-			c.stale.Store(true)
-		}
-		return changed, err
-	}
-	return changed, nil
-}
-
-func (c *Controller) reload(ctx context.Context, marksStale bool) error {
+func (c *Controller) reload(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
@@ -137,9 +107,7 @@ func (c *Controller) reload(ctx context.Context, marksStale bool) error {
 	defer c.reloading.Unlock()
 
 	if err := c.publish(ctx); err != nil {
-		if marksStale {
-			c.stale.Store(true)
-		}
+		c.stale.Store(true)
 		return err
 	}
 	return nil
