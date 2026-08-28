@@ -274,6 +274,116 @@ jobs:
 
           echo "all smoke assertions passed"
 
+      # The headline claim of dashboard-managed resolver access is "it takes
+      # effect on the next query, with no restart". Unit tests prove the
+      # plumbing; only a real binary on a real socket proves the claim. A
+      # second instance is used because this one's ACL includes loopback, so
+      # granting it would change nothing observable.
+      - name: Resolver access granted in the dashboard must take effect without a restart
+        run: |
+          mkdir -p /tmp/acl
+          cat > /tmp/acl/config.yaml <<EOF
+          data_dir: /tmp/acl/data
+          dns:
+            listen_udp: "127.0.0.1:15354"
+            listen_tcp: "127.0.0.1:15354"
+            upstreams: ["udp://1.1.1.1:53"]
+            # Deliberately excludes loopback, so this instance refuses the very
+            # client the dashboard is about to permit.
+            allowed_client_cidrs: ["10.99.0.0/16"]
+          http:
+            listen: "127.0.0.1:18081"
+            admin_password: "ci-test-password-longer-than-twelve"
+          feeds:
+            refresh_on_start: false
+          detection:
+            enabled: false
+          EOF
+          # The PID, not `pkill -f` on the config path: this script contains
+          # that path as a literal, so a pattern kill can match the shell
+          # running it. Found the hard way.
+          ./dnsdaddy -config /tmp/acl/config.yaml &
+          acl_pid=$!
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:18081/api/v1/health > /dev/null && break
+            sleep 0.5
+          done
+
+          api() { curl -sf -b /tmp/acl/jar "$@"; }
+          rcode() { dig @127.0.0.1 -p 15354 example.com +timeout=5 | grep -oP 'status: \K\w+'; }
+
+          curl -sf -c /tmp/acl/jar -X POST -H 'Content-Type: application/json' \
+            -d '{"password":"ci-test-password-longer-than-twelve"}' \
+            http://127.0.0.1:18081/api/v1/auth/login > /dev/null
+
+          echo "--- before any permission, this client must be REFUSED ---"
+          status=$(rcode); echo "status=$status"
+          [ "$status" = "REFUSED" ] || { echo "expected REFUSED before anything permits loopback"; exit 1; }
+
+          echo "--- granting access in the dashboard must work on the next query ---"
+          id=$(api -X POST -H 'Content-Type: application/json' \
+            -d '{"name":"CI loopback","cidrs":["127.0.0.0/8"],"allowResolver":true}' \
+            http://127.0.0.1:18081/api/v1/networks | jq -r .id)
+          [ -n "$id" ] && [ "$id" != "null" ] || { echo "the network was not created"; exit 1; }
+          status=$(rcode); echo "status=$status"
+          [ "$status" != "REFUSED" ] || { echo "still REFUSED after a permission was granted"; exit 1; }
+
+          echo "--- revoking it must take effect on the next query too ---"
+          api -X PATCH -H 'Content-Type: application/json' \
+            -d '{"allowResolver":false}' "http://127.0.0.1:18081/api/v1/networks/$id" > /dev/null
+          status=$(rcode); echo "status=$status"
+          [ "$status" = "REFUSED" ] || { echo "still resolving after the permission was withdrawn"; exit 1; }
+
+          echo "--- the permission must survive a restart ---"
+          api -X PATCH -H 'Content-Type: application/json' \
+            -d '{"allowResolver":true}' "http://127.0.0.1:18081/api/v1/networks/$id" > /dev/null
+          kill "$acl_pid" 2>/dev/null || true
+          wait "$acl_pid" 2>/dev/null || true
+          ./dnsdaddy -config /tmp/acl/config.yaml &
+          acl_pid=$!
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:18081/api/v1/health > /dev/null && break
+            sleep 0.5
+          done
+          status=$(rcode); echo "status=$status"
+          [ "$status" != "REFUSED" ] || { echo "the permission did not survive a restart"; exit 1; }
+
+          echo "--- a public range must be refused until it is acknowledged ---"
+          code=$(curl -s -o /tmp/acl/ack.json -w '%{http_code}' -b /tmp/acl/jar \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"Public","cidrs":["203.0.113.25/32"],"allowResolver":true}' \
+            -X POST http://127.0.0.1:18081/api/v1/networks)
+          [ "$code" = "409" ] || { echo "expected 409 for an unacknowledged public range, got $code"; exit 1; }
+          jq -e '.publicCidrs == ["203.0.113.25/32"]' /tmp/acl/ack.json > /dev/null \
+            || { echo "the 409 does not name the offending range"; cat /tmp/acl/ack.json; exit 1; }
+
+          echo "--- and must be accepted once it is ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/acl/jar \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"Public","cidrs":["203.0.113.25/32"],"allowResolver":true,"publicAck":true}' \
+            -X POST http://127.0.0.1:18081/api/v1/networks)
+          [ "$code" = "201" ] || { echo "expected 201 for an acknowledged public range, got $code"; exit 1; }
+
+          echo "--- a default route must never be permittable from the API ---"
+          for cidr in "0.0.0.0/0" "::/0"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/acl/jar \
+              -H 'Content-Type: application/json' \
+              -d "{\"name\":\"Everyone\",\"cidrs\":[\"$cidr\"],\"allowResolver\":true,\"publicAck\":true}" \
+              -X POST http://127.0.0.1:18081/api/v1/networks)
+            [ "$code" = "400" ] || { echo "expected 400 for $cidr as a resolver permission, got $code"; exit 1; }
+          done
+
+          echo "--- doctor must report both sources of the effective ACL ---"
+          ./dnsdaddy doctor -config /tmp/acl/config.yaml -json > /tmp/acl/doctor.json || true
+          jq -e '[.checks[] | select(.section == "CLIENT ACCESS")] | length > 0' /tmp/acl/doctor.json > /dev/null \
+            || { echo "doctor reported no client-access checks"; exit 1; }
+          jq -e '[.checks[] | select(.evidence != null) | .evidence[]
+                  | select(test("from the dashboard"))] | length > 0' /tmp/acl/doctor.json > /dev/null \
+            || { echo "doctor does not name the dashboard as a source of the ACL"; cat /tmp/acl/doctor.json; exit 1; }
+
+          kill "$acl_pid" 2>/dev/null || true
+          echo "all resolver-access assertions passed"
+
       - name: A tunnel must be detected, and normal traffic must not be
         run: |
           go build -o /tmp/dd/dnsdaddy-lab ./cmd/dnsdaddy-lab

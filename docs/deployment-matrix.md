@@ -80,7 +80,7 @@ that the machine still resolves names for itself afterwards, and that
 | B4 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh --lan` | browser on another machine | ☐ not run |
 | B2 | Debian 12 + Docker | same | another private subnet, routed | ☐ not run |
 | B3 | Ubuntu + Docker | same, then `docker compose down && up -d` | same subnet | ☐ not run |
-| B5 | Ubuntu 24.04 + Docker | dashboard-managed access: add a network, tick *Allow*, query; untick, query | same subnet | ☐ not run |
+| B5 | Ubuntu 24.04 + Docker | dashboard-managed access: add a network, tick *Allow*, query; untick, query | same subnet | ☐ not run (resolver half covered in CI) |
 | B6 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh --upgrade` over a B0 install | same subnet | ☐ not run |
 | B7 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh --uninstall`, then re-install | same subnet | ☐ not run |
 
@@ -107,6 +107,16 @@ and ticking *Allow this network to use DNS Daddy* must make its clients resolve
 next query. Then restart the stack and confirm the permission survived. On a
 VPS, repeat with a public `/32` and check the acknowledgement is demanded once
 and remembered afterwards.
+
+The *resolver* half of this is now covered by CI, against the real binary over
+a real UDP socket rather than in-process: the end-to-end job starts a second
+instance whose ACL deliberately excludes loopback, asserts `REFUSED`, grants
+access through the API, asserts the very next query is answered, revokes it,
+asserts `REFUSED` again, restarts and asserts the permission survived — and
+checks that a public range is refused with 409 until acknowledged and that a
+default route is refused outright. What CI cannot cover, and what B5 is still
+for: the browser doing it rather than curl, Docker's port publishing and source
+translation in the path, and a real client on a real subnet.
 
 **B6 checks the upgrade path.** Data, `.env` and dashboard-managed permissions
 must all survive; the run must wait for health and run `dnsdaddy doctor`. Seed
