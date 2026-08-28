@@ -1527,8 +1527,11 @@ function accessExplainer() {
       </p>
       <p class="small">
         <strong>Access</strong> decides whether DNS Daddy accepts queries
-        arriving <em>from this network's addresses</em> at all. Without it,
-        clients there are answered <code>REFUSED</code>.
+        arriving <em>from this network's addresses</em> at all. Without it this
+        network grants nothing, and its clients are answered <code>REFUSED</code>
+        unless another permitted range covers them — permissions add up, and
+        nothing here subtracts, so unticking a narrower network does not close a
+        range a wider one opens.
       </p>
       <p class="small muted">
         DNS-over-HTTPS and DNS-over-TLS clients holding this network's token are
@@ -1665,6 +1668,16 @@ function accessBadge(n) {
   if (n.resolvesVia) {
     return html`<span class="badge warn" title="Covered by ${n.resolvesVia}">Via wider range</span>`;
   }
+  if (catchAll) {
+    // The seeded Default network is exactly this: enabled, no ranges, no
+    // permission. It has no addresses of its own, so whether its clients are
+    // served depends on where each one arrives from — and on a stock install
+    // the configured ACL serves every private range, so most of them are.
+    // Badging it Refused told every new operator that their working clients
+    // were being turned away.
+    return html`<span class="badge"
+      title="A catch-all has no ranges of its own. Whether a client it matches is served depends on that client's own address — see who may use this resolver, above.">Depends on the client</span>`;
+  }
   return html`<span class="badge bad">Refused</span>`;
 }
 
@@ -1702,7 +1715,9 @@ pages.networks = {
             <input type="checkbox" name="allowResolver" checked>
             <span><strong>Allow this network to use DNS Daddy</strong>
               <span class="cat-desc">Permits DNS queries from these addresses. Leave it off and
-                clients here are answered REFUSED, whatever policy they have.</span>
+                this network grants nothing — its clients are answered REFUSED unless some
+                other permitted range covers them, since the ACL is a union with no deny
+                rules.</span>
               <span class="cat-desc" id="access-needs-cidrs" hidden>This permits nothing while
                 the CIDR list is empty: a catch-all has no addresses of its own to permit.
                 Add a range above, or permit the network your clients actually match.</span></span>

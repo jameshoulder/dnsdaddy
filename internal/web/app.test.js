@@ -795,3 +795,22 @@ test('an unrestricted ACL says nothing is refused rather than listing ranges', (
   const out = clientAccessSummary({ unrestricted: true, allowPublicResolver: false });
   assert.match(out, /nothing is refused/);
 });
+
+// The seeded Default network is enabled, has no ranges and is unpermitted, so
+// it is the state every fresh install starts in — and it was badged Refused
+// while the configured ACL was serving its clients perfectly well. That is the
+// dashboard misdiagnosing a working deployment, which is the failure this
+// whole branch exists to end.
+test('an unpermitted catch-all does not claim its clients are refused', () => {
+  const out = accessBadge(network({ cidrs: [], allowResolver: false }));
+  assert.doesNotMatch(out, /badge bad/);
+  assert.doesNotMatch(out, /Refused/);
+  assert.match(out, /Depends on the client/);
+});
+
+// A network with ranges, unpermitted and covered by nothing, genuinely is.
+test('an unpermitted network with ranges nothing covers still reads as refused', () => {
+  const out = accessBadge(network({ allowResolver: false }));
+  assert.match(out, /badge bad/);
+  assert.match(out, /Refused/);
+});
