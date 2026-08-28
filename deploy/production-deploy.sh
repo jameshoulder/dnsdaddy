@@ -346,8 +346,16 @@ step "7. Validate and build (old container keeps serving)"
 docker compose config >/dev/null || die "docker compose config is invalid"
 ok "compose config valid"
 if command -v go >/dev/null 2>&1; then
-  go vet ./... >/dev/null 2>&1 && ok "go vet clean" || warn "go vet reported issues"
-  go test ./... >/dev/null 2>&1 && ok "go test passed" || warn "go test failed — review before relying on this build"
+  # Read-only against the deployment, but not against the disk: go writes a
+  # build cache under $HOME, and this run has promised to change nothing. It is
+  # also minutes of work nobody asked a dry run to do.
+  if [[ $DRY_RUN -eq 1 ]]; then
+    act go vet ./...
+    act go test ./...
+  else
+    go vet ./... >/dev/null 2>&1 && ok "go vet clean" || warn "go vet reported issues"
+    go test ./... >/dev/null 2>&1 && ok "go test passed" || warn "go test failed — review before relying on this build"
+  fi
 else
   warn "Go not installed on the host; relying on the Docker build"
 fi

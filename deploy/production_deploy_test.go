@@ -113,6 +113,14 @@ case "$q" in
 esac
 exit 0
 `)
+	// go is deliberately on this PATH. The script runs `go vet` and `go test`
+	// when it finds one, and that branch never ran here — go lives in
+	// /usr/local/go/bin, off the harness PATH — while it did run on CI, where
+	// it wrote a build cache during a dry run. A stub PATH that cannot reach a
+	// command the script looks for hides whatever that branch does.
+	if path, err := exec.LookPath("go"); err == nil {
+		_ = os.Symlink(path, filepath.Join(p.bin, "go"))
+	}
 	p.stub("curl", `exit 0`)
 	p.stub("dig", `exit 0`)
 }
