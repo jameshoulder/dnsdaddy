@@ -17,6 +17,7 @@
 package deploy
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -404,4 +405,66 @@ func TestASqliteFailureIsNotMistakenForALegacySchema(t *testing.T) {
 	contains(t, out, "database is locked")
 	notContains(t, out, "predates per-network resolver access")
 	notContains(t, out, "bootstrap ACL set to: 127.0.0.0/8,172.16.0.0/12,10.0.10.0/24")
+}
+
+// snapshot records every path under dir with the things a mutation would
+// change. Enough to catch a create, a delete, a rewrite, a chmod, or a bare
+// touch.
+func snapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	must(t, filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		out[rel] = fmt.Sprintf("mode=%v size=%d mtime=%d",
+			info.Mode(), info.Size(), info.ModTime().UnixNano())
+		return nil
+	}))
+	return out
+}
+
+// "*** DRY RUN — nothing will be changed ***" is a promise the script makes in
+// prose, in its own output, at the top of every dry run. Until now nothing
+// enforced it, and it was already false twice in this PR's history: step 6's
+// touch created an .env on hosts that had none, and its chmod restamped the
+// mode of one that did. Both sat outside act(), which is the mechanism the
+// promise actually rests on, and both were found by accident rather than by a
+// test.
+//
+// So this asserts the promise directly, over the whole fixture rather than one
+// file: no path appears, disappears, or changes mode, size or mtime. A comment
+// saying "every mutating step goes through act()" cannot fail; this can.
+func TestADryRunChangesNothingOnDisk(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_PERMITTED=10.0.10.0/24")
+
+	before := snapshot(t, p.root)
+	out, code := p.run("--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	after := snapshot(t, p.root)
+
+	for path, was := range before {
+		switch now, still := after[path]; {
+		case !still:
+			t.Errorf("the dry run deleted %s", path)
+		case now != was:
+			t.Errorf("the dry run changed %s:\n  before %s\n  after  %s", path, was, now)
+		}
+	}
+	for path := range after {
+		if _, existed := before[path]; !existed {
+			t.Errorf("the dry run created %s", path)
+		}
+	}
 }

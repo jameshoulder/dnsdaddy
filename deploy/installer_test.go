@@ -50,6 +50,13 @@ func newInstall(t *testing.T) *install {
 	copyFile(t, filepath.Join(repo, ".env.example"), filepath.Join(root, ".env.example"), 0o644)
 	copyFile(t, filepath.Join(repo, "docker-compose.yml"), filepath.Join(root, "docker-compose.yml"), 0o644)
 
+	// The stub log is created up front, and writable, so that a run which
+	// records nothing and a run which records a lot differ only in its
+	// contents — never in whether the fixture gained a file. It is harness
+	// scaffolding that happens to live inside the tree, which is why the
+	// dry-run snapshot below excludes it by name.
+	must(t, os.WriteFile(filepath.Join(root, "compose.log"), nil, 0o666))
+
 	in := &install{t: t, root: root, bin: filepath.Join(root, "stubbin")}
 	must(t, os.MkdirAll(in.bin, 0o755))
 	in.writeDefaultStubs()
@@ -967,9 +974,8 @@ func TestUpgradeAbortsWhenItCannotCloseAPublicBind(t *testing.T) {
 	in := newInstall(t)
 	in.writeEnv("# managed by install-docker.sh\nDNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
 	// sed -i rewrites .env by creating a sibling and renaming, so it is the
-	// directory that has to refuse the write. The stub log is pre-created
-	// because appending to an existing file does not need that permission.
-	must(t, os.WriteFile(filepath.Join(in.root, "compose.log"), nil, 0o666))
+	// directory that has to refuse the write. Appending to the already-created
+	// stub log does not need that permission, so the stubs still work.
 	in.denyWrite(in.root)
 
 	out, code, ok := in.runAsNonRoot("--upgrade", "--yes")
@@ -1014,7 +1020,6 @@ func TestUpgradeRefusesToGuessAtAnUnreadableEnv(t *testing.T) {
 func TestFreshInstallAbortsWhenItCannotCloseAPublishedBind(t *testing.T) {
 	in := newInstall(t)
 	in.writeEnv("DNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
-	must(t, os.WriteFile(filepath.Join(in.root, "compose.log"), nil, 0o666))
 	in.denyWrite(in.root)
 
 	out, code, ok := in.runAsNonRoot("--yes")
@@ -1026,4 +1031,38 @@ func TestFreshInstallAbortsWhenItCannotCloseAPublishedBind(t *testing.T) {
 	}
 	notContains(t, out, "returns to loopback")
 	notContains(t, in.composeLog(), "up -d")
+}
+
+// The installer makes the same promise its sibling does — "Dry run complete.
+// Nothing was changed." — and TestDryRunChangesNothing checks two specific
+// ways it could be broken: .env appearing, and compose running. Those are the
+// two that were thought of. This asserts the promise itself over the whole
+// fixture, so a third way fails a test rather than waiting to be noticed.
+func TestDryRunChangesNothingOnDisk(t *testing.T) {
+	in := newInstall(t)
+
+	before := snapshot(t, in.root)
+	out, code := in.run("--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	after := snapshot(t, in.root)
+	// compose.log is this harness's recording of what the script invoked, not
+	// something the script wrote on its own account.
+	delete(before, "compose.log")
+	delete(after, "compose.log")
+
+	for path, was := range before {
+		switch now, still := after[path]; {
+		case !still:
+			t.Errorf("the dry run deleted %s", path)
+		case now != was:
+			t.Errorf("the dry run changed %s:\n  before %s\n  after  %s", path, was, now)
+		}
+	}
+	for path := range after {
+		if _, existed := before[path]; !existed {
+			t.Errorf("the dry run created %s", path)
+		}
+	}
 }
