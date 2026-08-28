@@ -157,7 +157,34 @@ type resolverAccessPlan struct {
 //     the same outcome through a web form would make it decorative.
 //  3. A publicly routable range needs the operator's affirmation, either
 //     carried in this request or remembered from when they made it.
-func planResolverAccess(allow bool, cidrs []string, alreadyAcked map[string]bool, ackNow bool) (resolverAccessPlan, error) {
+//
+// otherPermittedCIDRs returns the ranges every *other* enabled, permitted
+// network contributes, read inside the caller's transaction.
+//
+// The open-resolver rule is about the ACL the dashboard produces, not about one
+// row: two networks holding 0.0.0.0/1 and 128.0.0.0/1 admit the whole internet
+// between them while each looks unremarkable on its own.
+func otherPermittedCIDRs(ctx context.Context, tx *sql.Tx, exceptID string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT c.cidr FROM network_cidrs c
+		  JOIN networks n ON n.id = c.network_id
+		 WHERE n.enabled = 1 AND n.allow_resolver = 1 AND c.cidr <> '' AND n.id <> ?`, exceptID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func planResolverAccess(allow bool, cidrs []string, alreadyAcked map[string]bool, ackNow bool, otherPermitted []string) (resolverAccessPlan, error) {
 	plan := resolverAccessPlan{acked: map[string]bool{}}
 	if !allow {
 		// Acknowledgements are still carried forward: revoking access and
@@ -167,6 +194,25 @@ func planResolverAccess(allow bool, cidrs []string, alreadyAcked map[string]bool
 			plan.acked[c] = true
 		}
 		return plan, nil
+	}
+
+	// The aggregate first, because a set can be an open resolver without any
+	// member of it being one.
+	aggregate := make([]netip.Prefix, 0, len(cidrs)+len(otherPermitted))
+	for _, raw := range append(append([]string(nil), cidrs...), otherPermitted...) {
+		if p, err := clientacl.ParsePrefix(raw); err == nil {
+			aggregate = append(aggregate, p)
+		}
+	}
+	if clientacl.CoversEntireFamily(aggregate) {
+		return plan, fmt.Errorf(
+			"the networks permitted after this change would together allow DNS queries from " +
+				"every address on the internet, which is what an open resolver is — even though " +
+				"no single range says so. DNS Daddy will not do that from the dashboard: an open " +
+				"resolver is found and conscripted into amplification attacks within days. If " +
+				"you genuinely intend to run one, set dns.allow_public_resolver " +
+				"(DNSDADDY_ALLOW_PUBLIC_RESOLVER) in configuration, where it is a deliberate act " +
+				"with a restart attached")
 	}
 
 	var needAck []string
@@ -223,10 +269,6 @@ func (s *Store) CreateNetwork(ctx context.Context, in NetworkInput) (Network, er
 
 	enabled := derefBoolDefault(in.Enabled, true)
 	allowResolver := derefBoolDefault(in.AllowResolver, false)
-	plan, err := planResolverAccess(allowResolver, cidrs, nil, derefBoolDefault(in.PublicAck, false))
-	if err != nil {
-		return Network{}, err
-	}
 
 	id := NewID("n")
 	now := unixMilli(time.Now())
@@ -236,6 +278,18 @@ func (s *Store) CreateNetwork(ctx context.Context, in NetworkInput) (Network, er
 		return Network{}, err
 	}
 	defer tx.Rollback()
+
+	// Inside the transaction, because the open-resolver rule is about the ACL
+	// the dashboard produces as a whole: what the other permitted networks
+	// contribute has to be read at the same instant as the row being written.
+	others, err := otherPermittedCIDRs(ctx, tx, id)
+	if err != nil {
+		return Network{}, err
+	}
+	plan, err := planResolverAccess(allowResolver, cidrs, nil, derefBoolDefault(in.PublicAck, false), others)
+	if err != nil {
+		return Network{}, err
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO networks (id, name, location, policy_id, token, enabled, allow_resolver, created_at, updated_at)
@@ -304,7 +358,12 @@ func (s *Store) UpdateNetwork(ctx context.Context, id string, in NetworkInput) (
 	if in.AllowResolver != nil {
 		resultAllow = *in.AllowResolver
 	}
-	plan, err := planResolverAccess(resultAllow, resultCIDRs, current.acked, derefBoolDefault(in.PublicAck, false))
+	others, err := otherPermittedCIDRs(ctx, tx, id)
+	if err != nil {
+		return Network{}, err
+	}
+	plan, err := planResolverAccess(resultAllow, resultCIDRs, current.acked,
+		derefBoolDefault(in.PublicAck, false), others)
 	if err != nil {
 		return Network{}, err
 	}

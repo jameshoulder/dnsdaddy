@@ -74,3 +74,92 @@ func AddrIsPublic(addr netip.Addr) bool {
 // attacks within days, and by then it is the operator's address in the abuse
 // report.
 func IsUniversal(p netip.Prefix) bool { return p.IsValid() && p.Bits() == 0 }
+
+// CoversEntireFamily reports whether prefixes between them admit every address
+// of IPv4, or every address of IPv6.
+//
+// IsUniversal only recognises a literal default route, which is one spelling of
+// an open resolver out of many. 0.0.0.0/1 and 128.0.0.0/1 each pass it and
+// together admit the whole internet, and there is nothing special about halves:
+// any complete tiling does it. The dashboard refuses to create an open
+// resolver, so it has to refuse every way of writing one.
+//
+// Sibling merging rather than interval arithmetic, so IPv6 needs no 128-bit
+// integers: absorb any prefix another already contains, then repeatedly replace
+// a pair of siblings with their parent. A set that tiles the family collapses
+// to /0; one that does not cannot.
+func CoversEntireFamily(prefixes []netip.Prefix) bool {
+	return coversFamily(prefixes, true) || coversFamily(prefixes, false)
+}
+
+func coversFamily(prefixes []netip.Prefix, v4 bool) bool {
+	set := map[netip.Prefix]bool{}
+	for _, p := range prefixes {
+		if !p.IsValid() {
+			continue
+		}
+		p = netip.PrefixFrom(Normalize(p.Addr()), p.Bits()).Masked()
+		if !p.IsValid() || p.Addr().Is4() != v4 {
+			continue
+		}
+		set[p] = true
+	}
+
+	for changed := true; changed; {
+		changed = false
+
+		// A prefix inside another contributes nothing, and leaving it in stops
+		// its container from ever finding its own sibling.
+		for p := range set {
+			for q := range set {
+				if q != p && q.Bits() < p.Bits() && q.Contains(p.Addr()) {
+					delete(set, p)
+					changed = true
+					break
+				}
+			}
+			if changed {
+				break
+			}
+		}
+		if changed {
+			continue
+		}
+
+		for p := range set {
+			sib, ok := sibling(p)
+			if !ok || !set[sib] {
+				continue
+			}
+			delete(set, p)
+			delete(set, sib)
+			set[netip.PrefixFrom(p.Addr(), p.Bits()-1).Masked()] = true
+			changed = true
+			break
+		}
+	}
+
+	for p := range set {
+		if p.Bits() == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// sibling returns the prefix sharing p's parent: same length, last significant
+// bit flipped.
+func sibling(p netip.Prefix) (netip.Prefix, bool) {
+	if p.Bits() == 0 {
+		return netip.Prefix{}, false
+	}
+	bit := p.Bits() - 1
+	if p.Addr().Is4() {
+		b := p.Addr().As4()
+		b[bit/8] ^= 1 << (7 - bit%8)
+		return netip.PrefixFrom(netip.AddrFrom4(b), p.Bits()).Masked(), true
+	}
+	b := p.Addr().As16()
+	b[bit/8] ^= 1 << (7 - bit%8)
+	return netip.PrefixFrom(netip.AddrFrom16(b), p.Bits()).Masked(), true
+}

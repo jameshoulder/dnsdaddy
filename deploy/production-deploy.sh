@@ -125,6 +125,7 @@ step "4. Derive the client ACL from configured networks"
 # writing every configured range into the ACL would overrule an operator who
 # deliberately left that box unticked — the opposite of what this script is for.
 CFG_CIDRS=""
+CFG_LEGACY=0
 if command -v sqlite3 >/dev/null; then
   CFG_CIDRS=$(sqlite3 -readonly "$DB" \
     "SELECT DISTINCT c.cidr FROM network_cidrs c
@@ -139,6 +140,11 @@ if command -v sqlite3 >/dev/null; then
   if [[ -z "$CFG_CIDRS" ]] && ! sqlite3 -readonly "$DB" \
        "SELECT allow_resolver FROM networks LIMIT 1;" >/dev/null 2>&1; then
     warn "this database predates per-network resolver access; using every enabled network"
+    # These ranges have to go into the bootstrap list, unlike the managed ones.
+    # The upgrade migrates every legacy network with allow_resolver = 0, so the
+    # database will grant none of them back — dropping them here would answer
+    # REFUSED to every client this deployment was already serving.
+    CFG_LEGACY=1
     CFG_CIDRS=$(sqlite3 -readonly "$DB" \
       "SELECT DISTINCT c.cidr FROM network_cidrs c
          JOIN networks n ON n.id = c.network_id
@@ -163,7 +169,20 @@ fi
 # window between the two refuses clients rather than admitting them, which is
 # the right way round for a gap this brief.
 BASE="127.0.0.0/8,172.16.0.0/12"
-if [[ -n "$CFG_CIDRS" ]]; then
+if [[ -n "$CFG_CIDRS" ]] && [[ $CFG_LEGACY -eq 1 ]]; then
+  # The legacy path is the exception to everything above. Nothing in this
+  # database carries the permission, so nothing will grant these ranges after
+  # the upgrade; they stay in the bootstrap list or the deployment goes dark.
+  # The trade is deliberate and stated: keeping the clients served costs the
+  # ability to revoke them from the dashboard until they are re-added as
+  # permitted Networks.
+  ok "configured client networks found: $CFG_CIDRS"
+  warn "kept in .env because this database predates per-network access — after"
+  warn "upgrading, re-add them under Networks with the box ticked and remove"
+  warn "them from DNSDADDY_ALLOWED_CLIENT_CIDRS to make them revocable again"
+  ACL="$BASE,$CFG_CIDRS"
+  ACL_KNOWN=1
+elif [[ -n "$CFG_CIDRS" ]]; then
   ok "configured client networks found: $CFG_CIDRS"
   ok "left in the database, where unticking the box can still withdraw them"
   ACL="$BASE"

@@ -566,3 +566,69 @@ func TestTheTransactionalReadReportsAMissingRowAsNotFound(t *testing.T) {
 		t.Errorf("err = %v, want ErrNotFound — the delete handler's 404 comes from this", err)
 	}
 }
+
+// An open resolver does not have to be spelled 0.0.0.0/0. Two complementary
+// halves admit every IPv4 address between them while each looks unremarkable,
+// and the dashboard refuses to create an open resolver — so it has to refuse
+// every way of writing one, not the one spelling.
+func TestComplementaryHalvesAreRefusedAsAnOpenResolver(t *testing.T) {
+	st := newTestStore(t)
+
+	_, err := st.CreateNetwork(context.Background(), NetworkInput{
+		Name:          ptr("Everything, quietly"),
+		CIDRs:         ptr([]string{"0.0.0.0/1", "128.0.0.0/1"}),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+	if err == nil {
+		t.Fatal("two halves of the IPv4 space were accepted; that is an open resolver created " +
+			"from the dashboard, which dns.allow_public_resolver exists to be the only route to")
+	}
+	if !strings.Contains(err.Error(), "open resolver") {
+		t.Errorf("err = %v, want it to name the open resolver", err)
+	}
+}
+
+// And across networks, because the rule is about the ACL the dashboard
+// produces rather than about any one row.
+func TestHalvesSplitAcrossTwoNetworksAreAlsoRefused(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.CreateNetwork(ctx, NetworkInput{
+		Name:          ptr("Lower half"),
+		CIDRs:         ptr([]string{"0.0.0.0/1"}),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	}); err != nil {
+		t.Fatalf("the first half alone should be allowed: %v", err)
+	}
+
+	_, err := st.CreateNetwork(ctx, NetworkInput{
+		Name:          ptr("Upper half"),
+		CIDRs:         ptr([]string{"128.0.0.0/1"}),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+	if err == nil {
+		t.Fatal("the second half was accepted; between them these two networks admit every " +
+			"IPv4 address, and neither one says so on its own")
+	}
+	if !strings.Contains(err.Error(), "open resolver") {
+		t.Errorf("err = %v, want it to name the open resolver", err)
+	}
+}
+
+// The rule must not refuse ordinary configurations. Every private range at once
+// is a lot of address space and nothing like the whole internet.
+func TestWidePrivateRangesAreStillAllowed(t *testing.T) {
+	st := newTestStore(t)
+
+	if _, err := st.CreateNetwork(context.Background(), NetworkInput{
+		Name:          ptr("Everything private"),
+		CIDRs:         ptr([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"}),
+		AllowResolver: ptr(true),
+	}); err != nil {
+		t.Errorf("permitting the private ranges was refused: %v", err)
+	}
+}
