@@ -129,7 +129,7 @@ separately by `dnsdaddy doctor`, at `GET /api/v1/diagnostics`, and on the
 Networks page, so you can always see which one is responsible for a given
 range.
 
-Three properties worth knowing before you rely on it:
+Four properties worth knowing before you rely on it:
 
 **An empty bootstrap ACL stays unrestricted.** An empty
 `dns.allowed_client_cidrs` means "refuse nothing", which DNS Daddy only starts
@@ -144,6 +144,14 @@ carve a hole in a broader permitted range. If `10.0.0.0/8` is permitted, a
 `10.50.0.0/16` network with the box unticked still resolves — because something
 wider already permits it. Diagnostics report exactly this case rather than
 leaving you to find it; to stop those clients, narrow the wider range.
+
+**Permitting the catch-all grants nothing.** A network with no ranges has no
+addresses of its own, so ticking *Allow this network to use DNS Daddy* on it
+adds nothing to the ACL — the permission is stored and contributes no range.
+Whether a client the catch-all matches is served depends entirely on that
+client's own address, which is why the Networks page badges it *Depends on the
+client* rather than allowed or refused. To permit a client, permit a network
+that actually lists its address.
 
 **A public range needs an explicit acknowledgement, and `0.0.0.0/0` is
 refused outright.** Permitting a publicly routable range means DNS Daddy will
@@ -282,7 +290,9 @@ arrive from:
 | Production floor | `198.51.100.11/32` | Strict |
 
 The seeded **Default** network has no ranges, which makes it the catch-all for
-anything unmatched. Keep it.
+anything unmatched. Keep it. Note that it decides *policy* for those clients
+and nothing about whether they may resolve: permitting it grants no range, so
+its access column reads *Depends on the client*.
 
 Most specific prefix wins, so a `/32` exception inside a `/24` behaves the way
 you would expect.
