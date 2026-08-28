@@ -138,13 +138,22 @@ func ClientAccess(in ClientAccessInput) []Check {
 		checks = append(checks, Check{
 			Section: sectionClientAccess,
 			Name:    "Client ACL is in force",
-			Status:  StatusFail,
+			Status:  StatusWarn,
 			Summary: "DNS Daddy could not re-read its configuration after a change, so it " +
 				"cannot confirm that the rules below are the ones being enforced.",
-			Action: "A permission you granted may not be working, and — the reason this is a " +
-				"failure rather than a warning — one you revoked may still be honoured. Make " +
-				"any change under Networks to force a reload, or restart DNS Daddy. The log " +
-				"records why the reload failed.",
+			// A warning rather than a failure, on this package's own
+			// definitions: something is definitely wrong — the re-read failed
+			// — but StatusFail also asserts that DNS will not work as the
+			// operator intends, and that is the half nobody can know here. The
+			// enforced ACL may be exactly right. Saying otherwise would be the
+			// mistake this whole check exists to catch, made by the check.
+			//
+			// The risk is named rather than dropped, because a warning that
+			// does not say what is at stake gets scrolled past.
+			Action: "A permission you granted may not be working, or one you revoked may still " +
+				"be honoured — which of those, if either, cannot be determined without the " +
+				"read that failed. Make any change under Networks to force a reload, or " +
+				"restart DNS Daddy. The log records why the reload failed.",
 		})
 	}
 

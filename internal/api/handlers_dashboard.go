@@ -22,17 +22,21 @@ type HealthResponse struct {
 	UptimeSeconds int64  `json:"uptimeSeconds"`
 	BlocklistSize int    `json:"blocklistSize"`
 
-	// ClientACLStale reports that a change to who may use the resolver could
-	// not be applied, so the rules being enforced may be older than what is
-	// stored.
+	// ClientACLStale reports that the resolver could not re-read its
+	// configuration after a change, so the client access it is enforcing could
+	// not be confirmed to match what is stored.
+	//
+	// It says the re-read failed and nothing more. Whether the enforced rules
+	// actually differ is not knowable here: working it out needs the reading
+	// that just failed.
 	//
 	// Here, on the unauthenticated endpoint, because it is the only way
 	// `dnsdaddy doctor` can see it. doctor runs as a separate process and
 	// rebuilds the ACL from configuration and the database — that is the
 	// *desired* state, and this flag lives only in the running daemon's
-	// memory. Without it doctor would exit zero while the daemon honoured a
-	// prefix the operator had deleted, which is exactly the misleading green
-	// that command exists to remove.
+	// memory. Without it doctor would report nothing at all while the daemon
+	// might be honouring a prefix the operator had deleted, which is exactly
+	// the misleading green that command exists to remove.
 	//
 	// It reveals nothing: a boolean saying a reload failed, not what the ACL
 	// contains. The same endpoint already reports the blocklist size for the

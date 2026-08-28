@@ -1153,10 +1153,11 @@ components:
         warning:
           type: string
           description: >-
-            Present only on a write that was stored but could not be applied
-            to the running resolver, which means the client access being
-            enforced could not be confirmed to match what is stored. Absent
-            otherwise.
+            Present only on a write that was stored, after which the resolver
+            could not re-read its configuration — so the client access being
+            enforced could not be confirmed to match what is stored. It does
+            not say the change failed to apply; which of the two it is cannot
+            be determined without the read that failed. Absent otherwise.
 
     NetworkWithActivity:
       allOf:

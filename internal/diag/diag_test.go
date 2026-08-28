@@ -282,10 +282,17 @@ func TestClientAccessStillReportsUnreachableNetworksWithAnACL(t *testing.T) {
 	}
 }
 
-// A stale ACL is a failure, not a warning: a permission the operator revoked
-// may still be being honoured, and after a delete there is no network row left
-// for any other check to notice it against.
-func TestStaleACLIsReportedAsAFailure(t *testing.T) {
+// A stale ACL is a warning, and the classification is the point rather than a
+// detail. StatusFail in this package asserts that DNS will not work as the
+// operator intends; after a failed reload the re-read is definitely broken but
+// the enforced ACL may be exactly right, and nothing here can tell which. A
+// check whose whole job is to stop DNS Daddy claiming what it has not measured
+// must not itself claim it.
+//
+// The risk still has to be named, or a warning gets scrolled past — so the
+// action says both directions and says that which one applies is unknowable
+// without the read that failed.
+func TestStaleACLIsReportedAsUnconfirmedRatherThanBroken(t *testing.T) {
 	stale := true
 	checks := ClientAccess(ClientAccessInput{
 		ACL:   clientacl.Compute([]string{"127.0.0.0/8"}, false, nil),
@@ -293,14 +300,18 @@ func TestStaleACLIsReportedAsAFailure(t *testing.T) {
 	})
 
 	c := find(t, checks, "Client ACL is in force")
-	if c.Status != StatusFail {
-		t.Errorf("status = %s, want fail — a revocation may not have taken effect", c.Status)
+	if c.Status != StatusWarn {
+		t.Errorf("status = %s, want warn — the re-read failed, but whether the enforced ACL "+
+			"is wrong is exactly what could not be determined", c.Status)
+	}
+	if !strings.Contains(c.Summary, "cannot confirm") {
+		t.Errorf("the summary does not say what is actually unknown: %q", c.Summary)
 	}
 	if !strings.Contains(c.Action, "revoked") {
-		t.Errorf("the action does not say which direction is dangerous: %q", c.Action)
+		t.Errorf("the action does not name the dangerous direction: %q", c.Action)
 	}
-	if Worst(checks) != StatusFail {
-		t.Error("Worst did not report the failure, so doctor would exit zero on a stale ACL")
+	if !strings.Contains(c.Action, "cannot be determined") {
+		t.Errorf("the action states the risk without saying it is unconfirmed: %q", c.Action)
 	}
 }
 

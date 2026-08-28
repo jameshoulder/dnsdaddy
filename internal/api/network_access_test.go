@@ -513,13 +513,12 @@ func TestDeleteReportsAFailedReload(t *testing.T) {
 	h.failACLReload.Store(false)
 	_, raw = h.do("GET", "/api/v1/diagnostics", nil)
 	body = decode[map[string]any](t, raw)
-	if body["status"] != "fail" {
-		t.Errorf("diagnostics status = %v, want fail while the ACL is stale", body["status"])
-	}
 	found := false
 	for _, c := range body["checks"].([]any) {
 		check := c.(map[string]any)
-		if check["name"] == "Client ACL is in force" && check["status"] == "fail" {
+		// Warn rather than fail: the re-read is definitely broken, but whether
+		// the enforced ACL is wrong is what could not be determined.
+		if check["name"] == "Client ACL is in force" && check["status"] == "warn" {
 			found = true
 		}
 	}
