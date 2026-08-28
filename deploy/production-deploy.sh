@@ -146,10 +146,27 @@ if command -v sqlite3 >/dev/null; then
   fi
 fi
 
+# The derived ranges decide whether it is safe to deploy. They are deliberately
+# NOT copied into the bootstrap list.
+#
+# The bootstrap list and the dashboard's permissions are combined by union, and
+# a union has no deny rules — so a range promoted here would go on admitting
+# its clients after the operator unticked "Allow this network to use DNS
+# Daddy", disabled the network or deleted it. That makes the dashboard's
+# revocation control ineffective on exactly the deployments this script
+# creates, and a revocation control that does not revoke is worse than none:
+# the operator believes the client is cut off.
+#
+# The managed ranges stay where they can be withdrawn. BASE keeps the config
+# valid and the container closed on the way up, and the first read of the
+# database — immediately after start — adds the permitted networks back. The
+# window between the two refuses clients rather than admitting them, which is
+# the right way round for a gap this brief.
 BASE="127.0.0.0/8,172.16.0.0/12"
 if [[ -n "$CFG_CIDRS" ]]; then
   ok "configured client networks found: $CFG_CIDRS"
-  ACL="$BASE,$CFG_CIDRS"
+  ok "left in the database, where unticking the box can still withdraw them"
+  ACL="$BASE"
   ACL_KNOWN=1
 elif [[ $ALLOW_PUBLIC_RESOLVER -eq 1 ]]; then
   warn "no client CIDRs configured in the database"
@@ -172,9 +189,8 @@ else
     2. Re-run this script — it will derive the ACL from them automatically.
 
   On a running deployment that tick-box is enough on its own: it takes effect
-  on the next query. This script exists to bake the same ranges into .env as
-  bootstrap configuration, so a container that starts before the database is
-  read is already closed.
+  on the next query. This script checks that you have set at least one, so it
+  never deploys a resolver nobody has decided the audience for.
 
   Or set DNSDADDY_ALLOWED_CLIENT_CIDRS in .env yourself and run
   'docker compose up -d' directly.
@@ -234,7 +250,16 @@ set_env() {
   fi
 }
 if [[ $ACL_KNOWN -eq 1 ]]; then
-  set_env DNSDADDY_ALLOWED_CLIENT_CIDRS "$ACL"; ok "ACL set to: $ACL"
+  set_env DNSDADDY_ALLOWED_CLIENT_CIDRS "$ACL"; ok "bootstrap ACL set to: $ACL"
+  if [[ -n "$CFG_CIDRS" ]]; then
+    ok "permitted networks stay in the database: $CFG_CIDRS"
+    # An earlier version of this script copied them here. Say so, because a
+    # previous run's promoted ranges are exactly what this narrowing removes,
+    # and an operator watching the diff deserves the reason rather than a
+    # silent change to who their resolver admits.
+    ok "(a previous run may have copied these into .env; they are withdrawn from"
+    ok " the bootstrap list so that unticking the box in the dashboard works)"
+  fi
 else
   # Reaching this branch requires --allow-public-resolver: step 4 already
   # aborted the deployment otherwise. This is the explicit, deliberate opt-in

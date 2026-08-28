@@ -867,3 +867,52 @@ func TestResolvesViaNamesEveryCoveringRange(t *testing.T) {
 	}
 	t.Fatal("the created network is missing from the list")
 }
+
+// The snapshot and the database are two points in time, and after a failed
+// reload they disagree. An explanation for a range the row no longer has must
+// not be reported against the range that replaced it.
+func TestResolvesViaIsNotCarriedOverToAReplacedRange(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	// 10.10.0.0/16 is inside the shipped 10.0.0.0/8, so the snapshot records a
+	// covering range for it.
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Moving site",
+		"cidrs": []string{"10.10.0.0/16"},
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	// Replace it with a different range, and break the reload so the snapshot
+	// keeps describing the old one.
+	h.failACLReload.Store(true)
+	resp, raw := h.do("PATCH", "/api/v1/networks/"+id, map[string]any{
+		"cidrs": []string{"192.168.40.0/24"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+
+	_, raw = h.do("GET", "/api/v1/networks", nil)
+	body := decode[struct {
+		Networks []struct {
+			Name        string   `json:"name"`
+			CIDRs       []string `json:"cidrs"`
+			ResolvesVia string   `json:"resolvesVia"`
+		} `json:"networks"`
+	}](t, raw)
+
+	for _, n := range body.Networks {
+		if n.Name != "Moving site" {
+			continue
+		}
+		if strings.Contains(n.ResolvesVia, "10.0.0.0/8") {
+			t.Errorf("resolvesVia = %q for a row whose ranges are now %v — the explanation "+
+				"belongs to a range this network no longer has", n.ResolvesVia, n.CIDRs)
+		}
+		h.failACLReload.Store(false)
+		return
+	}
+	h.failACLReload.Store(false)
+	t.Fatal("the network is missing from the list")
+}

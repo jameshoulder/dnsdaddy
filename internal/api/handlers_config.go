@@ -62,12 +62,21 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 	// different grants produced two entries and this kept whichever came last
 	// — and the row then named one range as covering a network of which it
 	// covers half.
-	shadows := map[string][]string{}
+	// Keyed by the range as well as the network, so an explanation can only be
+	// attached to a range the row still has.
+	//
+	// The snapshot and the database are two different points in time — the
+	// snapshot is what the resolver is enforcing, the row is what is stored —
+	// and after a failed reload they disagree. Matching on the network alone
+	// let a covering range for a CIDR the operator had just replaced be
+	// reported against the CIDR that replaced it, so a 192.168.0.0/24 row
+	// could be described as reachable inside 10.0.0.0/8.
+	shadows := map[string]map[string]string{}
 	for _, sh := range acl.Shadowed() {
-		via := sh.CoveredBy + " (" + sh.Source + ")"
-		if !slices.Contains(shadows[sh.NetworkID], via) {
-			shadows[sh.NetworkID] = append(shadows[sh.NetworkID], via)
+		if shadows[sh.NetworkID] == nil {
+			shadows[sh.NetworkID] = map[string]string{}
 		}
+		shadows[sh.NetworkID][sh.CIDR] = sh.CoveredBy + " (" + sh.Source + ")"
 	}
 
 	out := make([]row, 0, len(networks))
@@ -103,7 +112,18 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 		// before it reads coverage, then described a network with a refused
 		// half as reachable through that wider range.
 		if r.Coverage == coverageFull {
-			r.ResolvesVia = strings.Join(shadows[n.ID], ", ")
+			var via []string
+			for _, raw := range n.CIDRs {
+				p, err := clientacl.ParsePrefix(raw)
+				if err != nil {
+					continue
+				}
+				v, ok := shadows[n.ID][p.String()]
+				if ok && !slices.Contains(via, v) {
+					via = append(via, v)
+				}
+			}
+			r.ResolvesVia = strings.Join(via, ", ")
 		}
 		out = append(out, r)
 	}
