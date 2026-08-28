@@ -483,3 +483,26 @@ func TestADryRunChangesNothingOnDisk(t *testing.T) {
 		}
 	}
 }
+
+// Step 5 picks the dashboard hostname from four sources in turn, each guarded
+// by -f and then read with sed. A file that exists but cannot be read fails
+// that read, and the run concluded "no hostname configured" — which is not a
+// measurement, it is the absence of one. It then acts on it: Caddy left
+// inactive, the dashboard put on loopback, and a raw `sed: can't read` leaked
+// into the output as the only clue.
+//
+// A dry run exists to preview the real run, so a preview that reports a plan
+// the real run would not follow is the defect, whatever the exit code.
+func TestAnUnreadableHostnameSourceIsNotReportedAsNoHostname(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_PERMITTED=10.0.10.0/24")
+	p.unreadable = append(p.unreadable, filepath.Join(p.root, "repo", ".env"))
+
+	out, _, ok := p.runAsNonRoot("--dry-run")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	notContains(t, out, "can't read")
+	contains(t, out, "could not be read")
+	notContains(t, out, "no hostname configured — Caddy will be installed but left inactive")
+}

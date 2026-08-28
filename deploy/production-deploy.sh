@@ -271,23 +271,38 @@ if [[ -n "${STATE:-}" ]]; then
     --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
     | sed -n 's/^DNSDADDY_BASE_URL=//p' | head -1 || true)
 fi
+# A source that exists but cannot be read is recorded, not treated as absent.
+# Concluding "no hostname configured" from a file this run never opened puts
+# Caddy inactive and the dashboard on loopback for a deployment that may have a
+# hostname, and reports it as though it had been measured.
+UNREADABLE_SOURCE=""
+readable_or_note() { # path -> true when it can be read; records it when it cannot
+  [[ -f "$1" ]] || return 1
+  [[ -r "$1" ]] && return 0
+  UNREADABLE_SOURCE="${UNREADABLE_SOURCE:-$1}"
+  return 1
+}
 # 2. .env in the repo.
-[[ -z "$HOSTNAME_FOUND" && -f .env ]] && \
+[[ -z "$HOSTNAME_FOUND" ]] && readable_or_note .env && \
   HOSTNAME_FOUND=$(sed -n 's/^DNSDADDY_BASE_URL=//p' .env | head -1 || true)
 # 3. A mounted config file, if this deployment uses one.
 if [[ -z "$HOSTNAME_FOUND" ]]; then
   for c in /etc/dnsdaddy/config.yaml "$VOL_SRC/config.yaml"; do
-    [[ -f "$c" ]] && HOSTNAME_FOUND=$(sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' "$c" | tr -d '"'"'" | head -1) && \
+    readable_or_note "$c" && HOSTNAME_FOUND=$(sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' "$c" | tr -d '"'"'" | head -1) && \
       [[ -n "$HOSTNAME_FOUND" ]] && break
   done
 fi
 # 4. An existing Caddyfile from a previous attempt.
-if [[ -z "$HOSTNAME_FOUND" && -f /etc/caddy/Caddyfile ]]; then
+if [[ -z "$HOSTNAME_FOUND" ]] && readable_or_note /etc/caddy/Caddyfile; then
   HOSTNAME_FOUND=$(grep -oE '^[a-z0-9.-]+\.[a-z]{2,}' /etc/caddy/Caddyfile | grep -v example | head -1 || true)
 fi
 HOSTNAME_FOUND="${HOSTNAME_FOUND#https://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND#http://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND%%/*}"
 
-if [[ -n "$HOSTNAME_FOUND" ]]; then
+if [[ -z "$HOSTNAME_FOUND" && -n "$UNREADABLE_SOURCE" ]]; then
+  warn "$UNREADABLE_SOURCE exists but could not be read by this user, so no hostname could be discovered"
+  note "  A real deploy runs as root and would read it. Re-run this preview with sudo"
+  note "  to see the plan it would actually follow."
+elif [[ -n "$HOSTNAME_FOUND" ]]; then
   ok "hostname: $HOSTNAME_FOUND"
 else
   warn "no hostname configured — Caddy will be installed but left inactive"
