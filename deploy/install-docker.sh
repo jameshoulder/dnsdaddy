@@ -193,16 +193,17 @@ env_set() { # key value
   printf '\n%s\n%s=%s\n' "$ENV_MARKER" "$key" "$val" >> "$ENV_FILE"
 }
 
-# env_disable comments a key out. Returns 1 when there was nothing to do, so
-# the caller only reports a change it actually made — claiming to have closed
-# something that is still open is worse than saying nothing.
-# env_disable is three-way on purpose: 0 disabled it, 1 there was nothing to
-# disable, 2 could not. Its one caller closes a dashboard this installer
-# published on a public address, so collapsing 2 into 1 reports an exposure as
-# closed while leaving it open. grep says which by exit status — 1 is no match,
-# above that is a read failure — and the edit is confirmed by re-reading rather
-# than by trusting sed, which reports success for a substitution it did not
-# make.
+# env_disable comments a key out, three-way on purpose: 0 disabled it, 1 there
+# was nothing to disable, 2 could not. Both callers use it to close a dashboard
+# published on a public address — do_upgrade for one this installer wrote, and
+# reconcile_env for one an existing .env carried into a fresh install — so
+# collapsing 2 into 1 reports an exposure as closed while leaving it open. Every
+# caller must distinguish them; an earlier version of this comment said "its one
+# caller", and the second one went on treating a failed close as a no-op.
+#
+# grep says which by exit status — 1 is no match, above that is a read failure —
+# and the edit is confirmed by re-reading rather than by trusting sed, which
+# reports success for a substitution it did not make.
 env_disable() { # key
   [[ -f "$ENV_FILE" ]] || return 1
   grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null
@@ -582,11 +583,19 @@ reconcile_env() {
     pass "DNSDADDY_DASHBOARD_BIND=${DASHBOARD_BIND}"
     return
   fi
-  if env_disable DNSDADDY_DASHBOARD_BIND; then
-    warn "Your .env published the dashboard on a specific address; that line is now commented out"
-    note "The dashboard returns to loopback. If it was reachable from the internet,"
-    note "change the admin password: assume it has been seen."
-  fi
+  env_disable DNSDADDY_DASHBOARD_BIND
+  case $? in
+    0)
+      warn "Your .env published the dashboard on a specific address; that line is now commented out"
+      note "The dashboard returns to loopback. If it was reachable from the internet,"
+      note "change the admin password: assume it has been seen."
+      ;;
+    1) ;; # nothing was published; there is nothing to close
+    *)
+      die "Could not close the dashboard address in $ENV_FILE." \
+        "Your .env still publishes the dashboard, and starting now would put it back on that address after saying it had returned to loopback. Fix that file's permissions, or comment the line out by hand, then run this again."
+      ;;
+  esac
 }
 
 # --- runtime -----------------------------------------------------------------

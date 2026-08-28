@@ -1005,3 +1005,25 @@ func TestUpgradeRefusesToGuessAtAnUnreadableEnv(t *testing.T) {
 	contains(t, out, "Could not read")
 	notContains(t, out, "loopback")
 }
+
+// The upgrade path is not the only one that closes a published dashboard: a
+// fresh install reusing an existing .env does it too, in reconcile_env. Both
+// callers have to treat "could not disable" as a failure, or the installer
+// reports the dashboard back on loopback and hands compose the unchanged bind
+// — publishing it while saying it did not.
+func TestFreshInstallAbortsWhenItCannotCloseAPublishedBind(t *testing.T) {
+	in := newInstall(t)
+	in.writeEnv("DNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
+	must(t, os.WriteFile(filepath.Join(in.root, "compose.log"), nil, 0o666))
+	in.denyWrite(in.root)
+
+	out, code, ok := in.runAsNonRoot("--yes")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("fresh install succeeded without closing the published dashboard\n%s", out)
+	}
+	notContains(t, out, "returns to loopback")
+	notContains(t, in.composeLog(), "up -d")
+}
