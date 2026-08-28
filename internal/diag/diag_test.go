@@ -299,7 +299,7 @@ func TestStaleACLIsReportedAsUnconfirmedRatherThanBroken(t *testing.T) {
 		Stale: &stale,
 	})
 
-	c := find(t, checks, "Client ACL is in force")
+	c := find(t, checks, "Enforced client ACL confirmed")
 	if c.Status != StatusWarn {
 		t.Errorf("status = %s, want warn — the re-read failed, but whether the enforced ACL "+
 			"is wrong is exactly what could not be determined", c.Status)
@@ -338,7 +338,7 @@ func TestUnknownStalenessIsReportedRatherThanAssumedFine(t *testing.T) {
 		// Stale left nil: not measured.
 	})
 
-	c := find(t, checks, "Client ACL is in force")
+	c := find(t, checks, "Enforced client ACL confirmed")
 	if c.Status != StatusWarn {
 		t.Errorf("status = %s, want warn — it is unknown, neither fine nor broken", c.Status)
 	}

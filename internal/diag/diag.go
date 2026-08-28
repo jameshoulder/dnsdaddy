@@ -91,6 +91,17 @@ type ClientAccessInput struct {
 
 const sectionClientAccess = "CLIENT ACCESS"
 
+// checkACLConfirmed names what this check actually establishes.
+//
+// It was "Client ACL is in force", which is the one thing it never gets to
+// say: the check is emitted only when the answer is unknown — the daemon
+// could not be asked, or it could not re-read its own configuration — and
+// says nothing at all when the ACL is confirmed fresh. A WARN under a name
+// asserting the ACL is in force reads as "in force, with a caveat", which is
+// the assertion the summary underneath it exists to withhold. The name is
+// the field an operator scanning output reads first.
+const checkACLConfirmed = "Enforced client ACL confirmed"
+
 // ClientAccess reports whether the networks configured in the dashboard can
 // actually send queries.
 //
@@ -126,7 +137,7 @@ func ClientAccess(in ClientAccessInput) []Check {
 	case in.Stale == nil:
 		checks = append(checks, Check{
 			Section: sectionClientAccess,
-			Name:    "Client ACL is in force",
+			Name:    checkACLConfirmed,
 			Status:  StatusWarn,
 			Summary: "Whether the rules below are the ones actually being enforced could not be " +
 				"determined.",
@@ -137,7 +148,7 @@ func ClientAccess(in ClientAccessInput) []Check {
 	case *in.Stale:
 		checks = append(checks, Check{
 			Section: sectionClientAccess,
-			Name:    "Client ACL is in force",
+			Name:    checkACLConfirmed,
 			Status:  StatusWarn,
 			Summary: "DNS Daddy could not re-read its configuration after a change, so it " +
 				"cannot confirm that the rules below are the ones being enforced.",

@@ -518,7 +518,7 @@ func TestDeleteReportsAFailedReload(t *testing.T) {
 		check := c.(map[string]any)
 		// Warn rather than fail: the re-read is definitely broken, but whether
 		// the enforced ACL is wrong is what could not be determined.
-		if check["name"] == "Client ACL is in force" && check["status"] == "warn" {
+		if check["name"] == "Enforced client ACL confirmed" && check["status"] == "warn" {
 			found = true
 		}
 	}
