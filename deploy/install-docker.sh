@@ -125,11 +125,23 @@ env_is_set() { # key
   [[ -f "$ENV_FILE" ]] && grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null
 }
 
-# env_is_managed reports whether the active line for this key was written by
+# env_is_managed reports whether the ACTIVE line for this key was written by
 # this installer, which is what makes it safe to change without asking.
+#
+# The active line is the last assignment, matching env_value. A grep for the
+# marker anywhere near any matching line got that wrong in a way that mattered:
+# an older managed assignment followed by a hand-set override made the
+# operator's deliberate line look installer-generated, and an upgrade would
+# then comment out every active assignment — silently closing a dashboard
+# address they had opened on purpose. Only the line immediately above the last
+# assignment counts.
 env_is_managed() { # key
   [[ -f "$ENV_FILE" ]] || return 1
-  grep -B1 -E "^${1}=" "$ENV_FILE" 2>/dev/null | grep -qF "$ENV_MARKER"
+  awk -v key="$1" -v marker="$ENV_MARKER" '
+    $0 ~ "^" key "=" { found = 1; managed = (prev == marker) }
+    { prev = $0 }
+    END { exit !(found && managed) }
+  ' "$ENV_FILE"
 }
 
 # env_set writes a key this installer owns, replacing any existing active line.
@@ -313,23 +325,43 @@ dns_owner_advice() { # owners
     *pihole*|*pi-hole*) printf 'Pi-hole' ;;
     *coredns*)          printf 'CoreDNS' ;;
     *dnsdaddy*)         printf 'DNS Daddy' ;;
+    *docker-proxy*)     printf 'Docker' ;;
     *)                  printf '' ;;
   esac
 }
 
+# stack_is_running reports whether this Compose project's own dnsdaddy service
+# is up.
+#
+# Asking Docker, not the socket's process name. With the userland proxy — the
+# default on a great many Docker Engine installs — the published port 53 is
+# held by `docker-proxy`, not by anything called dnsdaddy, so matching on the
+# name made `--upgrade` refuse to run on its most common deployment. The
+# container is the thing that actually knows.
+stack_is_running() {
+  [[ -n "$("${COMPOSE[@]}" ps -q dnsdaddy 2>/dev/null)" ]]
+}
+
 check_ports() {
-  local blocked=0 proto owner program
+  local blocked=0 proto owner program ours=0
+  # Only an upgrade may treat a busy port as expected. During a fresh install a
+  # running stack is a reason to stop and say so, not to carry on into a bind
+  # failure.
+  if [[ "$MODE" == "upgrade" ]] && stack_is_running; then
+    ours=1
+  fi
+
   for proto in udp tcp; do
     owner="$(port_owner "$proto" 53)"
     if [[ -z "$owner" ]]; then
       pass "${proto^^} port 53 is free"
       continue
     fi
-    program="$(dns_owner_advice "$owner")"
-    if [[ "$program" == "DNS Daddy" && "$MODE" == "upgrade" ]]; then
-      pass "${proto^^} port 53 is held by DNS Daddy (expected during an upgrade)"
+    if [[ $ours -eq 1 ]]; then
+      pass "${proto^^} port 53 is held by this DNS Daddy deployment (expected during an upgrade)"
       continue
     fi
+    program="$(dns_owner_advice "$owner")"
     blocked=1
     fail "${proto^^} port 53 is already in use by: $owner"
   done
@@ -342,9 +374,8 @@ check_ports() {
   local dash_port="${DASHBOARD_PORT:-8080}"
   owner="$(port_owner tcp "$dash_port")"
   if [[ -n "$owner" ]]; then
-    program="$(dns_owner_advice "$owner")"
-    if [[ "$program" == "DNS Daddy" && "$MODE" == "upgrade" ]]; then
-      pass "TCP port ${dash_port} is held by DNS Daddy (expected during an upgrade)"
+    if [[ $ours -eq 1 ]]; then
+      pass "TCP port ${dash_port} is held by this DNS Daddy deployment (expected during an upgrade)"
     else
       warn "TCP port ${dash_port} is in use by: $owner — the dashboard will not start until it is free"
     fi
@@ -393,6 +424,14 @@ EOF
     "DNS Daddy")
       printf '\n  Another DNS Daddy instance is already running here.\n'
       printf '  Use --upgrade to rebuild and restart it, or `docker compose down` first.\n'
+      ;;
+    Docker)
+      # docker-proxy publishes somebody's container port. Whose, this script
+      # cannot say — but `docker ps` can, and that is a better answer than a
+      # guess.
+      printf '\n  A Docker container already publishes port 53 on this host.\n'
+      printf '  If it is DNS Daddy, use --upgrade instead. Otherwise find it with:\n'
+      printf '    docker ps --filter publish=53\n'
       ;;
     *)
       printf '\n  Stop whatever owns port 53, then run this again.\n'

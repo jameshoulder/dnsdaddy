@@ -154,6 +154,13 @@ level of confirmation: `dns.allow_public_resolver` is the setting for that, it
 lives in configuration, and changing it is a deliberate act with a restart
 attached.
 
+**Public exposure is reported from either source.** If you permit a publicly
+routable range — in the dashboard *or* through
+`DNSDADDY_ALLOWED_CLIENT_CIDRS` — diagnostics warn about it every time they
+run, naming the range and which of the two settings is responsible. The warning
+never resolves itself and never claims a firewall state: DNS Daddy cannot see
+your provider's security group and does not change it.
+
 **It is about source addresses, not about credentials.** A DNS-over-HTTPS or
 DNS-over-TLS client presenting a network's token is identified by that token
 rather than by where it connects from — which is the entire point of a roaming

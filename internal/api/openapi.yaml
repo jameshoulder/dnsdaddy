@@ -970,6 +970,43 @@ components:
             Whether client addresses are recorded at all (`log.query_log` and
             `log.log_client_ip`). When false, `hasSeenClients` says nothing
             about the network, only about the privacy setting.
+        permittedNetworks:
+          type: integer
+          description: |
+            How many enabled networks carry the resolver-access permission.
+
+            Informational, and deliberately **not** what the dashboard's
+            first-run card branches on. A stock LAN install has none of these
+            and serves every private range perfectly well, so treating zero as
+            "every client will be refused" is false on the most common
+            deployment there is.
+        unrestrictedAccess:
+          type: boolean
+          description: |
+            No client ACL is configured, so no query is refused on its source
+            address. Configuration validation only permits this alongside
+            loopback-only listeners or `dns.allow_public_resolver`.
+        servesOnlyLoopback:
+          type: boolean
+          description: |
+            The effective ACL admits nothing but this machine itself — the one
+            state in which "no client can use this resolver" is a measurement
+            rather than a guess.
+        refusedClients:
+          type: integer
+          format: int64
+          description: |
+            Queries turned away by the client ACL since start.
+
+            This is the evidence that separates two states nothing at rest can:
+            a deployment whose clients arrive from addresses the ACL does not
+            cover looks identical to one nobody has pointed anything at, until
+            somebody tries. A climbing count with `hasSeenClients` false means
+            the queries are arriving and being refused, which has a different
+            fix from no queries at all.
+
+            The refused addresses themselves are deliberately not recorded — an
+            unauthorised source could otherwise fill the log.
 
     ActivityBucket:
       type: object

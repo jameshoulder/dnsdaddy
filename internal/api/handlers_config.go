@@ -115,10 +115,12 @@ func networkCanResolve(acl *clientacl.Set, n store.Network) bool {
 		if err != nil {
 			return false
 		}
-		// The base address stands in for the range. Sound for the common case
-		// and for every case the ACL can produce, because a permitted prefix
-		// either contains the whole range or none of its base.
-		if !acl.Allows(p.Addr()) {
+		// Whole-prefix coverage, and the same calculation the diagnostics use.
+		// Sampling the base address was wrong in a way that mattered: a
+		// network of 10.0.0.0/8 against an ACL of 10.0.0.0/16 starts at a
+		// permitted address while almost every client in it is refused, and
+		// this column would have reported it green.
+		if acl.Cover(p) != clientacl.CoverFull {
 			return false
 		}
 	}

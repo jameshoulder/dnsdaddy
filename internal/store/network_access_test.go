@@ -366,3 +366,54 @@ func TestInvalidCIDRIsRejected(t *testing.T) {
 		t.Fatal("an invalid CIDR was accepted")
 	}
 }
+
+// A database written by an older release can hold a CIDR in that release's
+// canonical form. Planning canonicalises, so the acknowledgement was keyed on
+// the new spelling while the rows were written under the old one: public_ack
+// came out 0 on a permitted public range, and every unrelated edit afterwards
+// demanded the acknowledgement again.
+func TestLegacyCIDRSpellingDoesNotLoseTheAcknowledgement(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name:  ptr("Branch office"),
+		CIDRs: ptr([]string{"203.0.113.25/32"}),
+	})
+
+	// Rewrite the row the way an older release would have spelled it.
+	if _, err := st.DB().ExecContext(ctx,
+		"UPDATE network_cidrs SET cidr = ? WHERE network_id = ?",
+		"::ffff:203.0.113.25/128", n.ID); err != nil {
+		t.Fatalf("seed the legacy spelling: %v", err)
+	}
+
+	updated, err := st.UpdateNetwork(ctx, n.ID, NetworkInput{
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+	if err != nil {
+		t.Fatalf("UpdateNetwork: %v", err)
+	}
+	if !updated.AllowResolver {
+		t.Fatal("the permission did not persist")
+	}
+	if len(updated.AcknowledgedPublicCIDRs) != 1 {
+		t.Fatalf("acknowledged = %v, want the affirmation recorded against the stored range",
+			updated.AcknowledgedPublicCIDRs)
+	}
+	// The row is migrated to the canonical spelling on the way past, so the
+	// ACL and the acknowledgement agree from here on.
+	if updated.CIDRs[0] != "203.0.113.25/32" {
+		t.Errorf("cidrs = %v, want the canonical spelling", updated.CIDRs)
+	}
+
+	// And an unrelated later edit must not ask again.
+	renamed, err := st.UpdateNetwork(ctx, n.ID, NetworkInput{Location: ptr("Leeds")})
+	if err != nil {
+		t.Fatalf("an unrelated edit re-demanded the acknowledgement: %v", err)
+	}
+	if !renamed.AllowResolver || len(renamed.AcknowledgedPublicCIDRs) != 1 {
+		t.Errorf("state after an unrelated edit = %+v", renamed)
+	}
+}

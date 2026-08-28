@@ -115,18 +115,34 @@ type Overview struct {
 	// resolver, forever.
 	ClientAttribution bool `json:"clientAttribution"`
 
-	// PermittedNetworks is how many configured networks are allowed to query
-	// the resolver. Zero on a VPS install is the exact state that made DNS
-	// Daddy look broken: everything green, every client REFUSED. The
-	// onboarding card reads this so it can say "nothing is permitted yet"
-	// rather than "point a device at it and see", which is advice that cannot
-	// work.
+	// PermittedNetworks is how many configured networks carry the "allow this
+	// network to use DNS Daddy" permission.
+	//
+	// Informational only. It is deliberately NOT what the onboarding card
+	// branches on: a stock LAN install has none, because the shipped ACL
+	// already serves every private range, and branching on it told that
+	// operator every client would be REFUSED — the exact misleading message
+	// this work exists to stop producing.
 	PermittedNetworks int `json:"permittedNetworks"`
 
 	// UnrestrictedAccess reports that no client ACL is configured, so nothing
-	// is refused on its source address. PermittedNetworks is not meaningful
-	// when this is true.
+	// is refused on its source address.
 	UnrestrictedAccess bool `json:"unrestrictedAccess"`
+
+	// ServesOnlyLoopback reports that the effective ACL admits nothing but
+	// this machine itself. It is the one state in which "no client can use
+	// this resolver" is a measurement rather than a guess.
+	ServesOnlyLoopback bool `json:"servesOnlyLoopback"`
+
+	// RefusedClients is how many queries the ACL has turned away since start.
+	//
+	// This is the evidence that separates the two cases nothing at rest can:
+	// a VPS whose clients arrive from public addresses the shipped ACL does
+	// not cover looks identical to a working LAN until somebody tries. A
+	// climbing count with no client ever seen means the queries are arriving
+	// and being refused, which is a different problem from no queries at all
+	// and has a different fix.
+	RefusedClients uint64 `json:"refusedClients"`
 }
 
 func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +227,8 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 		HasSeenClients:     seenClients,
 		ClientAttribution:  attribution,
 		UnrestrictedAccess: a.ClientACL.Current().Unrestricted(),
+		ServesOnlyLoopback: a.ClientACL.Current().ServesOnlyLoopback(),
+		RefusedClients:     a.DNS.RefusedClients(),
 	})
 }
 

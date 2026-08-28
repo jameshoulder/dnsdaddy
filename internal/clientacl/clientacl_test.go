@@ -531,3 +531,99 @@ func TestNilControllerIsSafeToRead(t *testing.T) {
 		t.Errorf("Reload on a nil Controller: %v", err)
 	}
 }
+
+// --- Codex review regressions -------------------------------------------------
+
+// A headless deployment that permits a public client through the environment
+// is exposed to the internet exactly as much as one that ticks a box in the
+// dashboard. Scanning only the dashboard half reported no public exposure at
+// all — a false negative on the one check that exists to catch this.
+func TestPublicGrantsIncludeTheBootstrapHalf(t *testing.T) {
+	s := Compute([]string{"127.0.0.0/8", "203.0.113.42/32"}, false, nil)
+
+	public := s.PublicGrants()
+	if len(public) != 1 {
+		t.Fatalf("public grants = %+v, want the configured public range reported", public)
+	}
+	if public[0].CIDR != "203.0.113.42/32" {
+		t.Errorf("CIDR = %q, want 203.0.113.42/32", public[0].CIDR)
+	}
+	if public[0].Source != SourceBootstrap {
+		t.Errorf("Source = %q, want the configuration named so the operator knows where to look",
+			public[0].Source)
+	}
+	// It must not be mistaken for a dashboard permission: Grants() is what the
+	// "from the dashboard" evidence and the permitted-network count read.
+	if len(s.Grants()) != 0 {
+		t.Errorf("Grants = %+v, want none — nothing was permitted in the dashboard", s.Grants())
+	}
+}
+
+func TestPublicGrantsReportBothHalvesTogether(t *testing.T) {
+	s := Compute([]string{"127.0.0.0/8", "203.0.113.42/32"}, false,
+		[]Network{permitted("n1", "Branch", "198.51.100.10/32")})
+
+	got := map[string]string{}
+	for _, g := range s.PublicGrants() {
+		got[g.CIDR] = g.Source
+	}
+	if got["203.0.113.42/32"] != SourceBootstrap {
+		t.Errorf("bootstrap range = %q, want %q", got["203.0.113.42/32"], SourceBootstrap)
+	}
+	if got["198.51.100.10/32"] != `network "Branch"` {
+		t.Errorf("dashboard range = %q, want the network named", got["198.51.100.10/32"])
+	}
+}
+
+// Sampling a prefix's base address said "permitted" for a network that starts
+// at a permitted address and is almost entirely refused after that.
+func TestCoverRejectsAPartiallyPermittedNetwork(t *testing.T) {
+	s := Compute([]string{"10.0.0.0/16"}, false, nil)
+
+	if got := s.Cover(netip.MustParsePrefix("10.0.0.0/8")); got != CoverPartial {
+		t.Errorf("Cover(10.0.0.0/8) with an ACL of 10.0.0.0/16 = %v, want CoverPartial — "+
+			"the base address is permitted and almost nothing else in the range is", got)
+	}
+	if got := s.Cover(netip.MustParsePrefix("10.0.5.0/24")); got != CoverFull {
+		t.Errorf("Cover(10.0.5.0/24) = %v, want CoverFull", got)
+	}
+	if got := s.Cover(netip.MustParsePrefix("192.168.1.0/24")); got != CoverNone {
+		t.Errorf("Cover(192.168.1.0/24) = %v, want CoverNone", got)
+	}
+}
+
+func TestCoverIsFullWhenNothingIsRestricted(t *testing.T) {
+	s := Compute(nil, false, nil)
+	if got := s.Cover(netip.MustParsePrefix("203.0.113.0/24")); got != CoverFull {
+		t.Errorf("Cover on an unrestricted ACL = %v, want CoverFull", got)
+	}
+	var nilSet *Set
+	if got := nilSet.Cover(netip.MustParsePrefix("203.0.113.0/24")); got != CoverFull {
+		t.Errorf("Cover on a nil Set = %v, want CoverFull", got)
+	}
+}
+
+// The one state in which "no client can use this resolver" is a measurement.
+// It is deliberately not "no network carries a permission": a stock LAN
+// install has none and serves every private range perfectly well.
+func TestServesOnlyLoopback(t *testing.T) {
+	tests := []struct {
+		name      string
+		bootstrap []string
+		networks  []Network
+		want      bool
+	}{
+		{"loopback only", []string{"127.0.0.0/8", "::1/128"}, nil, true},
+		{"the shipped LAN default", []string{"127.0.0.0/8", "192.168.0.0/16"}, nil, false},
+		{"loopback plus a dashboard grant", []string{"127.0.0.0/8"},
+			[]Network{permitted("n1", "Home", "192.168.1.0/24")}, false},
+		{"unrestricted", nil, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Compute(tt.bootstrap, false, tt.networks).ServesOnlyLoopback(); got != tt.want {
+				t.Errorf("ServesOnlyLoopback = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

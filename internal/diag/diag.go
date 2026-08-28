@@ -14,7 +14,6 @@ package diag
 
 import (
 	"fmt"
-	"net/netip"
 	"sort"
 	"strings"
 
@@ -190,7 +189,7 @@ func publicAccessWarnings(acl *clientacl.Set) []Check {
 	}
 	var ranges []string
 	for _, g := range public {
-		ranges = append(ranges, fmt.Sprintf("%s (network %q)", g.CIDR, g.NetworkName))
+		ranges = append(ranges, fmt.Sprintf("%s (%s)", g.CIDR, g.Source))
 	}
 	return []Check{{
 		Section:  sectionClientAccess,
@@ -253,13 +252,6 @@ func networkReachability(in ClientAccessInput, acl *clientacl.Set, shadowed map[
 		return nil
 	}
 
-	allowed := make([]netip.Prefix, 0, len(acl.Effective()))
-	for _, raw := range acl.Effective() {
-		if p, err := clientacl.ParsePrefix(raw); err == nil {
-			allowed = append(allowed, p)
-		}
-	}
-
 	var checks []Check
 	for _, n := range in.Networks {
 		if !n.Enabled || len(n.CIDRs) == 0 {
@@ -274,10 +266,10 @@ func networkReachability(in ClientAccessInput, acl *clientacl.Set, shadowed map[
 			if err != nil {
 				continue
 			}
-			switch coverage(p, allowed) {
-			case coverNone:
+			switch acl.Cover(p) {
+			case clientacl.CoverNone:
 				refused = append(refused, raw)
-			case coverPartial:
+			case clientacl.CoverPartial:
 				partial = append(partial, raw)
 			}
 		}
@@ -345,43 +337,6 @@ func refusedAction(n Network) string {
 	return "This network is marked as permitted, so the effective ACL above should already " +
 		"include it. If it does not, the permission has not been reloaded: check the DNS Daddy " +
 		"log for a client-access reload error, and report this."
-}
-
-type cover int
-
-const (
-	coverNone cover = iota
-	coverPartial
-	coverFull
-)
-
-// coverage reports how much of p the allowed set permits.
-//
-// Full coverage is decided by single-prefix containment: some allowed prefix
-// is no more specific than p and contains its base address. That is sound but
-// not complete — two allowed prefixes could between them cover p without
-// either containing it (10.0.0.0/9 and 10.128.0.0/9 covering 10.0.0.0/8).
-// Such a configuration is reported as partial rather than full, which
-// over-warns in a rare case instead of under-warning in a common one. A
-// diagnostic that misses a real outage is worse than one that asks a question.
-func coverage(p netip.Prefix, allowed []netip.Prefix) cover {
-	overlaps := false
-	for _, a := range allowed {
-		if a.Addr().Is4() != p.Addr().Is4() {
-			continue
-		}
-		if a.Bits() <= p.Bits() && a.Contains(p.Addr()) {
-			return coverFull
-		}
-		// More specific than p: it can only cover part of it.
-		if p.Contains(a.Addr()) {
-			overlaps = true
-		}
-	}
-	if overlaps {
-		return coverPartial
-	}
-	return coverNone
 }
 
 // Worst returns the most severe status across checks, or StatusPass when there

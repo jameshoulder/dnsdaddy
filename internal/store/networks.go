@@ -286,6 +286,20 @@ func (s *Store) UpdateNetwork(ctx context.Context, id string, in NetworkInput) (
 	if in.CIDRs != nil {
 		resultCIDRs = cidrs
 	}
+	// Canonicalise before planning, because the stored form and the
+	// acknowledgement key have to be the same string.
+	//
+	// A database written by an older release can hold a CIDR in that
+	// release's canonical form — "::ffff:203.0.113.25/128" where this one
+	// would write "203.0.113.25/32". Planning canonicalises, so the
+	// acknowledgement was keyed on the new form while replaceCIDRs indexed
+	// the map with the unchanged stored string, wrote public_ack = 0, and
+	// left an enabled public grant recorded as unacknowledged — re-prompting
+	// on every unrelated edit afterwards. Rewriting the rows in canonical
+	// form fixes the mismatch and quietly migrates the legacy spelling.
+	if canon, err := normalizeCIDRs(&resultCIDRs); err == nil {
+		resultCIDRs = canon
+	}
 	resultAllow := current.allowResolver
 	if in.AllowResolver != nil {
 		resultAllow = *in.AllowResolver
@@ -327,11 +341,13 @@ func (s *Store) UpdateNetwork(ctx context.Context, id string, in NetworkInput) (
 	if _, err := tx.ExecContext(ctx, "UPDATE networks SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...); err != nil {
 		return Network{}, err
 	}
-	// The acknowledgement set can change without the CIDR list changing —
-	// permitting a network whose public range was already stored is exactly
-	// that case — so the rows are rewritten whenever the plan differs from
-	// what is on disk, not only when in.CIDRs was supplied.
-	if in.CIDRs != nil || !sameStringSet(plan.acked, current.acked) {
+	// The rows are rewritten whenever anything about them changes, not only
+	// when in.CIDRs was supplied: the acknowledgement set can change without
+	// the CIDR list changing (permitting a network whose public range was
+	// already stored is exactly that case), and so can the canonical spelling
+	// of a range written by an older release.
+	if in.CIDRs != nil || !sameStringSet(plan.acked, current.acked) ||
+		!sameStringSlice(resultCIDRs, current.cidrs) {
 		if err := replaceCIDRs(ctx, tx, id, resultCIDRs, plan.acked); err != nil {
 			return Network{}, err
 		}
@@ -382,6 +398,24 @@ func loadNetworkForUpdate(ctx context.Context, tx *sql.Tx, id string) (networkFo
 		}
 	}
 	return out, rows.Err()
+}
+
+// sameStringSlice compares two CIDR lists as sets: normalizeCIDRs
+// deduplicates and preserves input order, so order carries no meaning here.
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, s := range a {
+		seen[s] = true
+	}
+	for _, s := range b {
+		if !seen[s] {
+			return false
+		}
+	}
+	return true
 }
 
 func sameStringSet(a, b map[string]bool) bool {

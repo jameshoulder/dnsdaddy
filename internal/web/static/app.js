@@ -353,11 +353,20 @@ function diagnosticsBanner(diagnostics) {
 /**
  * Shown until a device on the network has actually used the resolver.
  *
- * A fresh install looks identical whether it is working perfectly and nothing
- * has been pointed at it, or it is refusing every client — the charts are
- * empty either way. This says which, and gives the next action rather than a
- * command that cannot succeed. It disappears the moment a real client appears;
- * nothing here invents activity that has not happened.
+ * A fresh install looks identical whether it is working perfectly with nothing
+ * pointed at it, or refusing every client — both produce empty charts. This
+ * says which, and it says it from measurements rather than from guesses.
+ *
+ * The guess it used to make was "no network carries a permission, so every
+ * client will be REFUSED". That is false on a stock LAN install, which has no
+ * permissions at all and serves every private range perfectly well, and being
+ * confidently wrong about why DNS is not working is the exact failure this
+ * product exists to stop producing. What is left is three states, each backed
+ * by something the server actually knows:
+ *
+ *   queries are arriving and being refused  → the ACL is the problem, say so
+ *   nothing but loopback may resolve        → nothing can reach it, say so
+ *   otherwise                               → nothing has tried yet, test it
  */
 function firstClientCard(overview) {
   if (typeof window === 'undefined') return '';
@@ -375,19 +384,49 @@ function firstClientCard(overview) {
   const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
   const target = isLoopback ? '<your-server-ip>' : host;
 
-  // Nothing permitted and an ACL in force means every client will be REFUSED.
-  // Telling somebody in that state to "try nslookup" sends them to debug a
-  // network fault that does not exist.
-  const nothingPermitted = !overview.unrestrictedAccess && !overview.permittedNetworks;
+  const footer = html`
+    <p class="muted small">
+      Run <code>dnsdaddy doctor</code> on the server for the full picture — it
+      reports exactly which ranges may resolve, and from which setting.
+    </p>`;
 
-  if (nothingPermitted) {
+  // Measured, not inferred: queries are reaching DNS Daddy and being turned
+  // away on their source address. That rules out firewalls, routing and port
+  // conflicts in one step.
+  if (overview.refusedClients > 0) {
     return html`
       <div class="card first-client">
-        <div class="first-client-title">No networks are permitted to use this resolver yet</div>
+        <div class="first-client-title">Clients are being refused</div>
         <p class="muted small">
-          DNS Daddy is running, and will answer REFUSED to every client until
-          you say which addresses may use it. Testing before that step will
-          fail, and the failure will not tell you why.
+          ${num(overview.refusedClients)} quer${overview.refusedClients === 1 ? 'y has' : 'ies have'}
+          reached DNS Daddy and been answered <code>REFUSED</code>, because the
+          address they came from is not permitted to use this resolver. Nothing
+          is broken — DNS Daddy is declining on purpose.
+        </p>
+        <ol class="small first-client-steps">
+          <li>Open <a href="#/networks">Networks</a> and add the client or network.</li>
+          <li>Tick <strong>Allow this network to use DNS Daddy</strong>.</li>
+          <li>Try again — it takes effect on the next query.</li>
+        </ol>
+        <p class="muted small">
+          Refused addresses are deliberately not logged, so compare the address
+          your client actually has against the permitted ranges on the Networks
+          page.
+        </p>
+        ${raw(footer)}
+      </div>`;
+  }
+
+  // Also measured: the effective ACL admits nothing but this machine, so no
+  // client anywhere can resolve, whatever they try.
+  if (overview.servesOnlyLoopback) {
+    return html`
+      <div class="card first-client">
+        <div class="first-client-title">Only this machine may use the resolver</div>
+        <p class="muted small">
+          The client ACL permits loopback and nothing else, so every other
+          device will be answered <code>REFUSED</code>. Testing before you
+          change that will fail, and the failure will not tell you why.
         </p>
         <ol class="small first-client-steps">
           <li>Open <a href="#/networks">Networks</a> and add your client or network.</li>
@@ -399,6 +438,7 @@ function firstClientCard(overview) {
           It takes effect immediately — there is nothing to restart and no file
           to edit.
         </p>
+        ${raw(footer)}
       </div>`;
   }
 
@@ -406,10 +446,10 @@ function firstClientCard(overview) {
     <div class="card first-client">
       <div class="first-client-title">No devices have used this resolver yet</div>
       <p class="muted small">
-        DNS Daddy is running and your networks are permitted to use it. Nothing
-        has sent it a query, which is expected until you point something at it.
+        DNS Daddy is running and nothing has sent it a query, which is expected
+        until you point something at it.
       </p>
-      <p class="small">Try this from an allowed client:</p>
+      <p class="small">Try this from a machine you expect it to serve:</p>
       <pre class="first-client-cmd">nslookup example.com ${target}</pre>
       <p class="muted small">
         ${raw(isLoopback
@@ -417,9 +457,11 @@ function firstClientCard(overview) {
           : 'Then reload this page: the query should appear in the Query log, attributed to that machine.')}
       </p>
       <p class="muted small">
-        Nothing appears? Run <code>dnsdaddy doctor</code> on the server — it
-        reports whether the query was refused, and why.
+        If it comes back <code>REFUSED</code>, that address is not permitted
+        yet — add it under <a href="#/networks">Networks</a> and tick
+        <strong>Allow this network to use DNS Daddy</strong>.
       </p>
+      ${raw(footer)}
     </div>`;
 }
 

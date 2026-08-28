@@ -82,6 +82,7 @@ esac
 if [[ "$1" == "compose" ]]; then
   printf '%s\n' "$*" >> "$STUB_LOG"
   case "$2" in
+    ps)   [[ "${STUB_STACK_RUNNING:-0}" == "1" ]] && echo "abc123def456"; exit 0 ;;
     up)   exit "${STUB_COMPOSE_UP_EXIT:-0}" ;;
     down) exit "${STUB_COMPOSE_DOWN_EXIT:-0}" ;;
     exec)
@@ -775,5 +776,94 @@ func TestHelpDescribesEveryMode(t *testing.T) {
 	}
 	for _, want := range []string{"--upgrade", "--uninstall", "--dry-run", "--yes"} {
 		contains(t, out, want)
+	}
+}
+
+// --- Codex review regressions -------------------------------------------------
+
+// With Docker's userland proxy — the default on a great many installs — the
+// published port 53 is held by `docker-proxy`, not by anything called
+// dnsdaddy. Matching on the socket's process name made --upgrade refuse to run
+// on its most common deployment, which is to say: unusable.
+func TestUpgradeProceedsWhenDockerProxyHoldsPortFiftyThree(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_STACK_RUNNING=1", "STUB_ADMIN_PASSWORD=test-password-1234")
+	in.stub("ss", `echo 'LISTEN 0 0 0.0.0.0:53 0.0.0.0:* users:(("docker-proxy",pid=9,fd=4))'`)
+	in.writeEnv("TZ=UTC\n")
+
+	out, code := in.run("--upgrade", "--yes")
+	if code != 0 {
+		t.Fatalf("--upgrade refused to run behind docker-proxy: exit %d\n%s", code, out)
+	}
+	contains(t, out, "held by this DNS Daddy deployment")
+	if !strings.Contains(in.composeLog(), "--build") {
+		t.Errorf("the upgrade never rebuilt; compose log:\n%s", in.composeLog())
+	}
+}
+
+// The exemption is for upgrades of a running stack, and nothing else. A fresh
+// install with something on port 53 must still stop.
+func TestFreshInstallStillStopsWhenDockerHoldsPortFiftyThree(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_STACK_RUNNING=1")
+	in.stub("ss", `echo 'LISTEN 0 0 0.0.0.0:53 0.0.0.0:* users:(("docker-proxy",pid=9,fd=4))'`)
+
+	out, code := in.run("--yes")
+	if code == 0 {
+		t.Fatal("a fresh install carried on into a bind failure")
+	}
+	contains(t, out, "port 53 is already in use")
+	contains(t, out, "docker ps --filter publish=53")
+}
+
+// Nor when the stack is not actually running: --upgrade must not wave through
+// a port held by an unrelated resolver.
+func TestUpgradeStillStopsWhenTheStackIsNotRunning(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_STACK_RUNNING=0")
+	in.stub("ss", `echo 'UNCONN 0 0 127.0.0.53:53 0.0.0.0:* users:(("systemd-resolved",pid=1,fd=1))'`)
+
+	out, code := in.run("--upgrade", "--yes")
+	if code == 0 {
+		t.Fatal("--upgrade ignored a port held by systemd-resolved")
+	}
+	contains(t, out, "port 53 is already in use")
+}
+
+// An older managed assignment followed by a hand-set override: env_value takes
+// the last one, so env_is_managed has to as well. Getting that wrong meant an
+// upgrade commented out every active assignment and silently closed a
+// dashboard address the operator had opened on purpose.
+func TestHandSetOverrideAfterAManagedLineIsNotTreatedAsManaged(t *testing.T) {
+	in := newInstall(t)
+	in.writeEnv("# managed by install-docker.sh\n" +
+		"DNSDADDY_DASHBOARD_BIND=192.168.1.10\n" +
+		"DNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
+
+	out, code := in.run("--upgrade", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "left alone")
+	if !strings.Contains(in.readEnv(), "\nDNSDADDY_DASHBOARD_BIND=203.0.113.20") {
+		t.Errorf("the operator's own override was commented out:\n%s", in.readEnv())
+	}
+}
+
+// And the mirror image still works: when the last assignment IS the managed
+// one, an upgrade may still close a public address it generated.
+func TestManagedLineAfterAHandSetOneIsStillReconciled(t *testing.T) {
+	in := newInstall(t)
+	in.writeEnv("DNSDADDY_DASHBOARD_BIND=192.168.1.10\n" +
+		"# managed by install-docker.sh\n" +
+		"DNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
+
+	out, code := in.run("--upgrade", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "returns to loopback")
+	if strings.Contains(in.readEnv(), "\nDNSDADDY_DASHBOARD_BIND=203.0.113.20") {
+		t.Errorf("a public bind this installer generated is still active:\n%s", in.readEnv())
 	}
 }

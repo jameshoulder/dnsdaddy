@@ -253,7 +253,11 @@ func TestOverviewMatchesOnboardingContract(t *testing.T) {
 	h.getJSON("/api/v1/overview", &overview)
 
 	requireKeys(t, "overview", overview,
-		"hasSeenClients", "clientAttribution", "permittedNetworks", "unrestrictedAccess")
+		"hasSeenClients", "clientAttribution", "permittedNetworks", "unrestrictedAccess",
+		// The two the card actually branches on. Both are measurements; the
+		// branch it used to make was a guess, and it was wrong on the most
+		// common install there is.
+		"servesOnlyLoopback", "refusedClients")
 }
 
 // resolvesVia is omitted when empty, so it cannot be asserted on a plain row —

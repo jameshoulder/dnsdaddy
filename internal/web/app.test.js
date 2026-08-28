@@ -551,21 +551,23 @@ test('server-supplied text is escaped', () => {
  * card says which. It must never invent activity, and must never claim "no
  * devices" when the truth is "we are not recording which devices".
  *
- * It now has two states, and getting the branch wrong is worse than the card
- * not existing. With nothing permitted and an ACL in force, every client will
- * be answered REFUSED, so "point a device at it and run nslookup" sends the
- * operator to debug a network fault that does not exist. Only once something
- * is permitted is that the right advice.
+ * It has three states, each backed by something the server actually measured,
+ * and getting the branch wrong is worse than the card not existing. It used to
+ * branch on "no network carries a permission", which is false on a stock LAN
+ * install — that has none, and serves every private range — so it told those
+ * operators every client would be REFUSED.
  */
 
-// The state where the resolver will actually serve a client: something is
-// permitted, nothing has used it yet.
+// A working resolver with nothing pointed at it yet. Refusals at zero and the
+// ACL serving more than loopback are both measurements, not guesses.
 function ready(overrides = {}) {
   return {
     hasSeenClients: false,
     clientAttribution: true,
-    permittedNetworks: 1,
+    permittedNetworks: 0,
     unrestrictedAccess: false,
+    servesOnlyLoopback: false,
+    refusedClients: 0,
     ...overrides,
   };
 }
@@ -592,30 +594,62 @@ test('the card appears when no client has been seen, naming the dashboard host',
   assert.match(out, /dnsdaddy doctor/, 'it must say what to do when nothing appears');
 });
 
-test('with nothing permitted it gives the steps, not a test that cannot pass', () => {
+test('a stock LAN install is not told its clients will be refused', () => {
+  // The regression this replaced. No network carries a permission on a fresh
+  // install, and the shipped ACL serves every private range perfectly well.
+  // Branching on the permission count told that operator the opposite.
   const out = withHostname('192.168.1.75', () =>
     firstClientCard(ready({ permittedNetworks: 0 })));
 
-  assert.match(out, /No networks are permitted to use this resolver yet/);
-  assert.match(out, /Allow this network to use DNS Daddy/,
-    'it must name the control that fixes it');
-  assert.match(out, /nothing to restart/,
-    'the whole point of the tick-box is that it needs no restart');
-  assert.doesNotMatch(out, /No devices have used this resolver yet/,
-    'that reading blames the network for a refusal DNS Daddy is choosing to make');
+  assert.match(out, /No devices have used this resolver yet/);
+  // A conditional — "if it comes back REFUSED, that address is not permitted
+  // yet" — is useful and true. What must not appear is a claim that clients
+  // are being refused, or that they will be.
+  assert.doesNotMatch(out, /Clients are being refused/);
+  assert.doesNotMatch(out, /will be answered <code>REFUSED/);
+  assert.doesNotMatch(out, /Only this machine/);
 });
 
-test('an unrestricted ACL is not the same as nothing being permitted', () => {
+test('measured refusals name the ACL as the cause', () => {
+  // Queries are arriving and being turned away on their source address. That
+  // rules out firewalls, routing and port conflicts in one step, and it is the
+  // only evidence that separates a VPS whose clients are refused from a LAN
+  // nobody has pointed anything at.
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ refusedClients: 12 })));
+
+  assert.match(out, /Clients are being refused/);
+  assert.match(out, /12 queries have/, 'it must say how many, from the counter');
+  assert.match(out, /Allow this network to use DNS Daddy/,
+    'it must name the control that fixes it');
+  assert.doesNotMatch(out, /No devices have used this resolver yet/,
+    'queries did arrive; saying otherwise sends the operator to the wrong problem');
+});
+
+test('a loopback-only ACL says so, because then it really is true', () => {
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ servesOnlyLoopback: true })));
+
+  assert.match(out, /Only this machine may use the resolver/);
+  assert.match(out, /Allow this network to use DNS Daddy/);
+  assert.match(out, /nothing to restart/,
+    'the whole point of the tick-box is that it needs no restart');
+});
+
+test('an unrestricted ACL refuses nothing, and the card must not imply otherwise', () => {
   // An empty dns.allowed_client_cidrs refuses nothing, which config validation
   // only allows for loopback-only listeners or a deliberate public resolver.
-  // Zero permitted networks there means "nobody has ticked a box", not "every
-  // client will be refused" — and telling the operator to go and permit
-  // something would be advice that changes nothing.
   const out = withHostname('192.168.1.75', () =>
-    firstClientCard(ready({ permittedNetworks: 0, unrestrictedAccess: true })));
+    firstClientCard(ready({ unrestrictedAccess: true })));
 
   assert.match(out, /No devices have used this resolver yet/);
-  assert.doesNotMatch(out, /No networks are permitted/);
+  assert.doesNotMatch(out, /Only this machine/);
+});
+
+test('refusals outrank every other state, because they are the strongest evidence', () => {
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ refusedClients: 3, servesOnlyLoopback: true })));
+  assert.match(out, /Clients are being refused/);
 });
 
 test('the card disappears as soon as a real client exists', () => {
@@ -633,11 +667,10 @@ test('the card is silent when client addresses are not recorded', () => {
   assert.strictEqual(out, '');
 });
 
-test('neither branch claims loopback is the DNS address over an SSH tunnel', () => {
+test('no branch claims loopback is the DNS address over an SSH tunnel', () => {
   for (const host of ['127.0.0.1', 'localhost']) {
-    for (const permitted of [0, 1]) {
-      const out = withHostname(host, () =>
-        firstClientCard(ready({ permittedNetworks: permitted })));
+    for (const state of [{}, { servesOnlyLoopback: true }]) {
+      const out = withHostname(host, () => firstClientCard(ready(state)));
 
       assert.doesNotMatch(out, /example\.com 127\.0\.0\.1/,
         'handing a client 127.0.0.1 as its DNS server would be actively wrong');

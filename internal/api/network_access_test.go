@@ -382,3 +382,73 @@ func TestDiagnosticsExplainAnUnpermittedNetwork(t *testing.T) {
 	}
 	t.Errorf("no client-access failure names the unpermitted network: %s", raw)
 }
+
+// A network broader than the range permitting it starts at a permitted address
+// and is almost entirely refused after that. Sampling the base address
+// reported it green — the same misleading health this work exists to remove,
+// reintroduced one column to the left.
+func TestPartiallyPermittedNetworkIsNotReportedAsResolving(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	// The shipped ACL permits 172.16.0.0/12. A /8 over the same base is
+	// therefore permitted at its first address and refused across most of it.
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Too broad",
+		"cidrs": []string{"172.0.0.0/8"},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+
+	_, raw = h.do("GET", "/api/v1/networks", nil)
+	body := decode[struct {
+		Networks []struct {
+			Name       string `json:"name"`
+			CanResolve bool   `json:"canResolve"`
+		} `json:"networks"`
+	}](t, raw)
+
+	for _, n := range body.Networks {
+		if n.Name != "Too broad" {
+			continue
+		}
+		if n.CanResolve {
+			t.Error("a network whose clients are mostly REFUSED is reported as able to resolve")
+		}
+		return
+	}
+	t.Fatal("the created network is missing from the list")
+}
+
+// The onboarding card branches on measurements, so the overview has to carry
+// them. Counting permitted networks alone told a stock LAN install — which has
+// none, and serves every private range — that every client would be REFUSED.
+func TestOverviewReportsMeasuredAccessState(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	var overview struct {
+		PermittedNetworks  int    `json:"permittedNetworks"`
+		UnrestrictedAccess bool   `json:"unrestrictedAccess"`
+		ServesOnlyLoopback bool   `json:"servesOnlyLoopback"`
+		RefusedClients     uint64 `json:"refusedClients"`
+	}
+	h.getJSON("/api/v1/overview", &overview)
+
+	if overview.PermittedNetworks != 0 {
+		t.Errorf("permittedNetworks = %d, want 0 on a fresh install", overview.PermittedNetworks)
+	}
+	// The shipped ACL serves the private ranges, so this must be false — it is
+	// what stops the dashboard claiming every client will be refused.
+	if overview.ServesOnlyLoopback {
+		t.Error("a stock install reports that only loopback may resolve, which is false " +
+			"and is exactly the misleading message this replaced")
+	}
+	if overview.UnrestrictedAccess {
+		t.Error("the default configuration was reported as unrestricted")
+	}
+	if overview.RefusedClients != 0 {
+		t.Errorf("refusedClients = %d, want 0 before anything has been refused", overview.RefusedClients)
+	}
+}

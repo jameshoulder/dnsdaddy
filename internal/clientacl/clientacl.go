@@ -78,11 +78,18 @@ type Network struct {
 // Grant is one permitted range, carrying where it came from so a diagnostic
 // can name the network an operator should go and look at.
 type Grant struct {
-	NetworkID   string       `json:"networkId"`
-	NetworkName string       `json:"networkName"`
-	CIDR        string       `json:"cidr"`
-	Public      bool         `json:"public"`
-	Prefix      netip.Prefix `json:"-"`
+	NetworkID   string `json:"networkId"`
+	NetworkName string `json:"networkName"`
+	CIDR        string `json:"cidr"`
+	Public      bool   `json:"public"`
+	// Source names where this range came from, ready to render:
+	// `network "HQ"`, or SourceBootstrap. It exists because public exposure
+	// has to be reported for both halves of the union — a headless deployment
+	// that permits a public client through the environment is exposed exactly
+	// as much as one that does it from the dashboard, and a warning that only
+	// looked at grants told it there was no public exposure at all.
+	Source string       `json:"source"`
+	Prefix netip.Prefix `json:"-"`
 }
 
 // Shadow records a network that is reachable even though it was never given
@@ -106,6 +113,19 @@ type Shadow struct {
 // SourceBootstrap names the configuration-file/environment source in evidence
 // strings, so an operator knows which of the two places to go and edit.
 const SourceBootstrap = "dns.allowed_client_cidrs"
+
+// Cover describes how much of a prefix the effective ACL permits.
+type Cover int
+
+const (
+	// CoverNone: no part of the prefix may resolve.
+	CoverNone Cover = iota
+	// CoverPartial: some of it may, and the rest is REFUSED — the state most
+	// worth reporting, because it looks like intermittent breakage.
+	CoverPartial
+	// CoverFull: all of it may resolve.
+	CoverFull
+)
 
 // Set is an immutable snapshot of the effective ACL.
 //
@@ -168,6 +188,7 @@ func Compute(bootstrapCIDRs []string, allowPublicResolver bool, networks []Netwo
 				NetworkName: n.Name,
 				CIDR:        p.String(),
 				Public:      PrefixIsPublic(p),
+				Source:      "network " + quoteName(n.Name),
 				Prefix:      p,
 			})
 		}
@@ -362,19 +383,105 @@ func (s *Set) Effective() []string {
 	return out
 }
 
-// PublicGrants returns the permitted ranges that are publicly routable. These
-// are the ones whose exposure depends on a firewall DNS Daddy cannot see.
+// PublicGrants returns every permitted range that is publicly routable,
+// whichever half of the union it came from.
+//
+// Both halves, deliberately. An operator who sets
+// DNSDADDY_ALLOWED_CLIENT_CIDRS=203.0.113.42/32 on a headless box is exposed
+// to the internet exactly as much as one who ticks a box in the dashboard, and
+// a warning that scanned only the dashboard told them there was no public
+// exposure at all — a false negative on the one check that exists to catch
+// this. Each entry names its Source so the operator knows where to go.
 func (s *Set) PublicGrants() []Grant {
 	if s == nil {
 		return nil
 	}
 	var out []Grant
+	for i, p := range s.bootstrap {
+		if !PrefixIsPublic(p) {
+			continue
+		}
+		// Quote the operator's own spelling where it survives, so the evidence
+		// matches what they wrote in the file.
+		raw := p.String()
+		if i < len(s.bootstrapRaw) {
+			raw = s.bootstrapRaw[i]
+		}
+		out = append(out, Grant{
+			CIDR:   raw,
+			Public: true,
+			Source: SourceBootstrap,
+			Prefix: p,
+		})
+	}
 	for _, g := range s.grants {
 		if g.Public {
 			out = append(out, g)
 		}
 	}
 	return out
+}
+
+// Cover reports how much of p the effective ACL permits.
+//
+// Full coverage is decided by single-prefix containment: some permitted prefix
+// is no more specific than p and contains its base address. That is sound but
+// not complete — two permitted prefixes could between them cover p without
+// either containing it (10.0.0.0/9 and 10.128.0.0/9 covering 10.0.0.0/8).
+// Such a configuration is reported as partial rather than full, which
+// over-warns in a rare case instead of under-warning in a common one.
+//
+// Sampling the base address alone is what this replaces, and it was wrong in a
+// way that mattered: a network of 10.0.0.0/8 against an ACL of 10.0.0.0/16
+// starts at a permitted address while almost every client in it is refused.
+func (s *Set) Cover(p netip.Prefix) Cover {
+	if s == nil {
+		return CoverFull // nothing configured refuses nothing
+	}
+	if s.unrestricted {
+		return CoverFull
+	}
+	if !p.IsValid() {
+		return CoverNone
+	}
+
+	overlaps := false
+	for _, a := range s.all {
+		if a.Addr().Is4() != p.Addr().Is4() {
+			continue
+		}
+		if a.Bits() <= p.Bits() && a.Contains(p.Addr()) {
+			return CoverFull
+		}
+		// More specific than p: it can only cover part of it.
+		if p.Contains(a.Addr()) {
+			overlaps = true
+		}
+	}
+	if overlaps {
+		return CoverPartial
+	}
+	return CoverNone
+}
+
+// ServesOnlyLoopback reports that nothing but this machine itself may resolve.
+//
+// The one state in which "no client can use this resolver" is a true statement
+// rather than a guess. It is deliberately not "no network carries a
+// permission": a stock LAN install has no permissions at all and serves every
+// private range perfectly well, and telling that operator their clients will
+// be REFUSED is precisely the misleading message this product exists to stop
+// producing.
+func (s *Set) ServesOnlyLoopback() bool {
+	if s == nil || s.unrestricted || len(s.all) == 0 {
+		return false
+	}
+	for _, p := range s.all {
+		if !p.Addr().IsLoopback() {
+			return false
+		}
+	}
+	return true
 }
 
 // ParsePrefix accepts a CIDR or a bare address, returning the masked prefix.
