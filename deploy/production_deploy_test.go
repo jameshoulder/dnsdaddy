@@ -128,6 +128,23 @@ exit 0
 
 func (p *prodDeploy) setenv(kv ...string) { p.env = append(p.env, kv...) }
 
+// patchScript rewrites the fixture's copy of the script. It exists for one
+// case: two of the hostname candidates are absolute paths under /etc, which a
+// test cannot create without mutating the host, and the third lives in the
+// data volume, which has to stay searchable or step 2 never completes. So the
+// candidate is pointed at a fixture directory instead. The code under test is
+// the real helper; only the constant it is handed changes.
+func (p *prodDeploy) patchScript(old, replacement string) {
+	p.t.Helper()
+	path := filepath.Join(p.root, "repo", "deploy", "production-deploy.sh")
+	b, err := os.ReadFile(path)
+	must(p.t, err)
+	if !strings.Contains(string(b), old) {
+		p.t.Fatalf("patchScript: %q is not in the script; it has moved or been reworded", old)
+	}
+	must(p.t, os.WriteFile(path, []byte(strings.Replace(string(b), old, replacement, 1)), 0o755))
+}
+
 func (p *prodDeploy) run(args ...string) (string, int) {
 	p.t.Helper()
 	return p.exec(nil, args...)
@@ -567,4 +584,35 @@ func TestNoScriptCallsAHelperItDoesNotDefine(t *testing.T) {
 			}
 		}
 	}
+}
+
+// -f answers no to "not there" and to "I am not allowed to look" alike. A
+// candidate whose directory cannot be searched — a root-only /etc/dnsdaddy, or
+// Docker's volume store — therefore looked exactly like a machine with no
+// config file, and the preview went back to announcing a hostname it had never
+// been able to go looking for. That is the same defect as the one above, one
+// level further out: the earlier fix distinguished "present but unreadable"
+// from "readable" and left "cannot even tell" classified as absent.
+func TestAnUnsearchableHostnameDirectoryIsNotReportedAsAbsent(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_PERMITTED=10.0.10.0/24")
+
+	// Nothing in .env, so the search reaches the config-file candidate.
+	must(t, os.WriteFile(filepath.Join(p.root, "repo", ".env"), []byte("DNSDADDY_LOG_LEVEL=info\n"), 0o644))
+
+	hidden := filepath.Join(p.root, "hidden")
+	must(t, os.MkdirAll(hidden, 0o755))
+	must(t, os.WriteFile(filepath.Join(hidden, "config.yaml"), []byte("base_url: https://dns.example.com\n"), 0o644))
+	p.patchScript("/etc/dnsdaddy/config.yaml", filepath.Join(hidden, "config.yaml"))
+	p.unreadable = append(p.unreadable, hidden)
+
+	out, code, ok := p.runAsNonRoot("--dry-run")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("the preview finished, having been unable to look for the hostname\n%s", out)
+	}
+	contains(t, out, "could not be read")
+	notContains(t, out, "no hostname configured — Caddy will be installed but left inactive")
 }

@@ -277,9 +277,22 @@ fi
 # hostname, and reports it as though it had been measured.
 UNREADABLE_SOURCE=""
 readable_or_note() { # path -> true when it can be read; records it when it cannot
-  [[ -f "$1" ]] || return 1
-  [[ -r "$1" ]] && return 0
-  UNREADABLE_SOURCE="${UNREADABLE_SOURCE:-$1}"
+  if [[ -f "$1" ]]; then
+    [[ -r "$1" ]] && return 0
+    UNREADABLE_SOURCE="${UNREADABLE_SOURCE:-$1}"
+    return 1
+  fi
+  # -f answers no to "not there" and to "I am not allowed to look" alike, and
+  # only the first is absence. A directory without search permission — Docker's
+  # volume store, or a root-only /etc/dnsdaddy — denies every question about
+  # what is inside it, so treating that as "no config file" would put the
+  # preview back to reporting a hostname it never went looking for. Walk up to
+  # the nearest ancestor this user can actually see and ask whether it is
+  # searchable.
+  local dir
+  dir=$(dirname "$1")
+  while [[ "$dir" != "/" && ! -e "$dir" ]]; do dir=$(dirname "$dir"); done
+  [[ -x "$dir" ]] || UNREADABLE_SOURCE="${UNREADABLE_SOURCE:-$1}"
   return 1
 }
 # 2. .env in the repo.
