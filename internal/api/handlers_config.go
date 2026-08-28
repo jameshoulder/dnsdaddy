@@ -255,6 +255,14 @@ func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleRotateToken(w http.ResponseWriter, r *http.Request) {
+	// A rotation cannot change who is admitted — a token identifies a DoH or
+	// DoT client by credential, not by source address — so it needs no ACL
+	// reload. It takes the lock anyway, so that "every handler that writes a
+	// network is serialised" holds without a reader having to work out which
+	// columns decide admission.
+	a.networkWrites.Lock()
+	defer a.networkWrites.Unlock()
+
 	n, err := a.Store.RotateNetworkToken(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeStoreError(w, err)

@@ -83,6 +83,11 @@ type API struct {
 	// network writes are operator actions in a dashboard — a handful in a
 	// session — and the contention is nil. Queries never touch this; they
 	// read the published snapshot with one atomic load.
+	//
+	// Every handler that writes the networks tables takes it, token rotation
+	// included, so the invariant needs no case analysis over which columns
+	// decide admission. The remaining writer is the seed, which runs once at
+	// startup before anything is served.
 	networkWrites sync.Mutex
 }
 
