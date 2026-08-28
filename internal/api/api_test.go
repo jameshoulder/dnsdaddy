@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +47,9 @@ type harness struct {
 	// acl is the live client ACL the DNS handler reads, so a test can assert
 	// that a permission granted through the API is in force without a restart.
 	acl *clientacl.Controller
+	// failACLReload breaks the ACL reload without breaking the write it
+	// follows, which is the only way to reach "stored but not in force".
+	failACLReload *atomic.Bool
 	// dir is the data directory, kept so a test can reopen the database and
 	// check that a setting survived a restart.
 	dir string
@@ -111,8 +116,16 @@ func newHarness(t *testing.T) *harness {
 	// so the handler and the API agree on who may resolve — and so a test that
 	// grants a network access exercises the real reload path rather than a
 	// stub that cannot be wrong.
+	// failACLReload lets a test break the reload without breaking the write it
+	// follows. Those are separate failures in production — a transient
+	// database error between the commit and the reload — and there is no
+	// other way to reach the path where a change is stored but not in force.
+	var failACLReload atomic.Bool
 	acl := clientacl.NewController(cfg.DNS.AllowedClientCIDRs, cfg.DNS.AllowPublicResolver,
 		func(ctx context.Context) ([]clientacl.Network, error) {
+			if failACLReload.Load() {
+				return nil, errors.New("simulated reload failure")
+			}
 			networks, err := st.ListNetworks(ctx)
 			if err != nil {
 				return nil, err
@@ -163,7 +176,8 @@ func newHarness(t *testing.T) *harness {
 
 	jar := &cookieJar{cookies: map[string]*http.Cookie{}}
 	return &harness{
-		t: t, server: srv, store: st, acl: acl, client: &http.Client{Jar: jar},
+		t: t, server: srv, store: st, acl: acl, failACLReload: &failACLReload,
+		client:   &http.Client{Jar: jar},
 		detector: detector, lists: lists, feeds: feeds, dir: dir,
 	}
 }

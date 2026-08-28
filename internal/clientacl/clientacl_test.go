@@ -653,3 +653,57 @@ func TestPublicPrefixesIsEmptyWhenNothingPublicIsPermitted(t *testing.T) {
 		t.Errorf("PublicPrefixes = %v, want none for an entirely private ACL", got)
 	}
 }
+
+// A failed reload has to outlive the request that caused it.
+//
+// The caller who could act on the error is often gone by the time it matters,
+// and after a delete there is no network row left for anything else to notice
+// the stale grant against. This flag is what lets the diagnostics keep saying
+// so until a reload succeeds.
+func TestStaleIsRecordedAndCleared(t *testing.T) {
+	fail := false
+	c := NewController([]string{"127.0.0.0/8"}, false, func(context.Context) ([]Network, error) {
+		if fail {
+			return nil, context.DeadlineExceeded
+		}
+		return []Network{permitted("n1", "Home", "192.168.1.0/24")}, nil
+	})
+
+	if c.Stale() {
+		t.Error("a fresh controller reports itself stale")
+	}
+	if err := c.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if c.Stale() {
+		t.Error("a successful reload left the controller stale")
+	}
+
+	fail = true
+	if err := c.Reload(context.Background()); err == nil {
+		t.Fatal("a load failure was not reported")
+	}
+	if !c.Stale() {
+		t.Error("a failed reload was not recorded; nothing downstream can know the ACL is old")
+	}
+	// The previous snapshot is still in force, which is the safe failure — but
+	// it is now known to be possibly out of date.
+	if !c.Allows(netip.MustParseAddr("192.168.1.50")) {
+		t.Error("a failed reload dropped a permission that was already in force")
+	}
+
+	fail = false
+	if err := c.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if c.Stale() {
+		t.Error("a later successful reload did not clear the stale flag")
+	}
+}
+
+func TestNilControllerIsNotStale(t *testing.T) {
+	var c *Controller
+	if c.Stale() {
+		t.Error("a nil Controller reported itself stale")
+	}
+}

@@ -35,6 +35,7 @@ func (a *API) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	refused := a.DNS.RefusedClients()
 	checks := diag.ClientAccess(diag.ClientAccessInput{
 		ACL:            a.ClientACL.Current(),
+		Stale:          a.ClientACL.Stale(),
 		Networks:       diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
 		RefusedQueries: &refused,
 	})

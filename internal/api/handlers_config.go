@@ -200,10 +200,24 @@ func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	// Deleting a network revokes whatever it permitted, so the reload matters
-	// as much here as on an update. A 204 has no body to carry a warning in,
-	// so a failure is logged by reloadAccess and reported by the diagnostics.
-	_ = a.reloadAccess(r)
+	// Deleting a network revokes whatever it permitted, so a failed reload
+	// here is the worst case of the three: the permission is still being
+	// honoured and the row that would have shown it is gone. Answering 204
+	// and dropping the warning told the caller the revocation had taken
+	// effect, which is a security-relevant false success.
+	//
+	// So the success case keeps its documented 204, and the failure case
+	// answers 200 with the warning. The condition is also recorded on the
+	// controller, so `dnsdaddy doctor` and /api/v1/diagnostics keep reporting
+	// it until a reload succeeds — a warning in one HTTP response is easy to
+	// miss, and this outlives the request that caused it.
+	if warning := a.reloadAccess(r); warning != "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "deleted",
+			"warning": warning,
+		})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -705,6 +719,8 @@ func (a *API) reloadAccess(r *http.Request) string {
 	}
 	if err := a.ClientACL.Reload(r.Context()); err != nil {
 		a.Log.Error("reload client access", "error", err)
+		// The controller records the failure too, so the diagnostics keep
+		// reporting it after this response has been closed and forgotten.
 		return "Saved, but the resolver's client access could not be reloaded, so this change is " +
 			"not yet in force. Retry the change, or restart DNS Daddy."
 	}

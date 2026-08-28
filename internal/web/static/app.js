@@ -417,16 +417,27 @@ function firstClientCard(overview) {
       </div>`;
   }
 
-  // Also measured: the effective ACL admits nothing but this machine, so no
-  // client anywhere can resolve, whatever they try.
+  // Also measured: the effective ACL admits nothing but this machine.
+  //
+  // Scoped to clients identified by their source address, which is what the
+  // ACL governs. A DoH or DoT client presenting a network's token is
+  // identified by the token and resolves regardless — saying "every other
+  // device" would contradict both the resolver and the Networks page, and
+  // over-claiming is the fault this card exists to stop making.
   if (overview.servesOnlyLoopback) {
     return html`
       <div class="card first-client">
         <div class="first-client-title">Only this machine may use the resolver</div>
         <p class="muted small">
-          The client ACL permits loopback and nothing else, so every other
-          device will be answered <code>REFUSED</code>. Testing before you
-          change that will fail, and the failure will not tell you why.
+          The client ACL permits loopback and nothing else, so a device asking
+          over ordinary DNS from any other address is answered
+          <code>REFUSED</code>. Testing before you change that will fail, and
+          the failure will not tell you why.
+        </p>
+        <p class="muted small">
+          DNS-over-HTTPS and DNS-over-TLS clients holding a network's token are
+          identified by that token rather than by where they connect from, so
+          they are unaffected by this.
         </p>
         <ol class="small first-client-steps">
           <li>Open <a href="#/networks">Networks</a> and add your client or network.</li>
@@ -1737,8 +1748,11 @@ pages.networks = {
           toast('Network not added — the public address was not confirmed', 'error');
           return;
         }
-        if (created.warning) toast(created.warning, 'error');
-        toast('Network added');
+        if (created.warning) {
+          toast(created.warning, 'error');
+        } else {
+          toast('Network added');
+        }
         router.reload();
       } catch (err) {
         reportError(err);
@@ -1759,10 +1773,17 @@ pages.networks = {
             box.checked = !wanted;
             return;
           }
-          if (updated.warning) toast(updated.warning, 'error');
-          toast(wanted
-            ? `"${box.dataset.name}" may now use DNS Daddy`
-            : `"${box.dataset.name}" can no longer use DNS Daddy`);
+          // Only claim the change is in force when it is. A stored-but-not-
+          // reloaded revocation still has the old permission being honoured,
+          // and "can no longer use DNS Daddy" over the top of that warning is
+          // a false success about the security-relevant direction.
+          if (updated.warning) {
+            toast(updated.warning, 'error');
+          } else {
+            toast(wanted
+              ? `"${box.dataset.name}" may now use DNS Daddy`
+              : `"${box.dataset.name}" can no longer use DNS Daddy`);
+          }
           router.reload();
         } catch (err) {
           box.checked = !wanted;
@@ -1775,8 +1796,15 @@ pages.networks = {
       btn.addEventListener('click', async () => {
         if (!confirm(`Delete network "${btn.dataset.name}"? Query history is kept.`)) return;
         try {
-          await apiSend('DELETE', `/networks/${btn.dataset.deleteNetwork}`);
-          toast('Network deleted');
+          // A delete answers 204 on success and 200 with a warning when the
+          // resolver could not be reloaded — where the deleted network's
+          // clients are still being served.
+          const result = await apiSend('DELETE', `/networks/${btn.dataset.deleteNetwork}`);
+          if (result && result.warning) {
+            toast(result.warning, 'error');
+          } else {
+            toast('Network deleted');
+          }
           router.reload();
         } catch (err) {
           reportError(err);

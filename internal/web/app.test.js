@@ -636,6 +636,20 @@ test('a loopback-only ACL says so, because then it really is true', () => {
     'the whole point of the tick-box is that it needs no restart');
 });
 
+test('the loopback claim is scoped to clients the ACL actually governs', () => {
+  // A DoH or DoT client presenting a network's token bypasses the source ACL
+  // entirely — that is what makes a roaming profile roam. Claiming "every
+  // other device will be REFUSED" would contradict the resolver and the
+  // Networks page, and over-claiming is the fault this card exists to stop.
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ servesOnlyLoopback: true })));
+
+  assert.doesNotMatch(out, /every other device/);
+  assert.match(out, /ordinary DNS/, 'the claim must name the transport it applies to');
+  assert.match(out, /DNS-over-HTTPS and DNS-over-TLS clients holding a network.s token/,
+    'the exception has to be stated, not left for the operator to discover');
+});
+
 test('an unrestricted ACL refuses nothing, and the card must not imply otherwise', () => {
   // An empty dns.allowed_client_cidrs refuses nothing, which config validation
   // only allows for loopback-only listeners or a deliberate public resolver.

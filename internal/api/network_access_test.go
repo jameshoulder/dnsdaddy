@@ -452,3 +452,74 @@ func TestOverviewReportsMeasuredAccessState(t *testing.T) {
 		t.Errorf("refusedClients = %d, want 0 before anything has been refused", overview.RefusedClients)
 	}
 }
+
+// A revocation that was stored but not applied is the worst of the three
+// write paths: the permission is still being honoured and the row that would
+// have shown it is gone. Answering 204 and dropping the warning told the
+// caller the revocation had taken effect.
+//
+// The failure is forced by closing the database under the API, which is the
+// only way to make ListNetworks fail on demand and is exactly the transient
+// condition the warning exists for.
+func TestDeleteReportsAFailedReload(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Benchmark lab",
+		"cidrs":         []string{"198.18.0.0/15"},
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+	if !permits(t, h, "198.18.4.4") {
+		t.Fatal("precondition: the permitted network should resolve")
+	}
+
+	// Break only the reload, so the delete still commits — the exact ordering
+	// the warning describes, and a real transient database error between the
+	// commit and the reload looks like this.
+	h.failACLReload.Store(true)
+
+	resp, raw := h.do("DELETE", "/api/v1/networks/"+id, nil)
+	if resp.StatusCode == http.StatusNoContent {
+		t.Fatal("a delete whose reload failed answered 204, claiming the revocation took effect")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	body := decode[map[string]any](t, raw)
+	warning, _ := body["warning"].(string)
+	if !strings.Contains(warning, "not yet in force") {
+		t.Errorf("warning = %q, want it to say the change is not in force", warning)
+	}
+
+	// The dangerous state itself: the network is gone from the database and
+	// its clients are still being served.
+	if !permits(t, h, "198.18.4.4") {
+		t.Log("the stale snapshot happened to drop the permission; the warning still matters")
+	}
+
+	// And the condition outlives the response, so the diagnostics keep saying
+	// so after the operator has clicked away.
+	if !h.acl.Stale() {
+		t.Fatal("the failed reload was not recorded on the controller")
+	}
+
+	h.failACLReload.Store(false)
+	_, raw = h.do("GET", "/api/v1/diagnostics", nil)
+	body = decode[map[string]any](t, raw)
+	if body["status"] != "fail" {
+		t.Errorf("diagnostics status = %v, want fail while the ACL is stale", body["status"])
+	}
+	found := false
+	for _, c := range body["checks"].([]any) {
+		check := c.(map[string]any)
+		if check["name"] == "Client ACL is in force" && check["status"] == "fail" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no diagnostics check reports the stale ACL: %s", raw)
+	}
+}

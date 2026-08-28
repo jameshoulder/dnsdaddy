@@ -274,3 +274,54 @@ func TestClientAccessStillReportsUnreachableNetworksWithAnACL(t *testing.T) {
 		t.Fatalf("Worst = %s, want fail", Worst(checks))
 	}
 }
+
+// A stale ACL is a failure, not a warning: a permission the operator revoked
+// may still be being honoured, and after a delete there is no network row left
+// for any other check to notice it against.
+func TestStaleACLIsReportedAsAFailure(t *testing.T) {
+	checks := ClientAccess(ClientAccessInput{
+		ACL:   clientacl.Compute([]string{"127.0.0.0/8"}, false, nil),
+		Stale: true,
+	})
+
+	c := find(t, checks, "Client ACL is in force")
+	if c.Status != StatusFail {
+		t.Errorf("status = %s, want fail — a revocation may not have taken effect", c.Status)
+	}
+	if !strings.Contains(c.Action, "revoked") {
+		t.Errorf("the action does not say which direction is dangerous: %q", c.Action)
+	}
+	if Worst(checks) != StatusFail {
+		t.Error("Worst did not report the failure, so doctor would exit zero on a stale ACL")
+	}
+}
+
+func TestFreshACLIsNotReportedAsStale(t *testing.T) {
+	checks := ClientAccess(ClientAccessInput{
+		ACL: clientacl.Compute([]string{"127.0.0.0/8"}, false, nil),
+	})
+	for _, c := range checks {
+		if strings.Contains(c.Name, "in force") {
+			t.Errorf("a healthy ACL was reported as stale: %s", c.Summary)
+		}
+	}
+}
+
+// One range permitted from configuration and from a network is two things to
+// go and change and one exposure. Counting it twice would make adding a
+// redundant permission look like the resolver had been opened wider.
+func TestPublicWarningCountsDistinctRanges(t *testing.T) {
+	acl := clientacl.Compute([]string{"127.0.0.0/8", "203.0.113.42/32"}, false, []clientacl.Network{
+		{ID: "n1", Name: "Branch", Enabled: true, AllowResolver: true, CIDRs: []string{"203.0.113.42/32"}},
+	})
+	checks := ClientAccess(ClientAccessInput{ACL: acl})
+
+	c := find(t, checks, "Publicly routable ranges")
+	if !strings.Contains(c.Summary, "1 publicly routable range") {
+		t.Errorf("summary = %q, want a count of one distinct range", c.Summary)
+	}
+	// The evidence still names both, because closing it means changing both.
+	if len(c.Evidence) != 2 {
+		t.Errorf("evidence = %v, want both sources named", c.Evidence)
+	}
+}

@@ -70,6 +70,11 @@ type ClientAccessInput struct {
 	ACL *clientacl.Set
 	// Networks are the networks configured in the dashboard.
 	Networks []Network
+	// Stale reports that the live ACL could not be reloaded after a change, so
+	// what is being enforced may be older than what is stored. Nothing else
+	// can detect this: once a network is deleted there is no row left for the
+	// reachability checks to compare a stale grant against.
+	Stale bool
 	// RefusedQueries is how many queries the ACL has rejected since start.
 	// Nil means not measured — a caller with no running handler, such as a
 	// startup check or `dnsdaddy doctor` in its own process. A pointer rather
@@ -109,6 +114,20 @@ func ClientAccess(in ClientAccessInput) []Check {
 	shadowed := make(map[string]bool, len(acl.Shadowed()))
 	for _, sh := range acl.Shadowed() {
 		shadowed[sh.NetworkID] = true
+	}
+
+	if in.Stale {
+		checks = append(checks, Check{
+			Section: sectionClientAccess,
+			Name:    "Client ACL is in force",
+			Status:  StatusFail,
+			Summary: "A change to which networks may use this resolver could not be applied, " +
+				"so the rules below may be older than what is stored.",
+			Action: "A permission you granted may not be working, and — the reason this is a " +
+				"failure rather than a warning — one you revoked may still be honoured. Make " +
+				"any change under Networks to force a reload, or restart DNS Daddy. The log " +
+				"records why the reload failed.",
+		})
 	}
 
 	checks = append(checks, aclSummary(acl))
@@ -191,11 +210,15 @@ func publicAccessWarnings(acl *clientacl.Set) []Check {
 	for _, g := range public {
 		ranges = append(ranges, fmt.Sprintf("%s (%s)", g.CIDR, g.Source))
 	}
+	// The count is of distinct ranges; the evidence names every source. One
+	// range listed in configuration and ticked on a network is two things to
+	// go and change and one exposure, and counting it twice would make adding
+	// a redundant permission look like the resolver had been opened wider.
 	return []Check{{
 		Section:  sectionClientAccess,
 		Name:     "Publicly routable ranges are permitted",
 		Status:   StatusWarn,
-		Summary:  fmt.Sprintf("%d publicly routable range(s) are permitted to query DNS Daddy.", len(public)),
+		Summary:  fmt.Sprintf("%d publicly routable range(s) are permitted to query DNS Daddy.", len(acl.PublicPrefixes())),
 		Evidence: ranges,
 		Action: "That is a supported deployment, and it is the right one for a VPS serving your " +
 			"own sites. Confirm your provider's firewall or security group restricts TCP and UDP " +

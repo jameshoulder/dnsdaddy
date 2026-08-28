@@ -23,6 +23,16 @@ type Loader func(ctx context.Context) ([]Network, error)
 type Controller struct {
 	snap atomic.Pointer[Set]
 
+	// stale records that the last reload failed, so the snapshot in force may
+	// be older than what is stored.
+	//
+	// Kept rather than only returned, because the caller who could act on the
+	// error is often gone by the time it matters. A revocation that did not
+	// reload leaves the old permission being honoured, and the operator sees a
+	// deleted network and assumes it is closed. This is what lets the
+	// diagnostics keep saying otherwise until a reload succeeds.
+	stale atomic.Bool
+
 	bootstrap   []string
 	allowPublic bool
 	load        Loader
@@ -58,12 +68,18 @@ func (c *Controller) Reload(ctx context.Context) error {
 		var err error
 		networks, err = c.load(ctx)
 		if err != nil {
+			c.stale.Store(true)
 			return err
 		}
 	}
 	c.snap.Store(Compute(c.bootstrap, c.allowPublic, networks))
+	c.stale.Store(false)
 	return nil
 }
+
+// Stale reports that the last reload failed, so the ACL being enforced may not
+// match what is stored. It clears on the next successful reload.
+func (c *Controller) Stale() bool { return c != nil && c.stale.Load() }
 
 // Current returns the live snapshot. Never nil once the controller is built.
 func (c *Controller) Current() *Set {
