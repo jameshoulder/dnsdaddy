@@ -1560,15 +1560,22 @@ function clientAccessSummary(access) {
   }
 
   const bootstrap = access.bootstrapCidrs || [];
-  const effective = access.effectiveCidrs || [];
-  const fromDashboard = effective.filter((c) => !bootstrap.includes(c));
+  // From the server, not from subtracting one list from another here: a range
+  // permitted in the dashboard *and* present in configuration survives that
+  // subtraction as nothing, so a network the operator had just ticked would be
+  // shown as contributing no ranges.
+  const fromDashboard = access.dashboardCidrs || [];
 
   return html`
     <div class="card section">
       <div class="card-head">
         <div>
           <h2>Who may use this resolver</h2>
-          <p>Everything else is answered REFUSED before any lookup happens.</p>
+          <p>Any other address asking over <strong>ordinary DNS</strong> is answered
+            REFUSED before any lookup happens. DNS-over-HTTPS and DNS-over-TLS clients
+            holding a network's token are identified by that token rather than by where
+            they connect from, so this does not apply to them — disable the network, or
+            rotate its token, to cut one off.</p>
         </div>
       </div>
       <div class="grid grid-2">
@@ -2661,5 +2668,6 @@ if (typeof module !== 'undefined' && module.exports) {
     diagnosticsBanner,
     firstClientCard,
     accessBadge,
+    clientAccessSummary,
   };
 }

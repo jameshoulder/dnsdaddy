@@ -373,6 +373,30 @@ func (s *Set) Grants() []Grant {
 	return append([]Grant(nil), s.grants...)
 }
 
+// GrantedPrefixes returns the distinct ranges the dashboard permits.
+//
+// Distinct, and computed here rather than by subtracting the bootstrap list
+// from Effective(): a range permitted in the dashboard *and* present in
+// configuration survives that subtraction as nothing, so a network the
+// operator had just ticked would be reported as contributing no ranges. What
+// the dashboard permits is a fact about the grants, not a leftover of the
+// union.
+func (s *Set) GrantedPrefixes() []string {
+	if s == nil {
+		return nil
+	}
+	seen := make(map[netip.Prefix]bool, len(s.grants))
+	out := make([]string, 0, len(s.grants))
+	for _, g := range s.grants {
+		if seen[g.Prefix] {
+			continue
+		}
+		seen[g.Prefix] = true
+		out = append(out, g.CIDR)
+	}
+	return out
+}
+
 // Shadowed returns networks reachable without their own permission.
 func (s *Set) Shadowed() []Shadow {
 	if s == nil {

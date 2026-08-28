@@ -88,6 +88,12 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 			"allowPublicResolver": acl.AllowPublicResolver(),
 			"bootstrapCidrs":      acl.Bootstrap(),
 			"effectiveCidrs":      acl.Effective(),
+			// Computed from the grants rather than left to the client to
+			// subtract one list from another: a range that is both permitted
+			// in the dashboard and listed in configuration survives that
+			// subtraction as nothing, and the network that permitted it would
+			// be shown as contributing no ranges.
+			"dashboardCidrs": acl.GrantedPrefixes(),
 		},
 	})
 }

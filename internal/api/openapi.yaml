@@ -1213,6 +1213,15 @@ components:
           description: >-
             The union actually enforced. Empty when unrestricted is true, which
             means everything is accepted rather than nothing.
+        dashboardCidrs:
+          type: array
+          items: { type: string }
+          description: >-
+            The distinct ranges permitted by networks, as opposed to by
+            configuration. Not the same as effectiveCidrs minus bootstrapCidrs:
+            a range that appears in both survives that subtraction as nothing,
+            which would report a network the operator had just permitted as
+            contributing no ranges.
 
     NetworkInput:
       type: object

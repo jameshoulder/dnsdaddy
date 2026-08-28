@@ -31,6 +31,7 @@ const {
   diagnosticsBanner,
   firstClientCard,
   accessBadge,
+  clientAccessSummary,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -755,4 +756,42 @@ test('an unpermitted network nothing covers reads as refused', () => {
   const out = accessBadge(network({ allowResolver: false }));
   assert.match(out, /badge bad/);
   assert.match(out, /Refused/);
+});
+
+// The "who may use this resolver" card makes two claims, and both were wrong
+// in ways the rest of this branch had already fixed elsewhere.
+
+test('the REFUSED claim is scoped to the transport the ACL governs', () => {
+  // Round three fixed exactly this over-claim in the onboarding card and left
+  // it standing here: a DoH or DoT client holding a network's token is
+  // identified by the token, not by where it connects from, so "everything
+  // else is REFUSED" is false for them.
+  const out = clientAccessSummary({
+    unrestricted: false,
+    bootstrapCidrs: ['127.0.0.0/8'],
+    effectiveCidrs: ['127.0.0.0/8'],
+    dashboardCidrs: [],
+  });
+  assert.match(out, /ordinary DNS/);
+  assert.match(out, /DNS-over-HTTPS and DNS-over-TLS/);
+  assert.match(out, /rotate its token/);
+});
+
+test('a dashboard range that configuration also lists is still shown as permitted here', () => {
+  // Subtracting bootstrap from effective loses it, and the operator who has
+  // just ticked that network sees an empty column and concludes it did not
+  // take. The server sends the grants, so the two lists can overlap.
+  const out = clientAccessSummary({
+    unrestricted: false,
+    bootstrapCidrs: ['10.0.0.0/8'],
+    effectiveCidrs: ['10.0.0.0/8'],
+    dashboardCidrs: ['10.0.0.0/8'],
+  });
+  const fromNetworks = out.split('From the networks below')[1];
+  assert.match(fromNetworks, /10\.0\.0\.0\/8/);
+});
+
+test('an unrestricted ACL says nothing is refused rather than listing ranges', () => {
+  const out = clientAccessSummary({ unrestricted: true, allowPublicResolver: false });
+  assert.match(out, /nothing is refused/);
 });
