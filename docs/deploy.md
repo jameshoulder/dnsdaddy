@@ -122,12 +122,21 @@ The **effective ACL** is built from two sources, combined by union:
 | Source | Where | Changing it |
 |---|---|---|
 | **Bootstrap** | `dns.allowed_client_cidrs`, or `DNSDADDY_ALLOWED_CLIENT_CIDRS` | needs a restart |
-| **Dashboard** | **Networks →** *Allow this network to use DNS Daddy* | in force on the next query |
+| **Dashboard** | **Networks →** *Allow this network to use DNS Daddy* | on the next query, no restart |
 
 A permission grants; nothing else revokes it. Both sources are listed
 separately by `dnsdaddy doctor`, at `GET /api/v1/diagnostics`, and on the
 Networks page, so you can always see which one is responsible for a given
 range.
+
+A dashboard change is stored and then applied to the running resolver, and
+those are two steps. Normally the second follows immediately and the change is
+in force on the next query. If it fails — a transient database error between
+the two — the write is kept, the response says DNS Daddy could not confirm what
+is being enforced, and `doctor` and the diagnostics keep saying so until a
+reload succeeds. The Networks page reports the ACL as it stands rather than as
+it was asked to stand, so a permission stored but not applied shows as *Allowed,
+not in force* rather than as allowed.
 
 Four properties worth knowing before you rely on it:
 

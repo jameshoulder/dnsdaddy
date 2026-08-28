@@ -710,8 +710,9 @@ function network(overrides = {}) {
   return {
     name: 'HQ',
     cidrs: ['10.0.10.0/24'],
+    enabled: true,
     allowResolver: true,
-    canResolve: true,
+    coverage: 'full',
     publicCidrs: [],
     ...overrides,
   };
@@ -732,7 +733,7 @@ test('a public range is permitted but flagged', () => {
 test('a grant the resolver is not enforcing does not read as allowed', () => {
   // A stored permission whose reload failed, or one only partly covered by
   // the ACL. Either way the database says yes and the resolver does not.
-  const out = accessBadge(network({ canResolve: false }));
+  const out = accessBadge(network({ coverage: 'none' }));
   assert.doesNotMatch(out, /badge ok/);
   assert.match(out, /not in force/);
 });
@@ -813,4 +814,29 @@ test('an unpermitted network with ranges nothing covers still reads as refused',
   const out = accessBadge(network({ allowResolver: false }));
   assert.match(out, /badge bad/);
   assert.match(out, /Refused/);
+});
+
+// Disabling a network stops it granting anything and stops its policy applying.
+// It does not create a deny rule, so its addresses may still be served — and
+// saying Refused there is the dashboard telling an operator a working range is
+// being turned away.
+test('a disabled network whose addresses are still served says so', () => {
+  const out = accessBadge(network({ enabled: false, allowResolver: false, coverage: 'full' }));
+  assert.doesNotMatch(out, /badge bad/);
+  assert.match(out, /Disabled, still served/);
+});
+
+test('a disabled network nothing covers reads as plainly disabled', () => {
+  const out = accessBadge(network({ enabled: false, allowResolver: false, coverage: 'none' }));
+  assert.match(out, /Disabled/);
+  assert.doesNotMatch(out, /still served/);
+});
+
+// Partial coverage is its own answer. A 10.0.0.0/8 network against a permitted
+// 10.0.0.0/16 has 65k addresses served and the rest refused; calling the whole
+// thing Refused hides a working half.
+test('a partly covered network is not badged as wholly refused', () => {
+  const out = accessBadge(network({ allowResolver: false, coverage: 'partial' }));
+  assert.doesNotMatch(out, /badge bad/);
+  assert.match(out, /Partly refused/);
 });

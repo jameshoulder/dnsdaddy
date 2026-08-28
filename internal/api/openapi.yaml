@@ -1175,17 +1175,27 @@ components:
               type: array
               items: { type: string }
               description: This network's ranges that are reachable from the public internet.
-            canResolve:
-              type: boolean
+            coverage:
+              type: string
+              enum: [full, partial, none]
               description: >-
-                Whether every one of this network's ranges is admitted by the
-                live effective ACL. Not the same field as allowResolver: a
-                network inside a broader permitted range resolves without a
-                permission of its own.
+                How much of this network the live effective ACL admits. A
+                question about addresses only: whether the row is enabled, and
+                whether it carries a permission of its own, decide what it
+                contributes to the ACL rather than what the ACL admits, because
+                the ACL is a union with no deny rules. So a disabled network
+                inside a permitted range reports full, and a permission that
+                has not been reloaded reports none despite allowResolver being
+                true.
+
+                `partial` is its own answer rather than a rounding of "not
+                full": a 10.0.0.0/8 network against a permitted 10.0.0.0/16 has
+                65k addresses served and the rest refused, which is the state
+                that presents as intermittent breakage.
             resolvesVia:
               type: string
               description: >-
-                When canResolve is true and allowResolver is false, the wider
+                When coverage is full and allowResolver is false, the wider
                 permitted range responsible. Client access has no deny rules,
                 so a narrower network without a permission does not carve a
                 hole in a broader permitted one.

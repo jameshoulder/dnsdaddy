@@ -35,14 +35,20 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 		// internet, so the dashboard can mark them without re-implementing
 		// the classification the server enforces.
 		PublicCIDRs []string `json:"publicCidrs"`
-		// CanResolve is whether this network's clients can actually reach the
-		// resolver right now, by any route. It is not the same field as
-		// allowResolver: a network inside a broader permitted range resolves
-		// without a permission of its own, and one whose permission has not
-		// been reloaded would show the reverse.
-		CanResolve bool `json:"canResolve"`
-		// ResolvesVia names the wider range responsible when CanResolve is
-		// true but allowResolver is false. Empty otherwise.
+		// Coverage is how much of this network the effective ACL admits right
+		// now: "full", "partial" or "none". It is a question about addresses,
+		// not about this row — a network inside a broader permitted range is
+		// covered without a permission of its own, and a permission that has
+		// not been reloaded is not covered despite one.
+		//
+		// Three states rather than a boolean because the middle one is real
+		// and was being reported as the worst one: a 10.0.0.0/8 network
+		// against a permitted 10.0.0.0/16 has its first 65k addresses served
+		// and the rest refused, and calling that "refused" hides a working
+		// half while calling it "allowed" hides a broken one.
+		Coverage string `json:"coverage"`
+		// ResolvesVia names the wider range responsible when the network is
+		// fully covered without a permission of its own. Empty otherwise.
 		ResolvesVia string `json:"resolvesVia,omitempty"`
 	}
 
@@ -78,7 +84,7 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 				r.PublicCIDRs = append(r.PublicCIDRs, p.String())
 			}
 		}
-		r.CanResolve = networkCanResolve(acl, n)
+		r.Coverage = networkCoverage(acl, n)
 		out = append(out, r)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -98,40 +104,59 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// networkCanResolve reports whether every one of a network's ranges is
-// admitted by the live ACL.
+// networkCoverage reports how much of a network the effective ACL admits.
 //
-// Every range, not any: a network half of whose addresses are refused is not
-// working, and reporting it green would recreate in the dashboard exactly the
-// misleading health this whole line of work exists to remove.
-func networkCanResolve(acl *clientacl.Set, n store.Network) bool {
-	if !n.Enabled {
-		return false
-	}
+// It asks only about addresses. Whether the row is enabled, and whether it
+// carries a permission of its own, decide what it *contributes* to the ACL —
+// they do not decide what the ACL admits, because the ACL is a union with no
+// deny rules. Disabling a network stops it granting anything and stops its
+// policy applying; it does not refuse its addresses, and reporting that it
+// does told operators a working range was being turned away.
+//
+// Partial is its own answer rather than a rounding of "not full". A network of
+// 10.0.0.0/8 against a permitted 10.0.0.0/16 has 65k addresses served and the
+// rest refused — the state that looks like intermittent breakage, and the one
+// most worth naming.
+func networkCoverage(acl *clientacl.Set, n store.Network) string {
 	if acl.Unrestricted() {
-		return true
+		return coverageFull
 	}
 	if len(n.CIDRs) == 0 {
-		// The catch-all has no range of its own; whether its clients are
-		// admitted depends entirely on where they arrive from.
-		return true
+		// The catch-all has no ranges of its own, so there is nothing to
+		// cover: whether its clients are admitted depends on where each one
+		// arrives from.
+		return coverageFull
 	}
+
+	worst := clientacl.CoverFull
 	for _, raw := range n.CIDRs {
 		p, err := clientacl.ParsePrefix(raw)
 		if err != nil {
-			return false
+			return coverageNone
 		}
-		// Whole-prefix coverage, and the same calculation the diagnostics use.
-		// Sampling the base address was wrong in a way that mattered: a
-		// network of 10.0.0.0/8 against an ACL of 10.0.0.0/16 starts at a
-		// permitted address while almost every client in it is refused, and
-		// this column would have reported it green.
-		if acl.Cover(p) != clientacl.CoverFull {
-			return false
+		// The same whole-prefix calculation the diagnostics use. Sampling the
+		// base address was wrong in a way that mattered: a network of
+		// 10.0.0.0/8 against an ACL of 10.0.0.0/16 starts at a permitted
+		// address while almost every client in it is refused.
+		if c := acl.Cover(p); c < worst {
+			worst = c
 		}
 	}
-	return true
+	switch worst {
+	case clientacl.CoverFull:
+		return coverageFull
+	case clientacl.CoverPartial:
+		return coveragePartial
+	default:
+		return coverageNone
+	}
 }
+
+const (
+	coverageFull    = "full"
+	coveragePartial = "partial"
+	coverageNone    = "none"
+)
 
 func (a *API) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
 	n, err := a.Store.GetNetwork(r.Context(), r.PathValue("id"))

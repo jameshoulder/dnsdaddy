@@ -210,7 +210,7 @@ func TestNetworkListExposesAccessState(t *testing.T) {
 		Networks []struct {
 			Name          string   `json:"name"`
 			AllowResolver bool     `json:"allowResolver"`
-			CanResolve    bool     `json:"canResolve"`
+			Coverage      string   `json:"coverage"`
 			PublicCIDRs   []string `json:"publicCidrs"`
 			ResolvesVia   string   `json:"resolvesVia"`
 		} `json:"networks"`
@@ -227,8 +227,8 @@ func TestNetworkListExposesAccessState(t *testing.T) {
 			continue
 		}
 		found = true
-		if !n.AllowResolver || !n.CanResolve {
-			t.Errorf("network %+v does not report itself as permitted", n)
+		if !n.AllowResolver || n.Coverage != "full" {
+			t.Errorf("network %+v does not report itself as permitted and fully covered", n)
 		}
 		if len(n.PublicCIDRs) != 1 || n.PublicCIDRs[0] != "203.0.113.25/32" {
 			t.Errorf("publicCidrs = %v, want the public range marked for the UI", n.PublicCIDRs)
@@ -407,8 +407,8 @@ func TestPartiallyPermittedNetworkIsNotReportedAsResolving(t *testing.T) {
 	_, raw = h.do("GET", "/api/v1/networks", nil)
 	body := decode[struct {
 		Networks []struct {
-			Name       string `json:"name"`
-			CanResolve bool   `json:"canResolve"`
+			Name     string `json:"name"`
+			Coverage string `json:"coverage"`
 		} `json:"networks"`
 	}](t, raw)
 
@@ -416,8 +416,12 @@ func TestPartiallyPermittedNetworkIsNotReportedAsResolving(t *testing.T) {
 		if n.Name != "Too broad" {
 			continue
 		}
-		if n.CanResolve {
-			t.Error("a network whose clients are mostly REFUSED is reported as able to resolve")
+		// Partial, not none: the /16 inside it is permitted, so some of its
+		// clients are served and most are not. Reporting either extreme hides
+		// half the truth.
+		if n.Coverage != "partial" {
+			t.Errorf("coverage = %q, want partial — a 10.0.0.0/8 network against a permitted "+
+				"10.0.0.0/16 has its first 65k addresses served and the rest refused", n.Coverage)
 		}
 		return
 	}

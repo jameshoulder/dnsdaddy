@@ -235,7 +235,7 @@ func TestNetworkListMatchesDashboardContract(t *testing.T) {
 	requireKeys(t, "network row", row,
 		"id", "name", "location", "policyId", "cidrs", "enabled",
 		"queries24h", "blocked24h", "status",
-		"allowResolver", "publicCidrs", "canResolve")
+		"allowResolver", "publicCidrs", "coverage")
 
 	// clientAccessSummary() reads these.
 	requireKeys(t, "clientAccess", body.ClientAccess,
@@ -289,8 +289,8 @@ func TestShadowedNetworkReportsResolvesVia(t *testing.T) {
 		if n["allowResolver"] != false {
 			t.Errorf("allowResolver = %v, want false", n["allowResolver"])
 		}
-		if n["canResolve"] != true {
-			t.Errorf("canResolve = %v, want true — it is inside a permitted range", n["canResolve"])
+		if n["coverage"] != "full" {
+			t.Errorf("coverage = %v, want full — it is inside a permitted range", n["coverage"])
 		}
 		via, _ := n["resolvesVia"].(string)
 		if via == "" {

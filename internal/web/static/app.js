@@ -1639,24 +1639,36 @@ async function sendNetwork(method, path, payload) {
 
 // The Access column reports what the resolver is doing, not what the row says.
 //
-// allowResolver is the stored intent; canResolve is computed from the ACL the
-// resolver is actually enforcing. They come apart in two ways that matter, and
-// badging the stored value made both of them look fine: a grant whose reload
-// failed is in the database and not in force, and a network only partly
-// covered by the ACL has most of its clients refused.
+// allowResolver is the stored intent; coverage is computed from the ACL the
+// resolver is actually enforcing. They come apart in several ways, and every
+// one of them was reaching a branch that read better than the truth:
 //
-// A permitted catch-all is the third case and the sharpest, because it looks
-// like the others and is not: a network with no ranges contributes nothing to
-// the ACL at all, so ticking the box on one grants precisely nothing. Saying
-// "Allowed" there is how an operator ends up certain they have permitted a
-// client that is still being refused.
+//   disabled          the row grants nothing and its policy does not apply,
+//                     but disabling creates no deny rule, so its addresses may
+//                     still be served by configuration or a wider network
+//   catch-all         has no ranges of its own, so it neither grants nor is
+//                     refused; the answer depends on each client's address
+//   partial coverage  some of the range is served and the rest refused, which
+//                     is the state that looks like intermittent breakage
+//   stored, unloaded  a grant the resolver has not published
+//
+// Collapsing any of these into "Allowed" or "Refused" is how the dashboard
+// ends up misdiagnosing a working deployment, which is the failure this whole
+// line of work exists to remove.
 function accessBadge(n) {
   const catchAll = !(n.cidrs || []).length;
+  const coverage = n.coverage || 'none';
+
+  if (n.enabled === false) {
+    return coverage === 'full'
+      ? html`<span class="badge" title="This network grants nothing and applies no policy while it is disabled, but disabling creates no deny rule — configuration or another network still permits these addresses.">Disabled, still served</span>`
+      : html`<span class="badge">Disabled</span>`;
+  }
   if (n.allowResolver && catchAll) {
     return html`<span class="badge warn"
       title="A catch-all has no ranges of its own, so permitting it grants nothing. Give it CIDRs, or permit the network the clients actually match.">Grants nothing</span>`;
   }
-  if (n.allowResolver && !n.canResolve) {
+  if (n.allowResolver && coverage !== 'full') {
     return html`<span class="badge warn"
       title="Stored, but the resolver is not enforcing all of it — see the client access summary above.">Allowed, not in force</span>`;
   }
@@ -1669,14 +1681,12 @@ function accessBadge(n) {
     return html`<span class="badge warn" title="Covered by ${n.resolvesVia}">Via wider range</span>`;
   }
   if (catchAll) {
-    // The seeded Default network is exactly this: enabled, no ranges, no
-    // permission. It has no addresses of its own, so whether its clients are
-    // served depends on where each one arrives from — and on a stock install
-    // the configured ACL serves every private range, so most of them are.
-    // Badging it Refused told every new operator that their working clients
-    // were being turned away.
     return html`<span class="badge"
       title="A catch-all has no ranges of its own. Whether a client it matches is served depends on that client's own address — see who may use this resolver, above.">Depends on the client</span>`;
+  }
+  if (coverage === 'partial') {
+    return html`<span class="badge warn"
+      title="Some of this network's addresses are permitted and the rest are refused, which looks like intermittent breakage from the client side. Permit the whole range, or split the network.">Partly refused</span>`;
   }
   return html`<span class="badge bad">Refused</span>`;
 }
