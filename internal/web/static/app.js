@@ -343,7 +343,7 @@ function diagnosticsBanner(diagnostics) {
       <p class="muted small diag-lede">
         ${failed
           ? 'DNS Daddy is running, but part of this configuration stops clients using it.'
-          : 'DNS Daddy is serving clients, but something here is worth knowing about.'}
+          : 'DNS Daddy is running and nothing here is a definite fault — but each of these is worth knowing about, including anything it could not confirm.'}
       </p>
       <ul class="diag-list">${raw(items)}</ul>
       <p class="muted small">Run <code>dnsdaddy doctor</code> on the server for the full report.</p>

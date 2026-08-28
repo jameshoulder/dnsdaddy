@@ -868,3 +868,33 @@ test('an unrestricted ACL says so rather than listing nothing', () => {
   assert.match(out, /Every address may query/);
   assert.doesNotMatch(out, /REFUSED/);
 });
+
+// The warning lede used to say "DNS Daddy is serving clients". Round 10 made a
+// stale client ACL a WARN rather than a FAIL — it means the resolver could not
+// re-read its configuration, so what it is enforcing is unconfirmed — and the
+// banner then asserted the one thing that had not been established, on the
+// strength of there being no FAIL. Downgrading a status without checking what
+// consumes it moved the false claim rather than removing it.
+test('the warning banner does not assert that clients are being served', () => {
+  const out = diagnosticsBanner({
+    checks: [
+      {
+        status: 'warn',
+        summary:
+          'DNS Daddy could not re-read its configuration after a change, so it cannot ' +
+          'confirm that the rules below are the ones being enforced.',
+      },
+    ],
+  });
+  assert.match(out, /CONFIGURATION WARNING/);
+  assert.doesNotMatch(out, /serving clients/);
+  assert.match(out, /could not confirm/);
+});
+
+test('the failure banner still says clients are being stopped', () => {
+  const out = diagnosticsBanner({
+    checks: [{ status: 'fail', summary: 'Queries from network "HQ" are REFUSED.' }],
+  });
+  assert.match(out, /CONFIGURATION PROBLEM/);
+  assert.match(out, /stops clients using it/);
+});
