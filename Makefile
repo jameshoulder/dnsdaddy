@@ -58,7 +58,7 @@ cover: ## Run tests and open a coverage report
 
 .PHONY: bench
 bench: ## Run benchmarks for the DNS hot path
-	go test -bench=. -benchmem -run='^$$' ./internal/blocklist/... ./internal/policy/... ./internal/domainutil/...
+	go test -bench=. -benchmem -run='^$$' ./internal/blocklist/... ./internal/policy/... ./internal/domainutil/... ./internal/clientacl/...
 
 .PHONY: lint
 lint: ## Vet and check formatting

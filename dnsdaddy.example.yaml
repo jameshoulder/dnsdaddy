@@ -50,6 +50,13 @@ dns:
   # This is deliberately belt-and-braces with your firewall. An open resolver
   # is found and conscripted into amplification attacks within days, and by
   # then it is your IP address in the abuse report.
+  #
+  # This list is the BOOTSTRAP half of the client ACL: read once at startup,
+  # right for a headless or automated deployment, and needing a restart to
+  # change. The other half is per-network — Networks in the dashboard, "Allow
+  # this network to use DNS Daddy" — which takes effect on the next query. The
+  # effective ACL is the union of the two; `dnsdaddy doctor` reports both
+  # sources separately. See docs/deploy.md#who-may-use-the-resolver.
   allowed_client_cidrs:
     - "127.0.0.0/8"
     - "10.0.0.0/8"
@@ -64,6 +71,15 @@ dns:
   # Emptying allowed_client_cidrs while listening on a public interface is a
   # startup error unless you set this. Only turn it on if you really intend to
   # run a resolver open to the whole internet, and rate-limit it upstream.
+  #
+  # This is also the only way to permit a default route. The dashboard refuses
+  # 0.0.0.0/0 and ::/0 outright, at any level of confirmation, so that "I
+  # intend to run a public resolver" stays one deliberate decision made here
+  # rather than something a web form can be talked into.
+  #
+  # Note that an empty allowed_client_cidrs means "refuse nothing", and stays
+  # that way: permitting a network in the dashboard does not narrow it to that
+  # network. A click must not change who a running resolver serves.
   allow_public_resolver: false
 
   # Answer ANY queries with a minimal RFC 8482 response instead of forwarding
