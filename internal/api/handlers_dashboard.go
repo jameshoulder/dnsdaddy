@@ -21,6 +21,27 @@ type HealthResponse struct {
 	Version       string `json:"version"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
 	BlocklistSize int    `json:"blocklistSize"`
+
+	// ClientACLStale reports that the resolver could not re-read its
+	// configuration after a change, so the client access it is enforcing could
+	// not be confirmed to match what is stored.
+	//
+	// It says the re-read failed and nothing more. Whether the enforced rules
+	// actually differ is not knowable here: working it out needs the reading
+	// that just failed.
+	//
+	// Here, on the unauthenticated endpoint, because it is the only way
+	// `dnsdaddy doctor` can see it. doctor runs as a separate process and
+	// rebuilds the ACL from configuration and the database — that is the
+	// *desired* state, and this flag lives only in the running daemon's
+	// memory. Without it doctor would report nothing at all while the daemon
+	// might be honouring a prefix the operator had deleted, which is exactly
+	// the misleading green that command exists to remove.
+	//
+	// It reveals nothing: a boolean saying a reload failed, not what the ACL
+	// contains. The same endpoint already reports the blocklist size for the
+	// same reason.
+	ClientACLStale bool `json:"clientAclStale"`
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -32,10 +53,11 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 		status = "degraded"
 	}
 	writeJSON(w, http.StatusOK, HealthResponse{
-		Status:        status,
-		Version:       version.String(),
-		UptimeSeconds: int64(time.Since(a.StartedAt).Seconds()),
-		BlocklistSize: size,
+		Status:         status,
+		Version:        version.String(),
+		UptimeSeconds:  int64(time.Since(a.StartedAt).Seconds()),
+		BlocklistSize:  size,
+		ClientACLStale: a.ClientACL.Stale(),
 	})
 }
 
@@ -114,6 +136,35 @@ type Overview struct {
 	// deliberately turned off client logging that no device is using their
 	// resolver, forever.
 	ClientAttribution bool `json:"clientAttribution"`
+
+	// PermittedNetworks is how many configured networks carry the "allow this
+	// network to use DNS Daddy" permission.
+	//
+	// Informational only. It is deliberately NOT what the onboarding card
+	// branches on: a stock LAN install has none, because the shipped ACL
+	// already serves every private range, and branching on it told that
+	// operator every client would be REFUSED — the exact misleading message
+	// this work exists to stop producing.
+	PermittedNetworks int `json:"permittedNetworks"`
+
+	// UnrestrictedAccess reports that no client ACL is configured, so nothing
+	// is refused on its source address.
+	UnrestrictedAccess bool `json:"unrestrictedAccess"`
+
+	// ServesOnlyLoopback reports that the effective ACL admits nothing but
+	// this machine itself. It is the one state in which "no client can use
+	// this resolver" is a measurement rather than a guess.
+	ServesOnlyLoopback bool `json:"servesOnlyLoopback"`
+
+	// RefusedClients is how many queries the ACL has turned away since start.
+	//
+	// This is the evidence that separates the two cases nothing at rest can:
+	// a VPS whose clients arrive from public addresses the shipped ACL does
+	// not cover looks identical to a working LAN until somebody tries. A
+	// climbing count with no client ever seen means the queries are arriving
+	// and being refused, which is a different problem from no queries at all
+	// and has a different fix.
+	RefusedClients uint64 `json:"refusedClients"`
 }
 
 func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -183,19 +234,23 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, Overview{
-		ProtectionStatus:  protection,
-		ResolverStatus:    resolverStatus,
-		Queries24h:        totals.Queries,
-		ThreatsBlocked24h: totals.Blocked,
-		BlockRate24h:      round2(blockRate),
-		ProtectedNetworks: len(networks),
-		ActivePolicies:    len(policies),
-		BlocklistDomains:  blocklistSize,
-		LastFeedRefresh:   lastRefresh,
-		UptimeSeconds:     int64(time.Since(a.StartedAt).Seconds()),
-		Version:           version.String(),
-		HasSeenClients:    seenClients,
-		ClientAttribution: attribution,
+		ProtectionStatus:   protection,
+		ResolverStatus:     resolverStatus,
+		Queries24h:         totals.Queries,
+		ThreatsBlocked24h:  totals.Blocked,
+		BlockRate24h:       round2(blockRate),
+		ProtectedNetworks:  len(networks),
+		ActivePolicies:     len(policies),
+		PermittedNetworks:  permittedNetworks(networks),
+		BlocklistDomains:   blocklistSize,
+		LastFeedRefresh:    lastRefresh,
+		UptimeSeconds:      int64(time.Since(a.StartedAt).Seconds()),
+		Version:            version.String(),
+		HasSeenClients:     seenClients,
+		ClientAttribution:  attribution,
+		UnrestrictedAccess: a.ClientACL.Current().Unrestricted(),
+		ServesOnlyLoopback: a.ClientACL.Current().ServesOnlyLoopback(),
+		RefusedClients:     a.DNS.RefusedClients(),
 	})
 }
 
@@ -444,4 +499,18 @@ func intParam(r *http.Request, name string, def int) int {
 
 func round2(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
+}
+
+// permittedNetworks counts the networks allowed to query the resolver.
+//
+// Disabled networks do not count: "disabled" that still permits traffic would
+// be a worse lie than no switch at all.
+func permittedNetworks(networks []store.Network) int {
+	n := 0
+	for _, net := range networks {
+		if net.Enabled && net.AllowResolver {
+			n++
+		}
+	}
+	return n
 }

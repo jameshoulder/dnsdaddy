@@ -9,9 +9,11 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
@@ -36,9 +38,16 @@ type Deps struct {
 	QueryLog *querylog.Logger
 	// Detector is the behavioural detection engine, or nil when detection is
 	// switched off. Every handler that touches it must tolerate nil.
-	Detector  *detect.Engine
-	Auth      *Auth
-	Log       *slog.Logger
+	Detector *detect.Engine
+	Auth     *Auth
+	Log      *slog.Logger
+
+	// ClientACL is the live effective client ACL. Writes that change which
+	// networks may resolve reload it, so a permission granted or revoked in
+	// the dashboard takes effect on the next query rather than the next
+	// restart.
+	ClientACL *clientacl.Controller
+
 	StartedAt time.Time
 
 	// TrustedProxies bounds which peers' forwarding headers are believed,
@@ -54,6 +63,25 @@ type API struct {
 	// exposure records evidence that the management surface is reachable in
 	// plaintext from the public internet. See internal/api/exposure.go.
 	exposure exposureWatch
+
+	// networkWrites serialises a network write with the ACL reload that
+	// follows it.
+	//
+	// It was introduced to stop a handler comparing a row another request had
+	// already superseded. That comparison is gone — see clientacl.Reload — so
+	// this is no longer load-bearing for correctness: reloads are ordered by
+	// clientacl's own mutex, each loads the database after its own commit, and
+	// the effective ACL converges on the last load either way.
+	//
+	// It is kept because it makes the write path trivial to reason about, at
+	// no cost worth measuring: network writes are operator actions in a
+	// dashboard, a handful in a session, and queries never touch it — they
+	// read the published snapshot with one atomic load. Every handler that
+	// writes the networks tables takes it, token rotation included, so the
+	// invariant needs no case analysis over which columns decide admission.
+	// The remaining writer is the seed, which runs once at startup before
+	// anything is served.
+	networkWrites sync.Mutex
 }
 
 // New returns an API bound to deps.
@@ -251,9 +279,20 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // writeStoreError maps store errors onto HTTP status codes.
 func writeStoreError(w http.ResponseWriter, err error) {
+	var needAck *store.ErrPublicAckRequired
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.As(err, &needAck):
+		// 409, not 400: the request is well-formed and the caller may resend
+		// it verbatim with publicAck set. A dashboard needs the ranges
+		// themselves to name them in its confirmation, so they are returned
+		// alongside the prose rather than only inside it.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":             needAck.Error(),
+			"publicAckRequired": true,
+			"publicCidrs":       needAck.PublicCIDRs(),
+		})
 	default:
 		writeError(w, http.StatusBadRequest, err.Error())
 	}

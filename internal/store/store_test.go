@@ -217,7 +217,7 @@ func TestNetworkRejectsBadCIDR(t *testing.T) {
 
 func TestCannotDeleteLastNetwork(t *testing.T) {
 	st := newTestStore(t)
-	if err := st.DeleteNetwork(context.Background(), "n_default"); err == nil {
+	if _, err := st.DeleteNetwork(context.Background(), "n_default"); err == nil {
 		t.Error("the only network was deleted, leaving nowhere to attribute clients")
 	}
 }

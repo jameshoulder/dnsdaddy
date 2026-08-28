@@ -3,8 +3,11 @@ package api
 import (
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -22,11 +25,58 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	acl := a.ClientACL.Current()
+
 	type row struct {
 		store.Network
 		Queries24h int64  `json:"queries24h"`
 		Blocked24h int64  `json:"blocked24h"`
 		Status     string `json:"status"`
+
+		// PublicCIDRs are this network's ranges that are reachable from the
+		// internet, so the dashboard can mark them without re-implementing
+		// the classification the server enforces.
+		PublicCIDRs []string `json:"publicCidrs"`
+		// Coverage is how much of this network the effective ACL admits right
+		// now: "full", "partial" or "none". It is a question about addresses,
+		// not about this row — a network inside a broader permitted range is
+		// covered without a permission of its own, and a permission that has
+		// not been reloaded is not covered despite one.
+		//
+		// Three states rather than a boolean because the middle one is real
+		// and was being reported as the worst one: a 10.0.0.0/8 network
+		// against a permitted 10.0.0.0/16 has its first 65k addresses served
+		// and the rest refused, and calling that "refused" hides a working
+		// half while calling it "allowed" hides a broken one.
+		Coverage string `json:"coverage"`
+		// ResolvesVia names the wider range or ranges responsible when the
+		// network is fully covered without a permission of its own — plural,
+		// because two of its CIDRs can be covered by two different grants.
+		// Empty otherwise, which includes the case where nothing is refused at
+		// all: an unrestricted ACL has no grants to name.
+		ResolvesVia string `json:"resolvesVia,omitempty"`
+	}
+
+	// Every range responsible, not the last one seen. Shadowed() reports one
+	// entry per covered CIDR, so a network with two ranges covered by two
+	// different grants produced two entries and this kept whichever came last
+	// — and the row then named one range as covering a network of which it
+	// covers half.
+	// Keyed by the range as well as the network, so an explanation can only be
+	// attached to a range the row still has.
+	//
+	// The snapshot and the database are two different points in time — the
+	// snapshot is what the resolver is enforcing, the row is what is stored —
+	// and after a failed reload they disagree. Matching on the network alone
+	// let a covering range for a CIDR the operator had just replaced be
+	// reported against the CIDR that replaced it, so a 192.168.0.0/24 row
+	// could be described as reachable inside 10.0.0.0/8.
+	shadows := map[string]map[string]string{}
+	for _, sh := range acl.Shadowed() {
+		if shadows[sh.NetworkID] == nil {
+			shadows[sh.NetworkID] = map[string]string{}
+		}
+		shadows[sh.NetworkID][sh.CIDR] = sh.CoveredBy + " (" + sh.Source + ")"
 	}
 
 	out := make([]row, 0, len(networks))
@@ -42,15 +92,124 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 			// somebody's firewall change did not take.
 			status = "no-traffic"
 		}
-		out = append(out, row{
-			Network:    n,
-			Queries24h: act.Queries,
-			Blocked24h: act.Blocked,
-			Status:     status,
-		})
+
+		r := row{
+			Network:     n,
+			Queries24h:  act.Queries,
+			Blocked24h:  act.Blocked,
+			Status:      status,
+			PublicCIDRs: []string{},
+		}
+		for _, raw := range n.CIDRs {
+			if p, err := clientacl.ParsePrefix(raw); err == nil && clientacl.PrefixIsPublic(p) {
+				r.PublicCIDRs = append(r.PublicCIDRs, p.String())
+			}
+		}
+		r.Coverage = networkCoverage(acl, n)
+		// Only when the whole row is covered. Shadowed() reports a shadowed
+		// *range*, so a network with two CIDRs of which one sits inside a wider
+		// grant produced an entry — and the badge, which reads resolvesVia
+		// before it reads coverage, then described a network with a refused
+		// half as reachable through that wider range.
+		if r.Coverage == coverageFull {
+			var via []string
+			for _, raw := range n.CIDRs {
+				p, err := clientacl.ParsePrefix(raw)
+				if err != nil {
+					continue
+				}
+				v, ok := shadows[n.ID][p.String()]
+				if ok && !slices.Contains(via, v) {
+					via = append(via, v)
+				}
+			}
+			r.ResolvesVia = strings.Join(via, ", ")
+		}
+		out = append(out, r)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"networks": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"networks": out,
+		"clientAccess": map[string]any{
+			"unrestricted":        acl.Unrestricted(),
+			"allowPublicResolver": acl.AllowPublicResolver(),
+			"bootstrapCidrs":      acl.Bootstrap(),
+			"effectiveCidrs":      acl.Effective(),
+			// Computed from the grants rather than left to the client to
+			// subtract one list from another: a range that is both permitted
+			// in the dashboard and listed in configuration survives that
+			// subtraction as nothing, and the network that permitted it would
+			// be shown as contributing no ranges.
+			"dashboardCidrs": acl.GrantedPrefixes(),
+		},
+	})
 }
+
+// networkCoverage reports how much of a network the effective ACL admits.
+//
+// It asks only about addresses. Whether the row is enabled, and whether it
+// carries a permission of its own, decide what it *contributes* to the ACL —
+// they do not decide what the ACL admits, because the ACL is a union with no
+// deny rules. Disabling a network stops it granting anything and stops its
+// policy applying; it does not refuse its addresses, and reporting that it
+// does told operators a working range was being turned away.
+//
+// Partial is its own answer rather than a rounding of "not full". A network of
+// 10.0.0.0/8 against a permitted 10.0.0.0/16 has 65k addresses served and the
+// rest refused — the state that looks like intermittent breakage, and the one
+// most worth naming.
+func networkCoverage(acl *clientacl.Set, n store.Network) string {
+	if acl.Unrestricted() {
+		return coverageFull
+	}
+	if len(n.CIDRs) == 0 {
+		// The catch-all has no ranges of its own, so there is nothing to
+		// cover: whether its clients are admitted depends on where each one
+		// arrives from.
+		return coverageFull
+	}
+
+	// Tracked as two facts rather than as a minimum. Taking the least-covered
+	// range calls a network with one fully permitted CIDR and one permitted by
+	// nothing "none", and the badge then reports the whole thing refused while
+	// half its clients are being served. What matters is whether any address
+	// is admitted and whether any is refused, which are independent.
+	anyAdmitted, anyRefused := false, false
+	for _, raw := range n.CIDRs {
+		p, err := clientacl.ParsePrefix(raw)
+		if err != nil {
+			// An unparseable range permits nothing, so it refuses this part of
+			// the network without saying anything about the rest.
+			anyRefused = true
+			continue
+		}
+		// The same whole-prefix calculation the diagnostics use. Sampling the
+		// base address was wrong in a way that mattered: a network of
+		// 10.0.0.0/8 against an ACL of 10.0.0.0/16 starts at a permitted
+		// address while almost every client in it is refused.
+		switch acl.Cover(p) {
+		case clientacl.CoverFull:
+			anyAdmitted = true
+		case clientacl.CoverPartial:
+			anyAdmitted, anyRefused = true, true
+		default:
+			anyRefused = true
+		}
+	}
+	switch {
+	case anyAdmitted && anyRefused:
+		return coveragePartial
+	case anyAdmitted:
+		return coverageFull
+	default:
+		return coverageNone
+	}
+}
+
+const (
+	coverageFull    = "full"
+	coveragePartial = "partial"
+	coverageNone    = "none"
+)
 
 func (a *API) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
 	n, err := a.Store.GetNetwork(r.Context(), r.PathValue("id"))
@@ -67,15 +226,27 @@ type networkBody struct {
 	PolicyID *string   `json:"policyId"`
 	CIDRs    *[]string `json:"cidrs"`
 	Enabled  *bool     `json:"enabled"`
+
+	// AllowResolver permits this network's addresses to query the resolver.
+	// Omitted leaves the stored value alone, so a client that updates a name
+	// cannot silently revoke access it never mentioned.
+	AllowResolver *bool `json:"allowResolver"`
+
+	// PublicAck affirms, in this request, that the publicly routable ranges
+	// it results in may reach the resolver. Without it the write is refused
+	// with 409 and the ranges in question.
+	PublicAck *bool `json:"publicAck"`
 }
 
 func (b networkBody) toInput() store.NetworkInput {
 	return store.NetworkInput{
-		Name:     b.Name,
-		Location: b.Location,
-		PolicyID: b.PolicyID,
-		CIDRs:    b.CIDRs,
-		Enabled:  b.Enabled,
+		Name:          b.Name,
+		Location:      b.Location,
+		PolicyID:      b.PolicyID,
+		CIDRs:         b.CIDRs,
+		Enabled:       b.Enabled,
+		AllowResolver: b.AllowResolver,
+		PublicAck:     b.PublicAck,
 	}
 }
 
@@ -84,13 +255,17 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	// Held across the commit and the reload: see API.networkWrites.
+	a.networkWrites.Lock()
+	defer a.networkWrites.Unlock()
+
 	n, err := a.Store.CreateNetwork(r.Context(), body.toInput())
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	a.reloadEngine(r)
-	writeJSON(w, http.StatusCreated, n)
+	writeNetwork(w, http.StatusCreated, n, a.reloadNetworkAccess(r))
 }
 
 func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -98,25 +273,58 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	a.networkWrites.Lock()
+	defer a.networkWrites.Unlock()
+
 	n, err := a.Store.UpdateNetwork(r.Context(), r.PathValue("id"), body.toInput())
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	a.reloadEngine(r)
-	writeJSON(w, http.StatusOK, n)
+	writeNetwork(w, http.StatusOK, n, a.reloadNetworkAccess(r))
 }
 
 func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
-	if err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id")); err != nil {
+	a.networkWrites.Lock()
+	defer a.networkWrites.Unlock()
+
+	// DeleteNetwork removes the row inside a transaction that reads it first,
+	// so the count check and the delete cannot disagree about what is there.
+	if _, err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id")); err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	a.reloadEngine(r)
+
+	// Deletion is the failure case that matters most: whatever the network
+	// permitted may still be honoured, and the row that would have shown it is
+	// gone. Answering 204 and dropping the warning tells the caller the
+	// revocation took effect, which is a security-relevant false success — so
+	// a failed reload answers 200 with the warning instead. The controller
+	// records it too, so `dnsdaddy doctor` and /api/v1/diagnostics keep
+	// reporting it until a reload succeeds: a warning in one HTTP response is
+	// easy to miss, and this outlives the request that caused it.
+	warning := a.reloadNetworkAccess(r)
+	if warning != "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "deleted",
+			"warning": warning,
+		})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) handleRotateToken(w http.ResponseWriter, r *http.Request) {
+	// A rotation cannot change who is admitted — a token identifies a DoH or
+	// DoT client by credential, not by source address — so it needs no ACL
+	// reload. It takes the lock anyway, so that "every handler that writes a
+	// network is serialised" holds without a reader having to work out which
+	// columns decide admission.
+	a.networkWrites.Lock()
+	defer a.networkWrites.Unlock()
+
 	n, err := a.Store.RotateNetworkToken(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeStoreError(w, err)
@@ -596,6 +804,48 @@ func (a *API) reloadEngine(r *http.Request) {
 	if err := a.Engine.Reload(r.Context()); err != nil {
 		a.Log.Error("reload policy engine", "error", err)
 	}
+}
+
+// reloadNetworkAccess republishes the effective client ACL after a network
+// write and returns a warning to hand back to the caller if it could not.
+//
+// Unlike a policy reload, a failure here is not merely late: it means a
+// permission the operator just revoked may still be honoured, or one they just
+// granted may not be working. The write is already committed, so failing the
+// request would invite a retry that creates a second network — hence a
+// successful response carrying an explicit warning rather than a 500.
+//
+// The warning says what is known and no more. Earlier versions decided from
+// the write whether client access could have changed, and said either "this is
+// not yet in force" or "no client is affected"; both claims turned out to be
+// unsupportable, because working out which one applies needs the reading of
+// the stored state that has just failed. The condition also outlives this
+// response, on the controller, so `dnsdaddy doctor` and /api/v1/diagnostics
+// keep reporting it until a reload succeeds.
+func (a *API) reloadNetworkAccess(r *http.Request) string {
+	if a.ClientACL == nil {
+		return ""
+	}
+	if err := a.ClientACL.Reload(r.Context()); err != nil {
+		a.Log.Error("reload client access", "error", err)
+		return "Saved, but DNS Daddy could not re-read its configuration, so it cannot confirm " +
+			"that the client access it is enforcing matches what is stored. Retry the change, " +
+			"or restart DNS Daddy."
+	}
+	return ""
+}
+
+// writeNetwork answers a network write, attaching a warning when the change is
+// stored but not yet enforced.
+func writeNetwork(w http.ResponseWriter, status int, n store.Network, warning string) {
+	if warning == "" {
+		writeJSON(w, status, n)
+		return
+	}
+	writeJSON(w, status, struct {
+		store.Network
+		Warning string `json:"warning"`
+	}{Network: n, Warning: warning})
 }
 
 func (a *API) handleOpenAPI(w http.ResponseWriter, r *http.Request) {

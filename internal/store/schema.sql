@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS networks (
     policy_id  TEXT    NOT NULL REFERENCES policies(id),
     token      TEXT    UNIQUE,
     enabled    INTEGER NOT NULL DEFAULT 1,
+    -- Whether this network's addresses may query the resolver at all, as
+    -- opposed to which policy they get once admitted. Defaults to 0 so an
+    -- upgrade grants nobody anything they did not already have: the
+    -- bootstrap ACL keeps working exactly as it did. See internal/clientacl.
+    allow_resolver INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -43,6 +48,11 @@ CREATE TABLE IF NOT EXISTS network_cidrs (
     id         INTEGER PRIMARY KEY,
     network_id TEXT NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
     cidr       TEXT NOT NULL,
+    -- Records that an operator affirmed this specific publicly routable range.
+    -- Kept per CIDR, not per network, so an unrelated later edit does not
+    -- re-prompt for a range already acknowledged, while adding a *new* public
+    -- range does.
+    public_ack INTEGER NOT NULL DEFAULT 0,
     UNIQUE (network_id, cidr)
 );
 

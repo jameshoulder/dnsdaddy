@@ -5,6 +5,10 @@
 #   cd /root/dnsdaddy && sudo ./deploy/production-deploy.sh
 #   sudo ./deploy/production-deploy.sh --dry-run     # decide nothing, change nothing
 #
+# A dry run changes nothing, so it does not need root to write. It still needs
+# to read the database, and a named volume lives under Docker's root-owned
+# store — so keep the sudo unless the data volume is one your own user can read.
+#
 # Does the whole job: investigate, back up, derive the client ACL from the
 # database, build, deploy onto the EXISTING volume, install Caddy, wire up boot
 # persistence, and verify the live service.
@@ -60,7 +64,14 @@ cd "$REPO" || die "repository not found at $REPO"
 # ---------------------------------------------------------------------------
 step "1. Preflight"
 # ---------------------------------------------------------------------------
-[[ $EUID -eq 0 ]] || die "run with sudo"
+# A real deploy needs root. A dry run does not: it changes nothing, every
+# mutating step goes through act(), and being able to ask what a deploy would
+# do without sudo is worth more than the uniformity. It is also what makes this
+# script testable, which is why the check is written this way and not inlined.
+if [[ $EUID -ne 0 ]]; then
+  [[ $DRY_RUN -eq 1 ]] || die "run with sudo"
+  warn "not running as root — fine for a dry run, if the data volume is readable by this user"
+fi
 command -v docker >/dev/null || die "docker is not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose v2 is not available"
 systemctl is-active --quiet docker || die "the docker daemon is not running"
@@ -91,6 +102,18 @@ ok "type=$VOL_TYPE  name=$VOL_NAME"
 ok "host path=$VOL_SRC"
 
 DB="$VOL_SRC/dnsdaddy.db"
+# Tell "not allowed" apart from "not there" before reporting either, and test
+# the two independently: the directory may be listable while the database is
+# root-owned 0600. Neither -f nor stat needs read access, so an unreadable
+# database otherwise sails through this step as "database present", and step 4
+# suppresses sqlite3's errors — leaving the script to blame the operator's
+# network configuration for a file it was never able to open.
+if [[ $EUID -ne 0 ]]; then
+  [[ -r "$VOL_SRC" && -x "$VOL_SRC" ]] ||
+    die "cannot list $VOL_SRC as an unprivileged user — it is Docker's own volume directory, so even a dry run over it needs sudo"
+  [[ ! -e "$DB" || -r "$DB" ]] ||
+    die "cannot read $DB as an unprivileged user — the database is there, but not readable by this user, so even a dry run over it needs sudo"
+fi
 [[ -f "$DB" ]] || die "no database at $DB — this is not the data volume"
 DB_BYTES=$(stat -c %s "$DB")
 (( DB_BYTES > 65536 )) || die "database is only $DB_BYTES bytes — refusing to proceed"
@@ -119,18 +142,89 @@ step "4. Derive the client ACL from configured networks"
 # The administrator's intended client ranges live in network_cidrs. Query-log
 # source addresses are NOT used: the resolver is currently open, so that log is
 # full of scanners and copying it would whitelist the abuse.
+#
+# Only networks carrying the "allow this network to use DNS Daddy" permission
+# count. A network exists to attribute a policy as well as to grant access, and
+# writing every configured range into the ACL would overrule an operator who
+# deliberately left that box unticked — the opposite of what this script is for.
 CFG_CIDRS=""
+CFG_LEGACY=0
 if command -v sqlite3 >/dev/null; then
-  CFG_CIDRS=$(sqlite3 -readonly "$DB" \
-    "SELECT DISTINCT c.cidr FROM network_cidrs c
+  PERMITTED_Q="SELECT DISTINCT c.cidr FROM network_cidrs c
        JOIN networks n ON n.id = c.network_id
-      WHERE n.enabled = 1 AND c.cidr <> '';" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || true)
+      WHERE n.enabled = 1 AND n.allow_resolver = 1 AND c.cidr <> '';"
+  ALL_Q="SELECT DISTINCT c.cidr FROM network_cidrs c
+       JOIN networks n ON n.id = c.network_id
+      WHERE n.enabled = 1 AND c.cidr <> '';"
+
+  # The read is authoritative, and only one failure means "old database": the
+  # allow_resolver column is not there. Everything else — SQLITE_BUSY, a
+  # corrupt page, an unreadable -wal sidecar, any other schema error — used to
+  # land in the same branch, because the query's output was discarded and an
+  # empty result was taken as proof. That is not a cosmetic misdiagnosis: a
+  # transient failure on this query followed by a working fallback promotes
+  # every enabled range into the bootstrap list, where the dashboard can no
+  # longer withdraw it. So anything unrecognised stops the deployment and
+  # quotes what SQLite actually said.
+  #
+  # The message is fetched by asking again rather than by capturing stderr to a
+  # temporary file. A temp file would be a real write, and a dry run here
+  # promises not to make any; the cost is one extra query on a path that has
+  # already failed.
+  if CFG_CIDRS=$(sqlite3 -readonly "$DB" "$PERMITTED_Q" 2>/dev/null); then
+    CFG_CIDRS=$(printf '%s' "$CFG_CIDRS" | tr '\n' ',' | sed 's/,$//')
+  else
+    SQL_ERR=$(sqlite3 -readonly "$DB" "$PERMITTED_Q" 2>&1 >/dev/null || true)
+    if [[ "$SQL_ERR" == *"no such column"* && "$SQL_ERR" == *allow_resolver* ]]; then
+      warn "this database predates per-network resolver access; using every enabled network"
+      # These ranges have to go into the bootstrap list, unlike the managed
+      # ones. The upgrade migrates every legacy network with allow_resolver = 0,
+      # so the database will grant none of them back — dropping them here would
+      # answer REFUSED to every client this deployment was already serving.
+      CFG_LEGACY=1
+      CFG_CIDRS=$(sqlite3 -readonly "$DB" "$ALL_Q" 2>/dev/null) ||
+        die "could not read the networks from $DB: $(sqlite3 -readonly "$DB" "$ALL_Q" 2>&1 >/dev/null | tr '\n' ' ' || true)"
+      CFG_CIDRS=$(printf '%s' "$CFG_CIDRS" | tr '\n' ',' | sed 's/,$//')
+    else
+      die "could not read the client networks from $DB: $(printf '%s' "${SQL_ERR:-sqlite3 exited non-zero without a message}" | tr '\n' ' ')"
+    fi
+  fi
 fi
 
+# The derived ranges decide whether it is safe to deploy. They are deliberately
+# NOT copied into the bootstrap list.
+#
+# The bootstrap list and the dashboard's permissions are combined by union, and
+# a union has no deny rules — so a range promoted here would go on admitting
+# its clients after the operator unticked "Allow this network to use DNS
+# Daddy", disabled the network or deleted it. That makes the dashboard's
+# revocation control ineffective on exactly the deployments this script
+# creates, and a revocation control that does not revoke is worse than none:
+# the operator believes the client is cut off.
+#
+# The managed ranges stay where they can be withdrawn. BASE keeps the config
+# valid and the container closed on the way up, and the first read of the
+# database — immediately after start — adds the permitted networks back. The
+# window between the two refuses clients rather than admitting them, which is
+# the right way round for a gap this brief.
 BASE="127.0.0.0/8,172.16.0.0/12"
-if [[ -n "$CFG_CIDRS" ]]; then
+if [[ -n "$CFG_CIDRS" ]] && [[ $CFG_LEGACY -eq 1 ]]; then
+  # The legacy path is the exception to everything above. Nothing in this
+  # database carries the permission, so nothing will grant these ranges after
+  # the upgrade; they stay in the bootstrap list or the deployment goes dark.
+  # The trade is deliberate and stated: keeping the clients served costs the
+  # ability to revoke them from the dashboard until they are re-added as
+  # permitted Networks.
   ok "configured client networks found: $CFG_CIDRS"
+  warn "kept in .env because this database predates per-network access — after"
+  warn "upgrading, re-add them under Networks with the box ticked and remove"
+  warn "them from DNSDADDY_ALLOWED_CLIENT_CIDRS to make them revocable again"
   ACL="$BASE,$CFG_CIDRS"
+  ACL_KNOWN=1
+elif [[ -n "$CFG_CIDRS" ]]; then
+  ok "configured client networks found: $CFG_CIDRS"
+  ok "left in the database, where unticking the box can still withdraw them"
+  ACL="$BASE"
   ACL_KNOWN=1
 elif [[ $ALLOW_PUBLIC_RESOLVER -eq 1 ]]; then
   warn "no client CIDRs configured in the database"
@@ -148,8 +242,13 @@ else
   changed; the existing container (if any) keeps running as-is.
 
   To fix this properly:
-    1. Open the dashboard and add your sites/ranges as Networks.
+    1. Open the dashboard and add your sites/ranges as Networks, ticking
+       "Allow this network to use DNS Daddy" on each one.
     2. Re-run this script — it will derive the ACL from them automatically.
+
+  On a running deployment that tick-box is enough on its own: it takes effect
+  on the next query. This script checks that you have set at least one, so it
+  never deploys a resolver nobody has decided the audience for.
 
   Or set DNSDADDY_ALLOWED_CLIENT_CIDRS in .env yourself and run
   'docker compose up -d' directly.
@@ -172,23 +271,39 @@ if [[ -n "${STATE:-}" ]]; then
     --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
     | sed -n 's/^DNSDADDY_BASE_URL=//p' | head -1 || true)
 fi
+# Sources are tried with -r rather than -f, and the question of what a failure
+# meant is settled once, below, rather than case by case. Three rounds of
+# review found three ways an unprivileged run cannot see a file that a root
+# deploy will read — unreadable file, unsearchable directory, symlink into a
+# tree it cannot follow — and there is no reason to think that list is closed.
 # 2. .env in the repo.
-[[ -z "$HOSTNAME_FOUND" && -f .env ]] && \
+[[ -z "$HOSTNAME_FOUND" && -r .env ]] && \
   HOSTNAME_FOUND=$(sed -n 's/^DNSDADDY_BASE_URL=//p' .env | head -1 || true)
 # 3. A mounted config file, if this deployment uses one.
 if [[ -z "$HOSTNAME_FOUND" ]]; then
   for c in /etc/dnsdaddy/config.yaml "$VOL_SRC/config.yaml"; do
-    [[ -f "$c" ]] && HOSTNAME_FOUND=$(sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' "$c" | tr -d '"'"'" | head -1) && \
+    [[ -r "$c" ]] && HOSTNAME_FOUND=$(sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' "$c" | tr -d '"'"'" | head -1) && \
       [[ -n "$HOSTNAME_FOUND" ]] && break
   done
 fi
 # 4. An existing Caddyfile from a previous attempt.
-if [[ -z "$HOSTNAME_FOUND" && -f /etc/caddy/Caddyfile ]]; then
+if [[ -z "$HOSTNAME_FOUND" && -r /etc/caddy/Caddyfile ]]; then
   HOSTNAME_FOUND=$(grep -oE '^[a-z0-9.-]+\.[a-z]{2,}' /etc/caddy/Caddyfile | grep -v example | head -1 || true)
 fi
 HOSTNAME_FOUND="${HOSTNAME_FOUND#https://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND#http://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND%%/*}"
 
-if [[ -n "$HOSTNAME_FOUND" ]]; then
+# Not "which source failed, and why" — that question has no last answer. Only
+# root can distinguish "no hostname is configured" from "there is one I am not
+# allowed to see", so an unprivileged run that found nothing does not know, and
+# every step below this one depends on the answer.
+if [[ -z "$HOSTNAME_FOUND" && $EUID -ne 0 ]]; then
+  # Warning and carrying on is not enough. Everything below here branches on
+  # the hostname — whether Caddy is configured, whether secure cookies are
+  # forced — so continuing would print a concrete plan that a real deploy,
+  # which runs as root and can read the file, may not follow. A preview that
+  # describes the wrong plan is worse than one that stops.
+  die "no hostname was found, and this run is not root — so it cannot tell that apart from a hostname it is not allowed to see. A file may be unreadable, its directory unsearchable, or a symlink into a tree this user cannot follow; a real deploy runs as root and would read it. Every step below depends on the answer, so re-run this preview with sudo rather than have it describe a plan the real run may not follow."
+elif [[ -n "$HOSTNAME_FOUND" ]]; then
   ok "hostname: $HOSTNAME_FOUND"
 else
   warn "no hostname configured — Caddy will be installed but left inactive"
@@ -199,7 +314,9 @@ fi
 # ---------------------------------------------------------------------------
 step "6. Write .env (secrets preserved, never overwritten with examples)"
 # ---------------------------------------------------------------------------
-touch .env
+# A dry run must not create or restamp .env. The banner above promises nothing
+# changes, and on a host that has none yet, touch leaves an empty one behind.
+act touch .env
 set_env() {
   local k="$1" v="$2"
   if grep -qE "^${k}=" .env 2>/dev/null; then
@@ -209,7 +326,16 @@ set_env() {
   fi
 }
 if [[ $ACL_KNOWN -eq 1 ]]; then
-  set_env DNSDADDY_ALLOWED_CLIENT_CIDRS "$ACL"; ok "ACL set to: $ACL"
+  set_env DNSDADDY_ALLOWED_CLIENT_CIDRS "$ACL"; ok "bootstrap ACL set to: $ACL"
+  if [[ -n "$CFG_CIDRS" ]]; then
+    ok "permitted networks stay in the database: $CFG_CIDRS"
+    # An earlier version of this script copied them here. Say so, because a
+    # previous run's promoted ranges are exactly what this narrowing removes,
+    # and an operator watching the diff deserves the reason rather than a
+    # silent change to who their resolver admits.
+    ok "(a previous run may have copied these into .env; they are withdrawn from"
+    ok " the bootstrap list so that unticking the box in the dashboard works)"
+  fi
 else
   # Reaching this branch requires --allow-public-resolver: step 4 already
   # aborted the deployment otherwise. This is the explicit, deliberate opt-in
@@ -227,7 +353,7 @@ if [[ -n "$HOSTNAME_FOUND" ]]; then
 else
   set_env DNSDADDY_SECURE_COOKIES "auto"
 fi
-chmod 600 .env 2>/dev/null || true
+[[ $DRY_RUN -eq 1 ]] || chmod 600 .env 2>/dev/null || true
 grep -q '^\.env$' .gitignore 2>/dev/null || warn ".env is not gitignored"
 
 # ---------------------------------------------------------------------------
@@ -236,8 +362,16 @@ step "7. Validate and build (old container keeps serving)"
 docker compose config >/dev/null || die "docker compose config is invalid"
 ok "compose config valid"
 if command -v go >/dev/null 2>&1; then
-  go vet ./... >/dev/null 2>&1 && ok "go vet clean" || warn "go vet reported issues"
-  go test ./... >/dev/null 2>&1 && ok "go test passed" || warn "go test failed — review before relying on this build"
+  # Read-only against the deployment, but not against the disk: go writes a
+  # build cache under $HOME, and this run has promised to change nothing. It is
+  # also minutes of work nobody asked a dry run to do.
+  if [[ $DRY_RUN -eq 1 ]]; then
+    act go vet ./...
+    act go test ./...
+  else
+    go vet ./... >/dev/null 2>&1 && ok "go vet clean" || warn "go vet reported issues"
+    go test ./... >/dev/null 2>&1 && ok "go test passed" || warn "go test failed — review before relying on this build"
+  fi
 else
   warn "Go not installed on the host; relying on the Docker build"
 fi

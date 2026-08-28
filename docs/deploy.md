@@ -40,14 +40,31 @@ sudo ufw enable
 curl -fsSL https://raw.githubusercontent.com/jameshoulder/dnsdaddy/main/deploy/install.sh | sudo bash
 ```
 
-Or with Docker:
+Or with Docker, which is the supported path and does the rest of this page's
+first-run steps for you:
 
 ```bash
 git clone https://github.com/jameshoulder/dnsdaddy.git
 cd dnsdaddy
-docker compose up -d
-docker compose logs dnsdaddy | grep -i password
+./deploy/install-docker.sh
 ```
+
+It creates `.env`, checks the ports, starts the stack, waits for readiness,
+runs `dnsdaddy doctor` and prints your DNS address, dashboard URL and admin
+password. `--dry-run` shows what it would do; `--upgrade` and `--uninstall` are
+covered in [Upgrades](#11-upgrades) and [Uninstalling](#12-uninstalling).
+
+By hand, if you would rather:
+
+```bash
+docker compose up -d
+docker compose exec dnsdaddy cat /var/lib/dnsdaddy/initial-password.txt
+```
+
+The generated password is written to that file with mode `0600` on first run.
+It is deliberately **not** written to the log: a credential in
+`docker compose logs` outlives the session and reaches every log shipper
+pointed at the container.
 
 Check it came up:
 
@@ -91,6 +108,96 @@ If that returns an answer, stop and fix the firewall.
 **Roaming devices and dynamic IPs.** Do not open port 53 to the world for
 them. Use the per-network DNS-over-HTTPS URL instead (step 6): it works from any
 address, and the token in the path is the credential.
+
+### Who may use the resolver
+
+Independently of your firewall, DNS Daddy keeps its own list of source
+addresses it will answer, and refuses everything else before doing any work.
+That is deliberately redundant with the firewall: an open resolver gets found
+and abused within days, and "the operator was told to firewall it" is not a
+control.
+
+The **effective ACL** is built from two sources, combined by union:
+
+| Source | Where | Changing it |
+|---|---|---|
+| **Bootstrap** | `dns.allowed_client_cidrs`, or `DNSDADDY_ALLOWED_CLIENT_CIDRS` | needs a restart |
+| **Dashboard** | **Networks →** *Allow this network to use DNS Daddy* | on the next query, no restart |
+
+A permission grants; nothing else revokes it. Both sources are listed
+separately by `dnsdaddy doctor`, at `GET /api/v1/diagnostics`, and on the
+Networks page, so you can always see which one is responsible for a given
+range.
+
+**That decides which source to put a range in.** A range in the bootstrap list
+is permitted whatever the dashboard says about it: unticking *Allow this
+network to use DNS Daddy*, disabling the network, or deleting it outright
+cannot withdraw a permission that configuration is also granting. So put a
+range in `.env` when you want it fixed by deployment — Ansible, a Compose file,
+an image build — and add it as a Network when you want to be able to revoke it
+from the dashboard. Putting it in both leaves you with a revocation control
+that appears to work and does not.
+
+A dashboard change is stored and then applied to the running resolver, and
+those are two steps. Normally the second follows immediately and the change is
+in force on the next query. If it fails — a transient database error between
+the two — the write is kept, the response says DNS Daddy could not confirm what
+is being enforced, and `doctor` and the diagnostics keep saying so until a
+reload succeeds. The Networks page reports the ACL as it stands rather than as
+it was asked to stand, so a permission stored but not applied shows as *Allowed,
+not in force* rather than as allowed.
+
+Four properties worth knowing before you rely on it:
+
+**An empty bootstrap ACL stays unrestricted.** An empty
+`dns.allowed_client_cidrs` means "refuse nothing", which DNS Daddy only starts
+with when the listeners are loopback-only or you set
+`dns.allow_public_resolver`. Adding the first dashboard permission does *not*
+narrow that to "only this range" — a click in the dashboard must not change who
+your running resolver serves as a side effect. Permissions are recorded and
+take effect the moment an ACL is configured.
+
+**There are no deny rules.** A narrower network without permission does not
+carve a hole in a broader permitted range. If `10.0.0.0/8` is permitted, a
+`10.50.0.0/16` network with the box unticked still resolves — because something
+wider already permits it. Diagnostics report exactly this case rather than
+leaving you to find it; to stop those clients, narrow the wider range.
+
+**Permitting the catch-all grants nothing.** A network with no ranges has no
+addresses of its own, so ticking *Allow this network to use DNS Daddy* on it
+adds nothing to the ACL — the permission is stored and contributes no range.
+Whether a client the catch-all matches is served depends entirely on that
+client's own address, which is why the Networks page badges it *Depends on the
+client* rather than allowed or refused. To permit a client, permit a network
+that actually lists its address.
+
+**A public range needs an explicit acknowledgement, and `0.0.0.0/0` is
+refused outright.** Permitting a publicly routable range means DNS Daddy will
+accept requests from the internet, so the dashboard asks you to confirm it and
+reminds you that your provider's firewall is yours to configure — DNS Daddy
+cannot see it and does not change it. A default route is not offered at any
+level of confirmation: `dns.allow_public_resolver` is the setting for that, it
+lives in configuration, and changing it is a deliberate act with a restart
+attached.
+
+**Public exposure is reported from either source.** If you permit a publicly
+routable range — in the dashboard *or* through
+`DNSDADDY_ALLOWED_CLIENT_CIDRS` — diagnostics warn about it every time they
+run, naming the range and which of the two settings is responsible. The warning
+never resolves itself and never claims a firewall state: DNS Daddy cannot see
+your provider's security group and does not change it.
+
+**It is about source addresses, not about credentials.** A DNS-over-HTTPS or
+DNS-over-TLS client presenting a network's token is identified by that token
+rather than by where it connects from — which is the entire point of a roaming
+profile, and why the token in the URL is a credential. Such a client keeps
+resolving whether or not the network's addresses are permitted. To cut one off,
+disable the network or rotate its token.
+
+**Upgrading from an earlier version?** Nothing changes. Every network that
+predates this feature starts unpermitted, so your bootstrap ACL alone keeps
+admitting exactly who it admitted before. DoH and DoT tokens are unaffected for
+the same reason: they never depended on the client ACL.
 
 ## 5. Put TLS in front of the dashboard
 
@@ -201,7 +308,9 @@ arrive from:
 | Production floor | `198.51.100.11/32` | Strict |
 
 The seeded **Default** network has no ranges, which makes it the catch-all for
-anything unmatched. Keep it.
+anything unmatched. Keep it. Note that it decides *policy* for those clients
+and nothing about whether they may resolve: permitting it grants no range, so
+its access column reads *Depends on the client*.
 
 Most specific prefix wins, so a `/32` exception inside a `/24` behaves the way
 you would expect.
@@ -420,8 +529,11 @@ dns:
     - "203.0.113.42/32"    # your sites — the same IPs as your ufw rules
 ```
 
-Under Docker set `DNSDADDY_ALLOWED_CLIENT_CIDRS` in `.env`. Confirm with
-`./deploy/healthcheck.sh`, which names this failure explicitly.
+Under Docker you can set `DNSDADDY_ALLOWED_CLIENT_CIDRS` in `.env`, or — from
+v0.3.0 — simply tick **Allow this network to use DNS Daddy** on the network in
+the dashboard, which needs no restart. Confirm either way with
+`./deploy/healthcheck.sh` or `dnsdaddy doctor`, both of which name this failure
+explicitly.
 
 ### Performing the upgrade
 
@@ -431,7 +543,20 @@ Docker:
 cd /opt/dnsdaddy
 docker compose exec dnsdaddy sh -c 'cd /var/lib/dnsdaddy && tar cz .' > ~/dnsdaddy-backup-$(date +%F).tgz
 git pull
-$EDITOR .env                      # apply the two changes above
+./deploy/install-docker.sh --upgrade
+```
+
+`--upgrade` keeps the data volume and your `.env`, rebuilds, waits for the
+service to answer, runs `dnsdaddy doctor`, and stops with the recovery command
+if it does not come up healthy. It reconciles only the keys it owns: a
+`DNSDADDY_DASHBOARD_BIND` you set by hand is reported and left alone, while one
+an older version of the installer generated on a public address is commented
+out, because that was never a choice you made.
+
+By hand, if you prefer:
+
+```bash
+$EDITOR .env                      # apply any breaking changes above
 docker compose up -d --build
 ./deploy/healthcheck.sh
 ```
@@ -465,6 +590,8 @@ Stops DNS Daddy and leaves everything recoverable. Bringing it back is
 
 ```bash
 # Docker
+./deploy/install-docker.sh --uninstall
+# or, equivalently:
 docker compose down                 # NOT -v; that deletes the volume
 # The named volume dnsdaddy-data survives.
 
@@ -492,7 +619,9 @@ Irreversible. Take a backup first (§10) if there is any chance you want the
 history.
 
 ```bash
-# Docker
+# Docker — asks you to type DELETE, and refuses entirely when unattended
+./deploy/install-docker.sh --uninstall --purge
+# or, equivalently and with no confirmation at all:
 docker compose down -v              # -v deletes the named volume
 docker volume rm dnsdaddy-data 2>/dev/null || true
 
@@ -532,7 +661,7 @@ What it tells apart, which `dig` alone cannot:
 |---|---|
 | Clients get no answer at all | whether **nothing is listening** or **another process holds the port** — and names that process |
 | Clients get `REFUSED` | that the resolver is **working and declining this source address**, and which ranges it will accept |
-| A network exists but gets nothing | that the network is **not in `dns.allowed_client_cidrs`**, with both values quoted |
+| A network exists but gets nothing | that the network is **not permitted to use the resolver**, quoting the effective ACL and naming the tick-box that fixes it |
 | Everything resolves, nothing blocked | that the **threat index is empty**, or is enforcing last-known-good data that is stale |
 | Names fail intermittently | which **upstreams** resolved a real test query and which did not — and, for one that answered `REFUSED` or `SERVFAIL`, that the transport is fine and the problem is the resolver itself |
 
@@ -542,23 +671,27 @@ What it tells apart, which `dig` alone cannot:
 says healthy, you have added your network — and every client says the DNS server
 is not responding, or `dig` returns `REFUSED`.
 
-**Cause.** A **Network** in the dashboard and `dns.allowed_client_cidrs` are two
-different settings. The network decides *which policy* an address gets once it
-is allowed to resolve. `dns.allowed_client_cidrs` decides *whether it may
-resolve at all*, and it is checked first, before anything else happens. Adding a
-network does not grant access.
+**Cause.** A **Network** and its resolver access are two different decisions.
+The network decides *which policy* an address gets once it is allowed to
+resolve. Its **Allow this network to use DNS Daddy** permission — and
+`dns.allowed_client_cidrs` — decide *whether it may resolve at all*, and that
+is checked first, before anything else happens. Adding a network on its own
+does not grant access.
 
 **Check.** `dnsdaddy doctor`, or `GET /api/v1/diagnostics`, or the
 `dnsdaddy_client_refused_total` metric — a number climbing there means clients
 are being turned away on their source address, which rules out firewalls,
 routing and port conflicts in one step.
 
-**Fix.** Add the range to `DNSDADDY_ALLOWED_CLIENT_CIDRS` (or
-`dns.allowed_client_cidrs`) and restart. Note that setting this variable
-**replaces** the built-in list rather than adding to it — the built-in list
-already covers loopback, every RFC 1918 range, carrier-grade NAT, link-local,
-the IPv6 equivalents and the Docker bridge, so on a LAN you should usually not
-set it at all.
+**Fix.** Open the dashboard, go to **Networks**, and tick **Allow this network
+to use DNS Daddy** on it. It takes effect on the next query — no restart, no
+file to edit.
+
+For a headless deployment, add the range to `DNSDADDY_ALLOWED_CLIENT_CIDRS`
+instead and restart. Note that setting that variable **replaces** the built-in
+list rather than adding to it — the built-in list already covers loopback,
+every RFC 1918 range, carrier-grade NAT, link-local, the IPv6 equivalents and
+the Docker bridge, so on a LAN you should usually not set it at all.
 
 ### Other symptoms
 

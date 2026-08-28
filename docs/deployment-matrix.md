@@ -76,10 +76,13 @@ that the machine still resolves names for itself afterwards, and that
 | # | Host | Method | Client | Status |
 |---|---|---|---|---|
 | B0 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh` | same subnet | ☐ not run |
-| B1 | Ubuntu 24.04 + Docker | `cp .env.example .env && docker compose up -d`, no edits | same subnet | ☐ not run |
-| B4 | Ubuntu 24.04 + Docker | LAN dashboard: `DNSDADDY_DASHBOARD_BIND=<lan-ip>` | browser on another machine | ☐ not run |
+| B1 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh`, no edits | same subnet | ☐ not run |
+| B4 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh --lan` | browser on another machine | ☐ not run |
 | B2 | Debian 12 + Docker | same | another private subnet, routed | ☐ not run |
 | B3 | Ubuntu + Docker | same, then `docker compose down && up -d` | same subnet | ☐ not run |
+| B5 | Ubuntu 24.04 + Docker | dashboard-managed access: add a network, tick *Allow*, query; untick, query | same subnet | ☐ not run (resolver half covered in CI) |
+| B6 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh --upgrade` over a B0 install | same subnet | ☐ not run |
+| B7 | Ubuntu 24.04 + Docker | `./deploy/install-docker.sh --uninstall`, then re-install | same subnet | ☐ not run |
 
 **B1 is the regression test for the audit's headline finding.** The documented
 path with no edits must produce a resolver that serves the LAN. Check
@@ -92,10 +95,39 @@ Docker daemon — only its `--dry-run` path has. Its detection routines (host
 address, port 53 and 8080, systemd-resolved) and everything after the checks
 are unverified on real hardware.
 
-**B4 checks the LAN dashboard.** `DNSDADDY_DASHBOARD_BIND` must make
-`http://<lan-ip>:8080` reachable from another machine on the same network, and
-must leave it unreachable from anywhere else. Confirm the login works and the
-session persists.
+**B4 checks the LAN dashboard.** `--lan` must make `http://<lan-ip>:8080`
+reachable from another machine on the same network, and must leave it
+unreachable from anywhere else. Confirm the login works and the session
+persists. Confirm too that `--lan` refuses outright on a host whose primary
+address is public.
+
+**B5 is the regression test for this pass's headline change.** Adding a network
+and ticking *Allow this network to use DNS Daddy* must make its clients resolve
+**without any restart**, and unticking it must produce `REFUSED` on the very
+next query. Then restart the stack and confirm the permission survived. On a
+VPS, repeat with a public `/32` and check the acknowledgement is demanded once
+and remembered afterwards.
+
+The *resolver* half of this is now covered by CI, against the real binary over
+a real UDP socket rather than in-process: the end-to-end job starts a second
+instance whose ACL deliberately excludes loopback, asserts `REFUSED`, grants
+access through the API, asserts the very next query is answered, revokes it,
+asserts `REFUSED` again, restarts and asserts the permission survived — and
+checks that a public range is refused with 409 until acknowledged and that a
+default route is refused outright. What CI cannot cover, and what B5 is still
+for: the browser doing it rather than curl, Docker's port publishing and source
+translation in the path, and a real client on a real subnet.
+
+**B6 checks the upgrade path.** Data, `.env` and dashboard-managed permissions
+must all survive; the run must wait for health and run `dnsdaddy doctor`. Seed
+it first with a hand-set `DNSDADDY_DASHBOARD_BIND` and confirm it is left
+alone, then with one carrying the installer's `# managed by` marker on a public
+address and confirm it is closed.
+
+**B7 checks uninstall.** `--uninstall` must leave the volume intact, and
+re-running the installer must bring the deployment back with its history,
+policies and permissions. `--purge` must refuse without an interactive
+confirmation.
 
 **B3 checks persistence.** Networks, policies, query history and findings must
 survive. `docker compose down -v` would delete them, which is the point of

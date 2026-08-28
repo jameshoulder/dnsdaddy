@@ -30,6 +30,9 @@ const {
   threatIntelPanel,
   diagnosticsBanner,
   firstClientCard,
+  accessBadge,
+  clientAccessSummary,
+  resolverAccessNote,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -550,7 +553,27 @@ test('server-supplied text is escaped', () => {
  * pointed at it, or refusing every client — both produce empty charts. This
  * card says which. It must never invent activity, and must never claim "no
  * devices" when the truth is "we are not recording which devices".
+ *
+ * It has three states, each backed by something the server actually measured,
+ * and getting the branch wrong is worse than the card not existing. It used to
+ * branch on "no network carries a permission", which is false on a stock LAN
+ * install — that has none, and serves every private range — so it told those
+ * operators every client would be REFUSED.
  */
+
+// A working resolver with nothing pointed at it yet. Refusals at zero and the
+// ACL serving more than loopback are both measurements, not guesses.
+function ready(overrides = {}) {
+  return {
+    hasSeenClients: false,
+    clientAttribution: true,
+    permittedNetworks: 0,
+    unrestrictedAccess: false,
+    servesOnlyLoopback: false,
+    refusedClients: 0,
+    ...overrides,
+  };
+}
 
 // window is not defined under node --test; the card reads location.hostname.
 function withHostname(host, fn) {
@@ -566,8 +589,7 @@ function withHostname(host, fn) {
 }
 
 test('the card appears when no client has been seen, naming the dashboard host', () => {
-  const out = withHostname('192.168.1.75', () =>
-    firstClientCard({ hasSeenClients: false, clientAttribution: true }));
+  const out = withHostname('192.168.1.75', () => firstClientCard(ready()));
 
   assert.match(out, /No devices have used this resolver yet/);
   assert.match(out, /nslookup example\.com 192\.168\.1\.75/,
@@ -575,9 +597,81 @@ test('the card appears when no client has been seen, naming the dashboard host',
   assert.match(out, /dnsdaddy doctor/, 'it must say what to do when nothing appears');
 });
 
+test('a stock LAN install is not told its clients will be refused', () => {
+  // The regression this replaced. No network carries a permission on a fresh
+  // install, and the shipped ACL serves every private range perfectly well.
+  // Branching on the permission count told that operator the opposite.
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ permittedNetworks: 0 })));
+
+  assert.match(out, /No devices have used this resolver yet/);
+  // A conditional — "if it comes back REFUSED, that address is not permitted
+  // yet" — is useful and true. What must not appear is a claim that clients
+  // are being refused, or that they will be.
+  assert.doesNotMatch(out, /Clients are being refused/);
+  assert.doesNotMatch(out, /will be answered <code>REFUSED/);
+  assert.doesNotMatch(out, /Only this machine/);
+});
+
+test('measured refusals name the ACL as the cause', () => {
+  // Queries are arriving and being turned away on their source address. That
+  // rules out firewalls, routing and port conflicts in one step, and it is the
+  // only evidence that separates a VPS whose clients are refused from a LAN
+  // nobody has pointed anything at.
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ refusedClients: 12 })));
+
+  assert.match(out, /Clients are being refused/);
+  assert.match(out, /12 queries have/, 'it must say how many, from the counter');
+  assert.match(out, /Allow this network to use DNS Daddy/,
+    'it must name the control that fixes it');
+  assert.doesNotMatch(out, /No devices have used this resolver yet/,
+    'queries did arrive; saying otherwise sends the operator to the wrong problem');
+});
+
+test('a loopback-only ACL says so, because then it really is true', () => {
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ servesOnlyLoopback: true })));
+
+  assert.match(out, /Only this machine may use the resolver/);
+  assert.match(out, /Allow this network to use DNS Daddy/);
+  assert.match(out, /nothing to restart/,
+    'the whole point of the tick-box is that it needs no restart');
+});
+
+test('the loopback claim is scoped to clients the ACL actually governs', () => {
+  // A DoH or DoT client presenting a network's token bypasses the source ACL
+  // entirely — that is what makes a roaming profile roam. Claiming "every
+  // other device will be REFUSED" would contradict the resolver and the
+  // Networks page, and over-claiming is the fault this card exists to stop.
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ servesOnlyLoopback: true })));
+
+  assert.doesNotMatch(out, /every other device/);
+  assert.match(out, /ordinary DNS/, 'the claim must name the transport it applies to');
+  assert.match(out, /DNS-over-HTTPS and DNS-over-TLS clients holding a network.s token/,
+    'the exception has to be stated, not left for the operator to discover');
+});
+
+test('an unrestricted ACL refuses nothing, and the card must not imply otherwise', () => {
+  // An empty dns.allowed_client_cidrs refuses nothing, which config validation
+  // only allows for loopback-only listeners or a deliberate public resolver.
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ unrestrictedAccess: true })));
+
+  assert.match(out, /No devices have used this resolver yet/);
+  assert.doesNotMatch(out, /Only this machine/);
+});
+
+test('refusals outrank every other state, because they are the strongest evidence', () => {
+  const out = withHostname('192.168.1.75', () =>
+    firstClientCard(ready({ refusedClients: 3, servesOnlyLoopback: true })));
+  assert.match(out, /Clients are being refused/);
+});
+
 test('the card disappears as soon as a real client exists', () => {
   const out = withHostname('192.168.1.75', () =>
-    firstClientCard({ hasSeenClients: true, clientAttribution: true }));
+    firstClientCard(ready({ hasSeenClients: true })));
   assert.strictEqual(out, '', 'onboarding must not outlive its usefulness');
 });
 
@@ -586,23 +680,262 @@ test('the card is silent when client addresses are not recorded', () => {
   // there would be a statement about the setting, not about the network — and
   // it would never stop being shown.
   const out = withHostname('192.168.1.75', () =>
-    firstClientCard({ hasSeenClients: false, clientAttribution: false }));
+    firstClientCard(ready({ clientAttribution: false })));
   assert.strictEqual(out, '');
 });
 
-test('over an SSH tunnel it does not claim loopback is the DNS address', () => {
+test('no branch claims loopback is the DNS address over an SSH tunnel', () => {
   for (const host of ['127.0.0.1', 'localhost']) {
-    const out = withHostname(host, () =>
-      firstClientCard({ hasSeenClients: false, clientAttribution: true }));
+    for (const state of [{}, { servesOnlyLoopback: true }]) {
+      const out = withHostname(host, () => firstClientCard(ready(state)));
 
-    assert.doesNotMatch(out, /nslookup example\.com 127\.0\.0\.1/,
-      'handing a client 127.0.0.1 as its DNS server would be actively wrong');
-    assert.doesNotMatch(out, /nslookup example\.com localhost/);
-    assert.match(out, /your-server-ip|LAN address/);
+      assert.doesNotMatch(out, /example\.com 127\.0\.0\.1/,
+        'handing a client 127.0.0.1 as its DNS server would be actively wrong');
+      assert.doesNotMatch(out, /example\.com localhost/);
+      assert.match(out, /your-server-ip|LAN address/);
+    }
   }
 });
 
 test('the card tolerates a missing overview', () => {
   assert.strictEqual(withHostname('192.168.1.75', () => firstClientCard(null)), '');
   assert.strictEqual(withHostname('192.168.1.75', () => firstClientCard(undefined)), '');
+});
+
+// The Access column says what the resolver is doing, not what the row says.
+// Badging the stored intent made three different situations look identical to
+// a working one, and each of them is a client being refused while the
+// dashboard says otherwise.
+
+function network(overrides = {}) {
+  return {
+    name: 'HQ',
+    cidrs: ['10.0.10.0/24'],
+    enabled: true,
+    allowResolver: true,
+    coverage: 'full',
+    publicCidrs: [],
+    ...overrides,
+  };
+}
+
+test('a permitted network the resolver is enforcing reads as allowed', () => {
+  const out = accessBadge(network());
+  assert.match(out, /badge ok/);
+  assert.match(out, />Allowed</);
+});
+
+test('a public range is permitted but flagged', () => {
+  const out = accessBadge(network({ cidrs: ['203.0.113.0/24'], publicCidrs: ['203.0.113.0/24'] }));
+  assert.match(out, /badge warn/);
+  assert.match(out, /Allowed \(public\)/);
+});
+
+test('a grant the resolver is not enforcing does not read as allowed', () => {
+  // A stored permission whose reload failed, or one only partly covered by
+  // the ACL. Either way the database says yes and the resolver does not.
+  const out = accessBadge(network({ coverage: 'none' }));
+  assert.doesNotMatch(out, /badge ok/);
+  assert.match(out, /not in force/);
+});
+
+test('permitting a catch-all says it grants nothing, because it does', () => {
+  // A network with no ranges contributes none to the ACL, so ticking the box
+  // on one permits precisely nothing — and the form invites exactly this by
+  // defaulting the box on and offering an empty CIDR list as the catch-all.
+  const out = accessBadge(network({ cidrs: [] }));
+  assert.doesNotMatch(out, /badge ok/);
+  assert.doesNotMatch(out, />Allowed</);
+  assert.match(out, /Grants nothing/);
+});
+
+test('an unpermitted network covered by a wider range says so', () => {
+  const out = accessBadge(network({ allowResolver: false, resolvesVia: '10.0.0.0/8' }));
+  assert.match(out, /Via wider range/);
+});
+
+test('an unpermitted network nothing covers reads as refused', () => {
+  // coverage: 'none' is the whole point of the case. Both of these tests said
+  // "nothing covers" and passed a fixture whose coverage is full — so they
+  // asserted Refused for a network the ACL admits, and passed only because
+  // the badge had exactly that bug. A test can encode the defect it was
+  // written to prevent.
+  const out = accessBadge(network({ allowResolver: false, coverage: 'none' }));
+  assert.match(out, /badge bad/);
+  assert.match(out, /Refused/);
+});
+
+// The "who may use this resolver" card makes two claims, and both were wrong
+// in ways the rest of this branch had already fixed elsewhere.
+
+test('the REFUSED claim is scoped to the transport the ACL governs', () => {
+  // Round three fixed exactly this over-claim in the onboarding card and left
+  // it standing here: a DoH or DoT client holding a network's token is
+  // identified by the token, not by where it connects from, so "everything
+  // else is REFUSED" is false for them.
+  const out = clientAccessSummary({
+    unrestricted: false,
+    bootstrapCidrs: ['127.0.0.0/8'],
+    effectiveCidrs: ['127.0.0.0/8'],
+    dashboardCidrs: [],
+  });
+  assert.match(out, /ordinary DNS/);
+  assert.match(out, /DNS-over-HTTPS and DNS-over-TLS/);
+  assert.match(out, /rotate its token/);
+});
+
+test('a dashboard range that configuration also lists is still shown as permitted here', () => {
+  // Subtracting bootstrap from effective loses it, and the operator who has
+  // just ticked that network sees an empty column and concludes it did not
+  // take. The server sends the grants, so the two lists can overlap.
+  const out = clientAccessSummary({
+    unrestricted: false,
+    bootstrapCidrs: ['10.0.0.0/8'],
+    effectiveCidrs: ['10.0.0.0/8'],
+    dashboardCidrs: ['10.0.0.0/8'],
+  });
+  const fromNetworks = out.split('From the networks below')[1];
+  assert.match(fromNetworks, /10\.0\.0\.0\/8/);
+});
+
+test('an unrestricted ACL says nothing is refused rather than listing ranges', () => {
+  const out = clientAccessSummary({ unrestricted: true, allowPublicResolver: false });
+  assert.match(out, /nothing is refused/);
+});
+
+// The seeded Default network is enabled, has no ranges and is unpermitted, so
+// it is the state every fresh install starts in — and it was badged Refused
+// while the configured ACL was serving its clients perfectly well. That is the
+// dashboard misdiagnosing a working deployment, which is the failure this
+// whole branch exists to end.
+test('an unpermitted catch-all does not claim its clients are refused', () => {
+  const out = accessBadge(network({ cidrs: [], allowResolver: false }));
+  assert.doesNotMatch(out, /badge bad/);
+  assert.doesNotMatch(out, /Refused/);
+  assert.match(out, /Depends on the client/);
+});
+
+// A network with ranges, unpermitted and covered by nothing, genuinely is.
+test('an unpermitted network with ranges nothing covers still reads as refused', () => {
+  const out = accessBadge(network({ allowResolver: false, coverage: 'none' }));
+  assert.match(out, /badge bad/);
+  assert.match(out, /Refused/);
+});
+
+// Disabling a network stops it granting anything and stops its policy applying.
+// It does not create a deny rule, so its addresses may still be served — and
+// saying Refused there is the dashboard telling an operator a working range is
+// being turned away.
+test('a disabled network whose addresses are still served says so', () => {
+  const out = accessBadge(network({ enabled: false, allowResolver: false, coverage: 'full' }));
+  assert.doesNotMatch(out, /badge bad/);
+  assert.match(out, /Disabled, still served/);
+});
+
+test('a disabled network nothing covers reads as plainly disabled', () => {
+  const out = accessBadge(network({ enabled: false, allowResolver: false, coverage: 'none' }));
+  assert.match(out, /Disabled/);
+  assert.doesNotMatch(out, /still served/);
+});
+
+// Partial coverage is its own answer. A 10.0.0.0/8 network against a permitted
+// 10.0.0.0/16 has 65k addresses served and the rest refused; calling the whole
+// thing Refused hides a working half.
+test('a partly covered network is not badged as wholly refused', () => {
+  const out = accessBadge(network({ allowResolver: false, coverage: 'partial' }));
+  assert.doesNotMatch(out, /badge bad/);
+  assert.match(out, /Partly refused/);
+});
+
+// The Setup page's whole job is "point your network here". Following it while
+// the client ACL does not cover that network gives every device REFUSED — the
+// failure this branch exists to end, at the moment the operator acts on it.
+
+test('the setup page names the ranges that may actually query', () => {
+  const out = resolverAccessNote({
+    unrestricted: false,
+    effectiveCidrs: ['10.0.0.0/8', '192.168.0.0/16'],
+  });
+  assert.match(out, /10\.0\.0\.0\/8/);
+  assert.match(out, /192\.168\.0\.0\/16/);
+  assert.match(out, /REFUSED/);
+  assert.match(out, /Allow this network to use DNS Daddy/);
+});
+
+test('the setup page keeps the token exception with the claim it qualifies', () => {
+  // The DoH URLs are on the same page, and they are not governed by the ACL.
+  const out = resolverAccessNote({ unrestricted: false, effectiveCidrs: ['10.0.0.0/8'] });
+  assert.match(out, /DNS-over-HTTPS/);
+});
+
+test('an unrestricted ACL says so rather than listing nothing', () => {
+  const out = resolverAccessNote({ unrestricted: true });
+  assert.match(out, /Every address may query/);
+  assert.doesNotMatch(out, /REFUSED/);
+});
+
+// The warning lede used to say "DNS Daddy is serving clients". Round 10 made a
+// stale client ACL a WARN rather than a FAIL — it means the resolver could not
+// re-read its configuration, so what it is enforcing is unconfirmed — and the
+// banner then asserted the one thing that had not been established, on the
+// strength of there being no FAIL. Downgrading a status without checking what
+// consumes it moved the false claim rather than removing it.
+test('the warning banner does not assert that clients are being served', () => {
+  const out = diagnosticsBanner({
+    checks: [
+      {
+        status: 'warn',
+        summary:
+          'DNS Daddy could not re-read its configuration after a change, so it cannot ' +
+          'confirm that the rules below are the ones being enforced.',
+      },
+    ],
+  });
+  assert.match(out, /CONFIGURATION WARNING/);
+  assert.doesNotMatch(out, /serving clients/);
+  assert.match(out, /could not confirm/);
+});
+
+test('the failure banner still says clients are being stopped', () => {
+  const out = diagnosticsBanner({
+    checks: [{ status: 'fail', summary: 'Queries from network "HQ" are REFUSED.' }],
+  });
+  assert.match(out, /CONFIGURATION PROBLEM/);
+  assert.match(out, /stops clients using it/);
+});
+
+// A disabled catch-all has no ranges, so the server's vacuous "full" says
+// nothing about it. The badge announced its clients were still being served.
+test('a disabled catch-all does not claim its clients are still served', () => {
+  const out = accessBadge(network({ enabled: false, cidrs: [], allowResolver: false, coverage: 'full' }));
+  assert.doesNotMatch(out, /still served/);
+  assert.match(out, /Disabled/);
+});
+
+// A disabled network with some of its addresses still permitted is neither
+// "still served" nor plainly disabled.
+test('a disabled network partly still served says which', () => {
+  const out = accessBadge(network({ enabled: false, allowResolver: false, coverage: 'partial' }));
+  assert.match(out, /Disabled, partly served/);
+});
+
+// With no client ACL configured — a loopback-only deployment, which is what
+// DNS Daddy starts as — nothing is refused, but Compute has no grants so
+// Shadowed is empty and no row gets a resolvesVia. Every unpermitted network
+// fell through to Refused on an install that refuses nobody.
+test('an unpermitted network is not badged refused when nothing is refused', () => {
+  const out = accessBadge(network({ allowResolver: false, coverage: 'full', resolvesVia: '' }));
+  assert.doesNotMatch(out, /badge bad/);
+  assert.doesNotMatch(out, /Refused/);
+  assert.match(out, /Served, not by this row/);
+});
+
+// And where the covering range is known, it is still named — the more useful
+// answer, so it has to keep winning.
+test('a named covering range still outranks the generic served state', () => {
+  const out = accessBadge(network({
+    allowResolver: false, coverage: 'full', resolvesVia: '10.0.0.0/8 (dns.allowed_client_cidrs)',
+  }));
+  assert.match(out, /Via wider range/);
+  assert.match(out, /10\.0\.0\.0\/8/);
 });

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -39,8 +40,14 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// deliberately not labelled by address: the refusal path writes no query
 	// log, so an unauthorised source cannot fill the disk, and giving it a
 	// metric label would reintroduce exactly that.
-	metric(&b, "dnsdaddy_client_refused_total", "DNS questions refused because the source address is not in dns.allowed_client_cidrs", "counter",
+	metric(&b, "dnsdaddy_client_refused_total", "DNS questions refused because the source address is not permitted to use this resolver", "counter",
 		fmt.Sprintf("dnsdaddy_client_refused_total %d", a.DNS.RefusedClients()))
+
+	// Client-access shape. Counts only: an alert wants to know that the number
+	// of publicly permitted ranges went from nought to one, not which address
+	// it was. A label per client IP would be an unbounded cardinality
+	// explosion and a copy of the network's addressing in every scrape.
+	a.writeAccessMetrics(r.Context(), &b)
 
 	metric(&b, "dnsdaddy_cache_entries", "Answers currently cached", "gauge",
 		fmt.Sprintf("dnsdaddy_cache_entries %d", cacheSize))
@@ -140,4 +147,55 @@ func metric(b *strings.Builder, name, help, typ string, lines ...string) {
 		b.WriteString(l)
 		b.WriteByte('\n')
 	}
+}
+
+// writeAccessMetrics exports the shape of the effective client ACL.
+//
+// Bounded by construction: four gauges, no labels. The temptation with an ACL
+// is to label by CIDR so a dashboard can list them, and that is exactly how a
+// metrics endpoint acquires one series per network and then one per client.
+// The values here answer the questions monitoring should ask — is anything
+// permitted at all, and has public exposure changed — and the dashboard and
+// /api/v1/diagnostics answer the rest, authenticated.
+func (a *API) writeAccessMetrics(ctx context.Context, b *strings.Builder) {
+	// Everything derivable from the live snapshot is written first and
+	// unconditionally. A database hiccup must not put a gap in a series an
+	// operator is alerting on — "the number of publicly permitted ranges
+	// stopped being reported" and "it went to zero" look the same on a graph
+	// and mean opposite things.
+	acl := a.ClientACL.Current()
+
+	permitted := map[string]bool{}
+	for _, g := range acl.Grants() {
+		permitted[g.NetworkID] = true
+	}
+
+	metric(b, "dnsdaddy_networks_resolver_permitted", "Networks permitted to query the resolver", "gauge",
+		fmt.Sprintf("dnsdaddy_networks_resolver_permitted %d", len(permitted)))
+	metric(b, "dnsdaddy_client_acl_prefixes", "Address ranges in the effective client ACL, from configuration and the dashboard combined", "gauge",
+		fmt.Sprintf("dnsdaddy_client_acl_prefixes %d", len(acl.Effective())))
+	// Distinct ranges, not grants: a range permitted from configuration and
+	// from the dashboard at once is one exposure, and a gauge that doubled
+	// there would page somebody over a change that did not happen.
+	metric(b, "dnsdaddy_client_acl_public_prefixes", "Distinct permitted address ranges that are reachable from the public internet", "gauge",
+		fmt.Sprintf("dnsdaddy_client_acl_public_prefixes %d", len(acl.PublicPrefixes())))
+	metric(b, "dnsdaddy_client_acl_unrestricted", "1 when no client ACL is configured and every source address is accepted", "gauge",
+		fmt.Sprintf("dnsdaddy_client_acl_unrestricted %d", boolGauge(acl.Unrestricted())))
+
+	// The total needs the database, and is the one value worth omitting rather
+	// than guessing at.
+	networks, err := a.Store.ListNetworks(ctx)
+	if err != nil {
+		a.Log.Debug("count networks for metrics", "error", err)
+		return
+	}
+	metric(b, "dnsdaddy_networks_total", "Networks configured in the dashboard", "gauge",
+		fmt.Sprintf("dnsdaddy_networks_total %d", len(networks)))
+}
+
+func boolGauge(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

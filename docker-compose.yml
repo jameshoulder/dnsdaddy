@@ -1,6 +1,9 @@
 # DNS Daddy — protective DNS on a small VPS.
 #
-#   cp .env.example .env     # a LAN install needs no edits
+#   ./deploy/install-docker.sh
+#
+# Or by hand — this file works with no .env at all, every value has a default:
+#
 #   docker compose up -d
 #   docker compose exec dnsdaddy dnsdaddy doctor
 #
@@ -8,7 +11,7 @@
 # another machine by design: put Caddy in front for HTTPS (deploy/Caddyfile.example)
 # and browse to your own domain. See docs/deploy.md.
 #
-# First-run password:  docker compose logs dnsdaddy | grep -i password
+# First-run password:  docker compose exec dnsdaddy cat /var/lib/dnsdaddy/initial-password.txt
 # Health:              ./deploy/healthcheck.sh
 #
 # Sized for a 1 GB / 1 vCPU box (a $5 Linode Nanode, Hetzner CX22, DO basic
@@ -81,14 +84,16 @@ services:
       # config.TestComposeClientACLDefaultMatchesBuiltIn keeps this line
       # honest.
       #
-      # On a public VPS you DO have to set DNSDADDY_ALLOWED_CLIENT_CIDRS in
-      # .env: your clients arrive from public addresses, which none of these
-      # cover, so every real query is refused. Setting it replaces this list
-      # rather than adding to it — keep 127.0.0.0/8 for health checks and
-      # 172.16.0.0/12 for the published port.
+      # On a public VPS none of these cover your clients, so every real query
+      # is refused until you say otherwise. The normal way to do that is the
+      # dashboard: Networks → "Allow this network to use DNS Daddy", which
+      # takes effect on the next query. This variable is the bootstrap
+      # alternative for a headless deployment; the two combine, and setting it
+      # replaces the list above rather than adding to it — keep 127.0.0.0/8
+      # for health checks and 172.16.0.0/12 for the published port.
       #
-      # `dnsdaddy doctor` reports whether the networks in your dashboard can
-      # actually reach the resolver.
+      # `dnsdaddy doctor` reports both sources and whether the networks in your
+      # dashboard can actually reach the resolver.
       DNSDADDY_ALLOWED_CLIENT_CIDRS: "${DNSDADDY_ALLOWED_CLIENT_CIDRS:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,::1/128,fc00::/7,fe80::/10}"
 
       # Upstreams are DNS-over-TLS by default: queries DNS Daddy forwards are

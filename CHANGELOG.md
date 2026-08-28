@@ -20,6 +20,81 @@ should be swapping a binary, not restoring a backup.
 
 ---
 
+## [Unreleased]
+
+**Installation and network access.** Two failures a real deployment ran into:
+installing was still too manual, and adding a network in the dashboard did not
+let that network use the resolver.
+
+| | |
+|---|---|
+| **Added** | Per-network resolver access — Networks → *Allow this network to use DNS Daddy* — in force on the next query, no restart. `--upgrade`, `--uninstall`, `--lan` and `--vps` for the Docker installer, which now creates `.env`, waits for readiness, runs `doctor` and prints the DNS address, dashboard URL and admin password itself. Four bounded client-access gauges on `/metrics`. `internal/clientacl`, and a test harness that drives the real installer against stubbed system commands. |
+| **Changed** | `dnsdaddy doctor`, `GET /api/v1/diagnostics` and the startup log report the **effective** client ACL — configuration unioned with the dashboard's permissions — and name both sources separately. Their remedy is now the tick-box rather than an environment variable and a restart. `deploy/production-deploy.sh` derives its ACL only from networks carrying the permission. |
+| **Security** | The generated first-run password is no longer written to the log; it lives in the data volume at mode `0600` and the installer reads it from there. `0.0.0.0/0` and `::/0` cannot be permitted from the dashboard at any level of confirmation — `dns.allow_public_resolver` remains the only route, and it lives in configuration. A publicly routable range needs an explicit acknowledgement, recorded per range and enforced in the store rather than in a handler. |
+| **Compatibility** | Nothing changes for an existing deployment. Every network that predates this migrates unpermitted, so the bootstrap ACL alone keeps admitting exactly who it admitted before, and DoH/DoT tokens are unaffected because they never depended on the client ACL. |
+
+### Added
+
+- **A network can be permitted to use the resolver from the dashboard.** A
+  **Network** decided which policy a client got; `dns.allowed_client_cidrs`
+  decided whether it could resolve at all, and only the first was reachable
+  from the dashboard. The result, on a real VPS: add your network, watch every
+  client still get `REFUSED`, and reasonably conclude the product is broken.
+
+  Both are now set in one place, with the difference stated beside the control.
+  The effective ACL is the **union** of the configured list and the networks
+  the dashboard permits — not an intersection, which would permit a VPS
+  operator's own public address precisely nothing, and not a replacement, which
+  would make a later `.env` edit silently do nothing.
+
+  Two consequences worth stating, because they can surprise:
+
+  - An empty `dns.allowed_client_cidrs` means "refuse nothing", and stays that
+    way. The first dashboard permission does not narrow it to that one range: a
+    click must not change who a running resolver serves.
+  - There are no deny rules. A narrower network without permission does not
+    carve a hole in a broader permitted range. Diagnostics report exactly that
+    case rather than leaving it to be discovered.
+
+- **`deploy/install-docker.sh` does the rest of the install.** It creates
+  `.env`, names the process holding port 53 and what to do about it, waits for
+  the service to answer rather than printing "container started" and leaving,
+  runs `doctor`, and ends with a summary and the exact next step. `--lan` and
+  `--vps` make the deployment choice explicit for automation; `--yes` alone
+  still never publishes anything. `--upgrade` preserves data and `.env` and
+  reconciles only the keys the installer owns. `--uninstall` keeps your data;
+  `--purge` needs both the flag and a typed confirmation.
+
+### Changed
+
+- **`DELETE /api/v1/networks/{id}` can now answer `200` instead of `204`.**
+  Only in one case: the deletion committed but the resolver's client access
+  could not be reloaded, so the network's addresses may still be being served.
+  The body carries a `warning`, and the condition is reported by
+  `dnsdaddy doctor` and `GET /api/v1/diagnostics` until a reload succeeds.
+
+  `204` still means exactly what it meant — the revocation is in force — so
+  this is additive. A client that treats *any* non-`204` as failure will now
+  see a failure where it previously saw silent success, which is the correct
+  direction for it to be wrong in.
+
+- **The generated first-run admin password is no longer written to the log.**
+  It is written to `initial-password.txt` in the data volume with mode `0600`,
+  as before, and that is now the only place it appears.
+  `docker compose logs dnsdaddy | grep -i password` no longer finds it; use
+  `docker compose exec dnsdaddy cat /var/lib/dnsdaddy/initial-password.txt`,
+  or let the installer print it. A credential in the container log outlives
+  the session and reaches every log shipper pointed at it.
+
+### Fixed
+
+- **`ss -lnp` without privilege lists a socket but cannot name its process**,
+  and the installer read the empty owner as a free port — sending the operator
+  into a `docker compose up` that fails on the bind. A successful `ss` run is
+  now authoritative about use, with only the name treated as missing.
+
+---
+
 ## [0.2.0-alpha.1] — unreleased
 
 **Maturation release.** Less feature work, more finding out where DNS Daddy was

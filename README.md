@@ -97,7 +97,7 @@ the code rather than measured end-to-end, and says so.
 
 ## Quick start
 
-Docker Compose, on a Linux machine or VM on your LAN:
+Docker Compose, on a Linux machine, VM or VPS:
 
 ```bash
 git clone https://github.com/jameshoulder/dnsdaddy.git
@@ -105,59 +105,99 @@ cd dnsdaddy
 ./deploy/install-docker.sh
 ```
 
-The installer checks Docker, finds your address, checks ports 53 and 8080,
-asks whether this is a LAN or a public VPS, writes `.env`, starts the stack and
-runs the readiness check. Use `--dry-run` to see what it would do first.
+That is the whole installation. There is no `cp .env.example .env` first and
+nothing to look up afterwards. The installer checks Docker, finds your address,
+checks ports 53 and 8080 and names whatever is holding them, asks the one
+question it cannot answer for you, writes `.env`, starts the stack, waits for
+it to be ready, runs the readiness check, and finishes by printing your DNS
+address, your dashboard URL, your admin password and the exact next step.
 
-Prefer to drive it yourself:
+Use `--dry-run` first to see what it would do without changing anything.
+`--upgrade` rebuilds and restarts while keeping your data and your `.env`;
+`--uninstall` stops it and keeps your data. `--help` lists the rest.
 
-```bash
-git clone https://github.com/jameshoulder/dnsdaddy.git
-cd dnsdaddy
-cp .env.example .env
-docker compose up -d
-docker compose exec dnsdaddy dnsdaddy doctor
-docker compose logs dnsdaddy | grep -i password
-```
+### Then: allow the clients that should use it
 
-**On a LAN or in a VM there is nothing to edit.** The built-in client ACL
-already serves loopback, every private range, carrier-grade NAT, link-local and
-the IPv6 equivalents.
+DNS Daddy answers `REFUSED` to any source address it has not been told to
+serve. That is deliberate — an open resolver is found and conscripted into
+amplification attacks within days — and on a LAN it costs you nothing, because
+the shipped default already serves loopback, every private range,
+carrier-grade NAT, link-local and the IPv6 equivalents.
 
-**To open the dashboard from your laptop**, on a machine that has **no public
-address** — a home server, a LAN VM, a box behind your router — set its LAN
-address in `.env` and restart:
+On a public VPS your clients arrive from public addresses, which that default
+does not cover. Open the dashboard, go to **Networks**, add the client or
+network, and tick:
 
-```bash
-echo "DNSDADDY_DASHBOARD_BIND=$(hostname -I | awk '{print $1}')" >> .env
-docker compose up -d
-```
+> **☑ Allow this network to use DNS Daddy**
 
-> **Check this is not a cloud VPS first.** On AWS, GCP, Azure, Hetzner Cloud and
-> most providers the instance holds a *private* address and the public one is
-> NATed onto it, so `ip addr` shows `10.x` or `172.x` while the machine is fully
-> reachable from the internet. Binding the dashboard to that private address
-> publishes an authenticated but **plaintext** management API to the world.
-> A private address on the NIC is not evidence that a host is private.
->
-> Never set it to `0.0.0.0` either — and note Docker's port publishing bypasses
-> `ufw`, so a firewall rule will not contain it.
+It takes effect on the next query. There is nothing to restart and no file to
+edit.
 
-**On a public VPS or any host with a public address**, leave the dashboard on
-loopback and reach it over an SSH tunnel:
+Two settings sit behind that box, and telling them apart saves an afternoon:
+
+| | decides |
+|---|---|
+| the network's **policy** | what DNS Daddy does with those queries — what it blocks, what it logs |
+| **allow this network** | whether DNS Daddy accepts queries from it at all |
+
+Adding a network on its own gives it a policy. Until it is also allowed, its
+clients are answered `REFUSED` — which is what used to make a perfectly healthy
+resolver look broken. `dnsdaddy doctor` says so in plain English if it ever
+happens.
+
+`DNSDADDY_ALLOWED_CLIENT_CIDRS` still works and is still the right tool for a
+headless or automated deployment. The two combine: the effective ACL is the
+environment list plus whatever the dashboard permits. See
+[docs/deploy.md](docs/deploy.md#who-may-use-the-resolver).
+
+### Reaching the dashboard
+
+The dashboard is published on `127.0.0.1:8080` by default — reachable from the
+server itself and nowhere else.
+
+**On a public VPS or any host with a public address**, leave it there and reach
+it over an SSH tunnel:
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 you@your-server
 ```
 
 or put TLS in front ([`deploy/Caddyfile.example`](deploy/Caddyfile.example)).
-You must also set `DNSDADDY_ALLOWED_CLIENT_CIDRS` there — your clients arrive
-from public addresses, which the default does not cover, so every real query
-would be answered `REFUSED`.
+
+**On a machine with no public address** — a home server, a LAN VM, a box behind
+your router — run the installer with `--lan` and it publishes the dashboard on
+that machine's LAN address and prints the URL.
+
+> **Check this is not a cloud VPS first.** On AWS, GCP, Azure, Hetzner Cloud and
+> most providers the instance holds a *private* address and the public one is
+> NATed onto it, so `ip addr` shows `10.x` or `172.x` while the machine is fully
+> reachable from the internet. Binding the dashboard to that private address
+> publishes an authenticated but **plaintext** management API to the world.
+> A private address on the NIC is not evidence that a host is private — which is
+> why the installer never infers it and `--lan` has to be said out loud.
+>
+> Never set it to `0.0.0.0` either — and note Docker's port publishing bypasses
+> `ufw`, so a firewall rule will not contain it.
 
 If it does go wrong, DNS Daddy says so: a management request arriving over plain
 HTTP from a public address is raised on the dashboard and at
 `/api/v1/diagnostics`.
+
+### Driving it yourself
+
+The installer is a convenience, not a dependency. By hand:
+
+```bash
+git clone https://github.com/jameshoulder/dnsdaddy.git
+cd dnsdaddy
+docker compose up -d
+docker compose exec dnsdaddy dnsdaddy doctor
+docker compose exec dnsdaddy cat /var/lib/dnsdaddy/initial-password.txt
+```
+
+`docker-compose.yml` works with no `.env` at all; every value it reads has a
+default. The password file is written `0600` inside the data volume on first
+run only — delete it once you have changed the password from **Settings**.
 
 ## What success looks like
 
@@ -179,7 +219,14 @@ DNS LISTENER
          elapsed: 23ms
 
 CLIENT ACCESS
-  [PASS] 9 address range(s) may send queries; everything else is REFUSED.
+  [PASS] 11 address range(s) may send queries; everything else is REFUSED.
+         from configuration (dns.allowed_client_cidrs): 127.0.0.0/8, 10.0.0.0/8, …
+         from the dashboard: 192.168.1.0/24, 203.0.113.25/32
+  [WARN] 1 publicly routable range(s) are permitted to query DNS Daddy.
+         203.0.113.25/32 (network "Branch office")
+         → Confirm your provider's firewall or security group restricts TCP and
+           UDP port 53 to those addresses — DNS Daddy cannot see that firewall
+           and has not checked it, and it does not change it for you.
   [PASS] Network "Home" is permitted to send queries.
          192.168.1.0/24 → policy Standard business
 
@@ -189,7 +236,7 @@ UPSTREAM
 THREAT INTELLIGENCE
   [PASS] 412,908 domains indexed, refreshed 3m ago.
 
-READY
+READY, with warnings.
 ```
 
 - **PASS** — checked, and fine.

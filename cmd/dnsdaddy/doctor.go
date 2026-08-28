@@ -16,6 +16,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
@@ -62,11 +63,27 @@ func runDoctor(args []string) error {
 		defer st.Close()
 	}
 
+	// The effective ACL, computed once: the same union of configuration and
+	// dashboard permissions the daemon admits on. Every check that quotes "who
+	// may resolve" quotes this, so the listener probe and the client-access
+	// section cannot disagree with each other or with the running resolver.
+	acl := doctorACL(ctx, st, cfg)
+
+	// Asked first, rendered last. The dashboard is the only place a failed
+	// client-access reload is visible — it lives in the running daemon's
+	// memory, and this process rebuilds the ACL from configuration and the
+	// database, which is what *should* be enforced rather than what is.
+	//
+	// A nil answer means the API did not respond, and stays nil: reporting
+	// "not stale" for something that could not be checked is the misleading
+	// green this command exists to remove.
+	webChecks, aclStale := doctorWeb(ctx, st, cfg, *timeout)
+
 	checks = append(checks, dbCheck)
-	checks = append(checks, doctorListeners(ctx, cfg, *timeout)...)
-	checks = append(checks, doctorClientAccess(ctx, st, cfg)...)
+	checks = append(checks, doctorListeners(ctx, cfg, acl, *timeout)...)
+	checks = append(checks, doctorClientAccess(ctx, st, cfg, acl, aclStale)...)
 	checks = append(checks, doctorUpstreams(cfg, *timeout)...)
-	checks = append(checks, doctorWeb(ctx, st, cfg, *timeout)...)
+	checks = append(checks, webChecks...)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -176,6 +193,16 @@ func openExistingStore(ctx context.Context, cfg config.Config) (*store.Store, di
 		c.Status = diag.StatusFail
 		c.Summary = "The database opened but could not be read."
 		c.Evidence = []string{"path: " + path, "error: " + err.Error()}
+		// The likely cause of "no such column" is a half-finished upgrade:
+		// this binary is newer than the one that last opened the database, and
+		// nothing has applied the migration yet because doctor deliberately
+		// does not write. Saying so is more use than the raw SQLite error.
+		if strings.Contains(err.Error(), "no such column") {
+			c.Action = "This database was last written by an older DNS Daddy than this binary, and " +
+				"doctor will not migrate it — it changes nothing by design. Start the resolver " +
+				"once (`docker compose up -d`, or `systemctl start dnsdaddy`), which applies the " +
+				"migration, then run this again."
+		}
 		return st, c
 	}
 
@@ -187,7 +214,7 @@ func openExistingStore(ctx context.Context, cfg config.Config) (*store.Store, di
 
 // doctorListeners establishes whether anything is serving DNS, and if not,
 // what is in the way.
-func doctorListeners(ctx context.Context, cfg config.Config, timeout time.Duration) []diag.Check {
+func doctorListeners(ctx context.Context, cfg config.Config, acl *clientacl.Set, timeout time.Duration) []diag.Check {
 	var checks []diag.Check
 
 	for _, l := range []struct {
@@ -202,7 +229,7 @@ func doctorListeners(ctx context.Context, cfg config.Config, timeout time.Durati
 		}
 		target := probeTarget(l.addr)
 		probe := queryResolver(ctx, l.proto, target, timeout)
-		c := diag.ResolverReachability(probe, cfg.DNS.AllowedClientCIDRs)
+		c := diag.ResolverReachability(probe, acl.Effective())
 
 		// Nothing answered. Distinguish "not running" from "something else has
 		// the port", which are different problems with different remedies.
@@ -218,36 +245,54 @@ func doctorListeners(ctx context.Context, cfg config.Config, timeout time.Durati
 	return checks
 }
 
-// doctorClientAccess is the configuration cross-check: which of the networks
-// in the dashboard are actually permitted to send queries.
-func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
+// doctorClientAccess is the cross-check that answers the question an operator
+// actually has: who may use this resolver, and does that include the networks
+// they configured?
+//
+// It computes the same effective ACL the daemon runs on — the bootstrap list
+// from configuration unioned with the dashboard's permissions — rather than
+// reporting either source alone. Reporting configuration alone was the old
+// behaviour and would now be worse than useless: it would tell an operator
+// their network was refused by a resolver that is serving it.
+func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config, acl *clientacl.Set, stale *bool) []diag.Check {
+	in := diag.ClientAccessInput{
+		ACL:   acl,
+		Stale: stale,
+		// This process has served nothing; the live counter is on the running
+		// daemon and reaches the operator through /metrics and the dashboard.
+		RefusedQueries: nil,
+	}
 	if st == nil {
-		// Without the database we cannot know which networks are configured,
-		// but the ACL itself is in the config and is still worth reporting.
-		return diag.ClientAccess(diag.ClientAccessInput{
-			AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
-			AllowPublicResolver: cfg.DNS.AllowPublicResolver,
-			RefusedQueries:      nil,
-		})
+		return diag.ClientAccess(in)
 	}
 
 	networks, err := st.ListNetworks(ctx)
 	if err != nil {
-		return nil
+		return diag.ClientAccess(in)
 	}
 	policies, err := st.ListPolicies(ctx)
 	if err != nil {
-		return nil
+		return diag.ClientAccess(in)
 	}
+	in.Networks = diag.FromStoreNetworks(networks, diag.PolicyNames(policies))
+	return diag.ClientAccess(in)
+}
 
-	return diag.ClientAccess(diag.ClientAccessInput{
-		AllowedCIDRs:        cfg.DNS.AllowedClientCIDRs,
-		Networks:            diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
-		AllowPublicResolver: cfg.DNS.AllowPublicResolver,
-		// This process has served nothing; the live counter is on the running
-		// daemon and reaches the operator through /metrics and the dashboard.
-		RefusedQueries: nil,
-	})
+// doctorACL rebuilds the effective client ACL from configuration and the
+// database.
+//
+// Without a readable database only the bootstrap half is knowable. That is
+// reported honestly — the summary names its source — rather than being
+// presented as the whole answer, because a doctor that quietly reports half an
+// ACL is how an operator concludes their permission did not save.
+func doctorACL(ctx context.Context, st *store.Store, cfg config.Config) *clientacl.Set {
+	var networks []clientacl.Network
+	if st != nil {
+		if stored, err := st.ListNetworks(ctx); err == nil {
+			networks = store.ClientACLNetworks(stored)
+		}
+	}
+	return clientacl.Compute(cfg.DNS.AllowedClientCIDRs, cfg.DNS.AllowPublicResolver, networks)
 }
 
 // doctorUpstreams tests each configured forwarder.
@@ -259,8 +304,15 @@ func doctorUpstreams(cfg config.Config, timeout time.Duration) []diag.Check {
 	return diag.Upstreams(probes)
 }
 
-// doctorWeb checks the dashboard and reads the live threat-index size from it.
-func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration) []diag.Check {
+// doctorWeb checks the dashboard, and reads from it the two things only the
+// running process knows: the size of the live threat index, and whether a
+// client-access reload has failed.
+//
+// It returns the stale flag separately because the CLIENT ACCESS section is
+// rendered before this one and needs the answer. Everything else doctor
+// reports is derived from configuration and the database, which is the
+// *desired* state; these two are the enforced one.
+func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration) ([]diag.Check, *bool) {
 	target := probeTarget(cfg.HTTP.Listen)
 	url := "http://" + target + "/api/v1/health"
 
@@ -274,7 +326,7 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		c.Status = diag.StatusFail
 		c.Summary = "The dashboard address could not be used."
 		c.Evidence = []string{"listen: " + cfg.HTTP.Listen, "error: " + err.Error()}
-		return []diag.Check{c, intelUnknown()}
+		return []diag.Check{c, intelUnknown()}, nil
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -285,7 +337,7 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		c.Action = "If DNS Daddy runs in a container, the dashboard is published on loopback only " +
 			"and this must be run inside the container: " +
 			"`docker compose exec dnsdaddy dnsdaddy doctor`."
-		return []diag.Check{c, intelUnknown()}
+		return []diag.Check{c, intelUnknown()}, nil
 	}
 	defer resp.Body.Close()
 
@@ -294,18 +346,19 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		c.Status = diag.StatusFail
 		c.Summary = fmt.Sprintf("The dashboard answered HTTP %d.", resp.StatusCode)
 		c.Evidence = []string{"url: " + url}
-		return []diag.Check{c, intelUnknown()}
+		return []diag.Check{c, intelUnknown()}, nil
 	}
 
 	var health struct {
-		Status        string `json:"status"`
-		BlocklistSize int    `json:"blocklistSize"`
+		Status         string `json:"status"`
+		BlocklistSize  int    `json:"blocklistSize"`
+		ClientACLStale bool   `json:"clientAclStale"`
 	}
 	if err := json.Unmarshal(body, &health); err != nil {
 		c.Status = diag.StatusWarn
 		c.Summary = "The dashboard responded, but the health payload was not readable."
 		c.Evidence = []string{"url: " + url}
-		return []diag.Check{c, intelUnknown()}
+		return []diag.Check{c, intelUnknown()}, nil
 	}
 
 	c.Status = diag.StatusPass
@@ -314,7 +367,7 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 
 	// The running process owns the live index, so its size is only knowable
 	// from the API. Feed timestamps come from the database.
-	return []diag.Check{c, doctorIntel(ctx, st, cfg, health.BlocklistSize)}
+	return []diag.Check{c, doctorIntel(ctx, st, cfg, health.BlocklistSize)}, &health.ClientACLStale
 }
 
 // doctorIntel reports whether filtering is actually in force.

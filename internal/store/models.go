@@ -55,13 +55,34 @@ type Policy struct {
 
 // Network is a site, VLAN, or roaming profile that queries are attributed to.
 type Network struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Location  string    `json:"location"`
-	PolicyID  string    `json:"policyId"`
-	Token     string    `json:"token,omitempty"`
-	Enabled   bool      `json:"enabled"`
-	CIDRs     []string  `json:"cidrs"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Location string `json:"location"`
+	PolicyID string `json:"policyId"`
+	Token    string `json:"token,omitempty"`
+	Enabled  bool   `json:"enabled"`
+
+	// AllowResolver is whether this network's addresses may query DNS Daddy
+	// at all — a separate question from PolicyID, which decides what happens
+	// to those queries once they are accepted.
+	//
+	// Two fields rather than one because they really are two decisions: a
+	// network can exist for attribution alone (its addresses reach the
+	// resolver through the bootstrap ACL, or through a broader permitted
+	// range) and a permitted network still needs a policy. What changes here
+	// is that the dashboard now sets both, in one place, instead of setting
+	// the first and leaving the second to an environment variable and a
+	// container restart.
+	AllowResolver bool `json:"allowResolver"`
+
+	CIDRs []string `json:"cidrs"`
+
+	// AcknowledgedPublicCIDRs are the publicly routable ranges an operator has
+	// explicitly affirmed. Permitting a public range requires one; it is
+	// remembered per range so an unrelated later edit does not re-prompt,
+	// while adding a new public range does.
+	AcknowledgedPublicCIDRs []string `json:"acknowledgedPublicCidrs"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

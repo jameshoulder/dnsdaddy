@@ -321,3 +321,100 @@ func TestUpgradeFromPreLastSuccessDatabase(t *testing.T) {
 		t.Error("the new column is not written after an upgrade")
 	}
 }
+
+// oldNetworkSchema is networks and network_cidrs as they shipped before
+// per-network resolver access. Reproduced literally, for the same reason as
+// oldSchema above: deriving it from the current schema would test nothing.
+const oldNetworkSchema = `
+CREATE TABLE policies (
+    id          TEXT PRIMARY KEY,
+    name        TEXT    NOT NULL,
+    description TEXT    NOT NULL DEFAULT '',
+    categories  TEXT    NOT NULL DEFAULT '[]',
+    block_mode  TEXT    NOT NULL DEFAULT 'nxdomain',
+    safe_search INTEGER NOT NULL DEFAULT 0,
+    log_queries INTEGER NOT NULL DEFAULT 1,
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+CREATE TABLE networks (
+    id         TEXT PRIMARY KEY,
+    name       TEXT    NOT NULL,
+    location   TEXT    NOT NULL DEFAULT '',
+    policy_id  TEXT    NOT NULL REFERENCES policies(id),
+    token      TEXT    UNIQUE,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE network_cidrs (
+    id         INTEGER PRIMARY KEY,
+    network_id TEXT NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    cidr       TEXT NOT NULL,
+    UNIQUE (network_id, cidr)
+);`
+
+// Scenario E of the deployment review: an existing operator upgrades.
+//
+// The requirement is not "it still starts" but "nobody's resolver exposure
+// changed". Every network written before per-network access existed must come
+// back unpermitted, so the bootstrap ACL alone keeps admitting exactly who it
+// admitted before — an upgrade that silently granted access to every
+// configured network would widen a live deployment's ACL without anyone asking
+// for it.
+func TestUpgradeFromPreResolverAccessDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := raw.Exec(oldNetworkSchema); err != nil {
+		t.Fatalf("apply old schema: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := raw.Exec(`
+		INSERT INTO policies (id, name, created_at, updated_at) VALUES ('p_standard', 'Standard', ?, ?)`,
+		now, now); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+	if _, err := raw.Exec(`
+		INSERT INTO networks (id, name, policy_id, token, enabled, created_at, updated_at)
+		VALUES ('n_hq', 'HQ', 'p_standard', 'legacytoken', 1, ?, ?)`, now, now); err != nil {
+		t.Fatalf("seed network: %v", err)
+	}
+	if _, err := raw.Exec(`
+		INSERT INTO network_cidrs (network_id, cidr) VALUES ('n_hq', '203.0.113.0/24')`); err != nil {
+		t.Fatalf("seed cidr: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("upgrade open: %v", err)
+	}
+	defer st.Close()
+
+	n, err := st.GetNetwork(context.Background(), "n_hq")
+	if err != nil {
+		t.Fatalf("GetNetwork after upgrade: %v", err)
+	}
+	if n.AllowResolver {
+		t.Error("an upgrade granted resolver access to a pre-existing network, widening the ACL " +
+			"of a running deployment without anyone asking")
+	}
+	if len(n.CIDRs) != 1 || n.CIDRs[0] != "203.0.113.0/24" {
+		t.Errorf("cidrs = %v, want the existing range preserved", n.CIDRs)
+	}
+	if len(n.AcknowledgedPublicCIDRs) != 0 {
+		t.Errorf("acknowledged = %v, want none — nobody has affirmed anything", n.AcknowledgedPublicCIDRs)
+	}
+	// And the DoH token, which never depended on the client ACL, still works.
+	if id, err := st.NetworkByToken(context.Background(), "legacytoken"); err != nil || id != "n_hq" {
+		t.Errorf("NetworkByToken after upgrade = %q, %v; want n_hq — an upgrade must not break "+
+			"roaming DoH clients", id, err)
+	}
+}

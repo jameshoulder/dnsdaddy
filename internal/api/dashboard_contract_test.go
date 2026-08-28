@@ -193,3 +193,110 @@ func TestMalformedFindingDetailDegradesSafely(t *testing.T) {
 		}
 	}
 }
+
+// pages.networks renders the access column, the public-range marker and the
+// "resolves via a wider range" note straight off these keys. A rename here is
+// the silent-blank failure this file exists to catch, and on this page a blank
+// access column would read as "not permitted" — a wrong answer rather than a
+// missing one.
+func TestNetworkListMatchesDashboardContract(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Branch office",
+		"cidrs":         []string{"203.0.113.25/32"},
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status %d, body %s", resp.StatusCode, raw)
+	}
+
+	var body struct {
+		Networks     []map[string]any `json:"networks"`
+		ClientAccess map[string]any   `json:"clientAccess"`
+	}
+	h.getJSON("/api/v1/networks", &body)
+
+	if len(body.Networks) == 0 {
+		t.Fatal("no networks returned")
+	}
+	var row map[string]any
+	for _, n := range body.Networks {
+		if n["name"] == "Branch office" {
+			row = n
+		}
+	}
+	if row == nil {
+		t.Fatal("the created network is missing from the list")
+	}
+
+	requireKeys(t, "network row", row,
+		"id", "name", "location", "policyId", "cidrs", "enabled",
+		"queries24h", "blocked24h", "status",
+		"allowResolver", "publicCidrs", "coverage")
+
+	// clientAccessSummary() reads these.
+	requireKeys(t, "clientAccess", body.ClientAccess,
+		"unrestricted", "allowPublicResolver", "bootstrapCidrs", "effectiveCidrs")
+}
+
+// The first-run card branches on these to decide between "nothing is permitted
+// yet, here are the steps" and "point a device at it and test". Getting that
+// branch wrong hands somebody a command that cannot work.
+func TestOverviewMatchesOnboardingContract(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	var overview map[string]any
+	h.getJSON("/api/v1/overview", &overview)
+
+	requireKeys(t, "overview", overview,
+		"hasSeenClients", "clientAttribution", "permittedNetworks", "unrestrictedAccess",
+		// The two the card actually branches on. Both are measurements; the
+		// branch it used to make was a guess, and it was wrong on the most
+		// common install there is.
+		"servesOnlyLoopback", "refusedClients")
+}
+
+// resolvesVia is omitted when empty, so it cannot be asserted on a plain row —
+// but the dashboard prints it verbatim when a network is reachable without its
+// own permission, and that state has to produce it.
+func TestShadowedNetworkReportsResolvesVia(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	// 192.168.4.0/24 sits inside the shipped 192.168.0.0/16, so this network
+	// resolves without a permission of its own.
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Guest VLAN",
+		"cidrs": []string{"192.168.4.0/24"},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status %d, body %s", resp.StatusCode, raw)
+	}
+
+	var body struct {
+		Networks []map[string]any `json:"networks"`
+	}
+	h.getJSON("/api/v1/networks", &body)
+
+	for _, n := range body.Networks {
+		if n["name"] != "Guest VLAN" {
+			continue
+		}
+		if n["allowResolver"] != false {
+			t.Errorf("allowResolver = %v, want false", n["allowResolver"])
+		}
+		if n["coverage"] != "full" {
+			t.Errorf("coverage = %v, want full — it is inside a permitted range", n["coverage"])
+		}
+		via, _ := n["resolvesVia"].(string)
+		if via == "" {
+			t.Error("resolvesVia is empty; the dashboard cannot say why this network resolves")
+		}
+		return
+	}
+	t.Fatal("the created network is missing from the list")
+}

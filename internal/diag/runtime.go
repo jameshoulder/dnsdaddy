@@ -45,7 +45,7 @@ type ResolverProbe struct {
 // alone: REFUSED from DNS Daddy is not a fault, it is DNS Daddy working
 // correctly and declining to serve this source address. Saying "DNS query
 // failed" there would be true and useless.
-func ResolverReachability(p ResolverProbe, allowedCIDRs []string) Check {
+func ResolverReachability(p ResolverProbe, effectiveCIDRs []string) Check {
 	c := Check{
 		Section: SectionListener,
 		Name:    fmt.Sprintf("%s query to %s", strings.ToUpper(p.Proto), p.Address),
@@ -73,12 +73,13 @@ func ResolverReachability(p ResolverProbe, allowedCIDRs []string) Check {
 	case "REFUSED":
 		c.Status = StatusFail
 		c.Summary = "DNS Daddy answered, and REFUSED the query: this source address is not permitted to resolve."
-		if len(allowedCIDRs) > 0 {
-			c.Evidence = append(c.Evidence, "dns.allowed_client_cidrs: "+strings.Join(allowedCIDRs, ", "))
+		if len(effectiveCIDRs) > 0 {
+			c.Evidence = append(c.Evidence, "permitted: "+strings.Join(effectiveCIDRs, ", "))
 		}
-		c.Action = "The resolver is running and reachable — this is not a network fault. Add the " +
-			"address the query left from to dns.allowed_client_cidrs " +
-			"(DNSDADDY_ALLOWED_CLIENT_CIDRS) if it is a client you trust, then restart."
+		c.Action = "The resolver is running and reachable — this is not a network fault. Open " +
+			"Networks in the dashboard, add the address the query left from, and tick \"Allow " +
+			"this network to use DNS Daddy\". It takes effect immediately. For a headless " +
+			"deployment, set DNSDADDY_ALLOWED_CLIENT_CIDRS instead and restart."
 	case "NOERROR":
 		c.Status = StatusPass
 		c.Summary = fmt.Sprintf("DNS Daddy answered a query on %s over %s.", p.Address, p.Proto)

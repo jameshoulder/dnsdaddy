@@ -88,6 +88,19 @@ paths:
                   version: { type: string }
                   uptimeSeconds: { type: integer, format: int64 }
                   blocklistSize: { type: integer }
+                  clientAclStale:
+                    type: boolean
+                    description: |
+                      The resolver could not re-read its configuration after a
+                      change, so the client access it is enforcing could not be
+                      confirmed to match what is stored.
+
+                      On the unauthenticated endpoint because it is the only
+                      way `dnsdaddy doctor` can see it: doctor runs as a
+                      separate process and rebuilds the ACL from configuration
+                      and the database, which is the *desired* state, while
+                      this flag lives in the running daemon's memory. It
+                      reveals nothing about what the ACL contains.
 
   /api/v1/auth/login:
     post:
@@ -177,7 +190,7 @@ paths:
         Checks the resolver's configuration against its live counters and
         reports, in plain English, anything that would stop clients resolving.
         Chiefly: whether the networks configured here are actually permitted to
-        send queries by dns.allowed_client_cidrs, which are two independent
+        send queries by its resolver-access permission and dns.allowed_client_cidrs, which are independent
         settings that look like one. `dnsdaddy doctor` renders the same checks
         at the command line.
       responses:
@@ -333,6 +346,7 @@ paths:
                   networks:
                     type: array
                     items: { $ref: "#/components/schemas/NetworkWithActivity" }
+                  clientAccess: { $ref: "#/components/schemas/ClientAccess" }
     post:
       tags: [Networks]
       summary: Create a network
@@ -348,6 +362,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Network" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/PublicAckRequired" }
 
   /api/v1/networks/{id}:
     parameters:
@@ -377,13 +392,38 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Network" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/PublicAckRequired" }
     delete:
       tags: [Networks]
       summary: Delete a network
       description: The last remaining network cannot be deleted.
       responses:
-        "204": { description: Deleted }
+        "204":
+          description: >-
+            Deleted, and the effective client ACL was republished from what
+            remains. That does not necessarily mean the network's addresses are
+            now refused: the ACL is a union with no deny rules, so a range the
+            bootstrap list or another permitted network also covers goes on
+            being served. `GET /api/v1/networks` reports what is actually
+            admitted.
+        "200":
+          description: >-
+            Deleted, but the resolver could not re-read its configuration, so
+            whether the network's addresses are still being served could not be
+            confirmed. The condition is also reported by `GET
+            /api/v1/diagnostics`, by `GET /api/v1/health` as `clientAclStale`,
+            and by `dnsdaddy doctor` (which reads it from health, since the
+            state lives in the running daemon's memory) — until a reload
+            succeeds.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [deleted] }
+                  warning: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -873,6 +913,22 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    PublicAckRequired:
+      description: >-
+        The request would permit a publicly routable range to query the
+        resolver, which needs an explicit acknowledgement. The request is
+        well-formed and may be resent verbatim with publicAck set to true.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+              publicAckRequired: { type: boolean, enum: [true] }
+              publicCidrs:
+                type: array
+                items: { type: string, example: 203.0.113.25/32 }
+                description: The ranges that need acknowledging.
 
   schemas:
     Error:
@@ -950,6 +1006,43 @@ components:
             Whether client addresses are recorded at all (`log.query_log` and
             `log.log_client_ip`). When false, `hasSeenClients` says nothing
             about the network, only about the privacy setting.
+        permittedNetworks:
+          type: integer
+          description: |
+            How many enabled networks carry the resolver-access permission.
+
+            Informational, and deliberately **not** what the dashboard's
+            first-run card branches on. A stock LAN install has none of these
+            and serves every private range perfectly well, so treating zero as
+            "every client will be refused" is false on the most common
+            deployment there is.
+        unrestrictedAccess:
+          type: boolean
+          description: |
+            No client ACL is configured, so no query is refused on its source
+            address. Configuration validation only permits this alongside
+            loopback-only listeners or `dns.allow_public_resolver`.
+        servesOnlyLoopback:
+          type: boolean
+          description: |
+            The effective ACL admits nothing but this machine itself — the one
+            state in which "no client can use this resolver" is a measurement
+            rather than a guess.
+        refusedClients:
+          type: integer
+          format: int64
+          description: |
+            Queries turned away by the client ACL since start.
+
+            This is the evidence that separates two states nothing at rest can:
+            a deployment whose clients arrive from addresses the ACL does not
+            cover looks identical to one nobody has pointed anything at, until
+            somebody tries. A climbing count with `hasSeenClients` false means
+            the queries are arriving and being refused, which has a different
+            fix from no queries at all.
+
+            The refused addresses themselves are deliberately not recorded — an
+            unauthorised source could otherwise fill the log.
 
     ActivityBucket:
       type: object
@@ -1036,12 +1129,39 @@ components:
           type: string
           description: The per-network DoH path token. Treat it as a credential.
         enabled: { type: boolean }
+        allowResolver:
+          type: boolean
+          description: >-
+            Whether this network's addresses may query the resolver at all — a
+            separate decision from policyId, which decides what happens to
+            those queries once they are accepted. False, the default, grants
+            nothing: the client ACL from configuration still applies on its
+            own. Changing this takes effect on the next query, with no restart.
+            It governs source addresses only — a DoH or DoT client presenting
+            this network's token is identified by the token and resolves either
+            way. Disable the network, or rotate its token, to cut one off.
         cidrs:
           type: array
           items: { type: string }
           description: Client ranges attributed to this network. Empty means catch-all.
+        acknowledgedPublicCidrs:
+          type: array
+          items: { type: string }
+          description: >-
+            The publicly routable ranges an operator has explicitly affirmed.
+            Permitting a public range requires one; it is remembered per range,
+            so an unrelated later edit does not re-prompt while introducing a
+            new public range does.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        warning:
+          type: string
+          description: >-
+            Present only on a write that was stored, after which the resolver
+            could not re-read its configuration — so the client access being
+            enforced could not be confirmed to match what is stored. It does
+            not say the change failed to apply; which of the two it is cannot
+            be determined without the read that failed. Absent otherwise.
 
     NetworkWithActivity:
       allOf:
@@ -1051,6 +1171,67 @@ components:
             queries24h: { type: integer, format: int64 }
             blocked24h: { type: integer, format: int64 }
             status: { type: string, enum: [healthy, no-traffic, disabled] }
+            publicCidrs:
+              type: array
+              items: { type: string }
+              description: This network's ranges that are reachable from the public internet.
+            coverage:
+              type: string
+              enum: [full, partial, none]
+              description: >-
+                How much of this network the live effective ACL admits. A
+                question about addresses only: whether the row is enabled, and
+                whether it carries a permission of its own, decide what it
+                contributes to the ACL rather than what the ACL admits, because
+                the ACL is a union with no deny rules. So a disabled network
+                inside a permitted range reports full, and a permission that
+                has not been reloaded reports none despite allowResolver being
+                true.
+
+                `partial` is its own answer rather than a rounding of "not
+                full": a 10.0.0.0/8 network against a permitted 10.0.0.0/16 has
+                65k addresses served and the rest refused, which is the state
+                that presents as intermittent breakage.
+            resolvesVia:
+              type: string
+              description: >-
+                When coverage is full and allowResolver is false, the wider
+                permitted range responsible. Client access has no deny rules,
+                so a narrower network without a permission does not carve a
+                hole in a broader permitted one.
+
+    ClientAccess:
+      type: object
+      description: >-
+        The effective client ACL: the bootstrap list from configuration unioned
+        with the networks the dashboard permits.
+      properties:
+        unrestricted:
+          type: boolean
+          description: >-
+            True when no client ACL is configured, so no query is refused on
+            its source address. Configuration validation only permits this
+            alongside loopback-only listeners or allowPublicResolver.
+        allowPublicResolver: { type: boolean }
+        bootstrapCidrs:
+          type: array
+          items: { type: string }
+          description: dns.allowed_client_cidrs, as configured. Changing it needs a restart.
+        effectiveCidrs:
+          type: array
+          items: { type: string }
+          description: >-
+            The union actually enforced. Empty when unrestricted is true, which
+            means everything is accepted rather than nothing.
+        dashboardCidrs:
+          type: array
+          items: { type: string }
+          description: >-
+            The distinct ranges permitted by networks, as opposed to by
+            configuration. Not the same as effectiveCidrs minus bootstrapCidrs:
+            a range that appears in both survives that subtraction as nothing,
+            which would report a network the operator had just permitted as
+            contributing no ranges.
 
     NetworkInput:
       type: object
@@ -1062,6 +1243,22 @@ components:
           type: array
           items: { type: string, example: 10.0.10.0/24 }
         enabled: { type: boolean }
+        allowResolver:
+          type: boolean
+          description: >-
+            Permit this network's addresses to query the resolver. Omitted
+            leaves the stored value alone, so a client updating a name cannot
+            silently revoke access it never mentioned. A default route
+            (0.0.0.0/0 or ::/0) is refused with 400 whatever else is sent:
+            dns.allow_public_resolver is the setting for that, and it lives in
+            configuration.
+        publicAck:
+          type: boolean
+          description: >-
+            Affirms, in this request, that the publicly routable ranges it
+            results in may reach the resolver. Without it such a write is
+            refused with 409 and a publicCidrs list naming them; resend the
+            same request with this set to proceed.
 
     Policy:
       type: object
