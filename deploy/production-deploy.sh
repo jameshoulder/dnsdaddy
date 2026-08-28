@@ -271,53 +271,38 @@ if [[ -n "${STATE:-}" ]]; then
     --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
     | sed -n 's/^DNSDADDY_BASE_URL=//p' | head -1 || true)
 fi
-# A source that exists but cannot be read is recorded, not treated as absent.
-# Concluding "no hostname configured" from a file this run never opened puts
-# Caddy inactive and the dashboard on loopback for a deployment that may have a
-# hostname, and reports it as though it had been measured.
-UNREADABLE_SOURCE=""
-readable_or_note() { # path -> true when it can be read; records it when it cannot
-  if [[ -f "$1" ]]; then
-    [[ -r "$1" ]] && return 0
-    UNREADABLE_SOURCE="${UNREADABLE_SOURCE:-$1}"
-    return 1
-  fi
-  # -f answers no to "not there" and to "I am not allowed to look" alike, and
-  # only the first is absence. A directory without search permission — Docker's
-  # volume store, or a root-only /etc/dnsdaddy — denies every question about
-  # what is inside it, so treating that as "no config file" would put the
-  # preview back to reporting a hostname it never went looking for. Walk up to
-  # the nearest ancestor this user can actually see and ask whether it is
-  # searchable.
-  local dir
-  dir=$(dirname "$1")
-  while [[ "$dir" != "/" && ! -e "$dir" ]]; do dir=$(dirname "$dir"); done
-  [[ -x "$dir" ]] || UNREADABLE_SOURCE="${UNREADABLE_SOURCE:-$1}"
-  return 1
-}
+# Sources are tried with -r rather than -f, and the question of what a failure
+# meant is settled once, below, rather than case by case. Three rounds of
+# review found three ways an unprivileged run cannot see a file that a root
+# deploy will read — unreadable file, unsearchable directory, symlink into a
+# tree it cannot follow — and there is no reason to think that list is closed.
 # 2. .env in the repo.
-[[ -z "$HOSTNAME_FOUND" ]] && readable_or_note .env && \
+[[ -z "$HOSTNAME_FOUND" && -r .env ]] && \
   HOSTNAME_FOUND=$(sed -n 's/^DNSDADDY_BASE_URL=//p' .env | head -1 || true)
 # 3. A mounted config file, if this deployment uses one.
 if [[ -z "$HOSTNAME_FOUND" ]]; then
   for c in /etc/dnsdaddy/config.yaml "$VOL_SRC/config.yaml"; do
-    readable_or_note "$c" && HOSTNAME_FOUND=$(sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' "$c" | tr -d '"'"'" | head -1) && \
+    [[ -r "$c" ]] && HOSTNAME_FOUND=$(sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' "$c" | tr -d '"'"'" | head -1) && \
       [[ -n "$HOSTNAME_FOUND" ]] && break
   done
 fi
 # 4. An existing Caddyfile from a previous attempt.
-if [[ -z "$HOSTNAME_FOUND" ]] && readable_or_note /etc/caddy/Caddyfile; then
+if [[ -z "$HOSTNAME_FOUND" && -r /etc/caddy/Caddyfile ]]; then
   HOSTNAME_FOUND=$(grep -oE '^[a-z0-9.-]+\.[a-z]{2,}' /etc/caddy/Caddyfile | grep -v example | head -1 || true)
 fi
 HOSTNAME_FOUND="${HOSTNAME_FOUND#https://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND#http://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND%%/*}"
 
-if [[ -z "$HOSTNAME_FOUND" && -n "$UNREADABLE_SOURCE" ]]; then
+# Not "which source failed, and why" — that question has no last answer. Only
+# root can distinguish "no hostname is configured" from "there is one I am not
+# allowed to see", so an unprivileged run that found nothing does not know, and
+# every step below this one depends on the answer.
+if [[ -z "$HOSTNAME_FOUND" && $EUID -ne 0 ]]; then
   # Warning and carrying on is not enough. Everything below here branches on
   # the hostname — whether Caddy is configured, whether secure cookies are
   # forced — so continuing would print a concrete plan that a real deploy,
   # which runs as root and can read the file, may not follow. A preview that
   # describes the wrong plan is worse than one that stops.
-  die "$UNREADABLE_SOURCE exists but could not be read by this user, so the hostname could not be determined — and every step below depends on it. A real deploy runs as root and would read it; re-run this preview with sudo to see the plan it would actually follow."
+  die "no hostname was found, and this run is not root — so it cannot tell that apart from a hostname it is not allowed to see. A file may be unreadable, its directory unsearchable, or a symlink into a tree this user cannot follow; a real deploy runs as root and would read it. Every step below depends on the answer, so re-run this preview with sudo rather than have it describe a plan the real run may not follow."
 elif [[ -n "$HOSTNAME_FOUND" ]]; then
   ok "hostname: $HOSTNAME_FOUND"
 else
