@@ -823,3 +823,47 @@ func TestMixedCoverageIsPartialRatherThanTheWorstRange(t *testing.T) {
 	}
 	t.Fatal("the created network is missing from the list")
 }
+
+// Shadowed() reports one entry per covered range, so a network whose two CIDRs
+// are covered by two different grants produced two entries. Keeping the last
+// one named a single range as covering a network of which it covers half.
+func TestResolvesViaNamesEveryCoveringRange(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	// Both are inside the shipped ACL, but via different entries in it:
+	// 10.10.0.0/16 through 10.0.0.0/8, and 192.168.4.0/24 through
+	// 192.168.0.0/16.
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Two sites, two covers",
+		"cidrs": []string{"10.10.0.0/16", "192.168.4.0/24"},
+	})
+	if id, _ := decode[map[string]any](t, raw)["id"].(string); id == "" {
+		t.Fatalf("create failed: %s", raw)
+	}
+
+	_, raw = h.do("GET", "/api/v1/networks", nil)
+	body := decode[struct {
+		Networks []struct {
+			Name        string `json:"name"`
+			Coverage    string `json:"coverage"`
+			ResolvesVia string `json:"resolvesVia"`
+		} `json:"networks"`
+	}](t, raw)
+
+	for _, n := range body.Networks {
+		if n.Name != "Two sites, two covers" {
+			continue
+		}
+		if n.Coverage != "full" {
+			t.Fatalf("coverage = %q, want full — both ranges are inside the shipped ACL", n.Coverage)
+		}
+		if !strings.Contains(n.ResolvesVia, "10.0.0.0/8") ||
+			!strings.Contains(n.ResolvesVia, "192.168.0.0/16") {
+			t.Errorf("resolvesVia = %q, want both covering ranges — naming one of them "+
+				"describes it as covering a network of which it covers half", n.ResolvesVia)
+		}
+		return
+	}
+	t.Fatal("the created network is missing from the list")
+}

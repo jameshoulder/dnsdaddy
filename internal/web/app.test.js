@@ -755,7 +755,12 @@ test('an unpermitted network covered by a wider range says so', () => {
 });
 
 test('an unpermitted network nothing covers reads as refused', () => {
-  const out = accessBadge(network({ allowResolver: false }));
+  // coverage: 'none' is the whole point of the case. Both of these tests said
+  // "nothing covers" and passed a fixture whose coverage is full — so they
+  // asserted Refused for a network the ACL admits, and passed only because
+  // the badge had exactly that bug. A test can encode the defect it was
+  // written to prevent.
+  const out = accessBadge(network({ allowResolver: false, coverage: 'none' }));
   assert.match(out, /badge bad/);
   assert.match(out, /Refused/);
 });
@@ -812,7 +817,7 @@ test('an unpermitted catch-all does not claim its clients are refused', () => {
 
 // A network with ranges, unpermitted and covered by nothing, genuinely is.
 test('an unpermitted network with ranges nothing covers still reads as refused', () => {
-  const out = accessBadge(network({ allowResolver: false }));
+  const out = accessBadge(network({ allowResolver: false, coverage: 'none' }));
   assert.match(out, /badge bad/);
   assert.match(out, /Refused/);
 });
@@ -912,4 +917,25 @@ test('a disabled catch-all does not claim its clients are still served', () => {
 test('a disabled network partly still served says which', () => {
   const out = accessBadge(network({ enabled: false, allowResolver: false, coverage: 'partial' }));
   assert.match(out, /Disabled, partly served/);
+});
+
+// With no client ACL configured — a loopback-only deployment, which is what
+// DNS Daddy starts as — nothing is refused, but Compute has no grants so
+// Shadowed is empty and no row gets a resolvesVia. Every unpermitted network
+// fell through to Refused on an install that refuses nobody.
+test('an unpermitted network is not badged refused when nothing is refused', () => {
+  const out = accessBadge(network({ allowResolver: false, coverage: 'full', resolvesVia: '' }));
+  assert.doesNotMatch(out, /badge bad/);
+  assert.doesNotMatch(out, /Refused/);
+  assert.match(out, /Served, not by this row/);
+});
+
+// And where the covering range is known, it is still named — the more useful
+// answer, so it has to keep winning.
+test('a named covering range still outranks the generic served state', () => {
+  const out = accessBadge(network({
+    allowResolver: false, coverage: 'full', resolvesVia: '10.0.0.0/8 (dns.allowed_client_cidrs)',
+  }));
+  assert.match(out, /Via wider range/);
+  assert.match(out, /10\.0\.0\.0\/8/);
 });

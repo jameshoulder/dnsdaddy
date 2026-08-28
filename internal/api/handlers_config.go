@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
@@ -47,14 +49,25 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 		// and the rest refused, and calling that "refused" hides a working
 		// half while calling it "allowed" hides a broken one.
 		Coverage string `json:"coverage"`
-		// ResolvesVia names the wider range responsible when the network is
-		// fully covered without a permission of its own. Empty otherwise.
+		// ResolvesVia names the wider range or ranges responsible when the
+		// network is fully covered without a permission of its own — plural,
+		// because two of its CIDRs can be covered by two different grants.
+		// Empty otherwise, which includes the case where nothing is refused at
+		// all: an unrestricted ACL has no grants to name.
 		ResolvesVia string `json:"resolvesVia,omitempty"`
 	}
 
-	shadows := map[string]string{}
+	// Every range responsible, not the last one seen. Shadowed() reports one
+	// entry per covered CIDR, so a network with two ranges covered by two
+	// different grants produced two entries and this kept whichever came last
+	// — and the row then named one range as covering a network of which it
+	// covers half.
+	shadows := map[string][]string{}
 	for _, sh := range acl.Shadowed() {
-		shadows[sh.NetworkID] = sh.CoveredBy + " (" + sh.Source + ")"
+		via := sh.CoveredBy + " (" + sh.Source + ")"
+		if !slices.Contains(shadows[sh.NetworkID], via) {
+			shadows[sh.NetworkID] = append(shadows[sh.NetworkID], via)
+		}
 	}
 
 	out := make([]row, 0, len(networks))
@@ -90,7 +103,7 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 		// before it reads coverage, then described a network with a refused
 		// half as reachable through that wider range.
 		if r.Coverage == coverageFull {
-			r.ResolvesVia = shadows[n.ID]
+			r.ResolvesVia = strings.Join(shadows[n.ID], ", ")
 		}
 		out = append(out, r)
 	}

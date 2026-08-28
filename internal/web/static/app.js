@@ -1733,6 +1733,16 @@ function accessBadge(n) {
   if (n.resolvesVia) {
     return html`<span class="badge warn" title="Covered by ${n.resolvesVia}">Via wider range</span>`;
   }
+  // Fully covered with nothing to name. The case that matters is an
+  // unrestricted ACL: Compute returns before populating Shadowed, because
+  // there are no grants for a range to be shadowed *by*, so every unpermitted
+  // row arrived here with coverage full and no resolvesVia — and fell through
+  // to Refused, on a deployment that refuses nobody. That is the dashboard
+  // misdiagnosing a working install, which is what this column exists to stop.
+  if (coverage === 'full') {
+    return html`<span class="badge"
+      title="These addresses are admitted by the client ACL rather than by a permission on this row — see who may use this resolver, above.">Served, not by this row</span>`;
+  }
   if (coverage === 'partial') {
     return html`<span class="badge warn"
       title="Some of this network's addresses are permitted and the rest are refused, which looks like intermittent breakage from the client side. Permit the whole range, or split the network.">Partly refused</span>`;
