@@ -193,6 +193,19 @@ func planResolverAccess(allow bool, cidrs []string, alreadyAcked map[string]bool
 		for c := range alreadyAcked {
 			plan.acked[c] = true
 		}
+		// An affirmation made now is recorded too, even though this write
+		// grants nothing. Staging a network disabled — or permitted but
+		// switched off — and enabling it later is one intention, and asking
+		// again at the moment it takes effect would be the same re-prompt the
+		// per-range memory exists to avoid. Recording it admits nobody: only
+		// enabled, permitted networks reach the ACL at all.
+		if ackNow {
+			for _, raw := range cidrs {
+				if p, err := clientacl.ParsePrefix(raw); err == nil && clientacl.PrefixIsPublic(p) {
+					plan.acked[p.String()] = true
+				}
+			}
+		}
 		return plan, nil
 	}
 
@@ -286,7 +299,8 @@ func (s *Store) CreateNetwork(ctx context.Context, in NetworkInput) (Network, er
 	if err != nil {
 		return Network{}, err
 	}
-	plan, err := planResolverAccess(allowResolver, cidrs, nil, derefBoolDefault(in.PublicAck, false), others)
+	plan, err := planResolverAccess(enabled && allowResolver, cidrs, nil,
+		derefBoolDefault(in.PublicAck, false), append(others, s.bootstrapCIDRs...))
 	if err != nil {
 		return Network{}, err
 	}
@@ -358,12 +372,21 @@ func (s *Store) UpdateNetwork(ctx context.Context, id string, in NetworkInput) (
 	if in.AllowResolver != nil {
 		resultAllow = *in.AllowResolver
 	}
+	resultEnabled := current.enabled
+	if in.Enabled != nil {
+		resultEnabled = *in.Enabled
+	}
 	others, err := otherPermittedCIDRs(ctx, tx, id)
 	if err != nil {
 		return Network{}, err
 	}
-	plan, err := planResolverAccess(resultAllow, resultCIDRs, current.acked,
-		derefBoolDefault(in.PublicAck, false), others)
+	// The resulting enabled state, not just the permission: clientacl.Compute
+	// skips a disabled network entirely, so one contributes nothing to the ACL
+	// and must not be validated as though it did. Judging it by allow alone
+	// refused the very write that closes a hole — disabling one of two networks
+	// whose ranges complete a family was rejected as creating the family.
+	plan, err := planResolverAccess(resultEnabled && resultAllow, resultCIDRs, current.acked,
+		derefBoolDefault(in.PublicAck, false), append(others, s.bootstrapCIDRs...))
 	if err != nil {
 		return Network{}, err
 	}
@@ -422,13 +445,15 @@ type networkForUpdate struct {
 	cidrs         []string
 	acked         map[string]bool
 	allowResolver bool
+	enabled       bool
 }
 
 func loadNetworkForUpdate(ctx context.Context, tx *sql.Tx, id string) (networkForUpdate, error) {
 	var out networkForUpdate
 
-	var allow int
-	err := tx.QueryRowContext(ctx, "SELECT allow_resolver FROM networks WHERE id = ?", id).Scan(&allow)
+	var allow, enabled int
+	err := tx.QueryRowContext(ctx,
+		"SELECT allow_resolver, enabled FROM networks WHERE id = ?", id).Scan(&allow, &enabled)
 	if err == sql.ErrNoRows {
 		return out, ErrNotFound
 	}
@@ -436,6 +461,7 @@ func loadNetworkForUpdate(ctx context.Context, tx *sql.Tx, id string) (networkFo
 		return out, err
 	}
 	out.allowResolver = allow == 1
+	out.enabled = enabled == 1
 	out.acked = map[string]bool{}
 
 	rows, err := tx.QueryContext(ctx, "SELECT cidr, public_ack FROM network_cidrs WHERE network_id = ?", id)

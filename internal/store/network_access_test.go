@@ -632,3 +632,95 @@ func TestWidePrivateRangesAreStillAllowed(t *testing.T) {
 		t.Errorf("permitting the private ranges was refused: %v", err)
 	}
 }
+
+// Configuration does not cover the other half of the open-resolver rule, which
+// is why the aggregate has to include it. Config validation short-circuits on
+// any non-empty dns.allowed_client_cidrs, so 0.0.0.0/1 is accepted there with
+// no allow_public_resolver — and a dashboard write of the complementary half
+// then completes an open resolver that nobody opted into.
+func TestADashboardWriteCannotCompleteABootstrapHalf(t *testing.T) {
+	st := newTestStore(t)
+	st.SetBootstrapClientCIDRs([]string{"0.0.0.0/1"})
+
+	_, err := st.CreateNetwork(context.Background(), NetworkInput{
+		Name:          ptr("The other half"),
+		CIDRs:         ptr([]string{"128.0.0.0/1"}),
+		AllowResolver: ptr(true),
+		PublicAck:     ptr(true),
+	})
+	if err == nil {
+		t.Fatal("the dashboard completed a default route against a bootstrap half; between " +
+			"configuration and this write every IPv4 address is admitted, with no " +
+			"allow_public_resolver anywhere")
+	}
+	if !strings.Contains(err.Error(), "open resolver") {
+		t.Errorf("err = %v, want it to name the open resolver", err)
+	}
+}
+
+// A disabled network contributes nothing to the ACL, so it must not be
+// validated as though it did — and the case that matters is one the API can no
+// longer create, only inherit.
+//
+// A database written before the aggregate check can hold two permitted
+// networks whose ranges complete a family. Judging a write by the permission
+// alone then refuses the one action that closes the hole: disabling either of
+// them is rejected as creating the very thing it prevents, and the operator is
+// left unable to fix it from the dashboard.
+//
+// Seeded by SQL because CreateNetwork now refuses the second half, which is the
+// point — this is inherited state, not reachable state.
+func TestDisablingOneOfTwoInheritedCompletingNetworksIsAllowed(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	for _, n := range []struct{ id, name, cidr string }{
+		{"n_lower", "Lower half", "0.0.0.0/1"},
+		{"n_upper", "Upper half", "128.0.0.0/1"},
+	} {
+		if _, err := st.db.ExecContext(ctx, `
+			INSERT INTO networks (id, name, location, policy_id, token, enabled, allow_resolver, created_at, updated_at)
+			VALUES (?, ?, '', 'p_standard', ?, 1, 1, 0, 0)`, n.id, n.name, NewToken(10)); err != nil {
+			t.Fatalf("seed %s: %v", n.id, err)
+		}
+		if _, err := st.db.ExecContext(ctx,
+			"INSERT INTO network_cidrs (network_id, cidr, public_ack) VALUES (?, ?, 1)",
+			n.id, n.cidr); err != nil {
+			t.Fatalf("seed cidr %s: %v", n.id, err)
+		}
+	}
+
+	if _, err := st.UpdateNetwork(ctx, "n_lower", NetworkInput{Enabled: ptr(false)}); err != nil {
+		t.Errorf("disabling one of two inherited completing networks was refused as creating "+
+			"an open resolver, which is the action that closes it: %v", err)
+	}
+}
+
+// The inverse still holds: with the pair inherited and both enabled, a write
+// that leaves them both granting must still be refused.
+func TestTouchingAnInheritedCompletingPairIsStillRefused(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	for _, n := range []struct{ id, name, cidr string }{
+		{"n_lower", "Lower half", "0.0.0.0/1"},
+		{"n_upper", "Upper half", "128.0.0.0/1"},
+	} {
+		if _, err := st.db.ExecContext(ctx, `
+			INSERT INTO networks (id, name, location, policy_id, token, enabled, allow_resolver, created_at, updated_at)
+			VALUES (?, ?, '', 'p_standard', ?, 1, 1, 0, 0)`, n.id, n.name, NewToken(10)); err != nil {
+			t.Fatalf("seed %s: %v", n.id, err)
+		}
+		if _, err := st.db.ExecContext(ctx,
+			"INSERT INTO network_cidrs (network_id, cidr, public_ack) VALUES (?, ?, 1)",
+			n.id, n.cidr); err != nil {
+			t.Fatalf("seed cidr %s: %v", n.id, err)
+		}
+	}
+
+	// Renaming leaves both halves granting, so the resulting ACL is still a
+	// default route and the write must not be waved through.
+	if _, err := st.UpdateNetwork(ctx, "n_lower", NetworkInput{Name: ptr("Renamed")}); err == nil {
+		t.Error("a write leaving an inherited default route in place was accepted")
+	}
+}

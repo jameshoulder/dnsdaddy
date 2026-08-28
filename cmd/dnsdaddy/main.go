@@ -129,6 +129,11 @@ func run() error {
 	}
 	defer st.Close()
 	st.SetLocalFeedDir(cfg.Feeds.LocalFeedDir)
+	// So a dashboard write is validated against the ACL it actually produces:
+	// the effective ACL unions this list with the permitted networks, and a
+	// write that completes a default route between the two is an open resolver
+	// however innocuous either half looks alone.
+	st.SetBootstrapClientCIDRs(cfg.DNS.AllowedClientCIDRs)
 	if cfg.Feeds.LocalFeedDir != "" {
 		log.Info("file:// feeds enabled", "local_feed_dir", cfg.Feeds.LocalFeedDir)
 	}

@@ -35,6 +35,24 @@ type Store struct {
 	// (the default) rejects file:// feeds outright. Set once at startup from
 	// the config, before any request is served.
 	localFeedDir string
+
+	// bootstrapCIDRs is dns.allowed_client_cidrs, needed here because the
+	// open-resolver rule is about the ACL that results from a write and the
+	// effective ACL is the union of this list with the permitted networks.
+	//
+	// Without it the check sees only the managed half, and configuration does
+	// not cover the other one: config validation short-circuits on any
+	// non-empty list, so dns.allowed_client_cidrs = 0.0.0.0/1 is accepted with
+	// no allow_public_resolver, and a dashboard write of 128.0.0.0/1 completes
+	// an open resolver that nobody ever opted into. Set once at startup,
+	// before any request is served.
+	bootstrapCIDRs []string
+}
+
+// SetBootstrapClientCIDRs records dns.allowed_client_cidrs so writes can be
+// validated against the ACL they actually produce. Call it during startup.
+func (s *Store) SetBootstrapClientCIDRs(cidrs []string) {
+	s.bootstrapCIDRs = append([]string(nil), cidrs...)
 }
 
 // SetLocalFeedDir confines file:// feed URLs to dir. Call it during startup;
