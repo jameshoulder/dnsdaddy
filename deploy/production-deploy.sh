@@ -102,13 +102,17 @@ ok "type=$VOL_TYPE  name=$VOL_NAME"
 ok "host path=$VOL_SRC"
 
 DB="$VOL_SRC/dnsdaddy.db"
-# Tell "not allowed" apart from "not there" before reporting either. A named
-# volume lands under Docker's root-owned store, so an unprivileged dry run
-# cannot read the database even though it is sitting right there — and saying
-# "this is not the data volume" would send the operator hunting for a path
-# problem they do not have.
-if [[ $EUID -ne 0 && ! -r "$DB" && ! -r "$VOL_SRC" ]]; then
-  die "cannot read $VOL_SRC as an unprivileged user — it is Docker's own volume directory, so even a dry run over it needs sudo"
+# Tell "not allowed" apart from "not there" before reporting either, and test
+# the two independently: the directory may be listable while the database is
+# root-owned 0600. Neither -f nor stat needs read access, so an unreadable
+# database otherwise sails through this step as "database present", and step 4
+# suppresses sqlite3's errors — leaving the script to blame the operator's
+# network configuration for a file it was never able to open.
+if [[ $EUID -ne 0 ]]; then
+  [[ -r "$VOL_SRC" && -x "$VOL_SRC" ]] ||
+    die "cannot list $VOL_SRC as an unprivileged user — it is Docker's own volume directory, so even a dry run over it needs sudo"
+  [[ ! -e "$DB" || -r "$DB" ]] ||
+    die "cannot read $DB as an unprivileged user — the database is there, but not readable by this user, so even a dry run over it needs sudo"
 fi
 [[ -f "$DB" ]] || die "no database at $DB — this is not the data volume"
 DB_BYTES=$(stat -c %s "$DB")

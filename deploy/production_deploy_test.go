@@ -331,3 +331,27 @@ func TestAnUnreadableVolumeSaysSoRatherThanBlamingThePath(t *testing.T) {
 	contains(t, out, "Docker's own volume directory")
 	notContains(t, out, "this is not the data volume")
 }
+
+// The directory being listable says nothing about the database being readable:
+// a bind mount can be 0755 over a root-owned 0600 file. Neither -f nor stat
+// needs read access, so this case reaches step 4 claiming "database present",
+// where sqlite3's suppressed errors turn it into "no client CIDRs configured"
+// — telling operators to go and add networks they have already added, about a
+// file the script never opened. It fails closed, which is right; it explains
+// itself wrongly, which is not.
+func TestAnUnreadableDatabaseInAReadableVolumeSaysSo(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_PERMITTED=10.0.10.0/24")
+	p.unreadable = append(p.unreadable, filepath.Join(p.vol, "dnsdaddy.db"))
+
+	out, code, ok := p.runAsNonRoot("--dry-run")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("dry run claimed to read a database it has no permission to read\n%s", out)
+	}
+	contains(t, out, "not readable by this user")
+	notContains(t, out, "database present")
+	notContains(t, out, "no client CIDRs configured")
+}
