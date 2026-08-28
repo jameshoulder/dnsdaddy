@@ -627,3 +627,29 @@ func TestServesOnlyLoopback(t *testing.T) {
 		})
 	}
 }
+
+// One range permitted from both sources is two things to tell an operator and
+// one exposure. PublicGrants says both, because closing it means removing it
+// from both places; PublicPrefixes counts one, because that is what the gauge
+// means.
+func TestPublicPrefixesAreDistinctAcrossSources(t *testing.T) {
+	s := Compute([]string{"127.0.0.0/8", "203.0.113.42/32"}, false,
+		[]Network{permitted("n1", "Branch", "203.0.113.42/32")})
+
+	if got := len(s.PublicGrants()); got != 2 {
+		t.Errorf("PublicGrants = %d, want both sources named so either can be found", got)
+	}
+	prefixes := s.PublicPrefixes()
+	if len(prefixes) != 1 || prefixes[0] != "203.0.113.42/32" {
+		t.Errorf("PublicPrefixes = %v, want exactly one distinct range — a gauge that "+
+			"doubled here would report exposure growing when nothing changed", prefixes)
+	}
+}
+
+func TestPublicPrefixesIsEmptyWhenNothingPublicIsPermitted(t *testing.T) {
+	s := Compute([]string{"127.0.0.0/8", "192.168.0.0/16"}, false,
+		[]Network{permitted("n1", "Home", "10.0.0.0/8")})
+	if got := s.PublicPrefixes(); len(got) != 0 {
+		t.Errorf("PublicPrefixes = %v, want none for an entirely private ACL", got)
+	}
+}

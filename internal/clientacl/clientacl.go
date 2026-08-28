@@ -422,6 +422,33 @@ func (s *Set) PublicGrants() []Grant {
 	return out
 }
 
+// PublicPrefixes returns the distinct publicly routable ranges the effective
+// ACL permits.
+//
+// Distinct, where PublicGrants deliberately is not. A range listed in
+// dns.allowed_client_cidrs *and* ticked on a network is two things to say to
+// an operator — closing it means removing it from both places — but it is one
+// range, and a gauge that reported two would show public exposure doubling
+// when nothing about the exposure changed.
+func (s *Set) PublicPrefixes() []string {
+	if s == nil {
+		return nil
+	}
+	var (
+		out  []string
+		seen = map[string]bool{}
+	)
+	for _, g := range s.PublicGrants() {
+		key := g.Prefix.String()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	return out
+}
+
 // Cover reports how much of p the effective ACL permits.
 //
 // Full coverage is decided by single-prefix containment: some permitted prefix

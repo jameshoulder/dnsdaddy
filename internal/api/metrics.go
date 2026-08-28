@@ -174,8 +174,11 @@ func (a *API) writeAccessMetrics(ctx context.Context, b *strings.Builder) {
 		fmt.Sprintf("dnsdaddy_networks_resolver_permitted %d", len(permitted)))
 	metric(b, "dnsdaddy_client_acl_prefixes", "Address ranges in the effective client ACL, from configuration and the dashboard combined", "gauge",
 		fmt.Sprintf("dnsdaddy_client_acl_prefixes %d", len(acl.Effective())))
-	metric(b, "dnsdaddy_client_acl_public_prefixes", "Permitted address ranges that are reachable from the public internet", "gauge",
-		fmt.Sprintf("dnsdaddy_client_acl_public_prefixes %d", len(acl.PublicGrants())))
+	// Distinct ranges, not grants: a range permitted from configuration and
+	// from the dashboard at once is one exposure, and a gauge that doubled
+	// there would page somebody over a change that did not happen.
+	metric(b, "dnsdaddy_client_acl_public_prefixes", "Distinct permitted address ranges that are reachable from the public internet", "gauge",
+		fmt.Sprintf("dnsdaddy_client_acl_public_prefixes %d", len(acl.PublicPrefixes())))
 	metric(b, "dnsdaddy_client_acl_unrestricted", "1 when no client ACL is configured and every source address is accepted", "gauge",
 		fmt.Sprintf("dnsdaddy_client_acl_unrestricted %d", boolGauge(acl.Unrestricted())))
 
