@@ -542,30 +542,43 @@ func (s *Set) Cover(p netip.Prefix) Cover {
 // other way round is a revocation nobody is told failed.
 func (s *Set) AdmissionChangesFor(n Network) bool {
 	prefixes, _ := n.prefixes()
-	return s.admissionChanges(n.ID, prefixes)
+	return s.admissionChanges(n.ID, nil, prefixes)
 }
 
 // AdmissionChangesWithout reports whether removing this network altogether
 // could change who this snapshot admits.
-func (s *Set) AdmissionChangesWithout(networkID string) bool {
-	return s.admissionChanges(networkID, nil)
+//
+// It takes the network rather than its ID because what a deleted row
+// contributed is known from the database — the transaction that removed it
+// returned the row — where the snapshot only knows what it has published. A
+// concurrent reload that has read a newly permitted state but not yet
+// published it leaves the snapshot short of a grant this deletion is
+// withdrawing, so both are counted.
+func (s *Set) AdmissionChangesWithout(n Network) bool {
+	prefixes, _ := n.prefixes()
+	return s.admissionChanges(n.ID, prefixes, nil)
 }
 
 // admissionChanges compares the admission set this snapshot enforces against
 // the one it would enforce with networkID contributing exactly after.
 //
+// alsoBefore is counted as part of what the network contributes now, on top of
+// whatever the snapshot holds for it. It exists so a caller that knows the
+// committed state — a deletion, which has the row the transaction returned —
+// is not limited to what the snapshot has caught up with.
+//
 // Both sets share every prefix from the bootstrap list and from other
 // networks, so only the two differing contributions need testing: each prefix
 // leaving has to still be covered by what remains, and each arriving has to
 // have been covered already.
-func (s *Set) admissionChanges(networkID string, after []netip.Prefix) bool {
+func (s *Set) admissionChanges(networkID string, alsoBefore, after []netip.Prefix) bool {
 	if s == nil || s.unrestricted {
 		// An unrestricted ACL refuses nobody, and Compute keeps it that way no
 		// matter what is permitted, so no grant can change admission.
 		return false
 	}
 
-	var before []netip.Prefix
+	before := append([]netip.Prefix(nil), alsoBefore...)
 	rest := make([]netip.Prefix, 0, len(s.bootstrap)+len(s.grants))
 	rest = append(rest, s.bootstrap...)
 	for _, g := range s.grants {

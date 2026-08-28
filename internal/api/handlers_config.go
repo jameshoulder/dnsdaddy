@@ -154,32 +154,6 @@ type networkBody struct {
 	PublicAck *bool `json:"publicAck"`
 }
 
-// accessAffected reports whether a network write could have changed who the
-// resolver admits, by comparing the ACL in force against the one the stored
-// state calls for.
-//
-// The question is asked of the live snapshot rather than of the request,
-// because the request cannot answer it: mentioning allowResolver says nothing
-// about whether the resulting grant adds anything the bootstrap list or
-// another network did not already permit, and in a deployment whose bootstrap
-// ACL is empty — unrestricted, refusing nobody — no grant changes admission at
-// all. Getting this wrong is not free in either direction. Too eager, and a
-// failed reload raises "a permission you revoked may still be honoured", which
-// stands until an unrelated write succeeds, over a change that could not have
-// altered admission; too shy, and a revocation that never took effect is
-// reported as done.
-//
-// Read immediately before the reload, so a concurrent writer that has already
-// published a snapshot including this change is correctly read as "in force".
-func (a *API) accessAffected(n store.Network) bool {
-	return a.ClientACL.Current().AdmissionChangesFor(store.ClientACLNetwork(n))
-}
-
-// accessAffectedByRemoving is accessAffected for a network that is now gone.
-func (a *API) accessAffectedByRemoving(networkID string) bool {
-	return a.ClientACL.Current().AdmissionChangesWithout(networkID)
-}
-
 func (b networkBody) toInput() store.NetworkInput {
 	return store.NetworkInput{
 		Name:          b.Name,
@@ -203,12 +177,13 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	// Derived from what was actually stored, not assumed. A network created
-	// unpermitted — the default — changes nothing about who is admitted, and
-	// neither does a permitted one whose ranges are already covered, so a
-	// failed reload after either must not raise the standing "a revocation may
-	// still be honoured" warning.
-	writeNetwork(w, http.StatusCreated, n, a.reloadAccess(r, a.accessAffected(n)))
+	// Judged on what was actually stored, not on the request. A network
+	// created unpermitted — the default — changes nothing about who is
+	// admitted, and neither does a permitted one whose ranges the ACL already
+	// covers, so a failed reload after either must not raise the standing "a
+	// revocation may still be honoured" warning.
+	_, warning := a.reloadNetworkAccess(r, n, false)
+	writeNetwork(w, http.StatusCreated, n, warning)
 }
 
 func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +200,8 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	// n is the merged row the store committed, so this compares the ACL in
 	// force against the result of the write rather than guessing from which
 	// fields the request happened to mention.
-	writeNetwork(w, http.StatusOK, n, a.reloadAccess(r, a.accessAffected(n)))
+	_, warning := a.reloadNetworkAccess(r, n, false)
+	writeNetwork(w, http.StatusOK, n, warning)
 }
 
 func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
@@ -256,8 +232,7 @@ func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 	// with the reload failure still logged. Widening 200 to cover a failure
 	// that affects nobody would train the one caller who checks for it to stop
 	// checking, which costs more than the notice is worth.
-	affects := a.accessAffectedByRemoving(deleted.ID)
-	warning := a.reloadAccess(r, affects)
+	affects, warning := a.reloadNetworkAccess(r, deleted, true)
 	if affects && warning != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "deleted",
@@ -750,8 +725,8 @@ func (a *API) reloadEngine(r *http.Request) {
 	}
 }
 
-// reloadAccess republishes the effective client ACL and returns a warning to
-// hand back to the caller if it could not.
+// reloadNetworkAccess republishes the effective client ACL after a network
+// write and returns a warning to hand back to the caller if it could not.
 //
 // Unlike a policy reload, a failure here is not merely late: it means a
 // permission the operator just revoked is still being honoured, or one they
@@ -761,31 +736,45 @@ func (a *API) reloadEngine(r *http.Request) {
 // shows up in `dnsdaddy doctor` and at /api/v1/diagnostics, where the
 // effective ACL is what is reported.
 //
-// affectsAccess says whether the write could have changed who is admitted. A
-// rename that fails to reload leaves the enforced ACL correct in every respect
-// that matters, so it is reported but does not raise the standing warning that
-// a revocation may not have taken.
-func (a *API) reloadAccess(r *http.Request, affectsAccess bool) string {
+// removed marks a deletion, whose contribution is taken from the row the
+// removing transaction returned rather than from the snapshot.
+//
+// The returned bool says whether the write could have changed who is admitted.
+// The controller decides it under the same lock as the publish, so a
+// concurrent reload cannot slip a snapshot in between the two: deciding it out
+// here from Current() let a PATCH that had read a newly permitted network but
+// not yet published it leave a DELETE of that network concluding it withdrew
+// nothing. A rename, or a grant the ACL already covers, leaves the enforced
+// ACL correct in every respect that matters, so it is reported to the caller
+// but does not raise the standing warning that a revocation may not have taken.
+func (a *API) reloadNetworkAccess(r *http.Request, n store.Network, removed bool) (bool, string) {
 	if a.ClientACL == nil {
-		return ""
+		return false, ""
 	}
-	reload := a.ClientACL.Reload
-	if !affectsAccess {
-		reload = a.ClientACL.ReloadMetadata
+
+	var (
+		affected bool
+		err      error
+	)
+	if removed {
+		affected, err = a.ClientACL.ReloadAfterDelete(r.Context(), store.ClientACLNetwork(n))
+	} else {
+		affected, err = a.ClientACL.ReloadAfterWrite(r.Context(), store.ClientACLNetwork(n))
 	}
-	if err := reload(r.Context()); err != nil {
-		a.Log.Error("reload client access", "error", err, "affects_access", affectsAccess)
-		if !affectsAccess {
-			return "Saved, but the change could not be applied to the running resolver. Nothing " +
-				"about who may use it has changed, so no client is affected; the label will " +
-				"catch up on the next change."
-		}
-		// The controller records the failure too, so the diagnostics keep
-		// reporting it after this response has been closed and forgotten.
-		return "Saved, but the resolver's client access could not be reloaded, so this change is " +
-			"not yet in force. Retry the change, or restart DNS Daddy."
+	if err == nil {
+		return affected, ""
 	}
-	return ""
+
+	a.Log.Error("reload client access", "error", err, "affects_access", affected)
+	if !affected {
+		return false, "Saved, but the change could not be applied to the running resolver. Nothing " +
+			"about who may use it has changed, so no client is affected; the label will " +
+			"catch up on the next change."
+	}
+	// The controller records the failure too, so the diagnostics keep
+	// reporting it after this response has been closed and forgotten.
+	return true, "Saved, but the resolver's client access could not be reloaded, so this change is " +
+		"not yet in force. Retry the change, or restart DNS Daddy."
 }
 
 // writeNetwork answers a network write, attaching a warning when the change is
