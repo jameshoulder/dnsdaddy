@@ -898,3 +898,18 @@ test('the failure banner still says clients are being stopped', () => {
   assert.match(out, /CONFIGURATION PROBLEM/);
   assert.match(out, /stops clients using it/);
 });
+
+// A disabled catch-all has no ranges, so the server's vacuous "full" says
+// nothing about it. The badge announced its clients were still being served.
+test('a disabled catch-all does not claim its clients are still served', () => {
+  const out = accessBadge(network({ enabled: false, cidrs: [], allowResolver: false, coverage: 'full' }));
+  assert.doesNotMatch(out, /still served/);
+  assert.match(out, /Disabled/);
+});
+
+// A disabled network with some of its addresses still permitted is neither
+// "still served" nor plainly disabled.
+test('a disabled network partly still served says which', () => {
+  const out = accessBadge(network({ enabled: false, allowResolver: false, coverage: 'partial' }));
+  assert.match(out, /Disabled, partly served/);
+});

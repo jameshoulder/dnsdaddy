@@ -777,3 +777,49 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// Coverage is two independent facts — is any address admitted, is any refused
+// — not the least-covered range. A network with one fully permitted CIDR and
+// one permitted by nothing has half its clients working; reporting "none"
+// there badges the whole row Refused and hides the working half.
+func TestMixedCoverageIsPartialRatherThanTheWorstRange(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	// 10.10.0.0/16 sits inside the shipped 10.0.0.0/8; 198.18.0.0/15 does not.
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Two sites",
+		"cidrs": []string{"10.10.0.0/16", "198.18.0.0/15"},
+	})
+	if id, _ := decode[map[string]any](t, raw)["id"].(string); id == "" {
+		t.Fatalf("create failed: %s", raw)
+	}
+
+	_, raw = h.do("GET", "/api/v1/networks", nil)
+	body := decode[struct {
+		Networks []struct {
+			Name        string `json:"name"`
+			Coverage    string `json:"coverage"`
+			ResolvesVia string `json:"resolvesVia"`
+		} `json:"networks"`
+	}](t, raw)
+
+	for _, n := range body.Networks {
+		if n.Name != "Two sites" {
+			continue
+		}
+		if n.Coverage != "partial" {
+			t.Errorf("coverage = %q, want partial — 10.10.0.0/16 is admitted and "+
+				"198.18.0.0/15 is not, so some of this network resolves and some does not",
+				n.Coverage)
+		}
+		// And the row must not be described as reachable through a wider range
+		// on the strength of the half that is.
+		if n.ResolvesVia != "" {
+			t.Errorf("resolvesVia = %q on a partly covered network; the badge reads it before "+
+				"coverage, so the refused half would be reported as reachable", n.ResolvesVia)
+		}
+		return
+	}
+	t.Fatal("the created network is missing from the list")
+}

@@ -77,7 +77,6 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 			Blocked24h:  act.Blocked,
 			Status:      status,
 			PublicCIDRs: []string{},
-			ResolvesVia: shadows[n.ID],
 		}
 		for _, raw := range n.CIDRs {
 			if p, err := clientacl.ParsePrefix(raw); err == nil && clientacl.PrefixIsPublic(p) {
@@ -85,6 +84,14 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		r.Coverage = networkCoverage(acl, n)
+		// Only when the whole row is covered. Shadowed() reports a shadowed
+		// *range*, so a network with two CIDRs of which one sits inside a wider
+		// grant produced an entry — and the badge, which reads resolvesVia
+		// before it reads coverage, then described a network with a refused
+		// half as reachable through that wider range.
+		if r.Coverage == coverageFull {
+			r.ResolvesVia = shadows[n.ID]
+		}
 		out = append(out, r)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -128,25 +135,38 @@ func networkCoverage(acl *clientacl.Set, n store.Network) string {
 		return coverageFull
 	}
 
-	worst := clientacl.CoverFull
+	// Tracked as two facts rather than as a minimum. Taking the least-covered
+	// range calls a network with one fully permitted CIDR and one permitted by
+	// nothing "none", and the badge then reports the whole thing refused while
+	// half its clients are being served. What matters is whether any address
+	// is admitted and whether any is refused, which are independent.
+	anyAdmitted, anyRefused := false, false
 	for _, raw := range n.CIDRs {
 		p, err := clientacl.ParsePrefix(raw)
 		if err != nil {
-			return coverageNone
+			// An unparseable range permits nothing, so it refuses this part of
+			// the network without saying anything about the rest.
+			anyRefused = true
+			continue
 		}
 		// The same whole-prefix calculation the diagnostics use. Sampling the
 		// base address was wrong in a way that mattered: a network of
 		// 10.0.0.0/8 against an ACL of 10.0.0.0/16 starts at a permitted
 		// address while almost every client in it is refused.
-		if c := acl.Cover(p); c < worst {
-			worst = c
+		switch acl.Cover(p) {
+		case clientacl.CoverFull:
+			anyAdmitted = true
+		case clientacl.CoverPartial:
+			anyAdmitted, anyRefused = true, true
+		default:
+			anyRefused = true
 		}
 	}
-	switch worst {
-	case clientacl.CoverFull:
-		return coverageFull
-	case clientacl.CoverPartial:
+	switch {
+	case anyAdmitted && anyRefused:
 		return coveragePartial
+	case anyAdmitted:
+		return coverageFull
 	default:
 		return coverageNone
 	}

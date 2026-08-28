@@ -1684,16 +1684,43 @@ function resolverAccessNote(access) {
 function accessBadge(n) {
   const catchAll = !(n.cidrs || []).length;
   const coverage = n.coverage || 'none';
+  const disabled = n.enabled === false;
 
-  if (n.enabled === false) {
-    return coverage === 'full'
-      ? html`<span class="badge" title="This network grants nothing and applies no policy while it is disabled, but disabling creates no deny rule — configuration or another network still permits these addresses.">Disabled, still served</span>`
-      : html`<span class="badge">Disabled</span>`;
+  // The catch-all is settled before anything reads coverage, because coverage
+  // is a statement about a network's ranges and a catch-all has none. The
+  // server answers "full" for it, which is true of the empty set and useless
+  // here — and every branch that read it without checking got the wrong
+  // answer, including the disabled one, which announced that a catch-all's
+  // clients were still being served when that depends on each client.
+  if (catchAll) {
+    if (disabled) {
+      return html`<span class="badge"
+        title="This network is disabled, so it applies no policy and grants nothing. It has no ranges of its own either, so whether a client it would have matched is served depends on that client's own address.">Disabled</span>`;
+    }
+    if (n.allowResolver) {
+      return html`<span class="badge warn"
+        title="A catch-all has no ranges of its own, so permitting it grants nothing. Give it CIDRs, or permit the network the clients actually match.">Grants nothing</span>`;
+    }
+    return html`<span class="badge"
+      title="A catch-all has no ranges of its own. Whether a client it matches is served depends on that client's own address — see who may use this resolver, above.">Depends on the client</span>`;
   }
-  if (n.allowResolver && catchAll) {
-    return html`<span class="badge warn"
-      title="A catch-all has no ranges of its own, so permitting it grants nothing. Give it CIDRs, or permit the network the clients actually match.">Grants nothing</span>`;
+
+  // Disabling stops this row granting anything and stops its policy applying.
+  // It creates no deny rule, so the addresses may still be served — and an
+  // operator who disabled the network to cut a client off needs to be told
+  // when that did not happen.
+  if (disabled) {
+    if (coverage === 'full') {
+      return html`<span class="badge"
+        title="Disabled, so this row grants nothing and applies no policy — but disabling creates no deny rule, and configuration or another network still permits these addresses.">Disabled, still served</span>`;
+    }
+    if (coverage === 'partial') {
+      return html`<span class="badge"
+        title="Disabled, so this row grants nothing — but some of these addresses are still permitted by configuration or another network.">Disabled, partly served</span>`;
+    }
+    return html`<span class="badge">Disabled</span>`;
   }
+
   if (n.allowResolver && coverage !== 'full') {
     return html`<span class="badge warn"
       title="Stored, but the resolver is not enforcing all of it — see the client access summary above.">Allowed, not in force</span>`;
@@ -1705,10 +1732,6 @@ function accessBadge(n) {
   }
   if (n.resolvesVia) {
     return html`<span class="badge warn" title="Covered by ${n.resolvesVia}">Via wider range</span>`;
-  }
-  if (catchAll) {
-    return html`<span class="badge"
-      title="A catch-all has no ranges of its own. Whether a client it matches is served depends on that client's own address — see who may use this resolver, above.">Depends on the client</span>`;
   }
   if (coverage === 'partial') {
     return html`<span class="badge warn"
