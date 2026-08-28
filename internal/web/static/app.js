@@ -1655,6 +1655,32 @@ async function sendNetwork(method, path, payload) {
 // Collapsing any of these into "Allowed" or "Refused" is how the dashboard
 // ends up misdiagnosing a working deployment, which is the failure this whole
 // line of work exists to remove.
+// The Setup page tells an operator to point a whole network at DNS Daddy. It
+// has to say whether that network may use it, because the answer is the
+// difference between a rollout and every device on the LAN getting REFUSED —
+// which is the failure this branch exists to end, and the Setup page is where
+// an operator acts on it. Measured from the ACL in force, not from a count of
+// permissions.
+function resolverAccessNote(access) {
+  if (!access) return '';
+  if (access.unrestricted) {
+    return html`<p class="muted small note-tight">
+      Every address may query this resolver: no client ACL is configured. Anything you
+      point here will be answered.</p>`;
+  }
+  const effective = access.effectiveCidrs || [];
+  if (!effective.length) {
+    return '';
+  }
+  return html`<p class="muted small note-tight">
+    <strong>Before you point anything here:</strong> only these ranges may query over
+    ordinary DNS — <span class="mono">${effective.join(', ')}</span>. A client outside
+    them is answered <code>REFUSED</code> however you configure it. Add its network under
+    <em>Networks</em> and tick <em>Allow this network to use DNS Daddy</em>. The
+    DNS-over-HTTPS URLs below are identified by token instead, so they work from
+    anywhere.</p>`;
+}
+
 function accessBadge(n) {
   const catchAll = !(n.cidrs || []).length;
   const coverage = n.coverage || 'none';
@@ -2195,7 +2221,7 @@ pages.setup = {
   title: 'Setup',
   subtitle: 'Point your network here.',
   async render() {
-    const info = await apiGet('/resolvers');
+    const [info, networks] = await Promise.all([apiGet('/resolvers'), apiGet('/networks')]);
     const port = (listen) => (listen || '').split(':').pop() || '53';
 
     return html`
@@ -2206,6 +2232,7 @@ pages.setup = {
              Replace the host with this server's LAN or public IP.</p></div>
         </div>
         ${raw(copyBlock(`Plain DNS (UDP/TCP), port ${port(info.listenUdp)}`))}
+        ${raw(resolverAccessNote(networks.clientAccess))}
         <p class="muted small note-tight">
           On pfSense: <em>System → General Setup → DNS Servers</em>.
           On UniFi: <em>Settings → Networks → your LAN → DHCP Name Server</em>.
@@ -2694,5 +2721,6 @@ if (typeof module !== 'undefined' && module.exports) {
     firstClientCard,
     accessBadge,
     clientAccessSummary,
+    resolverAccessNote,
   };
 }

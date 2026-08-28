@@ -32,6 +32,7 @@ const {
   firstClientCard,
   accessBadge,
   clientAccessSummary,
+  resolverAccessNote,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -839,4 +840,31 @@ test('a partly covered network is not badged as wholly refused', () => {
   const out = accessBadge(network({ allowResolver: false, coverage: 'partial' }));
   assert.doesNotMatch(out, /badge bad/);
   assert.match(out, /Partly refused/);
+});
+
+// The Setup page's whole job is "point your network here". Following it while
+// the client ACL does not cover that network gives every device REFUSED — the
+// failure this branch exists to end, at the moment the operator acts on it.
+
+test('the setup page names the ranges that may actually query', () => {
+  const out = resolverAccessNote({
+    unrestricted: false,
+    effectiveCidrs: ['10.0.0.0/8', '192.168.0.0/16'],
+  });
+  assert.match(out, /10\.0\.0\.0\/8/);
+  assert.match(out, /192\.168\.0\.0\/16/);
+  assert.match(out, /REFUSED/);
+  assert.match(out, /Allow this network to use DNS Daddy/);
+});
+
+test('the setup page keeps the token exception with the claim it qualifies', () => {
+  // The DoH URLs are on the same page, and they are not governed by the ACL.
+  const out = resolverAccessNote({ unrestricted: false, effectiveCidrs: ['10.0.0.0/8'] });
+  assert.match(out, /DNS-over-HTTPS/);
+});
+
+test('an unrestricted ACL says so rather than listing nothing', () => {
+  const out = resolverAccessNote({ unrestricted: true });
+  assert.match(out, /Every address may query/);
+  assert.doesNotMatch(out, /REFUSED/);
 });
