@@ -736,8 +736,8 @@ func (a *API) reloadEngine(r *http.Request) {
 // shows up in `dnsdaddy doctor` and at /api/v1/diagnostics, where the
 // effective ACL is what is reported.
 //
-// removed marks a deletion, whose contribution is taken from the row the
-// removing transaction returned rather than from the snapshot.
+// removed marks a deletion: the network contributes nothing afterwards, and
+// what it was contributing is whatever the locked snapshot still holds for it.
 //
 // The returned bool says whether the write could have changed who is admitted.
 // The controller decides it under the same lock as the publish, so a
@@ -757,7 +757,7 @@ func (a *API) reloadNetworkAccess(r *http.Request, n store.Network, removed bool
 		err      error
 	)
 	if removed {
-		affected, err = a.ClientACL.ReloadAfterDelete(r.Context(), store.ClientACLNetwork(n))
+		affected, err = a.ClientACL.ReloadAfterDelete(r.Context(), n.ID)
 	} else {
 		affected, err = a.ClientACL.ReloadAfterWrite(r.Context(), store.ClientACLNetwork(n))
 	}

@@ -848,6 +848,58 @@ func TestAWriteThatChangesNoAdmissionDoesNotMarkStaleOnFailure(t *testing.T) {
 	}
 }
 
+// A concurrent write's reload can publish after a deletion commits but before
+// the deletion's own reload takes the lock — the handler reloads the policy
+// engine in between, which is window enough. That snapshot has already applied
+// the revocation, so the deletion's reload failing afterwards leaves nothing
+// wrong, and saying otherwise raises an alarm that nothing clears until an
+// unrelated write succeeds.
+func TestADeletionAlreadyAppliedByAnotherPublishRaisesNoAlarm(t *testing.T) {
+	permitted := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
+		CIDRs: []string{"203.0.113.0/24"}}
+
+	var (
+		networks = []Network{permitted}
+		fail     bool
+	)
+	c := NewController([]string{"127.0.0.0/8"}, false, func(context.Context) ([]Network, error) {
+		if fail {
+			return nil, context.DeadlineExceeded
+		}
+		return networks, nil
+	})
+	if err := c.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if !c.Allows(netip.MustParseAddr("203.0.113.5")) {
+		t.Fatal("the fixture never granted anything, so nothing below is being tested")
+	}
+
+	// The row is deleted, and another request's reload publishes first.
+	networks = nil
+	if err := c.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if c.Allows(netip.MustParseAddr("203.0.113.5")) {
+		t.Fatal("the concurrent publish did not apply the deletion")
+	}
+
+	// Now the deletion's own reload runs, and fails.
+	fail = true
+	changed, err := c.ReloadAfterDelete(context.Background(), permitted.ID)
+	if err == nil {
+		t.Fatal("the failure was not reported to the caller")
+	}
+	if changed {
+		t.Error("the deletion was reported as changing admission when the revocation was " +
+			"already in force; the caller would answer 200 saying it might not be")
+	}
+	if c.Stale() {
+		t.Error("a revocation that is already in force marked the ACL stale — a false alarm, " +
+			"and the kind nothing clears until an unrelated write succeeds")
+	}
+}
+
 // The comparison has to happen under the same lock as the publish. Deciding it
 // from Current() beforehand read a snapshot a concurrent reload was already in
 // the middle of replacing: a PATCH that had loaded a newly permitted network
@@ -891,7 +943,7 @@ func TestTheAdmissionComparisonSeesNoPublishInFlight(t *testing.T) {
 	done := make(chan bool, 1)
 	go func() {
 		failNext.Store(true)
-		changed, _ := c.ReloadAfterDelete(context.Background(), permitted)
+		changed, _ := c.ReloadAfterDelete(context.Background(), permitted.ID)
 		compared.Store(true)
 		done <- changed
 	}()
@@ -956,7 +1008,7 @@ func TestRemovingANetworkTheBootstrapACLCoversChangesNothing(t *testing.T) {
 		CIDRs: []string{"10.10.0.0/16"}}
 	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
 
-	if s.AdmissionChangesWithout(n) {
+	if s.AdmissionChangesWithout(n.ID) {
 		t.Error("removing a network whose range the bootstrap ACL still covers was reported " +
 			"as changing admission; nothing was revoked")
 	}
@@ -971,7 +1023,7 @@ func TestRemovingOneOfTwoNetworksPermittingTheSameRangeChangesNothing(t *testing
 		CIDRs: []string{"203.0.113.0/24"}}
 	s := admissionSet(t, []string{"10.0.0.0/8"}, a, b)
 
-	if s.AdmissionChangesWithout(a) {
+	if s.AdmissionChangesWithout(a.ID) {
 		t.Error("removing one of two networks permitting the same range was reported as " +
 			"revoking it")
 	}
@@ -982,7 +1034,7 @@ func TestRemovingTheOnlyGrantForARangeChangesAdmission(t *testing.T) {
 		CIDRs: []string{"203.0.113.0/24"}}
 	s := admissionSet(t, []string{"10.0.0.0/8"}, n)
 
-	if !s.AdmissionChangesWithout(n) {
+	if !s.AdmissionChangesWithout(n.ID) {
 		t.Error("removing the only grant for a range was reported as changing nothing — a " +
 			"revocation that never took effect would be reported as done")
 	}
@@ -1002,7 +1054,7 @@ func TestNoGrantChangesAdmissionUnderAnUnrestrictedACL(t *testing.T) {
 	if s.AdmissionChangesFor(n) {
 		t.Error("a grant was reported as changing admission under an unrestricted ACL")
 	}
-	if s.AdmissionChangesWithout(n) {
+	if s.AdmissionChangesWithout(n.ID) {
 		t.Error("a revocation was reported as changing admission under an unrestricted ACL")
 	}
 }
@@ -1070,30 +1122,32 @@ func TestAnUnpermittedNetworkNeverChangesAdmission(t *testing.T) {
 	if s.AdmissionChangesFor(n) {
 		t.Error("storing an unpermitted network was reported as changing admission")
 	}
-	if s.AdmissionChangesWithout(n) {
+	if s.AdmissionChangesWithout(n.ID) {
 		t.Error("deleting an unpermitted network was reported as changing admission")
 	}
 }
 
-// A snapshot that has not caught up with the database is the one case where
-// what a network contributes cannot be read off the snapshot. The deleted row
-// carries it instead, so the comparison counts it either way.
+// The mirror of the case I got wrong: a grant the snapshot does not hold is a
+// grant that is not being enforced, so withdrawing it changes nothing about
+// who is admitted.
 //
-// Under the lock this only arises when an earlier reload failed — the flag is
-// already raised then, so this is defence rather than a fix — but the
-// alternative is a comparison whose correctness rests entirely on the snapshot
-// never lagging, which is exactly the assumption that produced the bug it
-// replaced.
-func TestADeletedRowsOwnContributionIsCountedWhenTheSnapshotLacksIt(t *testing.T) {
+// This matters because the snapshot can legitimately lack it for a reason that
+// is not a lag at all — a concurrent write's reload, publishing after the
+// deletion committed, has already applied it. Counting the deleted row's own
+// ranges regardless produced the standing "your revocation may not be in
+// force" alarm for a revocation that was.
+func TestDeletingAGrantTheSnapshotDoesNotHoldChangesNothing(t *testing.T) {
 	n := Network{ID: "n1", Name: "VPS", Enabled: true, AllowResolver: true,
 		CIDRs: []string{"203.0.113.0/24"}}
 
-	// Computed without n: the snapshot holds no grant for it at all.
+	// Computed without n: the snapshot holds no grant for it at all, which is
+	// what a concurrent reload that has already applied the deletion produces.
 	s := admissionSet(t, []string{"10.0.0.0/8"})
 
-	if !s.AdmissionChangesWithout(n) {
-		t.Error("a deleted network's own ranges were ignored because the snapshot had not " +
-			"caught up with them; the comparison must not rest on the snapshot being current")
+	if s.AdmissionChangesWithout(n.ID) {
+		t.Error("deleting a network the enforced ACL was not granting anything for was " +
+			"reported as changing admission; a failed reload would then claim a revocation " +
+			"is not in force when another publish had already applied it")
 	}
 }
 
@@ -1107,7 +1161,7 @@ func TestSplitCoverageErrsTowardsWarning(t *testing.T) {
 		CIDRs: []string{"203.0.113.0/24"}}
 	s := admissionSet(t, []string{"203.0.113.0/25", "203.0.113.128/25"}, n)
 
-	if !s.AdmissionChangesWithout(n) {
+	if !s.AdmissionChangesWithout(n.ID) {
 		t.Error("split coverage was treated as full; the safe direction here is to warn")
 	}
 }

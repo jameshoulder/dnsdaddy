@@ -542,43 +542,41 @@ func (s *Set) Cover(p netip.Prefix) Cover {
 // other way round is a revocation nobody is told failed.
 func (s *Set) AdmissionChangesFor(n Network) bool {
 	prefixes, _ := n.prefixes()
-	return s.admissionChanges(n.ID, nil, prefixes)
+	return s.admissionChanges(n.ID, prefixes)
 }
 
 // AdmissionChangesWithout reports whether removing this network altogether
 // could change who this snapshot admits.
 //
-// It takes the network rather than its ID because what a deleted row
-// contributed is known from the database — the transaction that removed it
-// returned the row — where the snapshot only knows what it has published. A
-// concurrent reload that has read a newly permitted state but not yet
-// published it leaves the snapshot short of a grant this deletion is
-// withdrawing, so both are counted.
-func (s *Set) AdmissionChangesWithout(n Network) bool {
-	prefixes, _ := n.prefixes()
-	return s.admissionChanges(n.ID, prefixes, nil)
+// The network is identified by ID and nothing else, because what a deletion
+// withdraws from the enforced ACL is exactly what this snapshot holds for it.
+// An earlier version also counted the row the removing transaction returned,
+// on the reasoning that the database knows what the network contributed where
+// a lagging snapshot might not. That had it backwards: a grant the snapshot
+// does not hold is a grant that is not being enforced, so withdrawing it
+// changes nothing about who is admitted, whether the snapshot lacks it because
+// a concurrent reload already applied the deletion or because an earlier
+// reload failed. Counting it produced the standing "your revocation may not be
+// in force" alarm for a revocation that was.
+func (s *Set) AdmissionChangesWithout(networkID string) bool {
+	return s.admissionChanges(networkID, nil)
 }
 
 // admissionChanges compares the admission set this snapshot enforces against
 // the one it would enforce with networkID contributing exactly after.
 //
-// alsoBefore is counted as part of what the network contributes now, on top of
-// whatever the snapshot holds for it. It exists so a caller that knows the
-// committed state — a deletion, which has the row the transaction returned —
-// is not limited to what the snapshot has caught up with.
-//
 // Both sets share every prefix from the bootstrap list and from other
 // networks, so only the two differing contributions need testing: each prefix
 // leaving has to still be covered by what remains, and each arriving has to
 // have been covered already.
-func (s *Set) admissionChanges(networkID string, alsoBefore, after []netip.Prefix) bool {
+func (s *Set) admissionChanges(networkID string, after []netip.Prefix) bool {
 	if s == nil || s.unrestricted {
 		// An unrestricted ACL refuses nobody, and Compute keeps it that way no
 		// matter what is permitted, so no grant can change admission.
 		return false
 	}
 
-	before := append([]netip.Prefix(nil), alsoBefore...)
+	var before []netip.Prefix
 	rest := make([]netip.Prefix, 0, len(s.bootstrap)+len(s.grants))
 	rest = append(rest, s.bootstrap...)
 	for _, g := range s.grants {

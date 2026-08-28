@@ -95,20 +95,17 @@ func (c *Controller) Reload(ctx context.Context) error {
 // committed, so it cannot reintroduce what this write removed.
 func (c *Controller) ReloadAfterWrite(ctx context.Context, n Network) (bool, error) {
 	after, _ := n.prefixes()
-	return c.reloadFor(ctx, n.ID, nil, after)
+	return c.reloadFor(ctx, n.ID, after)
 }
 
-// ReloadAfterDelete is ReloadAfterWrite for a network that has been removed.
-//
-// deleted is the row as the removing transaction returned it, so what it
-// contributed is taken from the database rather than inferred from a snapshot
-// that may not have caught up with it.
-func (c *Controller) ReloadAfterDelete(ctx context.Context, deleted Network) (bool, error) {
-	before, _ := deleted.prefixes()
-	return c.reloadFor(ctx, deleted.ID, before, nil)
+// ReloadAfterDelete is ReloadAfterWrite for a network that has been removed:
+// it now contributes nothing, and what it was contributing is whatever the
+// snapshot under the lock still holds for it.
+func (c *Controller) ReloadAfterDelete(ctx context.Context, networkID string) (bool, error) {
+	return c.reloadFor(ctx, networkID, nil)
 }
 
-func (c *Controller) reloadFor(ctx context.Context, networkID string, before, after []netip.Prefix) (bool, error) {
+func (c *Controller) reloadFor(ctx context.Context, networkID string, after []netip.Prefix) (bool, error) {
 	if c == nil {
 		return false, nil
 	}
@@ -116,7 +113,7 @@ func (c *Controller) reloadFor(ctx context.Context, networkID string, before, af
 	c.reloading.Lock()
 	defer c.reloading.Unlock()
 
-	changed := c.snap.Load().admissionChanges(networkID, before, after)
+	changed := c.snap.Load().admissionChanges(networkID, after)
 	if err := c.publish(ctx); err != nil {
 		// A write that cannot have changed admission leaves the enforced ACL
 		// correct in every respect that decides it, and raising "a permission
