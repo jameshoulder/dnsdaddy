@@ -150,18 +150,24 @@ step "4. Derive the client ACL from configured networks"
 CFG_CIDRS=""
 CFG_LEGACY=0
 if command -v sqlite3 >/dev/null; then
-  CFG_CIDRS=$(sqlite3 -readonly "$DB" \
-    "SELECT DISTINCT c.cidr FROM network_cidrs c
-       JOIN networks n ON n.id = c.network_id
-      WHERE n.enabled = 1 AND n.allow_resolver = 1 AND c.cidr <> '';" 2>/dev/null \
-    | tr '\n' ',' | sed 's/,$//' || true)
+  SQL_ERR="$(mktemp)"
+  trap 'rm -f "$SQL_ERR"' EXIT
 
-  # A database written by a binary that predates the permission has no such
-  # column, and the query above fails rather than returning nothing. Fall back
-  # to the older meaning and say so: silently failing closed here would refuse
-  # to deploy a working configuration and blame the operator for it.
-  if [[ -z "$CFG_CIDRS" ]] && ! sqlite3 -readonly "$DB" \
-       "SELECT allow_resolver FROM networks LIMIT 1;" >/dev/null 2>&1; then
+  # The read is authoritative, and only one failure means "old database": the
+  # allow_resolver column is not there. Everything else — SQLITE_BUSY, a
+  # corrupt page, an unreadable -wal sidecar, any other schema error — used to
+  # land in the same branch, because the query's output was discarded and an
+  # empty result was taken as proof. That is not a cosmetic misdiagnosis: a
+  # transient failure on this query followed by a working fallback promotes
+  # every enabled range into the bootstrap list, where the dashboard can no
+  # longer withdraw it. So anything unrecognised stops the deployment and
+  # quotes what SQLite actually said.
+  if CFG_CIDRS=$(sqlite3 -readonly "$DB" \
+      "SELECT DISTINCT c.cidr FROM network_cidrs c
+         JOIN networks n ON n.id = c.network_id
+        WHERE n.enabled = 1 AND n.allow_resolver = 1 AND c.cidr <> '';" 2>"$SQL_ERR"); then
+    CFG_CIDRS=$(printf '%s' "$CFG_CIDRS" | tr '\n' ',' | sed 's/,$//')
+  elif grep -qi 'no such column' "$SQL_ERR" && grep -qi 'allow_resolver' "$SQL_ERR"; then
     warn "this database predates per-network resolver access; using every enabled network"
     # These ranges have to go into the bootstrap list, unlike the managed ones.
     # The upgrade migrates every legacy network with allow_resolver = 0, so the
@@ -171,7 +177,11 @@ if command -v sqlite3 >/dev/null; then
     CFG_CIDRS=$(sqlite3 -readonly "$DB" \
       "SELECT DISTINCT c.cidr FROM network_cidrs c
          JOIN networks n ON n.id = c.network_id
-        WHERE n.enabled = 1 AND c.cidr <> '';" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || true)
+        WHERE n.enabled = 1 AND c.cidr <> '';" 2>"$SQL_ERR") ||
+      die "could not read the networks from $DB: $(tr '\n' ' ' <"$SQL_ERR")"
+    CFG_CIDRS=$(printf '%s' "$CFG_CIDRS" | tr '\n' ',' | sed 's/,$//')
+  else
+    die "could not read the client networks from $DB: $(tr '\n' ' ' <"$SQL_ERR")"
   fi
 fi
 

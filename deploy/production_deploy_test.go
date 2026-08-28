@@ -86,15 +86,20 @@ exit 0
 	p.stub("systemctl", `exit 0`)
 
 	// The three queries the script asks, answered from the environment.
+	// The legacy case emits the message a real sqlite3 emits, not a bare
+	// non-zero exit. That distinction is the whole point: the script may only
+	// treat a failure as "old database" when it can see the column is missing,
+	// and a stub that failed silently could not tell the two apart either.
 	p.stub("sqlite3", `
 q="${@: -1}"
+if [[ -n "${STUB_SQL_ERROR:-}" ]]; then
+  echo "$STUB_SQL_ERROR" >&2; exit 1
+fi
 case "$q" in
-  *"allow_resolver FROM networks"*)
-    # The probe for whether this database predates per-network access.
-    [[ "${STUB_LEGACY:-0}" == "1" ]] && exit 1
-    echo 0; exit 0 ;;
   *"n.allow_resolver = 1"*)
-    [[ "${STUB_LEGACY:-0}" == "1" ]] && exit 1
+    if [[ "${STUB_LEGACY:-0}" == "1" ]]; then
+      echo "Error: in prepare, no such column: n.allow_resolver (1)" >&2; exit 1
+    fi
     printf '%s' "${STUB_PERMITTED:-}" | tr ',' '\n'; exit 0 ;;
   *"n.enabled = 1"*)
     printf '%s' "${STUB_ALL:-}" | tr ',' '\n'; exit 0 ;;
@@ -124,14 +129,37 @@ func (p *prodDeploy) runAsNonRoot(args ...string) (out string, code int, ok bool
 		out, code = p.exec(nil, args...)
 		return out, code, true
 	}
-	setpriv, err := exec.LookPath("setpriv")
-	if err != nil {
+	prefix, ok := nonRootPrefix(p.t, p.root)
+	if !ok {
 		return "", 0, false
 	}
-	// nobody must be able to traverse the fixture and read the script. TempDir
-	// hands back <parent>/001 with the parent at 0700, so that one is separate.
-	must(p.t, os.Chmod(filepath.Dir(p.root), 0o755))
-	must(p.t, filepath.WalkDir(p.root, func(path string, d os.DirEntry, err error) error {
+	p.lockDown()
+	out, code = p.exec(prefix, args...)
+	return out, code, true
+}
+
+// nonRootPrefix makes tree reachable by an unprivileged uid and returns the
+// argv prefix that runs a command as one. Both harnesses in this package need
+// it, because this container runs as root and a CI runner does not — a
+// difference that once silently disabled four of five tests here. ok is false
+// when the test process is root and there is no setpriv to drop with.
+//
+// Note what the sweep costs: a fixture made wholly readable cannot express
+// "readable directory, unreadable file", which is a real deployment shape and
+// was a real bug. Deny those paths after calling this, not before.
+func nonRootPrefix(t *testing.T, tree string) ([]string, bool) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		return nil, true
+	}
+	setpriv, err := exec.LookPath("setpriv")
+	if err != nil {
+		return nil, false
+	}
+	// TempDir hands back <parent>/001 with the parent at 0700, so that one is
+	// separate from the walk below.
+	must(t, os.Chmod(filepath.Dir(tree), 0o755))
+	must(t, filepath.WalkDir(tree, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -143,9 +171,7 @@ func (p *prodDeploy) runAsNonRoot(args ...string) (out string, code int, ok bool
 		}
 		return os.Chmod(path, mode)
 	}))
-	p.lockDown()
-	out, code = p.exec([]string{setpriv, "--reuid=65534", "--regid=65534", "--clear-groups"}, args...)
-	return out, code, true
+	return []string{setpriv, "--reuid=65534", "--regid=65534", "--clear-groups"}, true
 }
 
 // lockDown denies the paths a test asked to be unreadable, last, so the
@@ -354,4 +380,28 @@ func TestAnUnreadableDatabaseInAReadableVolumeSaysSo(t *testing.T) {
 	contains(t, out, "not readable by this user")
 	notContains(t, out, "database present")
 	notContains(t, out, "no client CIDRs configured")
+}
+
+// Only one SQLite failure means "this database predates per-network access":
+// the column is not there. Everything else — SQLITE_BUSY under a live
+// container, a corrupt page, an unreadable -wal sidecar — used to reach the
+// same branch, because the query's error was discarded and an empty result
+// was taken as proof of an old schema.
+//
+// That is not a cosmetic misdiagnosis. The legacy branch is the one that puts
+// ranges into the bootstrap list, where the dashboard can no longer withdraw
+// them, so a transient failure here followed by a working fallback query
+// quietly makes every enabled range unrevocable — the same defect a previous
+// round of this PR already had to fix once.
+func TestASqliteFailureIsNotMistakenForALegacySchema(t *testing.T) {
+	p := newProdDeploy(t)
+	p.setenv("STUB_SQL_ERROR=Error: database is locked (5)", "STUB_ALL=10.0.10.0/24")
+
+	out, code := p.run("--dry-run")
+	if code == 0 {
+		t.Fatalf("deployed over a database it could not read\n%s", out)
+	}
+	contains(t, out, "database is locked")
+	notContains(t, out, "predates per-network resolver access")
+	notContains(t, out, "bootstrap ACL set to: 127.0.0.0/8,172.16.0.0/12,10.0.10.0/24")
 }

@@ -26,6 +26,12 @@ type install struct {
 	root string // temporary copy of the repository
 	bin  string // stub commands, and the only PATH entry with them
 	env  []string
+	// Paths denied to the unprivileged uid, applied after nonRootPrefix's
+	// readability sweep. Mode 000 and 0555 deny the owner too, so these hold
+	// whether privileges were dropped or were never held — which matters,
+	// because on CI the test process is unprivileged and owns the fixture.
+	unreadable []string
+	unwritable []string
 }
 
 func newInstall(t *testing.T) *install {
@@ -150,8 +156,46 @@ func (in *install) setenv(kv ...string) { in.env = append(in.env, kv...) }
 // run executes the installer and returns its combined output and exit code.
 func (in *install) run(args ...string) (string, int) {
 	in.t.Helper()
+	return in.runWith(nil, args...)
+}
 
-	cmd := exec.Command("bash", filepath.Join(in.root, "deploy", "install-docker.sh"))
+// runAsNonRoot runs the installer as an unprivileged uid, which is the only way
+// to make a write into the repository directory actually fail: as root it
+// succeeds whatever the mode bits say. ok is false when that uid is out of
+// reach (root, and no setpriv).
+func (in *install) runAsNonRoot(args ...string) (out string, code int, ok bool) {
+	in.t.Helper()
+	prefix, ok := nonRootPrefix(in.t, in.root)
+	if !ok {
+		return "", 0, false
+	}
+	// After the sweep, never before it: nonRootPrefix makes the whole fixture
+	// readable and writable, which would undo these.
+	for _, path := range in.unreadable {
+		path := path
+		in.t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+		must(in.t, os.Chmod(path, 0))
+	}
+	for _, path := range in.unwritable {
+		path := path
+		in.t.Cleanup(func() { _ = os.Chmod(path, 0o755) })
+		must(in.t, os.Chmod(path, 0o555))
+	}
+	out, code = in.runWith(prefix, args...)
+	return out, code, true
+}
+
+func (in *install) denyRead(path string)  { in.unreadable = append(in.unreadable, path) }
+func (in *install) denyWrite(path string) { in.unwritable = append(in.unwritable, path) }
+
+func (in *install) envPath() string { return filepath.Join(in.root, ".env") }
+
+func (in *install) runWith(prefix []string, args ...string) (string, int) {
+	in.t.Helper()
+
+	argv := append(append([]string{}, prefix...),
+		"bash", filepath.Join(in.root, "deploy", "install-docker.sh"))
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Args = append(cmd.Args, args...)
 	cmd.Dir = in.root
 	cmd.Env = append([]string{
@@ -908,4 +952,56 @@ func TestVPSInstallSaysABootstrapRangeCannotBeRevokedFromTheDashboard(t *testing
 	contains(t, out, "DNSDADDY_ALLOWED_CLIENT_CIDRS")
 	contains(t, out, "cannot withdraw it")
 	contains(t, out, "add it as a Network and leave it out of .env")
+}
+
+// Closing a dashboard this installer published on a public address is the one
+// thing this branch exists to do. If the edit cannot be made — a read-only
+// repository directory, most plainly — the upgrade must not carry on: compose
+// would read the unchanged file and republish the very address the run just
+// promised to close. env_disable returning "nothing to disable" and "could not
+// disable" as the same status is what made that possible.
+//
+// Only an unprivileged uid can demonstrate it: root's writes succeed whatever
+// the mode bits say, which is precisely why this went unnoticed.
+func TestUpgradeAbortsWhenItCannotCloseAPublicBind(t *testing.T) {
+	in := newInstall(t)
+	in.writeEnv("# managed by install-docker.sh\nDNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
+	// sed -i rewrites .env by creating a sibling and renaming, so it is the
+	// directory that has to refuse the write. The stub log is pre-created
+	// because appending to an existing file does not need that permission.
+	must(t, os.WriteFile(filepath.Join(in.root, "compose.log"), nil, 0o666))
+	in.denyWrite(in.root)
+
+	out, code, ok := in.runAsNonRoot("--upgrade", "--yes")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("upgrade succeeded without closing the published dashboard\n%s", out)
+	}
+	contains(t, out, "Could not close the published dashboard")
+	notContains(t, out, "returns to loopback")
+	// And it did not lie about the state it left behind.
+	contains(t, in.readEnv(), "DNSDADDY_DASHBOARD_BIND=203.0.113.20")
+}
+
+// A .env that cannot be read is not a .env that says nothing. Read through
+// grep's "could not open" as though it were "no match", and an unprivileged
+// upgrade reports the dashboard safely on loopback while the file it never
+// managed to open publishes it to the internet — a false all-clear about the
+// one exposure this installer takes most seriously.
+func TestUpgradeRefusesToGuessAtAnUnreadableEnv(t *testing.T) {
+	in := newInstall(t)
+	in.writeEnv("# managed by install-docker.sh\nDNSDADDY_DASHBOARD_BIND=203.0.113.20\n")
+	in.denyRead(in.envPath())
+
+	out, code, ok := in.runAsNonRoot("--upgrade", "--yes", "--dry-run")
+	if !ok {
+		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+	}
+	if code == 0 {
+		t.Fatalf("upgrade reported success over a .env it could not read\n%s", out)
+	}
+	contains(t, out, "Could not read")
+	notContains(t, out, "loopback")
 }

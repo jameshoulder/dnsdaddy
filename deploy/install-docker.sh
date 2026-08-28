@@ -84,12 +84,21 @@ head_() { printf '\n%s%s%s\n' "$BOLD" "$*" "$OFF"; }
 
 # die prints the remedy, not just the problem. "Docker failed" is not a
 # diagnosis and leaves the reader with nowhere to go.
+# TOP_PID and the TERM trap are what make die reliable from inside $( ). A bare
+# exit there ends only the subshell: the message prints, the caller carries on
+# with an empty string, and the run finishes green. That is not hypothetical —
+# it is how an unreadable .env produced "Cannot continue: Could not read .env."
+# twice and then "Dashboard stays on loopback", exit 0.
+TOP_PID=$$
+trap 'exit 1' TERM
+
 die() {
   printf '\n%sCannot continue:%s %s\n' "$RED" "$OFF" "$1" >&2
   if [[ $# -gt 1 ]]; then
     printf '\n%s\n' "$2" >&2
   fi
   printf '\n' >&2
+  kill -TERM "$TOP_PID" 2>/dev/null
   exit 1
 }
 
@@ -116,13 +125,33 @@ ENV_FILE=".env"
 # reported as closed.
 ENV_MARKER="# managed by install-docker.sh"
 
+# An unreadable .env is not an empty one. A root-owned 0600 file read by an
+# unprivileged run answers "" to every question asked of it, and the answers
+# decide whether this installer thinks a dashboard is published — so it would
+# report the dashboard closed while leaving it open. grep and awk both separate
+# "no match" (1) from "could not read" (above 1); these helpers keep that
+# distinction rather than flattening it into an empty string.
+env_unreadable() {
+  die "Could not read $ENV_FILE." \
+    "The file exists but this user cannot read it. Re-run with sudo, or fix its permissions. Answering from a file it cannot read would mean guessing whether your dashboard is published."
+}
+
 env_value() { # key -> prints the active value, empty if unset or commented out
   [[ -f "$ENV_FILE" ]] || return 0
-  grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  local matches status
+  matches=$(grep -E "^${1}=" "$ENV_FILE" 2>/dev/null) && status=0 || status=$?
+  case $status in
+    0) printf '%s\n' "$matches" | tail -1 | cut -d= -f2- ;;
+    1) ;; # no such key
+    *) env_unreadable ;;
+  esac
 }
 
 env_is_set() { # key
-  [[ -f "$ENV_FILE" ]] && grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null
+  [[ -f "$ENV_FILE" ]] || return 1
+  grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null && return 0
+  (( $? == 1 )) || env_unreadable
+  return 1
 }
 
 # env_is_managed reports whether the ACTIVE line for this key was written by
@@ -141,7 +170,10 @@ env_is_managed() { # key
     $0 ~ "^" key "=" { found = 1; managed = (prev == marker) }
     { prev = $0 }
     END { exit !(found && managed) }
-  ' "$ENV_FILE"
+  ' "$ENV_FILE" 2>/dev/null
+  local status=$?
+  (( status <= 1 )) || env_unreadable
+  return $status
 }
 
 # env_set writes a key this installer owns, replacing any existing active line.
@@ -164,10 +196,24 @@ env_set() { # key value
 # env_disable comments a key out. Returns 1 when there was nothing to do, so
 # the caller only reports a change it actually made — claiming to have closed
 # something that is still open is worse than saying nothing.
+# env_disable is three-way on purpose: 0 disabled it, 1 there was nothing to
+# disable, 2 could not. Its one caller closes a dashboard this installer
+# published on a public address, so collapsing 2 into 1 reports an exposure as
+# closed while leaving it open. grep says which by exit status — 1 is no match,
+# above that is a read failure — and the edit is confirmed by re-reading rather
+# than by trusting sed, which reports success for a substitution it did not
+# make.
 env_disable() { # key
   [[ -f "$ENV_FILE" ]] || return 1
-  grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null || return 1
-  sed -i -E "s|^${1}=|# disabled by install-docker.sh (dashboard kept on loopback): ${1}=|" "$ENV_FILE"
+  grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null
+  case $? in
+    0) ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+  sed -i -E "s|^${1}=|# disabled by install-docker.sh (dashboard kept on loopback): ${1}=|" "$ENV_FILE" || return 2
+  grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null && return 2
+  return 0
 }
 
 ensure_env_file() {
@@ -690,9 +736,22 @@ do_upgrade() {
       # choice the operator made, so it is closed rather than preserved.
       warn "${bind} is a public address, and this installer wrote that line, not you"
       note "Publishing an authenticated but plaintext management API on it is not safe."
-      if [[ $DRY_RUN -eq 0 ]] && env_disable DNSDADDY_DASHBOARD_BIND; then
-        warn "That line is now commented out; the dashboard returns to loopback"
-        note "If it was reachable from the internet, change the admin password."
+      if [[ $DRY_RUN -eq 0 ]]; then
+        env_disable DNSDADDY_DASHBOARD_BIND
+        case $? in
+          0)
+            warn "That line is now commented out; the dashboard returns to loopback"
+            note "If it was reachable from the internet, change the admin password."
+            ;;
+          1) ;; # already gone; nothing was published to close
+          *)
+            # Carrying on here would hand compose the unchanged file and
+            # republish the address this branch exists to close, after saying
+            # it had been closed. Stop instead, having changed nothing.
+            die "Could not close the published dashboard in $ENV_FILE." \
+              "DNSDADDY_DASHBOARD_BIND=${bind} is still active, so continuing would republish it. Fix that file's permissions, or comment the line out by hand, then run the upgrade again."
+            ;;
+        esac
       fi
     fi
   else
