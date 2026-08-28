@@ -88,18 +88,19 @@ paths:
                   version: { type: string }
                   uptimeSeconds: { type: integer, format: int64 }
                   blocklistSize: { type: integer }
-        clientAclStale:
-          type: boolean
-          description: |
-            A change to which networks may use the resolver could not be
-            applied, so the rules being enforced may be older than what is
-            stored.
+                  clientAclStale:
+                    type: boolean
+                    description: |
+                      A change to which networks may use the resolver could not
+                      be applied, so the rules being enforced may be older than
+                      what is stored.
 
-            On the unauthenticated endpoint because it is the only way
-            `dnsdaddy doctor` can see it: doctor runs as a separate process
-            and rebuilds the ACL from configuration and the database, which
-            is the *desired* state, while this flag lives in the running
-            daemon's memory. It reveals nothing about what the ACL contains.
+                      On the unauthenticated endpoint because it is the only
+                      way `dnsdaddy doctor` can see it: doctor runs as a
+                      separate process and rebuilds the ACL from configuration
+                      and the database, which is the *desired* state, while
+                      this flag lives in the running daemon's memory. It
+                      reveals nothing about what the ACL contains.
 
   /api/v1/auth/login:
     post:
@@ -399,11 +400,18 @@ paths:
       summary: Delete a network
       description: The last remaining network cannot be deleted.
       responses:
-        "204": { description: Deleted, and the revocation is in force }
+        "204":
+          description: >-
+            Deleted, and whatever the network permitted is no longer in force.
+            Also returned when the network permitted nothing — a disabled or
+            unpermitted one, or a catch-all with no ranges — since there was no
+            permission to withdraw.
         "200":
           description: >-
             Deleted, but the resolver's client access could not be reloaded, so
-            the network's addresses may still be being served. The condition is
+            the network's addresses may still be being served. Returned only
+            when the network actually permitted something; a failed reload that
+            cannot have changed admission answers 204 and is logged. The condition is
             also reported by `GET /api/v1/diagnostics`, by `GET
             /api/v1/health` as `clientAclStale`, and by `dnsdaddy doctor`
             (which reads it from health, since the state lives in the running

@@ -169,6 +169,23 @@ func (b networkBody) affectsAccess() bool {
 	return b.CIDRs != nil || b.Enabled != nil || b.AllowResolver != nil
 }
 
+// networkGrantsAccess reports whether a stored network contributes anything to
+// the effective ACL.
+//
+// All three conditions, because clientacl.Compute skips a network failing any
+// of them: a disabled network permits nothing, an unpermitted one permits
+// nothing, and a permitted one with no CIDRs — the catch-all — has no range to
+// contribute. Creating or deleting such a network cannot change who is
+// admitted, so a failed reload around one is not evidence that a permission is
+// wrong.
+//
+// Used where the stored state is known exactly. A PATCH uses affectsAccess
+// instead, which reasons about the request rather than the result, because the
+// merge happens inside the store.
+func networkGrantsAccess(n store.Network) bool {
+	return n.Enabled && n.AllowResolver && len(n.CIDRs) > 0
+}
+
 func (b networkBody) toInput() store.NetworkInput {
 	return store.NetworkInput{
 		Name:          b.Name,
@@ -192,8 +209,11 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	// A new network always could: it may arrive already permitted.
-	writeNetwork(w, http.StatusCreated, n, a.reloadAccess(r, true))
+	// Derived from what was actually stored, not assumed. A network created
+	// unpermitted — the default — changes nothing about who is admitted, so a
+	// failed reload after one must not raise the standing "a revocation may
+	// still be honoured" warning.
+	writeNetwork(w, http.StatusCreated, n, a.reloadAccess(r, networkGrantsAccess(n)))
 }
 
 func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +231,16 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
+	// Read it before it is gone, for the same reason the create path reads
+	// what it stored: deleting a network that granted nothing cannot change
+	// who is admitted, and marking the ACL stale there is a false alarm that
+	// persists until an unrelated write succeeds. A missing network is left
+	// for DeleteNetwork to report, so the 404 stays where it was.
+	granted := false
+	if existing, err := a.Store.GetNetwork(r.Context(), r.PathValue("id")); err == nil {
+		granted = networkGrantsAccess(existing)
+	}
+
 	if err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id")); err != nil {
 		writeStoreError(w, err)
 		return
@@ -227,7 +257,17 @@ func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 	// controller, so `dnsdaddy doctor` and /api/v1/diagnostics keep reporting
 	// it until a reload succeeds — a warning in one HTTP response is easy to
 	// miss, and this outlives the request that caused it.
-	if warning := a.reloadAccess(r, true); warning != "" {
+	// 200 is reserved for the case it was introduced for: client access may
+	// not be in force. Deleting a network that granted nothing cannot leave a
+	// permission behind, so that stays a 204 — vacuously, the revocation is in
+	// force, because there was none to make. The reload failure is still
+	// logged by reloadAccess.
+	//
+	// Widening 200 to cover a failure that affects nobody would train the one
+	// caller who checks for it to stop checking, which costs more than the
+	// notice is worth.
+	warning := a.reloadAccess(r, granted)
+	if granted && warning != "" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "deleted",
 			"warning": warning,

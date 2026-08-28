@@ -630,3 +630,91 @@ func TestHealthReportsAStaleClientACL(t *testing.T) {
 
 	h.failACLReload.Store(false)
 }
+
+// Creating an unpermitted network cannot change who is admitted — that is the
+// default, and it is what a stock install does on every network it has. A
+// failed reload there must not raise the standing "a revocation may still be
+// honoured" warning, which nothing clears until an unrelated write succeeds.
+func TestCreatingAnUnpermittedNetworkDoesNotMarkTheACLStale(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Benchmark lab",
+		"cidrs": []string{"198.18.0.0/15"},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	if h.acl.Stale() {
+		t.Error("creating a network that grants nothing marked the ACL stale")
+	}
+	h.failACLReload.Store(false)
+}
+
+// A permitted one does, because it changes the effective ACL the moment it
+// lands — which is the whole point of the feature.
+func TestCreatingAPermittedNetworkMarksTheACLStaleOnFailure(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Benchmark lab",
+		"cidrs":         []string{"198.18.0.0/15"},
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	if !h.acl.Stale() {
+		t.Error("creating a permitted network whose reload failed was not recorded as stale")
+	}
+	h.failACLReload.Store(false)
+}
+
+// A permitted network with no CIDRs is the catch-all: clientacl skips it,
+// because it has no range to contribute. Same reasoning, third condition.
+func TestCreatingAPermittedCatchAllDoesNotMarkTheACLStale(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Everything else",
+		"allowResolver": true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+	}
+	if h.acl.Stale() {
+		t.Error("a permitted network with no CIDRs contributes nothing to the ACL, so a failed " +
+			"reload around it is not evidence that a permission is wrong")
+	}
+	h.failACLReload.Store(false)
+}
+
+// The delete path reasons the same way, which needs the network read before it
+// is gone.
+func TestDeletingAnUnpermittedNetworkDoesNotMarkTheACLStale(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":  "Benchmark lab",
+		"cidrs": []string{"198.18.0.0/15"},
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	h.failACLReload.Store(true)
+	resp, raw := h.do("DELETE", "/api/v1/networks/"+id, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status %d, want 204 — nothing about admission changed; body %s", resp.StatusCode, raw)
+	}
+	if h.acl.Stale() {
+		t.Error("deleting a network that granted nothing marked the ACL stale")
+	}
+	h.failACLReload.Store(false)
+}
