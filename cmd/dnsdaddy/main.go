@@ -263,9 +263,15 @@ func run() error {
 		return err
 	}
 	if generated != "" {
+		// The password itself is deliberately not logged. It used to be, which
+		// meant a credential in `docker compose logs` for the life of the
+		// container and in whatever log shipper an operator has pointed at it
+		// — and the only reason for that was to give the installer somewhere
+		// to read it from. The file is a better source: 0600, inside the data
+		// volume, and the installer reads it directly.
 		log.Info("generated an initial admin password",
-			"password", generated,
-			"also_written_to", filepath.Join(cfg.DataDir, "initial-password.txt"))
+			"written_to", filepath.Join(cfg.DataDir, "initial-password.txt"),
+			"read_it_with", "docker compose exec dnsdaddy cat /var/lib/dnsdaddy/initial-password.txt")
 	}
 
 	doh := dnsserver.NewDoHHandler(handler, st, log, dnsserver.DoHOptions{
