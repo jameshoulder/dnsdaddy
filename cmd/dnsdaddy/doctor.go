@@ -73,6 +73,10 @@ func runDoctor(args []string) error {
 	// client-access reload is visible — it lives in the running daemon's
 	// memory, and this process rebuilds the ACL from configuration and the
 	// database, which is what *should* be enforced rather than what is.
+	//
+	// A nil answer means the API did not respond, and stays nil: reporting
+	// "not stale" for something that could not be checked is the misleading
+	// green this command exists to remove.
 	webChecks, aclStale := doctorWeb(ctx, st, cfg, *timeout)
 
 	checks = append(checks, dbCheck)
@@ -250,7 +254,7 @@ func doctorListeners(ctx context.Context, cfg config.Config, acl *clientacl.Set,
 // reporting either source alone. Reporting configuration alone was the old
 // behaviour and would now be worse than useless: it would tell an operator
 // their network was refused by a resolver that is serving it.
-func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config, acl *clientacl.Set, stale bool) []diag.Check {
+func doctorClientAccess(ctx context.Context, st *store.Store, cfg config.Config, acl *clientacl.Set, stale *bool) []diag.Check {
 	in := diag.ClientAccessInput{
 		ACL:   acl,
 		Stale: stale,
@@ -308,7 +312,7 @@ func doctorUpstreams(cfg config.Config, timeout time.Duration) []diag.Check {
 // rendered before this one and needs the answer. Everything else doctor
 // reports is derived from configuration and the database, which is the
 // *desired* state; these two are the enforced one.
-func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration) ([]diag.Check, bool) {
+func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration) ([]diag.Check, *bool) {
 	target := probeTarget(cfg.HTTP.Listen)
 	url := "http://" + target + "/api/v1/health"
 
@@ -322,7 +326,7 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		c.Status = diag.StatusFail
 		c.Summary = "The dashboard address could not be used."
 		c.Evidence = []string{"listen: " + cfg.HTTP.Listen, "error: " + err.Error()}
-		return []diag.Check{c, intelUnknown()}, false
+		return []diag.Check{c, intelUnknown()}, nil
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -333,7 +337,7 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		c.Action = "If DNS Daddy runs in a container, the dashboard is published on loopback only " +
 			"and this must be run inside the container: " +
 			"`docker compose exec dnsdaddy dnsdaddy doctor`."
-		return []diag.Check{c, intelUnknown()}, false
+		return []diag.Check{c, intelUnknown()}, nil
 	}
 	defer resp.Body.Close()
 
@@ -342,7 +346,7 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		c.Status = diag.StatusFail
 		c.Summary = fmt.Sprintf("The dashboard answered HTTP %d.", resp.StatusCode)
 		c.Evidence = []string{"url: " + url}
-		return []diag.Check{c, intelUnknown()}, false
+		return []diag.Check{c, intelUnknown()}, nil
 	}
 
 	var health struct {
@@ -354,7 +358,7 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		c.Status = diag.StatusWarn
 		c.Summary = "The dashboard responded, but the health payload was not readable."
 		c.Evidence = []string{"url: " + url}
-		return []diag.Check{c, intelUnknown()}, false
+		return []diag.Check{c, intelUnknown()}, nil
 	}
 
 	c.Status = diag.StatusPass
@@ -363,7 +367,7 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 
 	// The running process owns the live index, so its size is only knowable
 	// from the API. Feed timestamps come from the database.
-	return []diag.Check{c, doctorIntel(ctx, st, cfg, health.BlocklistSize)}, health.ClientACLStale
+	return []diag.Check{c, doctorIntel(ctx, st, cfg, health.BlocklistSize)}, &health.ClientACLStale
 }
 
 // doctorIntel reports whether filtering is actually in force.

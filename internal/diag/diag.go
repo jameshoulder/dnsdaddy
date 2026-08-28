@@ -74,7 +74,13 @@ type ClientAccessInput struct {
 	// what is being enforced may be older than what is stored. Nothing else
 	// can detect this: once a network is deleted there is no row left for the
 	// reachability checks to compare a stale grant against.
-	Stale bool
+	//
+	// Nil means not measured, which is a third answer and not the same as
+	// false. It lives in the running daemon's memory, so `dnsdaddy doctor`
+	// learns it from the health endpoint and cannot learn it at all when that
+	// endpoint is unreachable. Reporting "not stale" there would be a
+	// diagnostic quietly passing a check it never ran.
+	Stale *bool
 	// RefusedQueries is how many queries the ACL has rejected since start.
 	// Nil means not measured — a caller with no running handler, such as a
 	// startup check or `dnsdaddy doctor` in its own process. A pointer rather
@@ -116,7 +122,19 @@ func ClientAccess(in ClientAccessInput) []Check {
 		shadowed[sh.NetworkID] = true
 	}
 
-	if in.Stale {
+	switch {
+	case in.Stale == nil:
+		checks = append(checks, Check{
+			Section: sectionClientAccess,
+			Name:    "Client ACL is in force",
+			Status:  StatusWarn,
+			Summary: "Whether the rules below are the ones actually being enforced could not be " +
+				"determined.",
+			Action: "That state lives in the running resolver, and its API did not answer — see " +
+				"the WEB INTERFACE section. Everything else in this section is read from your " +
+				"configuration and database, which is what SHOULD be enforced rather than what is.",
+		})
+	case *in.Stale:
 		checks = append(checks, Check{
 			Section: sectionClientAccess,
 			Name:    "Client ACL is in force",

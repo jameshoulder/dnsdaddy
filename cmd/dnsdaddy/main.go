@@ -396,9 +396,17 @@ func reportClientAccess(ctx context.Context, st *store.Store, acl *clientacl.Set
 		return
 	}
 
+	// Not stale, and known so: this runs immediately after a successful
+	// reload, so the snapshot in force was built from the database a moment
+	// ago. Leaving it nil would report it as unknown, which is the answer for
+	// a diagnostic that could not reach the daemon — not for the daemon
+	// itself.
+	stale := false
+
 	checks := diag.ClientAccess(diag.ClientAccessInput{
 		ACL:            acl,
 		Networks:       diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
+		Stale:          &stale,
 		RefusedQueries: nil, // nothing has been served yet
 	})
 

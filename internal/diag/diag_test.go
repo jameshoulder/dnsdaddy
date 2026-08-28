@@ -10,6 +10,11 @@ import (
 // find returns the first check whose Name contains sub.
 func refusals(n uint64) *uint64 { return &n }
 
+// measured says the live reload state was checked and is healthy. Most tests
+// here are about something else and want it out of the way; leaving it nil
+// would mean "not measured", which is deliberately a warning of its own.
+func measured() *bool { b := false; return &b }
+
 func find(t *testing.T, checks []Check, sub string) Check {
 	t.Helper()
 	for _, c := range checks {
@@ -65,7 +70,8 @@ func TestClientAccessFailsWhenNetworkIsOutsideTheACL(t *testing.T) {
 
 func TestClientAccessPassesWhenNetworkIsInsideTheACL(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		ACL: clientacl.Compute([]string{"192.168.0.0/16"}, false, nil),
+		Stale: measured(),
+		ACL:   clientacl.Compute([]string{"192.168.0.0/16"}, false, nil),
 		Networks: []Network{{
 			Name: "Home", PolicyName: "Standard", Enabled: true, CIDRs: []string{"192.168.1.0/24"},
 		}},
@@ -104,7 +110,8 @@ func TestClientAccessWarnsOnPartialCoverage(t *testing.T) {
 // address range to compare. Neither should produce noise.
 func TestClientAccessIgnoresDisabledAndCatchAllNetworks(t *testing.T) {
 	checks := ClientAccess(ClientAccessInput{
-		ACL: clientacl.Compute([]string{"10.0.0.0/8"}, false, nil),
+		Stale: measured(),
+		ACL:   clientacl.Compute([]string{"10.0.0.0/8"}, false, nil),
 		Networks: []Network{
 			{Name: "Retired", Enabled: false, CIDRs: []string{"192.168.1.0/24"}},
 			{Name: "Default", Enabled: true, CIDRs: nil},
@@ -279,9 +286,10 @@ func TestClientAccessStillReportsUnreachableNetworksWithAnACL(t *testing.T) {
 // may still be being honoured, and after a delete there is no network row left
 // for any other check to notice it against.
 func TestStaleACLIsReportedAsAFailure(t *testing.T) {
+	stale := true
 	checks := ClientAccess(ClientAccessInput{
 		ACL:   clientacl.Compute([]string{"127.0.0.0/8"}, false, nil),
-		Stale: true,
+		Stale: &stale,
 	})
 
 	c := find(t, checks, "Client ACL is in force")
@@ -297,13 +305,40 @@ func TestStaleACLIsReportedAsAFailure(t *testing.T) {
 }
 
 func TestFreshACLIsNotReportedAsStale(t *testing.T) {
+	fresh := false
 	checks := ClientAccess(ClientAccessInput{
-		ACL: clientacl.Compute([]string{"127.0.0.0/8"}, false, nil),
+		ACL:   clientacl.Compute([]string{"127.0.0.0/8"}, false, nil),
+		Stale: &fresh,
 	})
 	for _, c := range checks {
 		if strings.Contains(c.Name, "in force") {
 			t.Errorf("a healthy ACL was reported as stale: %s", c.Summary)
 		}
+	}
+}
+
+// Not measured is a third answer, and reporting it as "not stale" would be a
+// diagnostic quietly passing a check it never ran. `dnsdaddy doctor` reaches
+// this whenever the daemon's API does not answer: the flag lives in that
+// process's memory and nowhere else.
+func TestUnknownStalenessIsReportedRatherThanAssumedFine(t *testing.T) {
+	checks := ClientAccess(ClientAccessInput{
+		ACL: clientacl.Compute([]string{"127.0.0.0/8"}, false, nil),
+		// Stale left nil: not measured.
+	})
+
+	c := find(t, checks, "Client ACL is in force")
+	if c.Status != StatusWarn {
+		t.Errorf("status = %s, want warn — it is unknown, neither fine nor broken", c.Status)
+	}
+	if !strings.Contains(c.Summary, "could not be determined") {
+		t.Errorf("summary does not say it is unknown: %q", c.Summary)
+	}
+	if !strings.Contains(c.Action, "SHOULD be enforced") {
+		t.Errorf("the action does not distinguish desired state from enforced state: %q", c.Action)
+	}
+	if Worst(checks) == StatusFail {
+		t.Error("an unknown reload state must not fail the run; it is not evidence of a fault")
 	}
 }
 

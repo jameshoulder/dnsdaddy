@@ -33,9 +33,12 @@ func (a *API) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	refused := a.DNS.RefusedClients()
+	stale := a.ClientACL.Stale()
 	checks := diag.ClientAccess(diag.ClientAccessInput{
-		ACL:            a.ClientACL.Current(),
-		Stale:          a.ClientACL.Stale(),
+		ACL: a.ClientACL.Current(),
+		// Always known here: this handler runs inside the daemon that owns
+		// the flag.
+		Stale:          &stale,
 		Networks:       diag.FromStoreNetworks(networks, diag.PolicyNames(policies)),
 		RefusedQueries: &refused,
 	})
