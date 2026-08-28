@@ -491,36 +491,48 @@ func TestADryRunChangesNothingOnDisk(t *testing.T) {
 	}
 }
 
-// Step 5 picks the dashboard hostname from four sources in turn, each guarded
-// by -f and then read with sed. A file that exists but cannot be read fails
-// that read, and the run concluded "no hostname configured" — which is not a
-// measurement, it is the absence of one. It then acts on it: Caddy left
-// inactive, the dashboard put on loopback, and a raw `sed: can't read` leaked
-// into the output as the only clue.
+// Hostname discovery is refused outright without root, and the reason is not
+// that a particular source might be unreadable. The sources are tried in
+// priority order, so an unprivileged run that cannot read .env but can read the
+// volume's config.yaml reports the second while a real deploy uses the first —
+// confidently wrong rather than missing, which no per-source check fixes.
 //
-// A dry run exists to preview the real run, so a preview that reports a plan
-// the real run would not follow is the defect, whatever the exit code.
-func TestAnUnreadableHostnameSourceIsNotReportedAsNoHostname(t *testing.T) {
-	p := newProdDeploy(t)
-	p.setenv("STUB_PERMITTED=10.0.10.0/24")
-	p.unreadable = append(p.unreadable, filepath.Join(p.root, "repo", ".env"))
+// Three rounds found three ways a file can be invisible; a fourth found that
+// having a hostname was not evidence of having the right one. So the rule is
+// about privilege alone, and what it must produce is a stated unknown rather
+// than a plan.
+func TestUnprivilegedRunsDoNotGuessTheHostname(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+	}{
+		{"a readable hostname is still not trusted", "DNSDADDY_BASE_URL=https://dns.example.com\n"},
+		{"no hostname anywhere", "DNSDADDY_LOG_LEVEL=info\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newProdDeploy(t)
+			p.setenv("STUB_PERMITTED=10.0.10.0/24")
+			must(t, os.WriteFile(filepath.Join(p.root, "repo", ".env"), []byte(tc.env), 0o644))
 
-	out, code, ok := p.runAsNonRoot("--dry-run")
-	if !ok {
-		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+			out, code, ok := p.runAsNonRoot("--dry-run")
+			if !ok {
+				t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
+			}
+			if code != 0 {
+				t.Fatalf("exit %d\n%s", code, out)
+			}
+			contains(t, out, "hostname discovery needs root")
+			// The parts that follow from the hostname say they cannot be
+			// previewed, rather than naming a plan the real run may not follow.
+			contains(t, out, "not previewing DNSDADDY_BASE_URL")
+			contains(t, out, "not previewing the Caddy configuration")
+			notContains(t, out, "hostname: dns.example.com")
+			notContains(t, out, "no hostname configured — Caddy will be installed but left inactive")
+			// And the preview it *can* give — the client ACL, which is what this
+			// change is about — is still there.
+			contains(t, out, "bootstrap ACL set to:")
+		})
 	}
-	if code == 0 {
-		t.Fatalf("the preview finished, having failed to determine the hostname\n%s", out)
-	}
-	notContains(t, out, "can't read")
-	contains(t, out, "this run is not root")
-	notContains(t, out, "can't read")
-	notContains(t, out, "no hostname configured — Caddy will be installed but left inactive")
-	// Warning and carrying on is not enough: the steps below the hostname print
-	// concrete plans that depend on it, and a preview must not describe a plan
-	// the real run may not follow.
-	notContains(t, out, "DNSDADDY_SECURE_COOKIES")
-	notContains(t, out, "caddy")
 }
 
 // The two deploy scripts share a vocabulary — ok, warn, die, step — and each
@@ -574,24 +586,4 @@ func TestNoScriptCallsAHelperItDoesNotDefine(t *testing.T) {
 			}
 		}
 	}
-}
-
-// The rule is about privilege, not about which source failed — so a run that
-// simply finds nothing, with every source readable, is refused for the same
-// reason. That is the case this pins: no hostname anywhere, unprivileged, and
-// the preview stops rather than reporting an absence it cannot vouch for.
-func TestAnUnprivilegedRunWillNotVouchForAnAbsentHostname(t *testing.T) {
-	p := newProdDeploy(t)
-	p.setenv("STUB_PERMITTED=10.0.10.0/24")
-	must(t, os.WriteFile(filepath.Join(p.root, "repo", ".env"), []byte("DNSDADDY_LOG_LEVEL=info\n"), 0o644))
-
-	out, code, ok := p.runAsNonRoot("--dry-run")
-	if !ok {
-		t.Skip("cannot reach an unprivileged uid: test process is root and setpriv is missing")
-	}
-	if code == 0 {
-		t.Fatalf("the preview vouched for an absence it could not establish\n%s", out)
-	}
-	contains(t, out, "this run is not root")
-	notContains(t, out, "no hostname configured — Caddy will be installed but left inactive")
 }

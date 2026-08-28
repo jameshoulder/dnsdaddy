@@ -265,50 +265,51 @@ step "5. Discover the dashboard hostname"
 # admin password hash. It comes from config or the environment, so those are
 # the only places worth looking.
 HOSTNAME_FOUND=""
-# 1. The running container's environment (where the old deployment set it).
-if [[ -n "${STATE:-}" ]]; then
-  HOSTNAME_FOUND=$(docker inspect "$CONTAINER" \
-    --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
-    | sed -n 's/^DNSDADDY_BASE_URL=//p' | head -1 || true)
-fi
-# Sources are tried with -r rather than -f, and the question of what a failure
-# meant is settled once, below, rather than case by case. Three rounds of
-# review found three ways an unprivileged run cannot see a file that a root
-# deploy will read — unreadable file, unsearchable directory, symlink into a
-# tree it cannot follow — and there is no reason to think that list is closed.
-# 2. .env in the repo.
-[[ -z "$HOSTNAME_FOUND" && -r .env ]] && \
-  HOSTNAME_FOUND=$(sed -n 's/^DNSDADDY_BASE_URL=//p' .env | head -1 || true)
-# 3. A mounted config file, if this deployment uses one.
-if [[ -z "$HOSTNAME_FOUND" ]]; then
-  for c in /etc/dnsdaddy/config.yaml "$VOL_SRC/config.yaml"; do
-    [[ -r "$c" ]] && HOSTNAME_FOUND=$(sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' "$c" | tr -d '"'"'" | head -1) && \
-      [[ -n "$HOSTNAME_FOUND" ]] && break
-  done
-fi
-# 4. An existing Caddyfile from a previous attempt.
-if [[ -z "$HOSTNAME_FOUND" && -r /etc/caddy/Caddyfile ]]; then
-  HOSTNAME_FOUND=$(grep -oE '^[a-z0-9.-]+\.[a-z]{2,}' /etc/caddy/Caddyfile | grep -v example | head -1 || true)
-fi
-HOSTNAME_FOUND="${HOSTNAME_FOUND#https://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND#http://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND%%/*}"
+HOSTNAME_KNOWN=1
 
-# Not "which source failed, and why" — that question has no last answer. Only
-# root can distinguish "no hostname is configured" from "there is one I am not
-# allowed to see", so an unprivileged run that found nothing does not know, and
-# every step below this one depends on the answer.
-if [[ -z "$HOSTNAME_FOUND" && $EUID -ne 0 ]]; then
-  # Warning and carrying on is not enough. Everything below here branches on
-  # the hostname — whether Caddy is configured, whether secure cookies are
-  # forced — so continuing would print a concrete plan that a real deploy,
-  # which runs as root and can read the file, may not follow. A preview that
-  # describes the wrong plan is worse than one that stops.
-  die "no hostname was found, and this run is not root — so it cannot tell that apart from a hostname it is not allowed to see. A file may be unreadable, its directory unsearchable, or a symlink into a tree this user cannot follow; a real deploy runs as root and would read it. Every step below depends on the answer, so re-run this preview with sudo rather than have it describe a plan the real run may not follow."
-elif [[ -n "$HOSTNAME_FOUND" ]]; then
-  ok "hostname: $HOSTNAME_FOUND"
+# Discovery does not run at all without root, and the reason is not that some
+# particular source might be unreadable. It is that the sources are tried in
+# priority order: an unprivileged run that cannot read .env but can read the
+# volume's config.yaml finds the second and reports it, while the real deploy
+# reads the first and uses something else. So the answer would be confidently
+# wrong rather than missing, which no amount of per-source checking fixes.
+#
+# Three rounds of review found three ways a file can be invisible, and a fourth
+# found that having a hostname was not evidence of having the right one. The
+# rule is therefore about privilege and nothing else.
+if [[ $EUID -ne 0 ]]; then
+  HOSTNAME_KNOWN=0
+  warn "hostname discovery needs root — not attempted, and the steps that depend on it will say so rather than guess"
 else
-  warn "no hostname configured — Caddy will be installed but left inactive"
-  warn "the dashboard will be loopback-only; reach it with an SSH tunnel:"
-  warn "  ssh -L 8080:127.0.0.1:8080 root@\$(hostname -I | awk '{print \$1}')"
+  # 1. The running container's environment (where the old deployment set it).
+  if [[ -n "${STATE:-}" ]]; then
+    HOSTNAME_FOUND=$(docker inspect "$CONTAINER" \
+      --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+      | sed -n 's/^DNSDADDY_BASE_URL=//p' | head -1 || true)
+  fi
+  # 2. .env in the repo.
+  [[ -z "$HOSTNAME_FOUND" && -r .env ]] && \
+    HOSTNAME_FOUND=$(sed -n 's/^DNSDADDY_BASE_URL=//p' .env | head -1 || true)
+  # 3. A mounted config file, if this deployment uses one.
+  if [[ -z "$HOSTNAME_FOUND" ]]; then
+    for c in /etc/dnsdaddy/config.yaml "$VOL_SRC/config.yaml"; do
+      [[ -r "$c" ]] && HOSTNAME_FOUND=$(sed -n 's/^[[:space:]]*base_url:[[:space:]]*//p' "$c" | tr -d '"'"'" | head -1) && \
+        [[ -n "$HOSTNAME_FOUND" ]] && break
+    done
+  fi
+  # 4. An existing Caddyfile from a previous attempt.
+  if [[ -z "$HOSTNAME_FOUND" && -r /etc/caddy/Caddyfile ]]; then
+    HOSTNAME_FOUND=$(grep -oE '^[a-z0-9.-]+\.[a-z]{2,}' /etc/caddy/Caddyfile | grep -v example | head -1 || true)
+  fi
+  HOSTNAME_FOUND="${HOSTNAME_FOUND#https://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND#http://}"; HOSTNAME_FOUND="${HOSTNAME_FOUND%%/*}"
+
+  if [[ -n "$HOSTNAME_FOUND" ]]; then
+    ok "hostname: $HOSTNAME_FOUND"
+  else
+    warn "no hostname configured — Caddy will be installed but left inactive"
+    warn "the dashboard will be loopback-only; reach it with an SSH tunnel:"
+    warn "  ssh -L 8080:127.0.0.1:8080 root@\$(hostname -I | awk '{print \$1}')"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -347,7 +348,9 @@ else
 fi
 BRIDGE=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "172.17.0.0/16")
 set_env DNSDADDY_TRUSTED_PROXY_CIDRS "$BRIDGE"
-if [[ -n "$HOSTNAME_FOUND" ]]; then
+if [[ $HOSTNAME_KNOWN -eq 0 ]]; then
+  warn "not previewing DNSDADDY_BASE_URL or DNSDADDY_SECURE_COOKIES: they follow from the hostname, which this run could not determine"
+elif [[ -n "$HOSTNAME_FOUND" ]]; then
   set_env DNSDADDY_BASE_URL "https://$HOSTNAME_FOUND"
   set_env DNSDADDY_SECURE_COOKIES "always"
 else
@@ -425,7 +428,9 @@ if ! command -v caddy >/dev/null 2>&1; then
 else
   ok "caddy already installed"
 fi
-if [[ -n "$HOSTNAME_FOUND" ]]; then
+if [[ $HOSTNAME_KNOWN -eq 0 ]]; then
+  warn "not previewing the Caddy configuration: it follows from the hostname, which this run could not determine"
+elif [[ -n "$HOSTNAME_FOUND" ]]; then
   if [[ $DRY_RUN -eq 0 ]]; then
     [[ -f /etc/caddy/Caddyfile ]] && cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak-$STAMP"
     sed "s/dns\.example\.co\.uk/$HOSTNAME_FOUND/" deploy/Caddyfile.example > /etc/caddy/Caddyfile
@@ -472,7 +477,11 @@ step "Summary"
 printf '  volume        : %s (%s)\n' "$VOL_NAME" "$VOL_SRC"
 printf '  backup        : %s\n' "$NEW_BACKUP"
 printf '  ACL           : %s\n' "${ACL:-NONE — RESOLVER STILL OPEN}"
-printf '  hostname      : %s\n' "${HOSTNAME_FOUND:-NOT CONFIGURED}"
+if [[ $HOSTNAME_KNOWN -eq 0 ]]; then
+  printf '  hostname      : NOT DETERMINED (needs root)\n'
+else
+  printf '  hostname      : %s\n' "${HOSTNAME_FOUND:-NOT CONFIGURED}"
+fi
 printf '  docker boot   : %s\n' "$(systemctl is-enabled docker 2>/dev/null)"
 printf '  compose boot  : %s\n' "$(systemctl is-enabled dnsdaddy-compose 2>/dev/null || echo n/a)"
 printf '  caddy boot    : %s\n' "$(systemctl is-enabled caddy 2>/dev/null || echo n/a)"
