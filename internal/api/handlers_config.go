@@ -171,6 +171,10 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	// Held across the commit and the reload: see API.networkWrites.
+	a.networkWrites.Lock()
+	defer a.networkWrites.Unlock()
+
 	n, err := a.Store.CreateNetwork(r.Context(), body.toInput())
 	if err != nil {
 		writeStoreError(w, err)
@@ -191,15 +195,19 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	a.networkWrites.Lock()
+	defer a.networkWrites.Unlock()
+
 	n, err := a.Store.UpdateNetwork(r.Context(), r.PathValue("id"), body.toInput())
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	a.reloadEngine(r)
-	// n is the merged row the store committed, so this compares the ACL in
-	// force against the result of the write rather than guessing from which
-	// fields the request happened to mention.
+	// n is the merged row the store committed, and networkWrites guarantees no
+	// other network write has landed since, so this compares the ACL in force
+	// against the current stored state rather than against a row another
+	// request has already superseded.
 	_, warning := a.reloadNetworkAccess(r, n, false)
 	writeNetwork(w, http.StatusOK, n, warning)
 }
@@ -209,6 +217,9 @@ func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 	// what comes back is what was deleted rather than what happened to be
 	// stored a moment earlier. A missing network is still reported by the
 	// store, so the 404 stays where it was.
+	a.networkWrites.Lock()
+	defer a.networkWrites.Unlock()
+
 	deleted, err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeStoreError(w, err)

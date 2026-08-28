@@ -50,6 +50,9 @@ type harness struct {
 	// failACLReload breaks the ACL reload without breaking the write it
 	// follows, which is the only way to reach "stored but not in force".
 	failACLReload *atomic.Bool
+	// holdACLReload parks the next reload inside the handler's write lock, so
+	// a test can check what a concurrent write is prevented from doing.
+	holdACLReload *atomic.Pointer[chan struct{}]
 	// dir is the data directory, kept so a test can reopen the database and
 	// check that a setting survived a restart.
 	dir string
@@ -120,9 +123,19 @@ func newHarness(t *testing.T) *harness {
 	// follows. Those are separate failures in production — a transient
 	// database error between the commit and the reload — and there is no
 	// other way to reach the path where a change is stored but not in force.
-	var failACLReload atomic.Bool
+	//
+	// holdACLReload blocks inside the reload, which runs while the handler
+	// holds API.networkWrites. That is the only seam from which a test can
+	// observe whether a second network write is being kept out.
+	var (
+		failACLReload atomic.Bool
+		holdACLReload atomic.Pointer[chan struct{}]
+	)
 	acl := clientacl.NewController(cfg.DNS.AllowedClientCIDRs, cfg.DNS.AllowPublicResolver,
 		func(ctx context.Context) ([]clientacl.Network, error) {
+			if hold := holdACLReload.Swap(nil); hold != nil {
+				<-*hold
+			}
 			if failACLReload.Load() {
 				return nil, errors.New("simulated reload failure")
 			}
@@ -177,8 +190,9 @@ func newHarness(t *testing.T) *harness {
 	jar := &cookieJar{cookies: map[string]*http.Cookie{}}
 	return &harness{
 		t: t, server: srv, store: st, acl: acl, failACLReload: &failACLReload,
-		client:   &http.Client{Jar: jar},
-		detector: detector, lists: lists, feeds: feeds, dir: dir,
+		holdACLReload: &holdACLReload,
+		client:        &http.Client{Jar: jar},
+		detector:      detector, lists: lists, feeds: feeds, dir: dir,
 	}
 }
 

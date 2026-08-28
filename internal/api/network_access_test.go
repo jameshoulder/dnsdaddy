@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func permits(t *testing.T, h *harness, addr string) bool {
@@ -834,4 +837,100 @@ func TestAPatchThatChangesNothingAboutAdmissionDoesNotMarkTheACLStale(t *testing
 		t.Error("re-asserting a permission the network already had marked the ACL stale")
 	}
 	h.failACLReload.Store(false)
+}
+
+// A network write and the ACL reload that follows it have to be one unit, or
+// the row the handler reasons about can be superseded between them.
+//
+// The sequence that breaks it: an earlier PATCH commits while the network
+// still carries a grant, a later PATCH revokes that grant and publishes the
+// revocation, and the earlier handler then reaches its comparison holding the
+// grant-bearing row. It reports a change, and if its own reload fails it marks
+// the ACL stale and warns that access is not in force — while the database and
+// the snapshot both already agree the grant is gone. The policy-engine reload
+// sits between the commit and the ACL reload, so the window is not theoretical.
+//
+// This asserts the property that closes it: while one network write is between
+// its commit and its reload, no other network write can commit.
+func TestANetworkWriteAndItsReloadAreOneUnit(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name":          "Benchmark lab",
+		"cidrs":         []string{"198.18.0.0/15"},
+		"allowResolver": true,
+		"publicAck":     true,
+	})
+	id := decode[map[string]any](t, raw)["id"].(string)
+
+	// Park the next reload inside the first handler's write lock. Released
+	// through a sync.Once registered as cleanup, so a failing assertion below
+	// still unblocks the held request. Without that, the test server's
+	// shutdown waits on it and the failure is reported as a five-minute hang
+	// instead of as the assertion that actually fired.
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unhold := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unhold)
+	h.holdACLReload.Store(&release)
+
+	renamed := make(chan struct{})
+	go func() {
+		defer close(renamed)
+		h.do("PATCH", "/api/v1/networks/"+id, map[string]any{"location": "Leeds"})
+	}()
+
+	// Wait for the rename to be inside its reload, which it signals by having
+	// taken the hold: the seam clears itself when it fires.
+	waitFor(t, func() bool { return h.holdACLReload.Load() == nil })
+
+	revoked := make(chan struct{})
+	go func() {
+		defer close(revoked)
+		h.do("PATCH", "/api/v1/networks/"+id, map[string]any{"allowResolver": false})
+	}()
+
+	// Give the revocation every chance to commit early if it can.
+	time.Sleep(50 * time.Millisecond)
+	current, err := h.store.GetNetwork(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetNetwork: %v", err)
+	}
+	if !current.AllowResolver {
+		t.Fatal("a second network write committed while the first was between its commit and " +
+			"its reload; the first will then compare against a row that has been superseded, " +
+			"and a failed reload there warns that access is not in force when it is not granted")
+	}
+
+	unhold()
+	<-renamed
+	<-revoked
+
+	// And the end state is the later write's, with the ACL agreeing.
+	current, err = h.store.GetNetwork(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetNetwork: %v", err)
+	}
+	if current.AllowResolver {
+		t.Error("the revocation did not land")
+	}
+	if h.acl.Current().Allows(netip.MustParseAddr("198.18.0.1")) {
+		t.Error("the revocation is not in force after both writes completed")
+	}
+	if h.acl.Stale() {
+		t.Error("the ACL was marked stale although every reload succeeded")
+	}
+}
+
+// waitFor polls until cond holds, failing the test rather than hanging forever.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the reload to be held")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

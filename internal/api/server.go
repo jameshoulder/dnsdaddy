@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
@@ -62,6 +63,27 @@ type API struct {
 	// exposure records evidence that the management surface is reachable in
 	// plaintext from the public internet. See internal/api/exposure.go.
 	exposure exposureWatch
+
+	// networkWrites serialises a network write with the ACL reload that
+	// follows it, so the row a handler reasons about cannot be superseded
+	// between the two.
+	//
+	// The reload republishes the whole effective ACL, and the handler then
+	// asks whether *its* write could have changed who is admitted by
+	// comparing the row it committed against the snapshot in force. Both
+	// halves stop being true if another write lands in between: an earlier
+	// handler holding a row that still carries a grant can reach the
+	// comparison after a later handler has revoked that grant and published
+	// the revocation, and would then report a change, mark the ACL stale and
+	// warn that access is not in force — with the database and the snapshot
+	// both already agreeing that it is not granted. The window is real: the
+	// policy engine is reloaded between the commit and the ACL reload.
+	//
+	// Serialising here rather than generation-checking the row, because
+	// network writes are operator actions in a dashboard — a handful in a
+	// session — and the contention is nil. Queries never touch this; they
+	// read the published snapshot with one atomic load.
+	networkWrites sync.Mutex
 }
 
 // New returns an API bound to deps.
