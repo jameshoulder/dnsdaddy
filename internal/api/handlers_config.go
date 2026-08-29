@@ -105,6 +105,9 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 				r.PublicCIDRs = append(r.PublicCIDRs, p.String())
 			}
 		}
+		// Empty for every private network, which is the common case. See
+		// nonNilSlice: the dashboard should not have to guard a documented array.
+		r.PublicCIDRs = nonNilSlice(r.PublicCIDRs)
 		r.Coverage = networkCoverage(acl, n)
 		// Only when the whole row is covered. Shadowed() reports a shadowed
 		// *range*, so a network with two CIDRs of which one sits inside a wider
