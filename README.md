@@ -95,9 +95,42 @@ the code rather than measured end-to-end, and says so.
 | **SIEM-ready** | Newline-delimited JSON with a documented, versioned schema. Wazuh, Elastic, Splunk and Sentinel configurations included. |
 | **Open by construction** | Documented OpenAPI spec, Prometheus metrics, every threat feed listed by URL in [`internal/catalog`](internal/catalog/catalog.go). |
 
+## Prerequisites
+
+The Docker quick start assumes the following are already installed on the Linux
+machine, VM or VPS:
+
+- **Git** — used to clone this repository.
+- **Docker Engine** — used to run DNS Daddy.
+- **Docker Compose v2** — the Compose plugin that provides the modern
+  `docker compose` command (not the legacy `docker-compose` command).
+
+Check them before continuing:
+
+```bash
+git --version
+docker --version
+docker compose version
+```
+
+If any of those commands fail, install the missing prerequisite first. On
+Ubuntu or Debian, Git can be installed with:
+
+```bash
+sudo apt update
+sudo apt install git
+```
+
+For Docker Engine and Docker Compose v2, follow the official
+[Docker installation documentation](https://docs.docker.com/engine/install/)
+for your distribution.
+
+> `./deploy/install-docker.sh` configures and launches DNS Daddy with Docker;
+> it does **not** install Git, Docker Engine or Docker Compose for you.
+
 ## Quick start
 
-Docker Compose, on a Linux machine, VM or VPS:
+With the prerequisites above installed:
 
 ```bash
 git clone https://github.com/jameshoulder/dnsdaddy.git
