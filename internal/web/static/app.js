@@ -189,7 +189,9 @@ function areaChart(buckets) {
   const H = 180;
   const padX = 8;
   const padTop = 12;
-  const padBottom = 26;
+  // The axis moved out of the SVG, so the plot gets the height that used to be
+  // reserved for it.
+  const padBottom = 8;
   const max = Math.max(1, ...buckets.map((b) => b.total));
   const stepX = (W - padX * 2) / Math.max(1, buckets.length - 1);
   const plotH = H - padTop - padBottom;
@@ -207,24 +209,21 @@ function areaChart(buckets) {
   const totalPts = pointsFor('total');
   const blockedPts = pointsFor('blocked');
 
-  // Label roughly every 4 hours so the axis stays legible on a phone. The
-  // first and last labels anchor inward, otherwise a centred label at x=0 is
-  // half-clipped by the viewBox.
+  // The axis is HTML beside the SVG rather than <text> inside it. The plot
+  // stretches to the card with preserveAspectRatio="none", which squashes any
+  // glyph it contains — at phone width the labels were unreadable. Sampling is
+  // uniform, and the last bucket is always included, so spacing them evenly
+  // across the same box puts each label under the point it belongs to.
   const labelEvery = Math.max(1, Math.round(buckets.length / 6));
-  const labels = buckets
-    .map((b, i) => ({ b, i }))
-    .filter(({ i }) => i % labelEvery === 0)
-    .map(({ b, i }) => {
-      const x = padX + i * stepX;
-      const anchor = i === 0 ? 'start' : i >= buckets.length - 1 ? 'end' : 'middle';
-      return `<text x="${x.toFixed(1)}" y="${H - 8}" fill="#a3acba" font-size="10" text-anchor="${anchor}">${esc(b.label)}</text>`;
-    })
-    .join('');
+  const labelIdx = [];
+  for (let i = 0; i < buckets.length; i += labelEvery) labelIdx.push(i);
+  if (labelIdx[labelIdx.length - 1] !== buckets.length - 1) labelIdx.push(buckets.length - 1);
+  const axis = labelIdx.map((i) => html`<span>${buckets[i].label}</span>`).join('');
 
   const gridlines = [0.25, 0.5, 0.75]
     .map((f) => {
       const y = padTop + plotH * f;
-      return `<line x1="${padX}" y1="${y}" x2="${W - padX}" y2="${y}" stroke="#2a313b" stroke-width="1" stroke-dasharray="3 4"/>`;
+      return `<line x1="${padX}" y1="${y}" x2="${W - padX}" y2="${y}" stroke="#232932" stroke-width="1" stroke-dasharray="3 4"/>`;
     })
     .join('');
 
@@ -241,13 +240,13 @@ function areaChart(buckets) {
       <path d="${raw(area(totalPts))}" fill="url(#areaFill)"/>
       <path d="${raw(line(totalPts))}" fill="none" stroke="#bfed6d" stroke-width="2"
             stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-      <path d="${raw(line(blockedPts))}" fill="none" stroke="#f97583" stroke-width="1.75"
+      <path d="${raw(line(blockedPts))}" fill="none" stroke="#ff6b7a" stroke-width="1.75"
             stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-      ${raw(labels)}
     </svg>
+    <div class="chart-axis">${raw(axis)}</div>
     <div class="chart-legend">
       <span><i class="swatch" data-bg="#bfed6d"></i>Total queries · peak ${compact(max)}/h</span>
-      <span><i class="swatch" data-bg="#f97583"></i>Blocked</span>
+      <span><i class="swatch" data-bg="#ff6b7a"></i>Blocked</span>
     </div>
   `;
 }
@@ -949,8 +948,13 @@ function threatIntelPanel(data) {
   const offCount = feeds.filter((f) => f.id !== data.observatoryFeedId && !f.enabled).length;
 
   const row = (feed, extra) => html`
-    <div class="intel-row">
-      <span class="intel-name">${feed.name}</span>
+    <div class="feed-row">
+      <span class="feed-name">${feed.name}</span>
+      ${raw(
+        feed.enabled && feed.loaded && feed.indexedDomains
+          ? html`<span class="feed-meta">${compact(feed.indexedDomains)}</span>`
+          : ''
+      )}
       <span class="intel-status">${raw(extra || feedStatusBadge(feed))}</span>
     </div>
   `;
@@ -986,105 +990,420 @@ function threatIntelPanel(data) {
   `;
 }
 
+/* ---------- dashboard v2 ------------------------------------------------- */
+
+/*
+ * The dashboard answers six questions, in this order:
+ *
+ *   1. Is DNS Daddy operating correctly?      status hero
+ *   2. Is my network protected right now?     status hero
+ *   3. What has it stopped recently?          recently blocked
+ *   4. Is anything requiring my attention?    needs attention
+ *   5. What is happening on my network?       threat activity chart
+ *   6. Are my threat feeds healthy?           threat intelligence
+ *
+ * Everything below is assembled from endpoints that already exist. No figure
+ * on this page is derived from anything the server did not measure, and where
+ * a number cannot be had honestly the component says so rather than showing a
+ * zero — a zero and an unknown look identical, and only one of them is safe to
+ * act on.
+ */
+
+/**
+ * The hero's wording, taken from the server's protection status and nothing
+ * else.
+ *
+ * The three states are the server's, with its own definitions restated in
+ * plain English: `offline` means the blocklist is empty, `degraded` means it
+ * is loaded but no policy enforces a category or a domain. Neither means the
+ * process is down, so neither is worded that way — an operator reading
+ * "Offline" about a resolver that is answering every query learns the wrong
+ * thing and goes looking for the wrong fault.
+ */
+const PROTECTION_STATES = {
+  protected: {
+    tone: 'ok',
+    word: 'Protected',
+    line: 'DNS protection is active. Queries are checked against the loaded threat intelligence before they are answered.',
+  },
+  degraded: {
+    tone: 'warn',
+    word: 'Not enforcing',
+    line: 'Threat intelligence is loaded, but no policy blocks anything with it, so nothing is being stopped yet.',
+  },
+  offline: {
+    tone: 'bad',
+    word: 'Not blocking',
+    line: 'No threat intelligence is loaded. DNS Daddy is answering queries without checking any of them.',
+  },
+};
+
+function protectionState(status) {
+  return (
+    PROTECTION_STATES[status] || {
+      tone: 'warn',
+      word: String(status || 'Unknown'),
+      line: 'The server reported a protection status this dashboard does not recognise. Run dnsdaddy doctor for the authoritative report.',
+    }
+  );
+}
+
+/**
+ * Feed health across every enabled feed, graded by exactly the rule
+ * feedStatusBadge uses for a single row: `loaded` decides whether a feed is
+ * blocking, and the download history never does.
+ *
+ * Disabled feeds are excluded on purpose. A feed the operator switched off is
+ * a decision, not a fault, and counting it as unhealthy would put a permanent
+ * warning on a deliberately minimal install.
+ */
+function feedHealth(data) {
+  const all = (data && data.feeds) || [];
+  const enabled = all.filter((f) => f.enabled);
+  const broken = enabled.filter((f) => !f.loaded);
+  const stale = enabled.filter((f) => f.loaded && f.lastError);
+
+  if (!enabled.length) {
+    return {
+      tone: 'bad',
+      label: 'No threat intelligence enabled',
+      enabled,
+      broken,
+      stale,
+    };
+  }
+  if (broken.length) {
+    return {
+      tone: 'bad',
+      label: `${broken.length} of ${enabled.length} feeds not blocking`,
+      enabled,
+      broken,
+      stale,
+    };
+  }
+  if (stale.length) {
+    return {
+      tone: 'warn',
+      label: `${stale.length} of ${enabled.length} feeds stale`,
+      enabled,
+      broken,
+      stale,
+    };
+  }
+  return { tone: 'ok', label: 'Threat intelligence healthy', enabled, broken, stale };
+}
+
+function toneBadgeClass(tone) {
+  return tone === 'bad' ? 'bad' : tone === 'warn' ? 'warn' : 'ok';
+}
+
+/**
+ * The status block the page opens with.
+ *
+ * The dot and the word are driven by the protection status alone; feed health
+ * gets its own labelled badge underneath rather than being folded into the
+ * headline. Mixing them would produce an amber dot over the word "Protected",
+ * which is the kind of composite status nobody can act on.
+ *
+ * Nothing here relies on colour: every state that has a colour also has a word
+ * beside it, and the dot's shape changes with severity.
+ */
+function statusHero(overview, feedsData, detections) {
+  const state = protectionState(overview.protectionStatus);
+  const intel = feedHealth(feedsData);
+  const indexed = (feedsData && feedsData.totalIndexedDomains) || 0;
+
+  // Behavioural detection has three answers and they are not interchangeable.
+  // A zero says "nothing suspicious happened"; nobody measured that when the
+  // detector is switched off, and nobody measured it when the request failed
+  // either. Only a count that came back gets rendered as a count.
+  let detectionStat;
+  if (!detections) {
+    detectionStat = html`<div class="hero-stat"><span class="n muted">—</span><span class="k">Detections</span></div>`;
+  } else if (detections.enabled === false) {
+    detectionStat = html`<div class="hero-stat"><span class="n muted">Off</span><span class="k">Detections</span></div>`;
+  } else {
+    detectionStat = html`<div class="hero-stat is-detect"><span class="n">${num(detections.total)}</span><span class="k">Detections</span></div>`;
+  }
+
+  return html`
+    <section class="hero is-${state.tone}" aria-label="Protection status">
+      <div class="hero-top">
+        <div class="hero-state">
+          <span class="hero-dot" aria-hidden="true"></span>
+          <div>
+            <h2 class="hero-word">${state.word}</h2>
+            <p class="hero-sub">${state.line}</p>
+            <p class="hero-sub hero-intel">
+              <span class="badge ${toneBadgeClass(intel.tone)}">${intel.label}</span>
+              <span>${num(indexed)} domains indexed${intel.enabled.length ? ` across ${intel.enabled.length} enabled feed${intel.enabled.length === 1 ? '' : 's'}` : ''}</span>
+            </p>
+          </div>
+        </div>
+        <div class="hero-period"><span class="badge">Last 24 hours</span></div>
+      </div>
+      <div class="hero-stats">
+        <div class="hero-stat"><span class="n">${num(overview.queries24h)}</span><span class="k">DNS queries</span></div>
+        <div class="hero-stat is-blocked"><span class="n">${num(overview.threatsBlocked24h)}</span><span class="k">Threats blocked</span></div>
+        <div class="hero-stat"><span class="n">${overview.blockRate24h}%</span><span class="k">Of all queries</span></div>
+        ${raw(detectionStat)}
+      </div>
+    </section>
+  `;
+}
+
+/**
+ * Everything the server currently reports as wrong, in one list.
+ *
+ * The two sources are the diagnostics endpoint — which is authoritative for
+ * configuration and stays so; nothing here second-guesses it — and feed health
+ * graded by the same rule the feed badges use. An operator should not have to
+ * decide which of two panels is the real one, so there is only one.
+ *
+ * A diagnostics request that failed is itself an item. The alternative is a
+ * page that quietly reports "nothing needs attention" on the strength of
+ * checks it never received, which is the single most misleading thing this
+ * panel could do.
+ */
+function attentionItems(diagnostics, feedsData) {
+  const items = [];
+
+  if (!diagnostics) {
+    items.push({
+      tone: 'warn',
+      title: 'Configuration checks unavailable',
+      body: 'The diagnostics endpoint did not answer, so this page cannot confirm the configuration is sound. Run dnsdaddy doctor on the server.',
+    });
+  } else if (Array.isArray(diagnostics.checks)) {
+    for (const c of diagnostics.checks) {
+      if (c.status !== 'fail' && c.status !== 'warn') continue;
+      items.push({
+        tone: c.status === 'fail' ? 'bad' : 'warn',
+        title: c.name || c.section || 'Configuration',
+        body: [c.summary, c.action].filter(Boolean).join(' '),
+      });
+    }
+  }
+
+  const health = feedHealth(feedsData);
+  if (!health.enabled.length) {
+    items.push({
+      tone: 'bad',
+      title: 'No threat intelligence is enabled',
+      body: 'Every feed is switched off, so no domain is being blocked from intelligence. Enable at least one source on the Threat intelligence page.',
+    });
+  }
+  for (const f of health.broken) {
+    items.push({
+      tone: 'bad',
+      title: `${f.name} is not blocking`,
+      body: f.lastSuccessAt
+        ? `This feed downloaded successfully before, but its contents are not in the index answering queries right now. ${f.loadError || ''}`.trim()
+        : `This feed has never produced a usable download. ${f.lastError || ''}`.trim(),
+    });
+  }
+  for (const f of health.stale) {
+    items.push({
+      tone: 'warn',
+      title: `${f.name} is stale`,
+      body: `The last known good copy is still indexed and still blocking, but the most recent refresh failed. ${f.lastError || ''}`.trim(),
+    });
+  }
+
+  return items;
+}
+
+function attentionPanel(items) {
+  const bad = items.filter((i) => i.tone === 'bad').length;
+
+  const body = items.length
+    ? items
+        .map(
+          (i) => html`
+            <div class="attn-item ${i.tone === 'bad' ? 'is-bad' : ''}">
+              <span class="badge ${toneBadgeClass(i.tone)} attn-badge">${i.tone === 'bad' ? 'Fault' : 'Warning'}</span>
+              <div class="attn-body">
+                <strong>${i.title}</strong>
+                <p>${i.body}</p>
+              </div>
+            </div>`
+        )
+        .join('')
+    : html`
+        <div class="attn-clear">
+          <span class="hero-dot" aria-hidden="true"></span>
+          <div class="attn-body">
+            <strong>Nothing needs your attention</strong>
+            <p>Every configuration check passed, and every enabled feed is loaded and refreshing.</p>
+          </div>
+        </div>`;
+
+  const lede = items.length
+    ? `${items.length} item${items.length === 1 ? '' : 's'}${bad ? ` · ${bad} blocking` : ''}`
+    : 'Configuration checks and feed health.';
+
+  return html`
+    <div class="card">
+      <div class="card-head">
+        <div><h2>Needs attention</h2><p>${lede}</p></div>
+        <div class="row-end"><a class="btn btn-ghost btn-sm" href="#/setup">Setup</a></div>
+      </div>
+      ${raw(body)}
+    </div>
+  `;
+}
+
+/**
+ * The most recent blocked queries, exactly as logged.
+ *
+ * Domains are monospace so a typosquat is visible as one, and nothing beside
+ * them is invented: the category is the category the resolver filed the block
+ * under, the client is the client it attributed, and a query with neither
+ * shows neither. The full prose reason and the feed it came from are a click
+ * away in the query log rather than guessed at here.
+ */
+function recentlyBlocked(rows) {
+  if (!rows || !rows.length) {
+    return emptyState(
+      'Nothing blocked in the log yet',
+      'Either the query log is switched off, or nothing resolving through DNS Daddy has asked for a blocked domain yet.',
+      { icon: '⃠', action: '<a class="btn btn-ghost btn-sm" href="#/threats">Open Threats</a>' }
+    );
+  }
+  return rows
+    .map(
+      (q) => html`
+        <div class="dom-row">
+          <span class="dom-name">${q.domain}</span>
+          <span class="dom-meta">
+            ${raw(q.category ? categoryBadge(q.category) : '')}
+            ${raw(q.clientName || q.clientIp ? html`<span class="mono">${q.clientName || q.clientIp}</span>` : '')}
+            <span>${relTime(q.time)}</span>
+          </span>
+        </div>`
+    )
+    .join('');
+}
+
+/**
+ * Which kinds of threat were blocked, as a share of the blocks in the period.
+ *
+ * Deliberately not a progress bar: the meter is a proportion of the largest
+ * category, and the count that produced it is stated beside it, because a bar
+ * on its own invites the reading that something is filling up.
+ */
+function protectionBreakdown(rows) {
+  if (!rows || !rows.length) {
+    return emptyState(
+      'No blocks in this period',
+      'When DNS Daddy blocks something, the category it was blocked under appears here.',
+      { icon: '◔' }
+    );
+  }
+  const max = Math.max(...rows.map((r) => r.count));
+  const total = rows.reduce((sum, r) => sum + r.count, 0);
+  return rows
+    .map((r) => {
+      const share = total ? Math.round((r.count / total) * 100) : 0;
+      const width = Math.max(2, (r.count / max) * 100).toFixed(1);
+      return html`
+        <div class="cat-row">
+          <span class="cat-name">${r.label}</span>
+          <span class="cat-n">${num(r.count)} · ${raw(String(share))}%</span>
+          <span class="cat-meter"><span data-width="${raw(width)}" data-bg="${colourFor(r.category)}"></span></span>
+        </div>`;
+    })
+    .join('');
+}
+
 /* ---------- pages ------------------------------------------------------- */
 
 const pages = {};
 
 pages.dashboard = {
   title: 'Dashboard',
-  subtitle: 'What your network asked for, and what was stopped.',
+  subtitle: 'Protection status, recent activity, and anything that needs you.',
   async render() {
-    const [overview, activity, categories, top, feeds, diagnostics] = await Promise.all([
+    const [overview, activity, categories, recent, feeds, diagnostics, detections] = await Promise.all([
       apiGet('/overview'),
       apiGet('/activity/queries?hours=24'),
       apiGet('/threats/categories?hours=24'),
-      apiGet('/threats/top-domains?days=7&limit=8'),
+      // The actual blocked queries rather than a 7-day leaderboard: "what has
+      // it stopped recently" is a question about the log, and the log is what
+      // answers it.
+      apiGet('/queries?action=blocked&limit=8').catch(() => null),
       apiGet('/feeds'),
-      // Tolerate failure: a dashboard that will not load because the
-      // diagnostics endpoint is unavailable is a worse outcome than a
-      // dashboard without a banner.
+      // Both of these are tolerated failures. A dashboard that will not load
+      // because one panel's endpoint is unavailable is a worse outcome than a
+      // dashboard that says which panel it could not fill — and both say so
+      // rather than rendering an unearned zero.
       apiGet('/diagnostics').catch(() => null),
+      apiGet('/findings/summary?days=1').catch(() => null),
     ]);
     this.feeds = feeds;
 
-    const catRows = categories.categories.map((c) => ({
+    const catRows = (categories.categories || []).map((c) => ({
       label: c.label,
       count: c.count,
       category: c.category,
     }));
 
+    const buckets = activity.buckets || [];
+    const hadTraffic = buckets.some((b) => b.total > 0);
+
     return html`
-      ${raw(diagnosticsBanner(diagnostics))}
+      ${raw(statusHero(overview, feeds, detections))}
+      ${raw(attentionPanel(attentionItems(diagnostics, feeds)))}
       ${raw(firstClientCard(overview))}
-      <div class="section grid grid-4">
-        ${raw(metricCard({
-          label: 'Protection',
-          value: raw(statusBadge(overview.protectionStatus)),
-          sub: `${num(overview.blocklistDomains)} domains indexed`,
-        }))}
-        ${raw(metricCard({
-          label: 'Queries (24h)',
-          value: compact(overview.queries24h),
-          sub: `${num(overview.queries24h)} total`,
-        }))}
-        ${raw(metricCard({
-          label: 'Threats blocked (24h)',
-          value: compact(overview.threatsBlocked24h),
-          sub: `${overview.blockRate24h}% of all queries`,
-          tone: 'accent',
-        }))}
-        ${raw(metricCard({
-          label: 'Networks',
-          value: overview.protectedNetworks,
-          sub: `${overview.activePolicies} polic${overview.activePolicies === 1 ? 'y' : 'ies'}`,
-        }))}
-      </div>
 
       <div class="section card">
         <div class="card-head">
           <div>
-            <h2>Query activity</h2>
-            <p>Last 24 hours, hourly buckets.</p>
+            <h2>Threat activity</h2>
+            <p>Queries and blocks over the last 24 hours, in hourly buckets.</p>
           </div>
+          <div class="row-end"><a class="btn btn-ghost btn-sm" href="#/queries">Query log</a></div>
         </div>
-        ${raw(areaChart(activity.buckets))}
+        ${raw(
+          hadTraffic
+            ? html`<div class="chart-wrap">${raw(areaChart(buckets))}</div>`
+            : emptyState(
+                'No DNS activity observed yet',
+                'DNS Daddy is running and has not been asked to resolve anything in the last 24 hours. Point a device at it and the traffic will appear here.',
+                { icon: '∿', action: '<a class="btn btn-ghost btn-sm" href="#/setup">Setup guide</a>' }
+              )
+        )}
       </div>
 
       <div class="section grid grid-2">
         <div class="card">
-          <div class="card-head"><div><h2>Threats by category</h2><p>Last 24 hours.</p></div></div>
-          ${raw(barList(catRows))}
+          <div class="card-head">
+            <div><h2>Recently blocked</h2><p>Newest first, as recorded in the query log.</p></div>
+            <div class="row-end"><a class="btn btn-ghost btn-sm" href="#/threats">All threats</a></div>
+          </div>
+          ${raw(recentlyBlocked(recent ? recent.queries : null))}
         </div>
         <div class="card">
-          <div class="card-head"><div><h2>Most blocked domains</h2><p>Last 7 days.</p></div></div>
-          ${raw(
-            top.domains.length
-              ? html`<div class="table-wrap"><table>
-                  <thead><tr><th>Domain</th><th>Category</th><th class="num">Blocks</th></tr></thead>
-                  <tbody>${raw(
-                    top.domains
-                      .map(
-                        (d) => html`<tr>
-                          <td class="mono">${d.domain}</td>
-                          <td>${raw(categoryBadge(d.category))}</td>
-                          <td class="num">${num(d.count)}</td>
-                        </tr>`
-                      )
-                      .join('')
-                  )}</tbody></table></div>`
-              : emptyState('Nothing blocked yet', 'Blocked domains appear here once devices resolve through DNS Daddy.', { icon: '⚠' })
-          )}
+          <div class="card-head">
+            <div><h2>Protection breakdown</h2><p>What was blocked in the last 24 hours, by category.</p></div>
+          </div>
+          ${raw(protectionBreakdown(catRows))}
         </div>
       </div>
 
       <div class="section grid grid-2">
         ${raw(threatIntelPanel(feeds))}
         <div class="card">
-          <div class="card-head"><div><h2>Resolver</h2><p>Uptime and feed freshness.</p></div></div>
+          <div class="card-head">
+            <div><h2>Resolver</h2><p>What this instance is doing, and for whom.</p></div>
+          </div>
           <div class="grid grid-3">
             <div><div class="label muted small">STATUS</div><div>${raw(statusBadge(overview.resolverStatus))}</div></div>
             <div><div class="label muted small">UPTIME</div><div>${duration(overview.uptimeSeconds)}</div></div>
             <div><div class="label muted small">FEEDS REFRESHED</div><div>${relTime(overview.lastFeedRefresh)}</div></div>
+            <div><div class="label muted small">NETWORKS</div><div>${num(overview.protectedNetworks)}</div></div>
+            <div><div class="label muted small">POLICIES</div><div>${num(overview.activePolicies)}</div></div>
+            <div><div class="label muted small">VERSION</div><div class="mono small">${overview.version}</div></div>
           </div>
         </div>
       </div>
@@ -1290,6 +1609,14 @@ pages.queries = {
       }
     });
     $('#q-more').addEventListener('click', () => load(true));
+
+    // Arrived here from the topbar search. Prefill and consume it, so a later
+    // visit to this page is not still filtered by something typed once.
+    if (this.pendingDomain) {
+      $('#q-domain').value = this.pendingDomain;
+      this.pendingDomain = '';
+    }
+
     await load(false);
   },
 };
@@ -2736,12 +3063,26 @@ function bindCopyButtons() {
 
 /* ---------- router ------------------------------------------------------ */
 
+/**
+ * Which page a location hash selects.
+ *
+ * Pulled out of the router so it can be tested without a window: the routes in
+ * the sidebar and the routes the router will actually serve have to be the
+ * same set, and the redesign moved every link in that sidebar.
+ *
+ * Unknown hashes fall back to the dashboard rather than erroring, so an old
+ * bookmark lands somewhere useful.
+ */
+function routeName(hash) {
+  const name = String(hash || '').replace(/^#\/?/, '').split('?')[0];
+  return pages[name] ? name : 'dashboard';
+}
+
 const router = {
   current: 'dashboard',
 
   route() {
-    const hash = window.location.hash.replace(/^#\/?/, '') || 'dashboard';
-    return pages[hash] ? hash : 'dashboard';
+    return routeName(window.location.hash);
   },
 
   async navigate() {
@@ -2842,6 +3183,22 @@ async function boot() {
 
   $('#menu-btn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
 
+  // The search box goes to the Query log filtered by what was typed. That is
+  // the whole of what it claims to do, and the whole of what the API supports
+  // today: there is no cross-page investigation index behind it, so it does
+  // not pretend to be one.
+  $('#search-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const term = $('#global-search').value.trim();
+    if (!term) return;
+    pages.queries.pendingDomain = term;
+    if (router.route() === 'queries') {
+      router.reload();
+    } else {
+      window.location.hash = '#/queries';
+    }
+  });
+
   window.addEventListener('hashchange', () => router.navigate());
 
   // Keep the dashboard fresh without hammering a single-vCPU box.
@@ -2903,5 +3260,14 @@ if (typeof module !== 'undefined' && module.exports) {
     clientAccessSummary,
     resolverAccessNote,
     emptyState,
+    protectionState,
+    feedHealth,
+    statusHero,
+    attentionItems,
+    attentionPanel,
+    recentlyBlocked,
+    protectionBreakdown,
+    pages,
+    routeName,
   };
 }
