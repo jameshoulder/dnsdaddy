@@ -103,16 +103,35 @@ dns:
 http:
   # Dashboard and management API.
   #
-  #   ":8080"             every interface — right on a LAN, wrong on a VPS
-  #   "192.168.1.75:8080" one interface
-  #   "127.0.0.1:8080"    loopback only — the correct choice on anything
-  #                       internet-facing, with a TLS reverse proxy in front
+  #   "127.0.0.1:8080"    loopback only — the default, and the only address
+  #                       that is safe without knowing anything about the host
+  #   "192.168.1.75:8080" one named LAN interface — the home/LAN deployment
+  #   ":8080"             every interface, including the public one on a VPS.
+  #                       Refused unless allow_public_bind is also set.
   #
   # The API is authenticated but travels in plaintext, so what matters is who
-  # can reach the port. deploy/install.sh picks loopback automatically when
-  # this machine's primary address is public, and DNS Daddy reports it if a
-  # management request ever arrives over plain HTTP from a public address.
-  listen: ":8080"
+  # can reach the port. On anything internet-facing, keep this on loopback and
+  # terminate TLS in front of it (deploy/Caddyfile.example), or reach it over
+  # an SSH tunnel:
+  #
+  #   ssh -L 8080:127.0.0.1:8080 you@your-server
+  #
+  # DNS Daddy reports it if a management request ever arrives over plain HTTP
+  # from a public address.
+  listen: "127.0.0.1:8080"
+
+  # Acknowledgement required before the management interface may bind a
+  # wildcard (":8080", "0.0.0.0", "[::]") or a globally routable address.
+  #
+  # A named private address such as "192.168.1.75:8080" does NOT need this —
+  # typing that address is already a statement of intent. What this gates is
+  # the shape that publishes more than the operator was picturing: on a VPS,
+  # ":8080" is the whole internet, and it looks exactly like the ":8080" that
+  # is harmless on a laptop.
+  #
+  # Setting this without TLS in front puts an admin session cookie on the
+  # wire. There is almost always a better answer than turning it on.
+  allow_public_bind: false
 
   # Leave empty and a password is generated on first run, written to
   # <data_dir>/initial-password.txt and printed once to the log.

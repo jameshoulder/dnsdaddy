@@ -68,28 +68,49 @@ else
 fi
 
 # --- 2. application health -------------------------------------------------
+#
+# /api/v1/health answers in two tiers. Every caller gets {"status":"ok"} —
+# liveness and nothing else, because in the HTTPS deployment that endpoint is
+# published to the internet. The protection state comes back only for a caller
+# the server considers entitled: an authenticated one, or one whose peer
+# address is loopback.
+#
+# Run from the host against a published Docker port, this script is NOT a
+# loopback peer — Docker translates the source address to the bridge gateway —
+# so it sees liveness only. That is why the depth check below runs inside the
+# container when it can, and says plainly what it could not verify when it
+# cannot. Announcing "protected" without having looked is the failure this
+# whole script exists to avoid.
 body=$(curl -fsS --max-time 5 "$API/api/v1/health" 2>/dev/null) || body=""
 if [[ -z "$body" ]]; then
   fail "no response from $API/api/v1/health"
 else
   app_status=$(printf '%s' "$body" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
-  blocklist=$(printf '%s' "$body" | sed -n 's/.*"blocklistSize":\([0-9]*\).*/\1/p')
-  case "$app_status" in
-    ok)
-      if [[ "${blocklist:-0}" -gt 0 ]]; then
-        ok "api healthy (status=ok, blocklist=$blocklist domains)"
-      else
-        warn "api reports ok but the blocklist is empty — nothing is being filtered"
-      fi
-      ;;
-    degraded)
-      warn "api reports degraded (blocklist=$blocklist) — resolving but not protecting"
-      say "      feeds may still be downloading; if this persists, refresh them"
-      ;;
-    *)
-      fail "api returned an unexpected status: $body"
-      ;;
-  esac
+  if [[ "$app_status" != "ok" ]]; then
+    fail "api returned an unexpected status: $body"
+  else
+    ok "api responding (status=ok)"
+
+    # Depth. Ask from inside the container, where the peer really is loopback.
+    detail=""
+    if [[ -n "${COMPOSE_CMD:-}" ]] || command -v docker >/dev/null 2>&1; then
+      detail=$(docker exec dnsdaddy wget -qO- http://127.0.0.1:8080/api/v1/health 2>/dev/null || true)
+    fi
+    if [[ -z "$detail" ]]; then
+      detail=$(curl -fsS --max-time 5 "$API/api/v1/health" 2>/dev/null || true)
+    fi
+
+    protecting=$(printf '%s' "$detail" | sed -n 's/.*"protecting":\(true\|false\).*/\1/p')
+    blocklist=$(printf '%s' "$detail" | sed -n 's/.*"blocklistSize":\([0-9]*\).*/\1/p')
+    case "$protecting" in
+      true)  ok "filtering in force (blocklist=${blocklist:-?} domains)" ;;
+      false) warn "the resolver answers but the blocklist is empty — nothing is being filtered"
+             say "      feeds may still be downloading; if this persists, refresh them" ;;
+      *)     say "note  could not read the protection state: this check has to run where the"
+             say "      health endpoint sees a loopback peer, or with an API token."
+             say "      Try: docker exec dnsdaddy dnsdaddy doctor" ;;
+    esac
+  fi
 fi
 
 # --- 3. DNS actually answering --------------------------------------------

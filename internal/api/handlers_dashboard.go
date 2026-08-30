@@ -13,14 +13,38 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
 
-// HealthResponse is the unauthenticated liveness payload. It deliberately
-// exposes no configuration — just enough for a monitor or status page to tell
-// whether the resolver is answering.
+// HealthResponse is the liveness payload.
+//
+// Two tiers, in one endpoint. What every caller gets is Status and nothing
+// else; the pointer fields are populated only for a caller that has proved it
+// is entitled to them, and are omitted entirely otherwise.
+//
+// The split exists because this is the one management-API path that is
+// deliberately unauthenticated, which means that in the HTTPS deployment it is
+// also the one path Caddy publishes to the internet. It used to answer any
+// stranger with the version (pick the right CVE), the uptime (when was it last
+// patched, and when did it last crash), the exact size of the threat index
+// (which feeds are loaded, and whether filtering is on at all), and whether a
+// configuration reload had failed. None of that helps a monitor decide whether
+// to page someone; all of it helps somebody decide whether this host is worth
+// their time.
 type HealthResponse struct {
-	Status        string `json:"status"`
-	Version       string `json:"version"`
-	UptimeSeconds int64  `json:"uptimeSeconds"`
-	BlocklistSize int    `json:"blocklistSize"`
+	// Status is "ok" whenever the process is up and serving. Deliberately not
+	// a protection verdict: "this resolver is currently filtering nothing" is
+	// an answer for the operator, not for the internet, and it now lives in
+	// Protecting below.
+	Status string `json:"status"`
+
+	// --- detail, for entitled callers only -----------------------------------
+
+	Version       *string `json:"version,omitempty"`
+	UptimeSeconds *int64  `json:"uptimeSeconds,omitempty"`
+	BlocklistSize *int    `json:"blocklistSize,omitempty"`
+
+	// Protecting reports whether the threat index has anything in it. This is
+	// the question `deploy/healthcheck.sh` is really asking, and the reason it
+	// used to read blocklistSize.
+	Protecting *bool `json:"protecting,omitempty"`
 
 	// ClientACLStale reports that the resolver could not re-read its
 	// configuration after a change, so the client access it is enforcing could
@@ -30,35 +54,61 @@ type HealthResponse struct {
 	// actually differ is not knowable here: working it out needs the reading
 	// that just failed.
 	//
-	// Here, on the unauthenticated endpoint, because it is the only way
-	// `dnsdaddy doctor` can see it. doctor runs as a separate process and
-	// rebuilds the ACL from configuration and the database — that is the
-	// *desired* state, and this flag lives only in the running daemon's
-	// memory. Without it doctor would report nothing at all while the daemon
-	// might be honouring a prefix the operator had deleted, which is exactly
-	// the misleading green that command exists to remove.
-	//
-	// It reveals nothing: a boolean saying a reload failed, not what the ACL
-	// contains. The same endpoint already reports the blocklist size for the
-	// same reason.
-	ClientACLStale bool `json:"clientAclStale"`
+	// `dnsdaddy doctor` needs it, which is why the loopback tier below exists:
+	// doctor runs as a separate process and rebuilds the ACL from
+	// configuration and the database — that is the *desired* state, and this
+	// flag lives only in the running daemon's memory. Without it doctor would
+	// report nothing at all while the daemon might be honouring a prefix the
+	// operator had deleted, which is exactly the misleading green that command
+	// exists to remove.
+	ClientACLStale *bool `json:"clientAclStale,omitempty"`
+}
+
+// healthDetailPermitted decides whether a caller may see more than liveness.
+//
+// Two ways in, and the second is the interesting one:
+//
+//	authenticated       a session or an API token — the ordinary answer
+//	a loopback peer     the process is on this machine already
+//
+// The loopback tier is what keeps `dnsdaddy doctor` and the container's own
+// HEALTHCHECK working without inventing a credential for them. It is decided
+// from httpx.PeerAddr — the address that actually opened the socket — and
+// never from a forwarding header, so `X-Forwarded-For: 127.0.0.1` buys
+// nothing. That distinction is the whole control: in the HTTPS deployment
+// Caddy reaches the container from the Docker bridge gateway rather than from
+// loopback, so a request that arrived from the internet is not loopback no
+// matter what it claims about itself.
+//
+// TestHealthDetailIgnoresForwardedLoopbackClaims is the regression test.
+func (a *API) healthDetailPermitted(r *http.Request) bool {
+	if _, ok := a.Auth.authenticate(r); ok {
+		return true
+	}
+	return httpx.PeerAddr(r).IsLoopback()
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
-	size := a.Lists.Load().Len()
-	status := "ok"
-	// An empty index means feeds have never loaded; the resolver still works
-	// but it is not protecting anyone, and a monitor should say so.
-	if size == 0 {
-		status = "degraded"
+	// Liveness, for everyone. "ok" means the process is up and answering; it
+	// is not a claim that the network is protected, and nothing about how this
+	// instance is configured is inferable from it.
+	resp := HealthResponse{Status: "ok"}
+
+	if a.healthDetailPermitted(r) {
+		size := a.Lists.Load().Len()
+		protecting := size > 0
+		ver := version.String()
+		uptime := int64(time.Since(a.StartedAt).Seconds())
+		stale := a.ClientACL.Stale()
+
+		resp.Version = &ver
+		resp.UptimeSeconds = &uptime
+		resp.BlocklistSize = &size
+		resp.Protecting = &protecting
+		resp.ClientACLStale = &stale
 	}
-	writeJSON(w, http.StatusOK, HealthResponse{
-		Status:         status,
-		Version:        version.String(),
-		UptimeSeconds:  int64(time.Since(a.StartedAt).Seconds()),
-		BlocklistSize:  size,
-		ClientACLStale: a.ClientACL.Stale(),
-	})
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // settingFirstClientSeen records the first time a device on the network used

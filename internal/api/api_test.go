@@ -56,6 +56,10 @@ type harness struct {
 	// dir is the data directory, kept so a test can reopen the database and
 	// check that a setting survived a restart.
 	dir string
+	// api is the API itself, for tests that must call a handler directly
+	// rather than over the loopback listener — the health tests need a peer
+	// address that is not loopback, and httptest only serves 127.0.0.1.
+	api *API
 }
 
 func newHarness(t *testing.T) *harness {
@@ -189,7 +193,7 @@ func newHarness(t *testing.T) *harness {
 
 	jar := &cookieJar{cookies: map[string]*http.Cookie{}}
 	return &harness{
-		t: t, server: srv, store: st, acl: acl, failACLReload: &failACLReload,
+		t: t, server: srv, store: st, acl: acl, api: api, failACLReload: &failACLReload,
 		holdACLReload: &holdACLReload,
 		client:        &http.Client{Jar: jar},
 		detector:      detector, lists: lists, feeds: feeds, dir: dir,

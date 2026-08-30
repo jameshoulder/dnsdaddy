@@ -70,8 +70,27 @@ paths:
   /api/v1/health:
     get:
       tags: [Status]
-      summary: Liveness and blocklist readiness
+      summary: Liveness
       security: []
+      description: |
+        Answers in two tiers.
+
+        **Every caller** gets `{"status":"ok"}` and nothing else. In the HTTPS
+        deployment this is the one management path the reverse proxy publishes
+        to the internet, so it describes neither the configuration nor the
+        protection state of this instance.
+
+        **An entitled caller** additionally gets `version`, `uptimeSeconds`,
+        `blocklistSize`, `protecting` and `clientAclStale`. Two things count as
+        entitled: an authenticated request (session cookie or bearer token),
+        and a request whose peer address is loopback — which is how
+        `dnsdaddy doctor` and the container's own health check read the live
+        index without a credential.
+
+        The loopback tier is decided from the address that opened the socket
+        and never from a forwarding header, so `X-Forwarded-For: 127.0.0.1`
+        does not reach it. Behind a reverse proxy the peer is the proxy, not
+        loopback.
       responses:
         "200":
           description: Resolver status
@@ -79,28 +98,37 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [status, version, uptimeSeconds, blocklistSize]
+                required: [status]
                 properties:
                   status:
                     type: string
-                    enum: [ok, degraded]
-                    description: "`degraded` means no blocklist is loaded: the resolver answers, but filters nothing."
-                  version: { type: string }
-                  uptimeSeconds: { type: integer, format: int64 }
-                  blocklistSize: { type: integer }
+                    enum: [ok]
+                    description: |
+                      The process is up and serving. Not a protection verdict —
+                      see `protecting`, which requires entitlement.
+                  version:
+                    type: string
+                    description: Entitled callers only.
+                  uptimeSeconds:
+                    type: integer
+                    format: int64
+                    description: Entitled callers only.
+                  blocklistSize:
+                    type: integer
+                    description: Entitled callers only.
+                  protecting:
+                    type: boolean
+                    description: |
+                      Whether the threat index has anything in it. False means
+                      the resolver answers but filters nothing. Entitled
+                      callers only.
                   clientAclStale:
                     type: boolean
                     description: |
                       The resolver could not re-read its configuration after a
                       change, so the client access it is enforcing could not be
-                      confirmed to match what is stored.
-
-                      On the unauthenticated endpoint because it is the only
-                      way `dnsdaddy doctor` can see it: doctor runs as a
-                      separate process and rebuilds the ACL from configuration
-                      and the database, which is the *desired* state, while
-                      this flag lives in the running daemon's memory. It
-                      reveals nothing about what the ACL contains.
+                      confirmed to match what is stored. It reveals nothing
+                      about what the ACL contains. Entitled callers only.
 
   /api/v1/auth/login:
     post:
