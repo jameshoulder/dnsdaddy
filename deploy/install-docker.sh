@@ -20,7 +20,10 @@
 #                  Say this explicitly; it is never inferred, because a
 #                  private address on the NIC does not mean the host has no
 #                  public one.
-#   --vps          keep the dashboard on loopback (the default)
+#   --vps          keep the dashboard on loopback, reached over SSH (the default)
+#   --https        keep the dashboard on loopback and put Caddy in front of it,
+#                  serving https://<hostname>. Needs DNSDADDY_HTTPS_HOSTNAME
+#                  when run non-interactively.
 #   --help, -h     this message
 #
 # For a native systemd install instead, use deploy/install.sh.
@@ -38,6 +41,17 @@ PURGE_DATA=0
 # flag: an unattended run must never end up publishing a management API
 # because something about the machine looked private.
 DEPLOYMENT=""
+# What already serves 80/443, discovered in check_ports and reported in the
+# summary. Empty means nothing was listening. Never acted on: see check_ports.
+WEB_80_OWNER=""
+WEB_443_OWNER=""
+
+# HTTPS mode (option 3). HTTPS_STATE is one of "", conflict, failed, pending,
+# dry-run or active, and only configure_https sets it — never on the strength
+# of having run the commands, only after the URL answers.
+HTTPS_HOSTNAME=""
+HTTPS_STATE=""
+
 # Where the dashboard ends up published, or empty for loopback. Declared here
 # so every path — install, upgrade — has a defined value before the closing
 # report reads it.
@@ -56,6 +70,7 @@ for arg in "$@"; do
     --yes|-y)    ASSUME_YES=1 ;;
     --lan)       DEPLOYMENT="lan" ;;
     --vps)       DEPLOYMENT="vps" ;;
+    --https)     DEPLOYMENT="https" ;;
     --help|-h)   sed -n '2,27p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; exit 2 ;;
   esac
@@ -443,6 +458,23 @@ check_ports() {
     pass "TCP port ${dash_port} is free"
   fi
 
+  # Ports 80 and 443 belong to whatever the operator already runs, and nothing
+  # in this installer will take them. They are inspected because the most
+  # confusing thing it can do is leave a VPS whose host IP serves somebody
+  # else's default page without ever mentioning it — the user types the IP,
+  # gets Apache, and concludes DNS Daddy failed to install.
+  #
+  # Recorded for the summary rather than reported here, so the connection is
+  # made where the reader is looking for a URL.
+  WEB_80_OWNER="$(port_owner tcp 80)"
+  WEB_443_OWNER="$(port_owner tcp 443)"
+  if [[ -n "$WEB_80_OWNER" ]]; then
+    pass "TCP port 80 is served by: ${WEB_80_OWNER} (left alone)"
+  fi
+  if [[ -n "$WEB_443_OWNER" ]]; then
+    pass "TCP port 443 is served by: ${WEB_443_OWNER} (left alone)"
+  fi
+
   # 853 only matters when DNS-over-TLS is actually configured. Checking a port
   # nothing is going to bind is noise.
   if [[ -n "$(env_value DNSDADDY_DNS_LISTEN_DOT)" ]]; then
@@ -524,8 +556,18 @@ choose_deployment() {
                             address at all. Most cloud VPSes show a private
                             address here and are still reachable from the
                             internet.
-  2. Public VPS, or unsure  dashboard stays on loopback; reach it over an SSH
-                            tunnel, or put TLS in front. (default)
+  2. Public VPS — SSH tunnel  dashboard stays on loopback. Reach it through an
+                            encrypted SSH tunnel. Nothing is published to the
+                            internet. (default)
+  3. Public VPS — HTTPS     dashboard reachable at https://your-hostname, with
+                            Caddy terminating TLS in front of it. The dashboard
+                            itself still binds loopback only; Caddy is the only
+                            thing listening publicly. Needs a hostname whose
+                            DNS already points here.
+
+  Modes 2 and 3 both keep the dashboard off the public internet in plaintext.
+  There is no option that publishes the management interface unencrypted, and
+  that is deliberate.
 
 EOF
 
@@ -536,6 +578,7 @@ EOF
   case "$DEPLOYMENT" in
     lan) CHOICE=1; printf '  (--lan given)\n' ;;
     vps) CHOICE=2; printf '  (--vps given)\n' ;;
+    https) CHOICE=3; printf '  (--https given)\n' ;;
     *)
       if [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 && -t 0 ]]; then
         read -r -p "  Deployment type [2]: " reply
@@ -544,9 +587,19 @@ EOF
       ;;
   esac
   case "$CHOICE" in
-    1|2) ;;
-    *) die "Expected 1 or 2, got '$CHOICE'." ;;
+    1|2|3) ;;
+    *) die "Expected 1, 2 or 3, got '$CHOICE'." ;;
   esac
+
+  # Mode 3 keeps the backend on loopback exactly as mode 2 does — the only
+  # difference is that Caddy is put in front of it. DASHBOARD_BIND stays empty
+  # here for both, and configure_https never sets it: see the compose file,
+  # where an empty value means 127.0.0.1.
+  if [[ "$CHOICE" == "3" ]]; then
+    DASHBOARD_BIND=""
+    choose_https_hostname
+    return
+  fi
 
   DASHBOARD_BIND=""
   if [[ "$CHOICE" != "1" ]]; then
@@ -583,6 +636,182 @@ EOF
   pass "Dashboard will be published on http://${HOST_IP}:8080 (your LAN only)"
 }
 
+# --- HTTPS mode ---------------------------------------------------------------
+#
+# The architecture is the one deploy/Caddyfile.example already documents and
+# deploy/production-deploy.sh already builds:
+#
+#   internet → :443 Caddy (TLS) → 127.0.0.1:8080 DNS Daddy
+#
+# Nothing new is invented here. What this adds is doing it during a first
+# install rather than as a separate manual step, because "install, get a URL,
+# open it" is the experience people expect and the reason they otherwise reach
+# for a plaintext port.
+#
+# The dashboard container is not published beyond loopback in this mode. Caddy
+# is the only process listening on a public interface, and the management API
+# is never available unencrypted.
+
+# valid_hostname rejects what will obviously fail ACME rather than discovering
+# it after Caddy has been reconfigured. It is deliberately not a full RFC 1035
+# implementation: it catches a URL pasted in place of a name, a bare label with
+# no dot, and the empty string, which are the mistakes people actually make.
+valid_hostname() { # name
+  local h="$1"
+  [[ -n "$h" ]] || return 1
+  [[ "$h" != *://* ]] || return 1
+  [[ "$h" != */* ]] || return 1
+  [[ "$h" != *:* ]] || return 1
+  [[ ${#h} -le 253 ]] || return 1
+  [[ "$h" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]] || return 1
+  # An IP address satisfies the shape above and is still useless: public
+  # certificates are not issued for them, so accepting one would produce a
+  # deployment that fails at ACME rather than here, where it can be explained.
+  [[ "${h##*.}" =~ ^[0-9]+$ ]] && return 1
+  return 0
+}
+
+choose_https_hostname() {
+  cat <<'EOF'
+
+  HTTPS needs a hostname that already resolves to this machine — Caddy proves
+  control of it to Let's Encrypt over ports 80 and 443. An IP address will not
+  work; public certificates are not issued for them.
+
+EOF
+  if [[ -n "${DNSDADDY_HTTPS_HOSTNAME:-}" ]]; then
+    HTTPS_HOSTNAME="$DNSDADDY_HTTPS_HOSTNAME"
+    printf '  (DNSDADDY_HTTPS_HOSTNAME given: %s)\n' "$HTTPS_HOSTNAME"
+  elif [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 && -t 0 ]]; then
+    read -r -p "  Hostname (e.g. dns.example.com): " HTTPS_HOSTNAME
+  fi
+
+  if ! valid_hostname "${HTTPS_HOSTNAME:-}"; then
+    die "HTTPS mode needs a hostname, and '${HTTPS_HOSTNAME:-}' is not one." \
+      "Give a name like dns.example.com — not a URL, not an IP address, and not a single label. Set it non-interactively with DNSDADDY_HTTPS_HOSTNAME=dns.example.com, or choose option 2 and reach the dashboard over an SSH tunnel."
+  fi
+  pass "HTTPS hostname: ${HTTPS_HOSTNAME}"
+}
+
+# https_port_conflict names what would stop Caddy binding, or prints nothing.
+#
+# Caddy's own listener is not a conflict — it is what an upgrade looks like.
+https_port_conflict() {
+  local conflict=""
+  if [[ -n "$WEB_80_OWNER" && "$WEB_80_OWNER" != *caddy* ]]; then
+    conflict="${WEB_80_OWNER} on port 80"
+  fi
+  if [[ -n "$WEB_443_OWNER" && "$WEB_443_OWNER" != *caddy* ]]; then
+    [[ -n "$conflict" ]] && conflict="${conflict}, "
+    conflict="${conflict}${WEB_443_OWNER} on port 443"
+  fi
+  printf '%s' "$conflict"
+}
+
+# configure_https puts Caddy in front of the loopback dashboard.
+#
+# It sets HTTPS_STATE to active or failed, and never to active on the strength
+# of having run the commands: the last thing it does is ask the URL whether it
+# answers. Announcing a working HTTPS dashboard that does not exist is worse
+# than saying plainly that the proxy step did not finish, because the operator
+# would stop looking.
+configure_https() {
+  [[ "$CHOICE" == "3" ]] || return 0
+
+  head_ "HTTPS"
+
+  local conflict
+  conflict="$(https_port_conflict)"
+  if [[ -n "$conflict" ]]; then
+    HTTPS_STATE="conflict"
+    warn "Cannot configure HTTPS: ${conflict}"
+    note "DNS Daddy itself is installed and the resolver is running. Only the"
+    note "TLS front end was skipped, and nothing belonging to that service was"
+    note "changed — this installer does not stop, reconfigure or take ports"
+    note "from software you already run."
+    note ""
+    note "Either point your existing web server at 127.0.0.1:8080 yourself, or"
+    note "free ports 80 and 443 and re-run with --https."
+    return 0
+  fi
+
+  if ! command -v caddy >/dev/null 2>&1; then
+    printf '  Installing Caddy...\n'
+    if ! install_caddy; then
+      HTTPS_STATE="failed"
+      warn "Caddy could not be installed; the dashboard stays on loopback."
+      return 0
+    fi
+  fi
+
+  local caddyfile=/etc/caddy/Caddyfile
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '  [dry-run] would write %s for %s and reload Caddy\n' "$caddyfile" "$HTTPS_HOSTNAME"
+    HTTPS_STATE="dry-run"
+    return 0
+  fi
+
+  # An existing Caddyfile is someone's configuration. Back it up before this
+  # installer replaces it, and say where it went.
+  if [[ -f "$caddyfile" ]]; then
+    local backup="${caddyfile}.bak-$(date +%F-%H%M%S)"
+    cp "$caddyfile" "$backup" || { HTTPS_STATE="failed"; warn "Could not back up $caddyfile"; return 0; }
+    pass "Existing Caddyfile saved to ${backup}"
+  fi
+
+  mkdir -p /etc/caddy
+  if ! sed "s/dns\.example\.co\.uk/${HTTPS_HOSTNAME}/" "${REPO_ROOT}/deploy/Caddyfile.example" > "$caddyfile"; then
+    HTTPS_STATE="failed"
+    warn "Could not write $caddyfile"
+    return 0
+  fi
+
+  # Validate before activating. A Caddyfile that does not parse would take
+  # down whatever Caddy was already serving.
+  if ! caddy validate --config "$caddyfile" >/dev/null 2>&1; then
+    HTTPS_STATE="failed"
+    warn "The generated Caddyfile did not validate; Caddy was not reloaded."
+    note "Inspect it with: caddy validate --config ${caddyfile}"
+    return 0
+  fi
+  pass "Caddyfile validated"
+
+  systemctl enable --now caddy >/dev/null 2>&1 || true
+  systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
+
+  # Certificate issuance is not instant, and it depends on DNS this installer
+  # cannot verify from here. Give it a bounded wait, then report what is
+  # actually true rather than what was intended.
+  local deadline=$((SECONDS + ${DNSDADDY_HTTPS_TIMEOUT:-45}))
+  while (( SECONDS < deadline )); do
+    if curl -fsS --max-time 5 "https://${HTTPS_HOSTNAME}/api/v1/health" >/dev/null 2>&1; then
+      HTTPS_STATE="active"
+      pass "https://${HTTPS_HOSTNAME} is serving the dashboard"
+      return 0
+    fi
+    sleep 3
+  done
+
+  HTTPS_STATE="pending"
+  warn "Caddy is configured for ${HTTPS_HOSTNAME}, but the URL did not answer yet."
+  note "This is usually DNS or certificate issuance still in progress, or ports"
+  note "80/443 not reachable from the internet. DNS Daddy itself is running."
+  note "Check with:"
+  note "  systemctl status caddy"
+  note "  journalctl -u caddy --no-pager -n 30"
+  note "  curl -v https://${HTTPS_HOSTNAME}/api/v1/health"
+}
+
+install_caddy() {
+  apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1 &&
+  curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
+    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null &&
+  curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
+    > /etc/apt/sources.list.d/caddy-stable.list 2>/dev/null &&
+  apt-get update -qq >/dev/null 2>&1 &&
+  apt-get install -y -qq caddy >/dev/null 2>&1
+}
+
 # reconcile_env brings the keys this installer owns into line with the choice
 # just made — in both directions.
 #
@@ -596,6 +825,19 @@ reconcile_env() {
     pass "DNSDADDY_DASHBOARD_BIND=${DASHBOARD_BIND}"
     return
   fi
+  # HTTPS mode configures the app to know it is behind TLS. The bind is
+  # deliberately untouched below: the backend stays on loopback, and Caddy is
+  # the only thing listening publicly. See docker-compose.yml, where an empty
+  # DNSDADDY_DASHBOARD_BIND means 127.0.0.1.
+  if [[ "$CHOICE" == "3" && -n "$HTTPS_HOSTNAME" ]]; then
+    env_set DNSDADDY_BASE_URL "https://${HTTPS_HOSTNAME}"
+    env_set DNSDADDY_SECURE_COOKIES "always"
+    # The container sees the Docker bridge gateway, not 127.0.0.1, so this is
+    # the narrow range that actually needs trusting — not a wildcard.
+    env_set DNSDADDY_TRUSTED_PROXY_CIDRS "$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo '172.17.0.0/16')"
+    pass "Configured for HTTPS at https://${HTTPS_HOSTNAME} (backend stays on loopback)"
+  fi
+
   env_disable DNSDADDY_DASHBOARD_BIND
   case $? in
     0)
@@ -882,13 +1124,50 @@ print_next_steps() {
   fi
 
   printf '\n  %sDashboard%s\n' "$BOLD" "$OFF"
-  if [[ -n "$DASHBOARD_BIND" ]]; then
-    printf '    %s\n' "$dashboard"
-  else
-    printf '    From your own machine:\n'
+  if [[ "$HTTPS_STATE" == "active" ]]; then
+    printf '    Mode:    Secure HTTPS\n'
+    printf '    URL:     https://%s\n' "$HTTPS_HOSTNAME"
+    printf '    Backend: 127.0.0.1:8080 (not reachable from the internet)\n'
+    printf '    TLS:     Caddy, on this machine\n'
+  elif [[ "$CHOICE" == "3" ]]; then
+    # Configured for HTTPS but not confirmed working. Say which, and do not
+    # print a URL as though it serves the dashboard.
+    printf '    Mode:    HTTPS requested for %s — not confirmed yet\n' "$HTTPS_HOSTNAME"
+    printf '    Backend: 127.0.0.1:8080 (not reachable from the internet)\n'
+    printf '    Until the URL answers, reach it the same way as tunnel mode:\n'
     printf '      ssh -L 8080:127.0.0.1:8080 %s@%s\n' "${USER:-root}" "${HOST_IP:-<this-server>}"
-    printf '    Then open:\n'
     printf '      http://127.0.0.1:8080\n'
+  elif [[ -n "$DASHBOARD_BIND" ]]; then
+    printf '    Mode:    Published on this network\n'
+    printf '    URL:     %s\n' "$dashboard"
+    printf '    Open it from another machine on the same network.\n'
+  else
+    printf '    Public access: disabled — the dashboard binds 127.0.0.1 only\n'
+    printf '    Backend:       127.0.0.1:8080\n\n'
+    printf '    Connect from your own machine:\n'
+    printf '      ssh -L 8080:127.0.0.1:8080 %s@%s\n\n' "${USER:-root}" "${HOST_IP:-<this-server>}"
+    printf '    Then open:\n'
+    printf '      http://127.0.0.1:8080\n\n'
+    printf '    That URL is plain HTTP, but it never leaves your machine: the SSH\n'
+    printf '    tunnel carries it to the server encrypted, and the dashboard is not\n'
+    printf '    listening on any public address.\n'
+  fi
+
+  # The Apache question. Printed whenever something else holds 80 or 443,
+  # because "I installed it and the IP shows someone else's page" is the
+  # confusion this whole section exists to prevent.
+  if [[ -n "$WEB_80_OWNER" || -n "$WEB_443_OWNER" ]]; then
+    printf '\n  %sExisting web server%s\n' "$BOLD" "$OFF"
+    [[ -n "$WEB_80_OWNER" ]]  && printf '    Port 80:  %s\n' "$WEB_80_OWNER"
+    [[ -n "$WEB_443_OWNER" ]] && printf '    Port 443: %s\n' "$WEB_443_OWNER"
+    if [[ "$HTTPS_STATE" != "active" ]]; then
+      printf '\n    Visiting http://%s reaches that server, not DNS Daddy.\n' "${HOST_IP:-this-machine}"
+      printf '    DNS Daddy has not been published there and has not changed it.\n'
+      if [[ "$HTTPS_STATE" == "conflict" ]]; then
+        printf '    It also holds the ports HTTPS mode needs, which is why TLS was\n'
+        printf '    skipped. Nothing belonging to it was stopped or reconfigured.\n'
+      fi
+    fi
   fi
 
   printf '\n  %sAdmin password%s\n' "$BOLD" "$OFF"
@@ -1023,7 +1302,17 @@ fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
   printf '\n  Would change in .env:\n'
-  if [[ -n "$DASHBOARD_BIND" ]]; then
+  if [[ "$CHOICE" == "3" ]]; then
+    # The point of previewing HTTPS mode is that the reader can see the
+    # dashboard bind is NOT among the changes: the backend stays on loopback
+    # and Caddy is the only public listener.
+    printf '    DNSDADDY_BASE_URL=https://%s\n' "$HTTPS_HOSTNAME"
+    printf '    DNSDADDY_SECURE_COOKIES=always\n'
+    printf '    DNSDADDY_TRUSTED_PROXY_CIDRS=<docker bridge subnet>\n'
+    printf '    (backend stays on loopback — DNSDADDY_DASHBOARD_BIND is not set)\n'
+    printf '\n  Would then configure Caddy for %s, validate the config, reload it,\n' "$HTTPS_HOSTNAME"
+    printf '  and check the URL answers before reporting HTTPS as working.\n'
+  elif [[ -n "$DASHBOARD_BIND" ]]; then
     printf '    DNSDADDY_DASHBOARD_BIND=%s\n' "$DASHBOARD_BIND"
   elif env_is_set DNSDADDY_DASHBOARD_BIND; then
     printf '    comment out DNSDADDY_DASHBOARD_BIND (currently publishing the dashboard)\n'
@@ -1050,6 +1339,7 @@ if ! wait_for_health; then
   exit 1
 fi
 
+configure_https
 run_doctor
 print_next_steps
 print_summary
