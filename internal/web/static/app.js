@@ -481,8 +481,19 @@ function categoryBadge(category, label) {
   return html`<span class="badge" data-fg="${colourFor(category)}">${label || category}</span>`;
 }
 
-function emptyState(title, body) {
-  return html`<div class="empty"><strong>${title}</strong>${body}</div>`;
+// emptyState is what most of a fresh install looks like, so it is written to
+// read as "nothing has happened yet, and here is what happens next" rather
+// than as a feature that failed to load. icon and action are optional; the
+// two-argument calls that predate them still work.
+function emptyState(title, body, opts = {}) {
+  const icon = opts.icon || '○';
+  const action = opts.action ? html`<div class="row">${raw(opts.action)}</div>` : '';
+  return html`<div class="empty">
+    <span class="empty-ico" aria-hidden="true">${icon}</span>
+    <strong>${title}</strong>
+    <p>${body}</p>
+    ${raw(action)}
+  </div>`;
 }
 
 function copyBlock(text) {
@@ -1061,7 +1072,7 @@ pages.dashboard = {
                       )
                       .join('')
                   )}</tbody></table></div>`
-              : emptyState('Nothing blocked yet', 'Once devices start resolving through DNS Daddy, blocked domains appear here.')
+              : emptyState('Nothing blocked yet', 'Blocked domains appear here once devices resolve through DNS Daddy.', { icon: '⚠' })
           )}
         </div>
       </div>
@@ -1134,7 +1145,7 @@ pages.threats = {
                       )
                       .join('')
                   )}</tbody></table></div>`
-              : emptyState('No threats blocked yet', 'That is good news, or nothing is pointed at the resolver yet — check Setup.')
+              : emptyState('No threats blocked yet', 'Either nothing malicious has been requested, or no client is using the resolver yet.', { icon: '⚠', action: '<a class="btn btn-ghost btn-sm" href="#/setup">Check Setup</a>' })
           )}
         </div>
       </div>
@@ -1172,7 +1183,7 @@ function dnssecBadge(status) {
 
 function queryTable(queries) {
   if (!queries || !queries.length) {
-    return emptyState('No queries recorded', 'Query logging may be disabled, or nothing has resolved through DNS Daddy yet.');
+    return emptyState('No queries recorded', 'Either query logging is off, or nothing has resolved through DNS Daddy yet.', { icon: '≡', action: '<a class="btn btn-ghost btn-sm" href="#/settings">Check settings</a>' });
   }
   return html`
     <div class="table-wrap">
@@ -1239,7 +1250,7 @@ pages.queries = {
           <span class="row-end muted small" id="q-count"></span>
         </div>
       </div>
-      <div id="q-results">${raw(emptyState('Loading…', ''))}</div>
+      <div id="q-results">${raw(emptyState('Loading…', 'Fetching matching queries.', { icon: '·' }))}</div>
       <div class="row mt-4">
         <button class="btn btn-ghost" id="q-more" hidden>Load more</button>
       </div>
@@ -2398,6 +2409,142 @@ pages.reports = {
   },
 };
 
+// The Assurance page exists because "is this trustworthy?" is a fair question
+// about an AI-assisted project, and the useful answer is evidence rather than
+// reassurance. Everything here is a pointer to something a reader can check:
+// a workflow file, a document, a test. Nothing on this page asserts a security
+// property that has not been tested, and the limitations are given the same
+// prominence as the evidence — a page that only listed the good news would be
+// the marketing it is meant to replace.
+//
+// It is deliberately static. A trust page that needs a backend is a trust page
+// that can fail to load, and it would cost memory on a $5 VPS to tell the
+// reader things the repository already states.
+const REPO = 'https://github.com/jameshoulder/dnsdaddy/blob/main';
+
+function evidenceRow(what, where, detail) {
+  return html`<tr>
+    <td>${what}</td>
+    <td class="mono small">${where}</td>
+    <td class="muted">${detail}</td>
+  </tr>`;
+}
+
+pages.assurance = {
+  title: 'Assurance',
+  subtitle: 'What is checked, by what, and what that does not prove.',
+  async render() {
+    const settings = await apiGet('/settings').catch(() => ({ version: 'unknown' }));
+
+    return html`
+      <div class="card lead section">
+        <div class="card-eyebrow">Position</div>
+        <h2>AI-assisted, transparently built, test-backed</h2>
+        <p class="muted note-tight">
+          DNS Daddy is an open-source project built with AI assistance. That is disclosed
+          rather than hidden, because the useful response to "was this written with an LLM?"
+          is evidence you can check, not a reassurance you have to accept.
+        </p>
+        <p class="muted">
+          You are running <span class="mono">${settings.version}</span>. Every document linked
+          below ships in the repository, so you can read the version you are actually running
+          rather than a page about it.
+        </p>
+        <div class="row note-loose">
+          <a class="btn btn-primary" href="${REPO}/docs/assurance.md" target="_blank" rel="noopener noreferrer">Engineering assurance</a>
+          <a class="btn btn-ghost" href="${REPO}/docs/threat-model.md" target="_blank" rel="noopener noreferrer">Threat model</a>
+          <a class="btn btn-ghost" href="${REPO}/docs/security-testing.md" target="_blank" rel="noopener noreferrer">Security testing</a>
+        </div>
+      </div>
+
+      <div class="card section">
+        <div class="card-head">
+          <div>
+            <div class="card-eyebrow">Automated</div>
+            <h2>What runs on every change</h2>
+            <p>These run in CI on every push and pull request. They are not a substitute for
+               review by a person; they are the floor beneath it.</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Check</th><th>Where</th><th>What it covers</th></tr></thead>
+            <tbody>
+              ${raw(evidenceRow('Build, vet, unit and integration tests', '.github/workflows/ci.yml', 'Every push and pull request'))}
+              ${raw(evidenceRow('Race detector', 'go test -race', 'Concurrent resolver and ACL paths'))}
+              ${raw(evidenceRow('staticcheck', '.github/workflows/security.yml', 'Correctness and dead code'))}
+              ${raw(evidenceRow('gosec', 'security workflow', 'Common Go security mistakes'))}
+              ${raw(evidenceRow('govulncheck', 'security workflow', 'Known CVEs in dependencies actually reached'))}
+              ${raw(evidenceRow('CodeQL and Semgrep', 'security workflow', 'Static analysis for injection and data flow'))}
+              ${raw(evidenceRow('Container and filesystem scan', 'security workflow', 'The published image'))}
+              ${raw(evidenceRow('End-to-end resolver test', 'CI', 'Grant, query, revoke, restart — against a real binary over UDP'))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card section">
+        <div class="card-head">
+          <div>
+            <div class="card-eyebrow">Testing</div>
+            <h2>Vulnerability scanning</h2>
+            <p>Scanning was performed with Tenable Vulnerability Management / Nessus across
+               several scan types, before and after deployment. Methodology and findings are
+               documented in full.</p>
+          </div>
+        </div>
+        <p class="muted">
+          The one Medium finding in those scans was
+          <strong>the scanner's own certificate</strong> on its management port, present on the
+          host before DNS Daddy was installed. It is recorded because omitting it would make the
+          results look cleaner than they were — not because it is a DNS Daddy defect.
+        </p>
+        <p class="muted note-tight">
+          Vulnerability scanning is one layer. It looks for known issues in exposed services;
+          it does not read the source, reason about the design, or attempt exploitation.
+        </p>
+        <div class="row note-loose">
+          <a class="btn btn-ghost" href="${REPO}/docs/security-testing.md" target="_blank" rel="noopener noreferrer">Read the methodology and findings</a>
+        </div>
+      </div>
+
+      <div class="card section diag-banner">
+        <div class="diag-title">Limitations</div>
+        <p class="diag-lede">Stated here rather than in a footnote, because they are the part
+           most worth knowing.</p>
+        <ul class="first-client-steps">
+          <li><strong>No independent professional security review.</strong> No third-party
+              penetration test, code audit or certification has been carried out. Nothing on
+              this page should be read as one.</li>
+          <li><strong>Scanners are not proof.</strong> A clean scan means known checks found
+              nothing on the surfaces they examined, not that the software is secure.</li>
+          <li><strong>Early software.</strong> Interfaces and storage formats may still change
+              between releases.</li>
+          <li><strong>Self-hosted responsibility.</strong> Exposure of the dashboard, firewall
+              rules and TLS termination are decided by your deployment, and DNS Daddy can only
+              report what it can actually observe.</li>
+        </ul>
+      </div>
+
+      <div class="card section">
+        <div class="card-head">
+          <div>
+            <div class="card-eyebrow">Inspectable</div>
+            <h2>Design and privacy</h2>
+            <p>The reasoning behind the parts most worth disagreeing with.</p>
+          </div>
+        </div>
+        <div class="row">
+          <a class="btn btn-ghost" href="${REPO}/docs/architecture.md" target="_blank" rel="noopener noreferrer">Architecture</a>
+          <a class="btn btn-ghost" href="${REPO}/docs/privacy.md" target="_blank" rel="noopener noreferrer">Privacy</a>
+          <a class="btn btn-ghost" href="${REPO}/docs/audit-2026-08.md" target="_blank" rel="noopener noreferrer">Audit notes</a>
+          <a class="btn btn-ghost" href="${REPO}/docs/roadmap.md" target="_blank" rel="noopener noreferrer">Roadmap</a>
+        </div>
+      </div>
+    `;
+  },
+};
+
 pages.settings = {
   title: 'Settings',
   subtitle: 'Runtime configuration and access.',
@@ -2618,7 +2765,7 @@ const router = {
       $('#refresh-note').textContent = `Updated ${new Date().toLocaleTimeString('en-GB')}`;
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 401)) {
-        view.innerHTML = emptyState('Could not load this page', esc(err.message || ''));
+        view.innerHTML = emptyState('Could not load this page', esc(err.message || 'The request failed.'), { icon: '!' });
         reportError(err);
       }
     } finally {
@@ -2755,5 +2902,6 @@ if (typeof module !== 'undefined' && module.exports) {
     accessBadge,
     clientAccessSummary,
     resolverAccessNote,
+    emptyState,
   };
 }

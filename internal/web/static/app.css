@@ -26,6 +26,28 @@
 
   --radius: 0.5rem;
   --radius-lg: 0.75rem;
+  --radius-sm: 0.375rem;
+
+  /* Spacing scale. Every margin, gap and pad below comes from this, so the
+   * page has one rhythm rather than a dozen hand-picked pixel values. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 40px;
+
+  /* Depth. Borders do most of the work on a dark UI; shadows are kept faint
+   * so cards separate from the background without looking like they float. */
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.28);
+  --shadow-2: 0 2px 8px rgb(0 0 0 / 0.32), 0 1px 2px rgb(0 0 0 / 0.24);
+  --ring: 0 0 0 2px rgb(191 237 109 / 0.45);
+
+  /* A hairline lift on raised surfaces: one pixel of light along the top edge
+   * reads as depth far more cheaply than a glow. */
+  --edge: inset 0 1px 0 rgb(255 255 255 / 0.04);
 
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-display: 'Space Grotesk', 'Inter', ui-sans-serif, system-ui, sans-serif;
@@ -155,7 +177,19 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .wordmark b { color: var(--primary); font-weight: 700; }
 
-.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav { display: flex; flex-direction: column; gap: 1px; }
+
+/* Section labels break twelve flat links into groups a reader can scan. */
+.nav-group {
+  padding: var(--s5) var(--s3) var(--s2);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  opacity: 0.65;
+}
+.nav-group:first-child { padding-top: var(--s2); }
 
 .nav a {
   display: flex;
@@ -170,6 +204,20 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 
 .nav a:hover { background: var(--surface-2); color: var(--foreground); }
+
+/* The active item gets a lime rail rather than only a fill, so the current
+ * page is findable at a glance instead of by comparing background tints. */
+.nav a { position: relative; }
+.nav a.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--primary);
+}
 
 .nav a.active {
   background: rgb(191 237 109 / 0.1);
@@ -217,13 +265,21 @@ code, pre, .mono { font-family: var(--font-mono); }
   z-index: 20;
 }
 
-.topbar h1 { font-size: 19px; }
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgb(9 11 15 / 0.82);
+  backdrop-filter: blur(10px);
+}
+.topbar h1 { font-size: 20px; letter-spacing: -0.015em; }
+.topbar p { margin: 2px 0 0; font-size: 12.5px; color: var(--muted-foreground); }
 .topbar > div:nth-of-type(1) { flex: 1; min-width: 0; }
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
 
 .menu-btn { display: none; }
 
-.content { padding: 24px; max-width: 1280px; width: 100%; }
+.content { padding: var(--s6) var(--s6) var(--s8); max-width: 1280px; width: 100%; }
 .content:focus { outline: none; }
 
 /* ---------- controls ---------------------------------------------------- */
@@ -247,8 +303,14 @@ code, pre, .mono { font-family: var(--font-mono); }
 a.btn { display: inline-block; text-decoration: none; color: var(--foreground); }
 a.btn.btn-primary { color: var(--primary-foreground); }
 
-.btn-primary { background: var(--primary); color: var(--primary-foreground); }
-.btn-primary:hover:not(:disabled) { opacity: 0.9; }
+.btn-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: transparent;
+  box-shadow: var(--shadow-1);
+}
+.btn-primary:hover:not(:disabled) { background: #cbf383; }
+.btn-primary:active:not(:disabled) { background: var(--primary-dim); }
 
 .btn-ghost {
   background: var(--surface);
@@ -285,6 +347,12 @@ input, select, textarea {
   border-radius: var(--radius);
 }
 
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+.btn:focus-visible, .nav a:focus-visible, a:focus-visible, summary:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-color: var(--primary-dim);
+}
 input:focus, select:focus, textarea:focus, .btn:focus-visible, .nav a:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 1px;
@@ -319,21 +387,26 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 
 /* ---------- layout primitives ------------------------------------------- */
 
-.grid { display: grid; gap: 14px; }
+.grid { display: grid; gap: var(--s4); }
 .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.stack { display: flex; flex-direction: column; gap: 14px; }
+.stack { display: flex; flex-direction: column; gap: var(--s4); }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row-end { margin-left: auto; }
-.section { margin-bottom: 22px; }
+.section { margin-bottom: var(--s6); }
 
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 16px;
+  padding: var(--s5);
+  box-shadow: var(--shadow-1), var(--edge);
 }
+
+/* A card that leads a page carries a little more presence than one in a
+ * grid of four. */
+.card.lead { padding: var(--s6); }
 
 .card-head {
   display: flex;
@@ -342,8 +415,19 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
   margin-bottom: 14px;
 }
 
-.card-head h2 { font-size: 15px; }
-.card-head p { margin: 2px 0 0; font-size: 12px; color: var(--muted-foreground); }
+.card-head h2 { font-size: 14.5px; letter-spacing: -0.005em; }
+.card-head p { margin: 3px 0 0; font-size: 12px; color: var(--muted-foreground); max-width: 68ch; }
+
+/* An eyebrow above a card title carries the category without spending a
+ * heading level on it. */
+.card-eyebrow {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  margin-bottom: var(--s1);
+}
 
 .metric .label {
   font-size: 11.5px;
@@ -353,6 +437,8 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 }
 
 .metric .value {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
   font-family: var(--font-display);
   font-size: 27px;
   font-weight: 700;
@@ -381,6 +467,9 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
   white-space: nowrap;
 }
 
+/* A dot carries state faster than a colour-shifted label, and survives being
+ * read by someone who cannot separate the hues. */
+.badge .dot { width: 6px; height: 6px; border-radius: 999px; background: currentColor; flex: none; }
 .badge.ok { color: var(--primary); border-color: rgb(191 237 109 / 0.35); background: rgb(191 237 109 / 0.1); }
 .badge.bad { color: var(--danger); border-color: rgb(249 117 131 / 0.35); background: rgb(249 117 131 / 0.1); }
 .badge.warn { color: var(--warn); border-color: rgb(255 180 90 / 0.35); background: rgb(255 180 90 / 0.1); }
@@ -394,6 +483,9 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 thead th {
   text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 1;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -405,19 +497,44 @@ thead th {
   white-space: nowrap;
 }
 
-tbody td { padding: 10px 14px; border-bottom: 1px solid rgb(42 49 59 / 0.6); vertical-align: top; }
+tbody td { padding: 11px 14px; border-bottom: 1px solid rgb(42 49 59 / 0.55); vertical-align: top; }
+/* The first column is what a reader scans down; give it the weight. */
+tbody td:first-child { color: var(--foreground); font-weight: 500; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: rgb(21 26 34 / 0.5); }
 
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
 
+/* Empty states.
+ *
+ * A fresh install is mostly empty states, so they are the first impression
+ * the product makes. They should read as "nothing has happened yet, and here
+ * is what happens next" rather than as a missing feature. */
 .empty {
-  padding: 40px 20px;
+  padding: var(--s8) var(--s5);
   text-align: center;
   color: var(--muted-foreground);
   font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
 }
+.empty-ico {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  margin-bottom: var(--s1);
+  background: rgb(191 237 109 / 0.08);
+  border: 1px solid rgb(191 237 109 / 0.18);
+  color: var(--primary);
+  font-size: 15px;
+}
+.empty p { margin: 0; max-width: 46ch; line-height: 1.6; }
+.empty .row { justify-content: center; margin-top: var(--s2); }
 
 .empty strong { display: block; color: var(--foreground); font-size: 14px; margin-bottom: 4px; }
 
