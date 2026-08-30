@@ -34,6 +34,15 @@ const {
   clientAccessSummary,
   resolverAccessNote,
   emptyState,
+  protectionState,
+  feedHealth,
+  statusHero,
+  attentionItems,
+  attentionPanel,
+  recentlyBlocked,
+  protectionBreakdown,
+  pages,
+  routeName,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -974,4 +983,364 @@ test('an empty state escapes what it is given', () => {
   const out = emptyState('<script>x</script>', 'body & more');
   assert.doesNotMatch(out, /<script>/);
   assert.match(out, /&amp;/);
+});
+
+/* ==========================================================================
+ * Dashboard V2
+ *
+ * The redesign moved every link in the sidebar and replaced the whole of the
+ * dashboard's markup. The tests below pin the two things that survive a
+ * redesign unchanged — that every route in the shell is reachable, and that no
+ * panel claims something the server did not measure — plus the escaping, which
+ * a rewrite is exactly the moment to lose.
+ * ======================================================================== */
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const indexHtml = fs.readFileSync(path.join(__dirname, 'static', 'index.html'), 'utf8');
+
+/* ---------- the shell and its routes ------------------------------------- */
+
+test('every route the sidebar links to is a page the router will serve', () => {
+  const routes = [...indexHtml.matchAll(/data-route="([a-z-]+)"/g)].map((m) => m[1]);
+  assert.ok(routes.length >= 11, `expected the full navigation, got ${routes.length}`);
+  for (const r of routes) {
+    assert.ok(pages[r], `#/${r} is in the sidebar but has no page`);
+    assert.equal(routeName(`#/${r}`), r, `#/${r} does not route to itself`);
+  }
+});
+
+test('the Assurance page is reachable', () => {
+  // Called out because it is the one page with no inbound link from anywhere
+  // but the sidebar: if the redesign dropped it, nothing else would notice.
+  assert.ok(indexHtml.includes('href="#/assurance"'), 'Assurance is missing from the navigation');
+  assert.ok(pages.assurance, 'Assurance has no page');
+  assert.equal(routeName('#/assurance'), 'assurance');
+});
+
+test('an unknown or empty hash falls back to the dashboard', () => {
+  assert.equal(routeName(''), 'dashboard');
+  assert.equal(routeName('#/'), 'dashboard');
+  assert.equal(routeName('#/nonexistent'), 'dashboard');
+  assert.equal(routeName('#/queries?domain=x'), 'queries');
+});
+
+test('every navigation icon resolves to a symbol defined in the sprite', () => {
+  const defined = new Set([...indexHtml.matchAll(/<g id="(i-[a-z]+)"/g)].map((m) => m[1]));
+  const used = [...indexHtml.matchAll(/<use href="#(i-[a-z]+)"/g)].map((m) => m[1]);
+  assert.ok(used.length >= 13, `expected every nav item to carry an icon, got ${used.length}`);
+  for (const id of used) {
+    assert.ok(defined.has(id), `${id} is used but never defined`);
+  }
+});
+
+test('the navigation is grouped with real headings a screen reader can use', () => {
+  // Five labelled groups, each a heading with a list that points back at it.
+  // The old markup hid the group labels with aria-hidden, which left twelve
+  // undifferentiated links for anyone not looking at them.
+  const headings = [...indexHtml.matchAll(/<h2 class="nav-group" id="([a-z-]+)">/g)].map((m) => m[1]);
+  const labelled = [...indexHtml.matchAll(/<ul class="nav-list" aria-labelledby="([a-z-]+)">/g)].map((m) => m[1]);
+  assert.equal(headings.length, 5);
+  assert.deepEqual(labelled, headings, 'every nav list must be labelled by its own heading');
+  assert.doesNotMatch(indexHtml, /nav-group" aria-hidden/);
+});
+
+test('the navigation uses inline SVG rather than the old Unicode glyphs', () => {
+  const navBlock = indexHtml.slice(indexHtml.indexOf('<nav class="nav"'), indexHtml.indexOf('</nav>'));
+  assert.match(navBlock, /class="nav-ico"/);
+  // The redesign's stated aim. A stray emoji or box-drawing glyph in the nav
+  // means a link was added without one.
+  assert.doesNotMatch(navBlock, /[←-⯿️\u{1F300}-\u{1FAFF}]/u);
+});
+
+/* ---------- the status hero ---------------------------------------------- */
+
+function overview(o = {}) {
+  return {
+    protectionStatus: 'protected',
+    resolverStatus: 'operational',
+    queries24h: 128491,
+    threatsBlocked24h: 327,
+    blockRate24h: 0.25,
+    protectedNetworks: 2,
+    activePolicies: 1,
+    blocklistDomains: 412345,
+    lastFeedRefresh: now(),
+    uptimeSeconds: 90061,
+    version: '0.1.0',
+    hasSeenClients: true,
+    clientAttribution: true,
+    servesOnlyLoopback: false,
+    refusedClients: 0,
+    ...o,
+  };
+}
+
+const healthyFeeds = {
+  observatoryFeedId: OBSERVATORY_ID,
+  totalIndexedDomains: 412345,
+  refreshing: false,
+  feeds: [{ ...feed({ enabled: true, loaded: true, lastSuccessAt: now(), indexedDomains: 412345 }), id: 'urlhaus', name: 'abuse.ch URLhaus' }],
+};
+
+test('the three protection states are worded distinctly and none says the process is down', () => {
+  const p = protectionState('protected');
+  const d = protectionState('degraded');
+  const o = protectionState('offline');
+  assert.equal(p.tone, 'ok');
+  assert.equal(d.tone, 'warn');
+  assert.equal(o.tone, 'bad');
+  assert.notEqual(p.word, d.word);
+  assert.notEqual(d.word, o.word);
+  // `offline` means the blocklist is empty, not that the resolver stopped.
+  // Saying "offline" about a resolver answering every query sends an operator
+  // after the wrong fault.
+  assert.doesNotMatch(o.word, /offline/i);
+  assert.match(o.line, /no threat intelligence is loaded/i);
+});
+
+test('an unrecognised protection status is reported, not silently called healthy', () => {
+  const s = protectionState('something-new');
+  assert.notEqual(s.tone, 'ok');
+  assert.match(s.word, /something-new/);
+});
+
+test('the hero states its status in words as well as colour', () => {
+  const out = statusHero(overview(), healthyFeeds, { enabled: true, total: 6 });
+  assert.match(out, />Protected</);
+  assert.match(out, /class="hero is-ok"/);
+  // The dot is decorative; removing every class attribute must still leave the
+  // status legible.
+  assert.match(out.replace(/class="[^"]*"/g, ''), /Protected/);
+});
+
+test('the hero reports the numbers the server gave it and invents none', () => {
+  const out = statusHero(overview(), healthyFeeds, { enabled: true, total: 6 });
+  assert.match(out, /128,491/);
+  assert.match(out, /327/);
+  assert.match(out, /0\.25%/);
+  assert.match(out, />6</);
+  assert.match(out, /Last 24 hours/);
+});
+
+test('a fresh install with no traffic shows zeroes, not sample data', () => {
+  const out = statusHero(
+    overview({ queries24h: 0, threatsBlocked24h: 0, blockRate24h: 0, hasSeenClients: false }),
+    healthyFeeds,
+    { enabled: true, total: 0 }
+  );
+  assert.match(out, />0</);
+  assert.doesNotMatch(out, /128,491/);
+});
+
+test('detection switched off reads as off, never as zero detections', () => {
+  // A zero would say "nothing suspicious happened". Nobody measured that.
+  const out = statusHero(overview(), healthyFeeds, { enabled: false, total: 0 });
+  assert.match(out, /Off<\/span><span class="k">Detections/);
+  assert.doesNotMatch(out, />0<\/span><span class="k">Detections/);
+});
+
+test('a real detection count is rendered as a count', () => {
+  const out = statusHero(overview(), healthyFeeds, { enabled: true, total: 6 });
+  assert.match(out, /is-detect"><span class="n">6</);
+});
+
+test('a detections request that failed does not become a zero either', () => {
+  // A zero here would say "nothing suspicious happened in 24 hours". Nothing
+  // measured that; the request did not come back.
+  const out = statusHero(overview(), healthyFeeds, null);
+  assert.match(out, /—<\/span><span class="k">Detections/);
+  assert.doesNotMatch(out, />0<\/span><span class="k">Detections/);
+});
+
+test('feed health in the hero is stated separately from protection status', () => {
+  const stale = {
+    ...healthyFeeds,
+    feeds: [{ ...healthyFeeds.feeds[0], lastError: 'HTTP 500' }],
+  };
+  const out = statusHero(overview(), stale, { enabled: true, total: 0 });
+  // Protection is still what the server said it was...
+  assert.match(out, /class="hero is-ok"/);
+  assert.match(out, />Protected</);
+  // ...and the feed problem is stated in its own badge rather than folded into
+  // the headline, which would produce an amber dot over the word "Protected".
+  assert.match(out, /1 of 1 feeds stale/);
+});
+
+/* ---------- feed health grading ------------------------------------------ */
+
+test('a switched-off feed is a decision, not a fault', () => {
+  const h = feedHealth({ feeds: [feed({ enabled: false }), healthyFeeds.feeds[0]] });
+  assert.equal(h.tone, 'ok');
+  assert.equal(h.enabled.length, 1);
+  assert.equal(h.label, 'Threat intelligence healthy');
+});
+
+test('an enabled feed that is not in the index is a fault, whatever its history says', () => {
+  const h = feedHealth({ feeds: [feed({ enabled: true, loaded: false, lastSuccessAt: hoursAgo(2) })] });
+  assert.equal(h.tone, 'bad');
+  assert.equal(h.broken.length, 1);
+});
+
+test('a loaded feed whose refresh failed is stale, not broken', () => {
+  const h = feedHealth({ feeds: [feed({ enabled: true, loaded: true, lastSuccessAt: hoursAgo(4), lastError: 'HTTP 500' })] });
+  assert.equal(h.tone, 'warn');
+  assert.equal(h.stale.length, 1);
+  assert.equal(h.broken.length, 0);
+});
+
+test('no enabled feed at all is a fault, not a healthy empty list', () => {
+  const h = feedHealth({ feeds: [feed({ enabled: false })] });
+  assert.equal(h.tone, 'bad');
+});
+
+/* ---------- needs attention ---------------------------------------------- */
+
+test('a calm install shows an explicit healthy state rather than an absent panel', () => {
+  const items = attentionItems({ checks: [{ status: 'ok', name: 'DNS', summary: 'fine' }] }, healthyFeeds);
+  assert.equal(items.length, 0);
+  const out = attentionPanel(items);
+  assert.match(out, /Nothing needs your attention/);
+  assert.match(out, /Needs attention/);
+});
+
+test('diagnostics that could not be fetched is itself an item, never silence', () => {
+  // The worst thing this panel could do is report "nothing needs attention" on
+  // the strength of checks it never received.
+  const items = attentionItems(null, healthyFeeds);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].tone, 'warn');
+  assert.match(items[0].title, /Configuration checks unavailable/);
+  assert.doesNotMatch(attentionPanel(items), /Nothing needs your attention/);
+});
+
+test('server-side diagnostics stay authoritative and are passed through verbatim', () => {
+  const items = attentionItems(
+    {
+      checks: [
+        { status: 'fail', section: 'Resolver', name: 'Client access', summary: 'Queries from "Home" are REFUSED.', action: 'Permit it on the Networks page.' },
+        { status: 'warn', section: 'Feeds', name: 'Refresh age', summary: 'Last refresh was 9 days ago.' },
+        { status: 'ok', section: 'Listeners', name: 'Port 53', summary: 'Bound.' },
+      ],
+    },
+    healthyFeeds
+  );
+  assert.equal(items.length, 2);
+  assert.equal(items[0].tone, 'bad');
+  assert.equal(items[0].title, 'Client access');
+  assert.match(items[0].body, /Queries from "Home" are REFUSED\./);
+  assert.match(items[0].body, /Permit it on the Networks page\./);
+  assert.equal(items[1].tone, 'warn');
+});
+
+test('feed faults reach the attention panel with the reason the server gave', () => {
+  const items = attentionItems({ checks: [] }, {
+    feeds: [
+      { ...feed({ enabled: true, loaded: false, lastSuccessAt: hoursAgo(3), loadError: 'its cached copy is missing' }), name: 'URLhaus' },
+      { ...feed({ enabled: true, loaded: true, lastSuccessAt: hoursAgo(3), lastError: 'HTTP 500' }), name: 'StevenBlack' },
+    ],
+  });
+  const titles = items.map((i) => i.title);
+  assert.ok(titles.includes('URLhaus is not blocking'), titles.join(' / '));
+  assert.ok(titles.includes('StevenBlack is stale'), titles.join(' / '));
+  assert.match(items.find((i) => i.title.startsWith('URLhaus')).body, /its cached copy is missing/);
+  assert.match(items.find((i) => i.title.startsWith('StevenBlack')).body, /HTTP 500/);
+});
+
+test('an install with every feed switched off is told so', () => {
+  const items = attentionItems({ checks: [] }, { feeds: [feed({ enabled: false })] });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].tone, 'bad');
+  assert.match(items[0].title, /No threat intelligence is enabled/);
+});
+
+test('the attention panel labels severity in words, not only in colour', () => {
+  const out = attentionPanel([
+    { tone: 'bad', title: 'A', body: 'b' },
+    { tone: 'warn', title: 'C', body: 'd' },
+  ]);
+  assert.match(out, />Fault</);
+  assert.match(out, />Warning</);
+});
+
+test('attention items escape everything the server put in them', () => {
+  const out = attentionPanel(
+    attentionItems({ checks: [{ status: 'fail', name: '<img src=x onerror="alert(1)">', summary: '<script>alert(2)</script>' }] }, healthyFeeds)
+  );
+  assert.doesNotMatch(out, /<img/);
+  assert.doesNotMatch(out, /<script>alert/);
+  assert.match(out, /&lt;img/);
+  assert.doesNotMatch(out, /&amp;lt;/);
+});
+
+/* ---------- recently blocked --------------------------------------------- */
+
+function blocked(o = {}) {
+  return {
+    time: now(),
+    domain: 'malware.example',
+    qtype: 'A',
+    action: 'blocked',
+    reason: 'Domain is on a malware distribution list',
+    category: 'malware',
+    source: 'abuse.ch URLhaus',
+    clientIp: '10.0.0.4',
+    ...o,
+  };
+}
+
+test('blocked domains are rendered in monospace so a typosquat is visible as one', () => {
+  const out = recentlyBlocked([blocked({ domain: 'paypaI-login.example' })]);
+  assert.match(out, /class="dom-name">paypaI-login\.example</);
+});
+
+test('a blocked row invents no enrichment it was not given', () => {
+  const bare = recentlyBlocked([blocked({ category: '', clientIp: '', clientName: '' })]);
+  assert.match(bare, /malware\.example/);
+  // No category recorded means no category shown — not a guess at one.
+  assert.doesNotMatch(bare, /class="badge/);
+
+  const full = recentlyBlocked([blocked()]);
+  assert.match(full, />malware</);
+  assert.match(full, /10\.0\.0\.4/);
+});
+
+test('an empty query log says which of the two reasons it might be', () => {
+  const out = recentlyBlocked([]);
+  assert.match(out, /query log is switched off/i);
+  assert.doesNotMatch(out, /example\.com|malware\.example/);
+});
+
+test('a hostile domain in the log is escaped, not rendered', () => {
+  const out = recentlyBlocked([blocked({ domain: '<img src=x onerror="alert(1)">.example', category: '<b>x</b>' })]);
+  assert.doesNotMatch(out, /<img/);
+  assert.doesNotMatch(out, /<b>x<\/b>/);
+  assert.match(out, /&lt;img/);
+  assert.doesNotMatch(out, /&amp;lt;/);
+});
+
+/* ---------- protection breakdown ----------------------------------------- */
+
+test('the breakdown states counts and shares, not a bar on its own', () => {
+  const out = protectionBreakdown([
+    { label: 'Malware', count: 60, category: 'malware' },
+    { label: 'Phishing', count: 40, category: 'phishing' },
+  ]);
+  assert.match(out, /Malware/);
+  assert.match(out, /60 · 60%/);
+  assert.match(out, /40 · 40%/);
+  assert.match(out, /class="cat-meter"/);
+});
+
+test('no blocks in the period is an explained empty state, not a zeroed chart', () => {
+  const out = protectionBreakdown([]);
+  assert.match(out, /No blocks in this period/);
+  assert.doesNotMatch(out, /cat-meter/);
+});
+
+test('a category label from the server is escaped', () => {
+  const out = protectionBreakdown([{ label: '<script>alert(1)</script>', count: 1, category: 'malware' }]);
+  assert.doesNotMatch(out, /<script>alert/);
+  assert.match(out, /&lt;script&gt;/);
 });
