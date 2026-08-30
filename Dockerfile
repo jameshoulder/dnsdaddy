@@ -65,9 +65,20 @@ EXPOSE 53/udp 53/tcp 8080/tcp 853/tcp
 
 # The container runs unprivileged, so it cannot bind 53 directly. Compose
 # publishes host 53 to container 5353; see docker-compose.yml.
+#
+# DNSDADDY_ALLOW_PUBLIC_BIND is set because the wildcard below is a wildcard.
+# The binary refuses one by default — a management API on every interface is
+# not something a program should do because nobody said otherwise — and the
+# image is the place that can honestly say the boundary is elsewhere: inside a
+# network namespace :8080 reaches nothing until Compose publishes it, and
+# docker-compose.yml publishes it to 127.0.0.1.
+#
+# This is a statement about the container, not about the host. If you run this
+# image with --network host, that boundary is gone and the wildcard is real.
 ENV DNSDADDY_DNS_LISTEN_UDP=:5353 \
     DNSDADDY_DNS_LISTEN_TCP=:5353 \
     DNSDADDY_HTTP_LISTEN=:8080 \
+    DNSDADDY_ALLOW_PUBLIC_BIND=true \
     DNSDADDY_DATA_DIR=/var/lib/dnsdaddy
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

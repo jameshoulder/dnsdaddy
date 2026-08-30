@@ -2,19 +2,14 @@ package api
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,8 +28,7 @@ const (
 
 // Auth handles dashboard sessions and API-token authentication.
 type Auth struct {
-	store  *store.Store
-	secret []byte
+	store *store.Store
 
 	secureCookies  string
 	trustedProxies *httpx.TrustedProxies
@@ -52,12 +46,17 @@ type AuthOptions struct {
 	TrustedProxies *httpx.TrustedProxies
 }
 
-// NewAuth loads or creates the session-signing secret under dataDir.
+// NewAuth prepares dashboard and token authentication.
+//
+// dataDir is no longer read for a signing key. Sessions are rows in the
+// database now, so there is no key whose compromise forges one — see
+// issueSession. Any session.key left over from an earlier version is retired
+// here rather than left in place: a 32-byte file with that name, still sitting
+// in the data directory, is something an operator would reasonably assume is
+// load-bearing, and it has not been since sessions moved to the store.
 func NewAuth(st *store.Store, dataDir string, o AuthOptions) (*Auth, error) {
-	secret, err := loadOrCreateSecret(filepath.Join(dataDir, "session.key"))
-	if err != nil {
-		return nil, err
-	}
+	retireLegacySessionKey(filepath.Join(dataDir, "session.key"))
+
 	mode := o.SecureCookies
 	if mode == "" {
 		mode = "auto"
@@ -68,32 +67,24 @@ func NewAuth(st *store.Store, dataDir string, o AuthOptions) (*Auth, error) {
 	}
 	return &Auth{
 		store:          st,
-		secret:         secret,
 		secureCookies:  mode,
 		trustedProxies: trusted,
 		limiter:        newAttemptLimiter(10, 15*time.Minute),
 	}, nil
 }
 
-func loadOrCreateSecret(path string) ([]byte, error) {
-	// #nosec G304 -- path is <data_dir>/session.key, built from operator config,
-	// never from a request.
-	b, err := os.ReadFile(path)
-	if err == nil && len(b) >= 32 {
-		return b, nil
+// retireLegacySessionKey removes the HMAC key that used to sign session
+// cookies.
+//
+// Best-effort and deliberately silent about failure: it grants nothing, so a
+// file that cannot be removed is untidy rather than dangerous, and refusing to
+// start over it would be absurd. Startup on a read-only data directory is a
+// supported shape for a diagnostic.
+func retireLegacySessionKey(path string) {
+	if _, err := os.Stat(path); err != nil {
+		return
 	}
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read session key: %w", err)
-	}
-
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return nil, fmt.Errorf("generate session key: %w", err)
-	}
-	if err := os.WriteFile(path, secret, 0o600); err != nil {
-		return nil, fmt.Errorf("write session key: %w", err)
-	}
-	return secret, nil
+	_ = os.Remove(path)
 }
 
 // EnsureAdminPassword sets the admin password from configuration, or generates
@@ -164,34 +155,72 @@ func (a *Auth) SetPassword(ctx context.Context, current, next string) error {
 	if err != nil {
 		return err
 	}
-	return a.store.SetSetting(ctx, settingAdminHash, string(hash))
+	if err := a.store.SetSetting(ctx, settingAdminHash, string(hash)); err != nil {
+		return err
+	}
+
+	// Every session, including this one.
+	//
+	// Changing the admin password is the thing an operator does when they
+	// think somebody else has been in. If that left the intruder's session
+	// working it would be a change that accomplished nothing, and the operator
+	// would believe otherwise — which is worse than not offering it. Signing
+	// the operator out of their own browser is a small price and an honest
+	// signal that it took effect.
+	//
+	// Ordered after the hash is stored: revoking first and then failing to
+	// write would log everybody out and leave the old password in place.
+	if _, err := a.store.DeleteAllSessions(ctx); err != nil {
+		return fmt.Errorf("password changed, but existing sessions could not be revoked: %w", err)
+	}
+	return nil
 }
 
-// issueSession returns a signed session value of the form "<expiry>.<mac>".
-func (a *Auth) issueSession() string {
-	exp := time.Now().Add(sessionTTL).Unix()
-	payload := strconv.FormatInt(exp, 10)
-	mac := hmac.New(sha256.New, a.secret)
-	mac.Write([]byte(payload))
-	return payload + "." + hex.EncodeToString(mac.Sum(nil))
+// issueSession creates a server-side session and returns the opaque secret to
+// put in the cookie.
+//
+// This replaced a self-contained "<expiry>.<hmac(expiry)>" value. That design
+// had three properties that a management interface should not have, and none
+// of them were fixable while the server kept no record of a session:
+//
+//	logout was advisory      — the cookie stayed valid until its expiry, so a
+//	                           copy taken beforehand kept working
+//	a password change did
+//	nothing to live sessions — the cookie did not depend on the password
+//	the key was the whole
+//	authority                — anyone reading <data_dir>/session.key could mint
+//	                           a cookie with any expiry, indefinitely, and
+//	                           rotating the key was the only response
+//
+// The signing key still exists for other uses, but it is no longer what makes
+// a session valid: a row in the database is. Deleting the row is revocation.
+func (a *Auth) issueSession(ctx context.Context, label string) (string, error) {
+	return a.store.CreateSession(ctx, sessionTTL, label)
 }
 
-func (a *Auth) validSession(value string) bool {
-	payload, sig, ok := strings.Cut(value, ".")
-	if !ok {
-		return false
-	}
-	mac := hmac.New(sha256.New, a.secret)
-	mac.Write([]byte(payload))
-	want := hex.EncodeToString(mac.Sum(nil))
-	if subtle.ConstantTimeCompare([]byte(sig), []byte(want)) != 1 {
-		return false
-	}
-	exp, err := strconv.ParseInt(payload, 10, 64)
+// validSession reports whether a cookie value names a live session.
+//
+// Both the expiry and the existence of the session are decided by the store,
+// in one query, so there is no window in which a deleted or expired session is
+// treated as live.
+func (a *Auth) validSession(ctx context.Context, value string) bool {
+	ok, err := a.store.LookupSession(ctx, value)
 	if err != nil {
+		// Fail closed. A database that cannot answer "is this session live?"
+		// is not a reason to assume it is.
 		return false
 	}
-	return time.Now().Unix() < exp
+	return ok
+}
+
+// RevokeSession ends one session. This is what logging out does.
+func (a *Auth) RevokeSession(ctx context.Context, value string) error {
+	return a.store.DeleteSession(ctx, value)
+}
+
+// RevokeAllSessions ends every session and reports how many there were.
+func (a *Auth) RevokeAllSessions(ctx context.Context) (int64, error) {
+	return a.store.DeleteAllSessions(ctx)
 }
 
 // secureFlag decides the session cookie's Secure attribute.
@@ -219,7 +248,10 @@ func (a *Auth) secureFlag(r *http.Request) bool {
 }
 
 // SetSessionCookie writes the session cookie on a successful login.
-func (a *Auth) SetSessionCookie(w http.ResponseWriter, r *http.Request) {
+//
+// token comes from issueSession, which has already recorded the session in the
+// database. The cookie carries the only copy of the secret.
+func (a *Auth) SetSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	// Secure is conditional, not absent. secureFlag resolves http.secure_cookies:
 	// "always" and "never" are literal, and "auto" (the default) sets the flag
 	// whenever the request genuinely arrived over TLS — either r.TLS != nil, or
@@ -247,7 +279,7 @@ func (a *Auth) SetSessionCookie(w http.ResponseWriter, r *http.Request) {
 	// nosemgrep: go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
-		Value:    a.issueSession(),
+		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		// Lax rather than Strict so following a bookmark into the dashboard
@@ -332,6 +364,9 @@ func sameOrigin(r *http.Request, trusted *httpx.TrustedProxies) bool {
 type principal struct {
 	kind  string // "session" or "token"
 	label string
+	// session is the cookie value, present only for kind == "session". It is
+	// what logout needs in order to revoke this session and no other.
+	session string
 }
 
 // authenticate resolves the caller, or reports that they are anonymous.
@@ -349,10 +384,10 @@ func (a *Auth) authenticate(r *http.Request) (principal, bool) {
 	}
 
 	c, err := r.Cookie(sessionCookie)
-	if err != nil || !a.validSession(c.Value) {
+	if err != nil || !a.validSession(r.Context(), c.Value) {
 		return principal{}, false
 	}
-	return principal{kind: "session", label: "admin"}, true
+	return principal{kind: "session", label: "admin", session: c.Value}, true
 }
 
 // attemptLimiter is a fixed-window counter keyed by client address.

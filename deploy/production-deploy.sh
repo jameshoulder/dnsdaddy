@@ -406,8 +406,20 @@ if [[ $DRY_RUN -eq 0 ]]; then
   BODY=$(curl -fsS --max-time 10 http://127.0.0.1:8080/api/v1/health || true)
   [[ -n "$BODY" ]] || die "health endpoint did not respond"
   echo "  $BODY"
-  SIZE=$(sed -n 's/.*"blocklistSize":\([0-9]*\).*/\1/p' <<<"$BODY")
-  (( SIZE > 2000000 )) && ok "blocklist intact ($SIZE)" || warn "blocklist is $SIZE — expected ~2.87M; investigate before trusting this"
+
+  # The published port translates the source address, so this request is not a
+  # loopback peer and gets liveness only. Ask from inside the container, where
+  # it is. If that is unavailable, say the size is unknown rather than reading
+  # a missing field as zero and declaring the blocklist destroyed.
+  DETAIL=$(docker exec "$CONTAINER" wget -qO- http://127.0.0.1:8080/api/v1/health 2>/dev/null || true)
+  SIZE=$(sed -n 's/.*"blocklistSize":\([0-9]*\).*/\1/p' <<<"$DETAIL")
+  if [[ -z "$SIZE" ]]; then
+    warn "could not read the blocklist size from inside the container; verify with: docker exec $CONTAINER dnsdaddy doctor"
+  elif (( SIZE > 2000000 )); then
+    ok "blocklist intact ($SIZE)"
+  else
+    warn "blocklist is $SIZE — expected ~2.87M; investigate before trusting this"
+  fi
 
   RC=$(dig @127.0.0.1 example.com +timeout=4 +tries=1 2>/dev/null | sed -n 's/.*status: \([A-Z]*\).*/\1/p' | head -1)
   [[ "$RC" == "NOERROR" ]] && ok "dig @127.0.0.1 example.com -> NOERROR" || die "local DNS returned $RC"

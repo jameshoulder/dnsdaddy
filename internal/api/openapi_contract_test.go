@@ -39,13 +39,58 @@ func TestHealthResponseMatchesTheSpec(t *testing.T) {
 				"health 200 schema — generated clients would not have it", name)
 		}
 	}
-	// And nothing described that the code does not return, which is the same
+
+	// And nothing described that the code cannot return, which is the same
 	// mistake pointing the other way.
+	//
+	// The comparison is against the fully populated form rather than the zero
+	// value: the entitled fields are pointers and omitempty, so marshalling an
+	// empty struct yields only the tier every caller sees. Using that as the
+	// reference would delete the documentation for the other tier the first
+	// time someone ran this.
+	rawFull, err := json.Marshal(fullHealthResponse())
+	if err != nil {
+		t.Fatalf("marshal populated HealthResponse: %v", err)
+	}
+	var allFields map[string]any
+	if err := json.Unmarshal(rawFull, &allFields); err != nil {
+		t.Fatalf("unmarshal populated HealthResponse: %v", err)
+	}
 	for name := range properties {
-		if _, ok := fields[name]; !ok {
+		if _, ok := allFields[name]; !ok {
 			t.Errorf("openapi.yaml describes %q on the health response, which the code does not "+
 				"return", name)
 		}
+	}
+
+	// The public tier is the security-relevant half, so it is pinned by name.
+	// A field added to HealthResponse without a pointer would silently join
+	// the body every stranger receives, and this is what stops that.
+	if len(fields) != 1 {
+		t.Errorf("the unauthenticated health body carries %d fields (%v); it must carry only status",
+			len(fields), fields)
+	}
+	if _, ok := fields["status"]; !ok {
+		t.Error("the unauthenticated health body does not carry status")
+	}
+}
+
+// fullHealthResponse is the entitled form: every field populated.
+func fullHealthResponse() HealthResponse {
+	var (
+		ver    = "test"
+		uptime = int64(1)
+		size   = 1
+		prot   = true
+		stale  = false
+	)
+	return HealthResponse{
+		Status:         "ok",
+		Version:        &ver,
+		UptimeSeconds:  &uptime,
+		BlocklistSize:  &size,
+		Protecting:     &prot,
+		ClientACLStale: &stale,
 	}
 }
 

@@ -181,6 +181,28 @@ type HTTP struct {
 	// Off by default: behind a public reverse proxy that path would other-
 	// wise be an open DoH resolver for anyone who finds it.
 	AllowUntokenizedDoH bool `yaml:"allow_untokenized_doh"`
+
+	// AllowPublicBind is the acknowledgement required to bind the management
+	// interface somewhere the public internet could reach.
+	//
+	// It gates two shapes, and only those two: a wildcard listener (":8080",
+	// "0.0.0.0:8080", "[::]:8080"), which on a VPS covers the public NIC
+	// whether or not the operator was thinking about it; and a specific
+	// globally routable address, which is unambiguous about what it publishes.
+	// Loopback needs nothing, and a specific private address needs nothing
+	// either — someone who types 192.168.1.50 has already said what they mean,
+	// and that is exactly how the LAN deployment is configured.
+	//
+	// The management API is authenticated but plaintext. Setting this without
+	// TLS in front of it puts an admin session cookie on the wire, which is
+	// why the startup path warns every time it is used and the documented
+	// public path is a reverse proxy instead.
+	//
+	// The container image sets it, and that is not a loophole: inside a
+	// network namespace a wildcard reaches nothing until Compose publishes
+	// the port, and Compose publishes it to 127.0.0.1. The setting is where
+	// the deployment declares that it is providing the boundary itself.
+	AllowPublicBind bool `yaml:"allow_public_bind"`
 }
 
 // Logging controls query logging and retention.
@@ -278,7 +300,26 @@ func Default() Config {
 			DNSSECTelemetry:    true,
 		},
 		HTTP: HTTP{
-			Listen:        ":8080",
+			// Loopback, deliberately.
+			//
+			// This is the management interface: it can repoint a whole
+			// network's DNS, read the query log and rotate credentials.
+			// ":8080" would have bound it to every interface, v4 and v6, so
+			// `./dnsdaddy` on a VPS published an authenticated-but-plaintext
+			// admin API to the internet with nothing asked of the operator.
+			//
+			// Docker's own boundary is not a substitute for this one. A
+			// published port is a property of the deployment; a safe default
+			// is a property of the program, and the program has to be safe
+			// when somebody runs the binary directly. The container image
+			// still sets DNSDADDY_HTTP_LISTEN=:8080 because inside a network
+			// namespace that address is not reachable until Compose publishes
+			// it — and Compose publishes it to 127.0.0.1.
+			//
+			// Widening this is a deliberate act: see validateManagementBind,
+			// which requires http.allow_public_bind for anything that is not
+			// loopback or a private address.
+			Listen:        "127.0.0.1:8080",
 			SecureCookies: "auto",
 		},
 		Log: Logging{
@@ -402,6 +443,7 @@ func applyEnv(cfg *Config) error {
 		func() error { return envDur("DNSDADDY_DETECTION_COOLDOWN", &cfg.Detection.Cooldown) },
 		func() error { return envFloat("DNSDADDY_DETECTION_WINDOW_SCALE", &cfg.Detection.WindowScale) },
 		func() error { return envBool("DNSDADDY_ALLOW_UNTOKENIZED_DOH", &cfg.HTTP.AllowUntokenizedDoH) },
+		func() error { return envBool("DNSDADDY_ALLOW_PUBLIC_BIND", &cfg.HTTP.AllowPublicBind) },
 		func() error { return envBool("DNSDADDY_QUERY_LOG", &cfg.Log.QueryLog) },
 		func() error { return envBool("DNSDADDY_LOG_CLIENT_IP", &cfg.Log.LogClientIP) },
 		func() error { return envInt("DNSDADDY_RETENTION_DAYS", &cfg.Log.RetentionDays) },
@@ -561,7 +603,140 @@ func (c *Config) validate() error {
 			c.Detection.WindowScale)
 	}
 
+	if err := c.validateManagementBind(); err != nil {
+		return err
+	}
+
 	return c.validateNotAnOpenResolver()
+}
+
+// ManagementBindKind classifies where the dashboard and API will be reachable.
+type ManagementBindKind int
+
+const (
+	// BindLoopback is reachable only from this machine.
+	BindLoopback ManagementBindKind = iota
+	// BindPrivate is a specific address in private or shared address space.
+	BindPrivate
+	// BindWildcard is every interface this host has, present and future.
+	BindWildcard
+	// BindPublic is a specific globally routable address.
+	BindPublic
+	// BindUnknown is a listen string that could not be classified — a unix
+	// socket, a hostname, or something malformed.
+	BindUnknown
+)
+
+func (k ManagementBindKind) String() string {
+	switch k {
+	case BindLoopback:
+		return "loopback"
+	case BindPrivate:
+		return "private"
+	case BindWildcard:
+		return "wildcard"
+	case BindPublic:
+		return "public"
+	default:
+		return "unknown"
+	}
+}
+
+// NeedsPublicBindAck reports whether this shape may only be used with an
+// explicit acknowledgement.
+//
+// Wildcard is included because ":8080" is the shape people reach for without
+// meaning it. On a laptop it is harmless; on a VPS it is the whole internet,
+// and the string looks identical either way. A specific private address is
+// not included: typing 192.168.1.50 is already a statement of intent, and it
+// is how the LAN deployment is meant to be configured.
+func (k ManagementBindKind) NeedsPublicBindAck() bool {
+	return k == BindWildcard || k == BindPublic
+}
+
+// ClassifyManagementBind reports what a listen address exposes.
+func ClassifyManagementBind(listen string) ManagementBindKind {
+	listen = strings.TrimSpace(listen)
+	if listen == "" {
+		// An empty listen address means net/http's ":http" — every interface.
+		return BindWildcard
+	}
+
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		host = listen
+	}
+	host = strings.Trim(host, "[]")
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i] // drop an IPv6 zone
+	}
+
+	if host == "" {
+		return BindWildcard // ":8080"
+	}
+	if strings.EqualFold(host, "localhost") {
+		return BindLoopback
+	}
+
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return BindUnknown
+	}
+	if addr.Is4In6() {
+		addr = addr.Unmap()
+	}
+	switch {
+	case addr.IsUnspecified(): // 0.0.0.0 and ::
+		return BindWildcard
+	case addr.IsLoopback():
+		return BindLoopback
+	case addr.IsPrivate(), addr.IsLinkLocalUnicast(), addr.IsLinkLocalMulticast():
+		return BindPrivate
+	case isSharedAddressSpace(addr):
+		return BindPrivate
+	default:
+		return BindPublic
+	}
+}
+
+// isSharedAddressSpace covers RFC 6598 carrier-grade NAT, which netip does not
+// classify as private but which is never globally routable.
+func isSharedAddressSpace(addr netip.Addr) bool {
+	return cgnatPrefix.Contains(addr)
+}
+
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// validateManagementBind refuses to publish the management interface to the
+// internet by accident.
+//
+// The dashboard and API can repoint a whole network's DNS, read every query
+// this resolver has answered, and rotate the credentials that let a device use
+// it. Binding that to a public address over plain HTTP is a decision, and this
+// makes the operator make it rather than inherit it from a default nobody
+// chose. Docker cannot be the control here: a security property of the
+// program has to hold when the program is run directly.
+func (c *Config) validateManagementBind() error {
+	if c.HTTP.AllowPublicBind {
+		return nil
+	}
+	kind := ClassifyManagementBind(c.HTTP.Listen)
+	if !kind.NeedsPublicBindAck() {
+		return nil
+	}
+
+	shape := "binds every interface on this machine"
+	if kind == BindPublic {
+		shape = "is a globally routable address"
+	}
+	return fmt.Errorf(
+		"http.listen %q %s, which would publish the management dashboard and API "+
+			"in plain HTTP to anything that can reach this host. Use \"127.0.0.1:8080\" and "+
+			"reach it over an SSH tunnel, or put a TLS reverse proxy in front of loopback "+
+			"(see deploy/Caddyfile.example). To bind a LAN address, name it explicitly "+
+			"(e.g. \"192.168.1.50:8080\"). If you genuinely intend to publish this port, "+
+			"set http.allow_public_bind: true (DNSDADDY_ALLOW_PUBLIC_BIND=true)",
+		c.HTTP.Listen, shape)
 }
 
 // validateNotAnOpenResolver refuses to start a resolver that is reachable from

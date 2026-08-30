@@ -311,6 +311,29 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// Say what was bound, in the terms that matter, every time. An operator
+	// reading "listening on :8080" has to know what that means on this
+	// particular host; "reachable from the internet" does not need decoding.
+	//
+	// The warning is not conditional on suspicion. Reaching a wildcard or a
+	// public address requires http.allow_public_bind, so by the time this
+	// runs somebody has already asserted they meant it — and the thing worth
+	// repeating is that the assertion put an admin session cookie on the wire.
+	switch config.ClassifyManagementBind(cfg.HTTP.Listen) {
+	case config.BindLoopback:
+		log.Info("management interface is loopback-only", "addr", cfg.HTTP.Listen)
+	case config.BindPrivate:
+		log.Info("management interface published on a private address",
+			"addr", cfg.HTTP.Listen,
+			"note", "plain HTTP: anyone on this network can read the session cookie")
+	case config.BindWildcard, config.BindPublic:
+		log.Warn("MANAGEMENT INTERFACE IS PUBLISHED BEYOND LOOPBACK IN PLAIN HTTP",
+			"addr", cfg.HTTP.Listen,
+			"acknowledged_by", "http.allow_public_bind",
+			"note", "the admin session cookie travels unencrypted; terminate TLS in front "+
+				"of 127.0.0.1:8080 instead (deploy/Caddyfile.example), or use an SSH tunnel")
+	}
+
 	httpErr := make(chan error, 1)
 	go func() {
 		log.Info("dashboard and API listening", "addr", cfg.HTTP.Listen)
@@ -555,6 +578,16 @@ func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *
 		if findings > 0 {
 			log.Info("pruned expired findings",
 				"rows", findings, "retention_days", cfg.Detection.RetentionDays)
+		}
+
+		// Expired sessions are already refused by the lookup, which enforces
+		// the expiry in the query itself — this only stops the table growing
+		// on a dashboard that is opened every day for a year. Nothing security
+		// relevant depends on it running.
+		if sessions, err := st.PurgeExpiredSessions(pctx); err != nil {
+			log.Error("session purge failed", "error", err)
+		} else if sessions > 0 {
+			log.Debug("purged expired sessions", "rows", sessions)
 		}
 	}
 

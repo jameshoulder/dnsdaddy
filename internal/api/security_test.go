@@ -180,7 +180,7 @@ func TestSecureCookieModes(t *testing.T) {
 			if tt.tls {
 				req.TLS = &tlsState
 			}
-			auth.SetSessionCookie(rec, req)
+			auth.SetSessionCookie(rec, req, mustSession(t, auth))
 
 			cookies := rec.Result().Cookies()
 			if len(cookies) != 1 {
@@ -230,7 +230,7 @@ func TestSecureCookieAutoHonoursTrustedProxyOnly(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 			req.RemoteAddr = tt.remote
 			req.Header.Set("X-Forwarded-Proto", "https")
-			auth.SetSessionCookie(rec, req)
+			auth.SetSessionCookie(rec, req, mustSession(t, auth))
 
 			if got := rec.Result().Cookies()[0].Secure; got != tt.wantSecure {
 				t.Errorf("Secure = %v, want %v", got, tt.wantSecure)
@@ -251,7 +251,7 @@ func TestClearSessionCookieMatchesSetAttributes(t *testing.T) {
 	req.RemoteAddr = "192.168.1.10:5555"
 
 	set := httptest.NewRecorder()
-	auth.SetSessionCookie(set, req)
+	auth.SetSessionCookie(set, req, mustSession(t, auth))
 	clear := httptest.NewRecorder()
 	auth.ClearSessionCookie(clear, req)
 
@@ -276,4 +276,15 @@ func newTestStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { st.Close() })
 	return st
+}
+
+// mustSession issues a real session for tests that are about cookie
+// attributes rather than session lifecycle.
+func mustSession(t *testing.T, auth *Auth) string {
+	t.Helper()
+	token, err := auth.issueSession(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("issueSession: %v", err)
+	}
+	return token
 }

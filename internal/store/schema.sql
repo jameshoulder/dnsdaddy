@@ -5,6 +5,32 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+-- Dashboard sessions.
+--
+-- The session cookie used to be a self-contained "<expiry>.<hmac(expiry)>",
+-- which meant the server held no opinion about any particular session: logout
+-- could only ask the browser to forget it, a password change left every live
+-- session working, and anyone holding the signing key could mint a valid
+-- cookie for any expiry they liked, forever. Moving the state here is what
+-- makes "log out", "change the password", and "revoke everything" mean
+-- something on the server rather than only in the browser.
+--
+-- token_hash, not token: this table is in the same SQLite file as the query
+-- log and the feed cache, and a database that leaks should not hand over live
+-- sessions with it. The cookie carries the only copy of the secret, and the
+-- server stores SHA-256 of it. A plain hash is right here where bcrypt is not:
+-- the input is 256 bits from crypto/rand, so there is no guessing to slow
+-- down, and login latency would suffer for nothing.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash  TEXT PRIMARY KEY,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    label       TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
 CREATE TABLE IF NOT EXISTS policies (
     id          TEXT PRIMARY KEY,
     name        TEXT    NOT NULL,
