@@ -1208,3 +1208,43 @@ exit 0`)
 		notContains(t, out, forbidden)
 	}
 }
+
+// The reported confusion, as a test. A public-VPS install with Apache already
+// on port 80: the dashboard is correctly on loopback, so browsing to the host
+// IP reaches Apache, and the installer used to say nothing at all about it.
+// Silence there is what made a working install look like a failed one.
+func TestTunnelModeExplainsAnExistingWebServerOnPort80(t *testing.T) {
+	in := newInstall(t)
+	in.stub("ss", `
+if [[ "$*" == *-t* ]]; then
+  echo 'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("apache2",pid=700,fd=4))'
+fi
+exit 0`)
+
+	out, code := in.run("--vps", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "apache2")
+	// The sentence whose absence caused the confusion.
+	contains(t, out, "reaches that server, not DNS Daddy")
+	contains(t, out, "has not changed it")
+	// And the dashboard is still reachable the safe way.
+	contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+	// Apache is left entirely alone.
+	for _, forbidden := range []string{"systemctl stop apache", "systemctl disable apache", "a2dissite", "apt-get remove apache"} {
+		notContains(t, out, forbidden)
+	}
+}
+
+// And with nothing on 80, no such section appears: an installer that warns
+// about a web server that is not there teaches the reader to skip warnings.
+func TestNoWebServerSectionWhenPortsAreFree(t *testing.T) {
+	in := newInstall(t)
+
+	out, code := in.run("--vps", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	notContains(t, out, "Existing web server")
+}
