@@ -151,6 +151,19 @@ func (a *API) handleReportSummary(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Go marshals a nil slice to null, and every one of these is built by
+	// appending — so a deployment that has not blocked anything yet, which is
+	// every deployment on its first day, sent the dashboard
+	// "categories": null. It calls .map on that, and the Reports page died
+	// with "Cannot read properties of null" at exactly the moment a new user
+	// went looking for evidence the product works.
+	//
+	// The spec says these are arrays. Empty is an array.
+	summary.Categories = nonNilSlice(summary.Categories)
+	summary.TopDomains = nonNilSlice(summary.TopDomains)
+	summary.Networks = nonNilSlice(summary.Networks)
+	summary.Feeds = nonNilSlice(summary.Feeds)
+
 	if strings.EqualFold(r.URL.Query().Get("format"), "markdown") {
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")

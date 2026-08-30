@@ -33,6 +33,7 @@ const {
   accessBadge,
   clientAccessSummary,
   resolverAccessNote,
+  emptyState,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -938,4 +939,39 @@ test('a named covering range still outranks the generic served state', () => {
   }));
   assert.match(out, /Via wider range/);
   assert.match(out, /10\.0\.0\.0\/8/);
+});
+
+// --- Empty states ---------------------------------------------------------
+//
+// A fresh install is almost entirely empty states, so they are the product's
+// first impression. These pin the two things that make one read as intentional
+// rather than broken: it explains what happens next, and it survives being
+// called the old two-argument way from the pages that have not been updated.
+
+test('an empty state carries an icon, a title and an explanation', () => {
+  const out = emptyState('No queries yet', 'Point a client at this resolver and they appear here.');
+  assert.match(out, /empty-ico/);
+  assert.match(out, /No queries yet/);
+  assert.match(out, /Point a client at this resolver/);
+});
+
+test('an empty state renders an action when one is given', () => {
+  const out = emptyState('No networks', 'Add one to get started.', {
+    action: '<a class="btn btn-primary" href="#/networks">Add a network</a>',
+  });
+  assert.match(out, /btn-primary/);
+  assert.match(out, /Add a network/);
+});
+
+test('an empty state without an action renders no empty button row', () => {
+  const out = emptyState('Nothing blocked', 'That is the expected state on a quiet network.');
+  assert.doesNotMatch(out, /class="row"/);
+});
+
+// The title and body are escaped like everything else: an empty state can end
+// up carrying a feed name or a hostname that came from configuration.
+test('an empty state escapes what it is given', () => {
+  const out = emptyState('<script>x</script>', 'body & more');
+  assert.doesNotMatch(out, /<script>/);
+  assert.match(out, /&amp;/);
 });

@@ -1106,3 +1106,145 @@ func TestDryRunUpgradeSaysItWouldCloseAPublicBind(t *testing.T) {
 	// And it is still a dry run: the line is untouched.
 	contains(t, in.readEnv(), "\nDNSDADDY_DASHBOARD_BIND=203.0.113.20")
 }
+
+// --- Deployment modes ---------------------------------------------------------
+
+// The security invariant of the whole VPS story: neither public mode may put
+// the management interface on a public address. HTTPS mode is the dangerous
+// one, because it is the mode whose purpose is "reachable from a browser" —
+// the tempting implementation is to publish 8080 and put TLS in front later.
+//
+// docker-compose.yml reads "${DNSDADDY_DASHBOARD_BIND:-127.0.0.1}:8080:8080",
+// so this asserts on the value that decides it. If a future change sets that
+// variable in HTTPS mode, this fails.
+func TestHttpsModeNeverPublishesTheDashboardBackend(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com")
+
+	// Not a dry run. A dry run writes no .env, so every assertion below would
+	// pass against an empty string — which is exactly what happened the first
+	// time this was written, and it is the one test in this file that must not
+	// be able to do that.
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if !in.envExists() {
+		t.Fatal(".env was never written, so this test would assert nothing")
+	}
+	env := in.readEnv()
+	for _, forbidden := range []string{
+		"DNSDADDY_DASHBOARD_BIND=0.0.0.0",
+		"DNSDADDY_DASHBOARD_BIND=::",
+	} {
+		if strings.Contains(env, forbidden) {
+			t.Errorf("HTTPS mode set %s — the management API would be published in plaintext:\n%s",
+				forbidden, env)
+		}
+	}
+	// Not merely "not 0.0.0.0": an active bind of any kind publishes it.
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_DASHBOARD_BIND=") &&
+			strings.TrimPrefix(line, "DNSDADDY_DASHBOARD_BIND=") != "" {
+			t.Errorf("HTTPS mode published the dashboard backend: %q", line)
+		}
+	}
+	notContains(t, out, "http://"+"dns.example.com")
+}
+
+// HTTPS mode is configured for TLS, and says so in the terms the app needs:
+// a base URL it can build links from, and cookies that will not be sent over
+// plaintext.
+func TestHttpsModeConfiguresTheAppForTLS(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com")
+
+	out, code := in.run("--https", "--yes", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "dns.example.com")
+	contains(t, out, "backend stays on loopback")
+}
+
+// A hostname is required, and the failure names what to do instead rather than
+// leaving the operator with a broken TLS config.
+func TestHttpsModeRefusesAnInvalidHostname(t *testing.T) {
+	for _, bad := range []string{"https://dns.example.com", "192.0.2.10", "localhost", ""} {
+		t.Run(bad, func(t *testing.T) {
+			in := newInstall(t)
+			in.setenv("DNSDADDY_HTTPS_HOSTNAME=" + bad)
+
+			out, code := in.run("--https", "--yes", "--dry-run")
+			if code == 0 {
+				t.Fatalf("accepted %q as a hostname\n%s", bad, out)
+			}
+			contains(t, out, "not one")
+		})
+	}
+}
+
+// Something already serving 80/443 is not a DNS Daddy failure, and must not be
+// treated as one: the resolver is installed and running either way. The TLS
+// front end is what gets skipped, and the other service is left alone.
+func TestHttpsModeStandsDownWhenAnotherWebServerHoldsThePorts(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com")
+	in.stub("ss", `
+# apache2 on 80, nothing on 443.
+if [[ "$*" == *-t* ]]; then
+  echo 'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("apache2",pid=700,fd=4))'
+fi
+exit 0`)
+
+	out, code := in.run("--https", "--yes", "--dry-run")
+	if code != 0 {
+		t.Fatalf("a busy port 80 failed the whole install\n%s", out)
+	}
+	contains(t, out, "apache2")
+	// Never: the installer does not stop, disable or reconfigure it.
+	notContains(t, in.composeLog(), "apache")
+	for _, forbidden := range []string{"systemctl stop apache", "systemctl disable apache", "a2dissite"} {
+		notContains(t, out, forbidden)
+	}
+}
+
+// The reported confusion, as a test. A public-VPS install with Apache already
+// on port 80: the dashboard is correctly on loopback, so browsing to the host
+// IP reaches Apache, and the installer used to say nothing at all about it.
+// Silence there is what made a working install look like a failed one.
+func TestTunnelModeExplainsAnExistingWebServerOnPort80(t *testing.T) {
+	in := newInstall(t)
+	in.stub("ss", `
+if [[ "$*" == *-t* ]]; then
+  echo 'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("apache2",pid=700,fd=4))'
+fi
+exit 0`)
+
+	out, code := in.run("--vps", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "apache2")
+	// The sentence whose absence caused the confusion.
+	contains(t, out, "reaches that server, not DNS Daddy")
+	contains(t, out, "has not changed it")
+	// And the dashboard is still reachable the safe way.
+	contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+	// Apache is left entirely alone.
+	for _, forbidden := range []string{"systemctl stop apache", "systemctl disable apache", "a2dissite", "apt-get remove apache"} {
+		notContains(t, out, forbidden)
+	}
+}
+
+// And with nothing on 80, no such section appears: an installer that warns
+// about a web server that is not there teaches the reader to skip warnings.
+func TestNoWebServerSectionWhenPortsAreFree(t *testing.T) {
+	in := newInstall(t)
+
+	out, code := in.run("--vps", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	notContains(t, out, "Existing web server")
+}

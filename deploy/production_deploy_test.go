@@ -548,7 +548,15 @@ func TestNoScriptCallsAHelperItDoesNotDefine(t *testing.T) {
 	}
 
 	defines := regexp.MustCompile(`(?m)^([a-z_][a-z0-9_]*)\(\)`)
-	calls := regexp.MustCompile(`(?m)^[ \t]*([a-z_][a-z0-9_]*)[ \t]`)
+	// Command positions, not just the start of a line: `if ! act foo` and
+	// `x && helper` are calls too, and the first version of this test missed
+	// exactly that — an `act` borrowed from the sibling script slipped past it.
+	// Command positions, not just the start of a line. A regex kept losing to
+	// `if ! act foo`: its first match is the `if`, and the position before
+	// `act` is a `! ` that no alternation happened to list. Splitting on the
+	// separators and taking the head of each fragment has no such blind spot.
+	sep := regexp.MustCompile(`(&&|\|\||;|\bthen\b|\belse\b|\bdo\b)`)
+	head := regexp.MustCompile(`^([a-z_][a-z0-9_]*)\b`)
 
 	defined := map[string]map[string]bool{}
 	every := map[string]bool{}
@@ -562,15 +570,37 @@ func TestNoScriptCallsAHelperItDoesNotDefine(t *testing.T) {
 
 	for name, body := range scripts {
 		for i, line := range strings.Split(body, "\n") {
-			m := calls.FindStringSubmatch(line)
-			if m == nil {
-				continue
-			}
-			if every[m[1]] && !defined[name][m[1]] {
-				t.Errorf("%s:%d calls %s(), which this script does not define — "+
-					"it is defined only in the other one, so this is a runtime "+
-					"\"command not found\" in whatever branch reaches it:\n  %s",
-					name, i+1, m[1], strings.TrimSpace(line))
+			for _, frag := range sep.Split(line, -1) {
+				frag = strings.TrimSpace(frag)
+				for _, prefix := range []string{"if ", "elif ", "while ", "until ", "! ", "!"} {
+					frag = strings.TrimSpace(strings.TrimPrefix(frag, prefix))
+				}
+				m := head.FindStringSubmatch(frag)
+				if m == nil {
+					continue
+				}
+				word := m[1]
+				if defined[name][word] || shellWord(word) {
+					continue
+				}
+				if every[word] {
+					t.Errorf("%s:%d calls %s(), which this script does not define — "+
+						"it is defined only in the other one, so this is a runtime "+
+						"\"command not found\" in whatever branch reaches it:\n  %s",
+						name, i+1, word, strings.TrimSpace(line))
+					continue
+				}
+				// A snake_case word in command position that neither script defines
+				// and that is not an external command is a helper that does not
+				// exist anywhere — the shape of a name invented while writing, or
+				// left behind by a rename. Underscores keep this off ordinary
+				// commands and off prose, which does not sit in command position.
+				if strings.Contains(word, "_") {
+					if _, err := exec.LookPath(word); err != nil {
+						t.Errorf("%s:%d calls %s, which nothing defines and which is not "+
+							"an executable on PATH:\n  %s", name, i+1, word, strings.TrimSpace(line))
+					}
+				}
 			}
 		}
 	}
@@ -594,4 +624,19 @@ func TestAnUnprivilegedRunWillNotVouchForAnAbsentHostname(t *testing.T) {
 	}
 	contains(t, out, "this run is not root")
 	notContains(t, out, "no hostname configured — Caddy will be installed but left inactive")
+}
+
+// shellWord covers the keywords and builtins that appear in command position
+// and are not helpers. Kept short on purpose: anything missing shows up as a
+// failure to look at, not as silence.
+func shellWord(w string) bool {
+	switch w {
+	case "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case",
+		"esac", "in", "return", "exit", "local", "readonly", "declare", "shift",
+		"echo", "printf", "read", "test", "eval", "exec", "trap", "set", "unset",
+		"export", "cd", "source", "command", "type", "hash", "wait", "kill",
+		"true", "false", "break", "continue", "shopt", "umask", "pwd", "mapfile":
+		return true
+	}
+	return false
 }

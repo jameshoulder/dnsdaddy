@@ -128,6 +128,25 @@ for your distribution.
 > `./deploy/install-docker.sh` configures and launches DNS Daddy with Docker;
 > it does **not** install Git, Docker Engine or Docker Compose for you.
 
+## Is this trustworthy?
+
+A fair question about an AI-assisted project, and the answer is evidence rather
+than reassurance. DNS Daddy runs `gofmt`, `go vet`, `staticcheck`, `gosec`,
+`govulncheck`, CodeQL, Semgrep, a container scan, the race detector and an
+end-to-end resolver test in CI on every push. Its design decisions, threat model
+and limitations are written down, and recent vulnerability scanning with Tenable
+/ Nessus is documented in full — including that the one Medium finding was the
+scanner's own certificate, present on the host before DNS Daddy was installed.
+
+**There has been no independent professional security review.** No third-party
+penetration test, code audit or certification. Scanners find known issues on the
+surfaces they examine; they do not read the source or reason about the design.
+
+The evidence is in [docs/assurance.md](docs/assurance.md),
+[docs/security-testing.md](docs/security-testing.md) and
+[docs/threat-model.md](docs/threat-model.md), and the running app links to all
+three from its **Assurance** page.
+
 ## Quick start
 
 With the prerequisites above installed:
@@ -140,10 +159,11 @@ cd dnsdaddy
 
 That is the whole installation. There is no `cp .env.example .env` first and
 nothing to look up afterwards. The installer checks Docker, finds your address,
-checks ports 53 and 8080 and names whatever is holding them, asks the one
-question it cannot answer for you, writes `.env`, starts the stack, waits for
-it to be ready, runs the readiness check, and finishes by printing your DNS
-address, your dashboard URL, your admin password and the exact next step.
+checks ports 53, 8080, 80 and 443 and names whatever is holding them, asks the
+one question it cannot answer for you, writes `.env`, starts the stack, waits
+for it to be ready, runs the readiness check, and finishes by printing your DNS
+address, how to reach the dashboard, your admin password and the exact next
+step.
 
 Use `--dry-run` first to see what it would do without changing anything.
 `--upgrade` rebuilds and restarts while keeping your data and your `.env`;
@@ -185,21 +205,63 @@ environment list plus whatever the dashboard permits. See
 
 ### Reaching the dashboard
 
-The dashboard is published on `127.0.0.1:8080` by default — reachable from the
-server itself and nowhere else.
+The installer offers three ways, and asks which. The dashboard binds
+`127.0.0.1:8080` in two of them; **none** of them publishes the management
+interface over plaintext HTTP, and that omission is deliberate.
 
-**On a public VPS or any host with a public address**, leave it there and reach
-it over an SSH tunnel:
+| | Dashboard reached by | Backend binds | Use when |
+|---|---|---|---|
+| **1 — LAN** (`--lan`) | `http://<lan-ip>:8080` | the LAN address | the machine genuinely has no public address |
+| **2 — SSH tunnel** (`--vps`, default) | `http://127.0.0.1:8080` through SSH | loopback | a public VPS, or you are unsure |
+| **3 — HTTPS** (`--https`) | `https://your-hostname` | loopback | a public VPS with a hostname pointing at it |
+
+**Mode 2** is the default and the safe answer. Nothing listens publicly:
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 you@your-server
+# then open http://127.0.0.1:8080
 ```
 
-or put TLS in front ([`deploy/Caddyfile.example`](deploy/Caddyfile.example)).
+That URL is plain HTTP, but it never crosses the network — SSH carries it to
+the server encrypted, and the dashboard is not listening on any public address.
 
-**On a machine with no public address** — a home server, a LAN VM, a box behind
-your router — run the installer with `--lan` and it publishes the dashboard on
-that machine's LAN address and prints the URL.
+**Mode 3** is the "install, get a URL, open it" path, and it gets there without
+exposing anything in plaintext:
+
+```
+internet → :443 Caddy (TLS) → 127.0.0.1:8080 DNS Daddy
+```
+
+The installer asks for a hostname, configures Caddy from
+[`deploy/Caddyfile.example`](deploy/Caddyfile.example), validates the config
+before reloading, and then checks the URL actually answers before telling you
+it works. The hostname must already resolve to the machine — Caddy proves
+control of it to Let's Encrypt over ports 80 and 443. If certificate issuance
+has not finished, the installer says so rather than printing a URL that does
+not serve anything.
+
+**Mode 1** publishes on the LAN address and prints the URL.
+
+#### If the VPS IP shows someone else's page
+
+Many VPS images ship Apache or Nginx on port 80. In modes 1 and 2 DNS Daddy is
+not published there, so `http://<your-vps-ip>` reaches *that* server — which
+looks like a failed install and is not one. The installer now detects what holds
+ports 80 and 443, names it, and says so:
+
+```
+  Existing web server
+    Port 80:  apache2
+
+    Visiting http://203.0.113.10 reaches that server, not DNS Daddy.
+    DNS Daddy has not been published there and has not changed it.
+```
+
+It never stops, disables, reconfigures or uninstalls another service, and never
+takes ports 80/443 from one. If something else holds those ports when you choose
+mode 3, TLS setup stands down with an explanation — the resolver still installs
+and runs, because DNS resolution, dashboard access and TLS termination are three
+separate things.
 
 > **Check this is not a cloud VPS first.** On AWS, GCP, Azure, Hetzner Cloud and
 > most providers the instance holds a *private* address and the public one is

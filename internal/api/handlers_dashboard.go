@@ -424,6 +424,11 @@ func (a *API) handleResolvers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Both are built by appending, and both are empty on a deployment that has
+	// no DoH/DoT networks yet — which is most of them. See nonNilSlice.
+	info.Upstreams = nonNilSlice(info.Upstreams)
+	info.Networks = nonNilSlice(info.Networks)
+
 	writeJSON(w, http.StatusOK, info)
 }
 

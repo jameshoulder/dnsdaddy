@@ -205,6 +205,64 @@ The dashboard authenticates with a password. Over plain HTTP on the public
 internet, that password crosses the network in the clear. On a LAN-only
 deployment you can accept that; on anything internet-facing, do not.
 
+### The three access modes
+
+`./deploy/install-docker.sh` asks which of these you want, and none of them
+publishes the management interface over plaintext HTTP.
+
+| Mode | Flag | Dashboard reached by | Backend binds |
+|---|---|---|---|
+| LAN / homelab | `--lan` | `http://<lan-ip>:8080` | the LAN address |
+| VPS, SSH tunnel | `--vps` (default) | `http://127.0.0.1:8080` through SSH | `127.0.0.1` |
+| VPS, HTTPS | `--https` | `https://<hostname>` | `127.0.0.1` |
+
+Mode 3 automates what the rest of this section describes by hand. It asks for a
+hostname, writes `/etc/caddy/Caddyfile` from
+[`Caddyfile.example`](../deploy/Caddyfile.example) (backing up any existing one),
+validates it, reloads Caddy, and then checks the URL answers before reporting
+success. It sets `DNSDADDY_BASE_URL`, forces `DNSDADDY_SECURE_COOKIES=always`
+and narrows `DNSDADDY_TRUSTED_PROXY_CIDRS` to the Docker bridge subnet. It does
+**not** set `DNSDADDY_DASHBOARD_BIND`, so the container stays on loopback and
+Caddy is the only process listening publicly.
+
+Non-interactively:
+
+```bash
+DNSDADDY_HTTPS_HOSTNAME=dns.example.com ./deploy/install-docker.sh --https --yes
+```
+
+### Four things that are not the same thing
+
+Conflating these is what makes a healthy install look broken:
+
+| | Controlled by |
+|---|---|
+| **DNS resolver reachability** | port 53, your firewall and your provider's |
+| **Which clients may resolve** | the client ACL — Networks page, or `DNSDADDY_ALLOWED_CLIENT_CIDRS` |
+| **Dashboard reachability** | `DNSDADDY_DASHBOARD_BIND`, and any reverse proxy |
+| **TLS** | Caddy or whatever terminates it |
+
+Making the dashboard reachable never changes who may resolve. Nothing in the
+install modes above can turn DNS Daddy into an open resolver.
+
+### If something already serves ports 80 or 443
+
+Many VPS images ship Apache or Nginx. The installer detects what holds each port
+and reports it, and **does not** stop, disable, reconfigure or uninstall it, or
+take the port.
+
+In modes 1 and 2 that is only a reporting matter: DNS Daddy was never published
+on port 80, so `http://<vps-ip>` reaching Apache is expected. The installer says
+so explicitly, because the silence is what previously made this look like a
+failed install.
+
+In mode 3 it is a conflict, and TLS setup stands down with the service named.
+The resolver still installs and runs. To proceed, either free the ports, or
+point your existing web server at `127.0.0.1:8080` yourself — the same
+`reverse_proxy` target Caddy would use.
+
+### Doing it by hand
+
 Caddy is two lines and handles certificates itself:
 
 ```bash
