@@ -1662,3 +1662,35 @@ test('the semantic colour and radius families are complete', () => {
     assert.match(css, new RegExp(`${token}\\s*:`), `${token} is no longer defined`);
   }
 });
+
+/*
+ * Every path that writes markup into the document goes through sanitize().
+ *
+ * Page renders always did — router.render assigns sanitize(await page.render()).
+ * Two assignments did not: the query log's incremental re-render and the token
+ * reveal. Neither was exploitable, because the tagged template escapes every
+ * interpolation and nothing those two build puts server data in an href or
+ * src. But that is a property of today's markup rather than of the assignment,
+ * and the invariant is worth stating as one: the next data-derived link added
+ * to a query row must not be the thing that discovers the exception.
+ */
+test('no innerHTML assignment bypasses sanitize()', () => {
+  const src = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.js'), 'utf8');
+
+  const offenders = [];
+  for (const line of src.split('\n')) {
+    const m = line.match(/\.innerHTML\s*=\s*(.*)$/);
+    if (!m) continue;
+    const rhs = m[1].trim();
+    // The read inside sanitize() itself is how it returns its result.
+    if (/^doc\.body\.innerHTML/.test(line.trim())) continue;
+    if (rhs.startsWith('sanitize(')) continue;
+    // An empty string clears a region and cannot carry markup.
+    if (/^(''|""|``);?$/.test(rhs)) continue;
+    offenders.push(line.trim());
+  }
+
+  assert.deepEqual(offenders, [],
+    'these write markup into the document without the pass that strips on* and javascript:');
+});
