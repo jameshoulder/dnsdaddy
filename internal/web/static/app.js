@@ -2996,14 +2996,33 @@ pages.settings = {
       </div>
 
       <div class="card section">
-        <div class="card-head"><div><h2>Change admin password</h2></div></div>
+        <div class="card-head">
+          <div>
+            <h2>Change admin password</h2>
+            <p>Signs every browser out, including this one.</p>
+          </div>
+        </div>
+        <!--
+          The consequence is stated before the button rather than discovered
+          after it. It is also the reason to use this control: an operator who
+          thinks somebody else is logged in wants exactly this, and until
+          recently a password change left every existing session working.
+        -->
+        <p class="notice-inline">
+          <strong>Every session is revoked.</strong> Any other device signed in
+          to this dashboard is signed out immediately, and so are you — you will
+          be asked to sign in again with the new password. This is what makes a
+          password change an effective response to a session you did not expect.
+        </p>
         <form id="password-form" class="grid grid-3">
           <label class="field"><span>Current password</span>
             <input type="password" name="current" autocomplete="current-password" required></label>
           <label class="field"><span>New password</span>
-            <input type="password" name="next" autocomplete="new-password" minlength="12" required></label>
-          <label class="field"><span>&nbsp;</span><button class="btn btn-primary" type="submit">Update password</button></label>
+            <input type="password" name="next" autocomplete="new-password" minlength="12" required
+                   aria-describedby="pw-req"></label>
+          <label class="field"><span>&nbsp;</span><button class="btn btn-primary" type="submit">Update password and sign out everywhere</button></label>
         </form>
+        <p class="muted small" id="pw-req">At least 12 characters. Longer is the only thing that reliably helps.</p>
       </div>
 
       <div class="card">
