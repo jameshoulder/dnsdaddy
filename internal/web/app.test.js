@@ -1500,3 +1500,121 @@ test('the sign-in page reports no system state', () => {
   // The decorative panel is hidden from assistive technology.
   assert.match(login, /class="login-aside" aria-hidden="true"/);
 });
+
+/* ---------- one product, not several generations of one ------------------- */
+
+test('every page title matches the navigation label that leads to it', () => {
+  // "Threat feeds" in the header under a "Threat intelligence" nav link made
+  // the page look like it belonged to a different product than the link.
+  const nav = {};
+  for (const m of indexHtml.matchAll(/data-route="([a-z-]+)"[\s\S]*?<span>([^<]+)<\/span>/g)) {
+    nav[m[1]] = m[2];
+  }
+  const src = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.js'), 'utf8');
+
+  let checked = 0;
+  for (const m of src.matchAll(/pages\.([a-z]+) = \{\s*(?:\/\/[^\n]*\n\s*)*title: '([^']+)'/g)) {
+    const [, route, title] = m;
+    if (!nav[route]) continue;
+    checked++;
+    assert.equal(title, nav[route],
+      `#/${route}: the page header says ${JSON.stringify(title)} but the nav link says ${JSON.stringify(nav[route])}`);
+  }
+  assert.ok(checked >= 10, `only matched ${checked} pages; the parse is probably wrong`);
+});
+
+test('the configuration pages use the shared record row, not their own tables', () => {
+  // Networks, feeds and policies were each a bespoke multi-column table. A
+  // reader met three different list designs in one product. They now share
+  // .rec (and policies the same <details> disclosure as the query log), so
+  // there is one list idiom to learn.
+  const src = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.js'), 'utf8');
+
+  const page = (name) => {
+    const from = src.indexOf(`pages.${name} = {`);
+    const to = src.indexOf('\npages.', from + 1);
+    return src.slice(from, to === -1 ? undefined : to);
+  };
+
+  for (const name of ['networks', 'feeds']) {
+    const body = page(name);
+    assert.ok(body.includes('class="rec"'),
+      `pages.${name} does not use the shared record row`);
+    assert.ok(!body.includes('<thead>'),
+      `pages.${name} still renders a bespoke table`);
+  }
+  assert.ok(page('policies').includes('<details class="card section policy"'),
+    'pages.policies no longer collapses each policy');
+});
+
+test('no stylesheet rule falls back to a colour literal for a token that does not exist', () => {
+  // var(--muted, #a3acba) looked like a themed value and was not: --muted was
+  // never defined, so three rules silently used the literal and drifted from
+  // --muted-foreground when the palette changed.
+  const css = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.css'), 'utf8');
+
+  const defined = new Set([...css.matchAll(/^\s*(--[a-z0-9-]+):/gm)].map((m) => m[1]));
+  for (const m of css.matchAll(/var\((--[a-z0-9-]+),\s*(#[0-9a-fA-F]{3,8}|[a-z]+)\)/g)) {
+    assert.ok(defined.has(m[1]),
+      `var(${m[1]}, ${m[2]}) falls back to a literal because ${m[1]} is never defined`);
+  }
+});
+
+test('a feed that has never attempted a download is pending, not a fault', () => {
+  // The dashboard opened on a fresh install with six red "is not blocking"
+  // faults, beside a panel calling the same six feeds "Pending". Two verdicts
+  // on the same state, on the same page. A feed that has not run yet is not
+  // broken — that is over-claiming, just pointing the other way.
+  const neverRan = {
+    feeds: [
+      { ...feed({ enabled: true, loaded: false, lastError: '', lastSuccessAt: null }), id: 'a', name: 'A' },
+      { ...feed({ enabled: true, loaded: false, lastError: '', lastSuccessAt: null }), id: 'b', name: 'B' },
+    ],
+  };
+
+  const h = feedHealth(neverRan);
+  assert.equal(h.broken.length, 0, 'a feed that never ran was counted as broken');
+  assert.equal(h.pending.length, 2);
+  assert.equal(h.tone, 'warn', 'never-run feeds should warn, not fault');
+  assert.match(h.label, /downloading/);
+
+  // And the two components agree, which is the actual requirement.
+  for (const f of neverRan.feeds) {
+    assert.match(feedStatusBadge(f), />Pending</);
+  }
+
+  const items = attentionItems({ checks: [] }, neverRan);
+  assert.equal(items.length, 1, 'one item, not one per feed');
+  assert.equal(items[0].tone, 'warn');
+  assert.match(items[0].title, /has not downloaded yet/);
+  assert.doesNotMatch(items[0].title, /is not blocking/);
+});
+
+test('a feed that attempted and failed is still a fault', () => {
+  // The distinction has to cut both ways, or it is just a downgrade.
+  const failed = {
+    feeds: [{ ...feed({ enabled: true, loaded: false, lastError: 'HTTP 404' }), name: 'Broken' }],
+  };
+  const h = feedHealth(failed);
+  assert.equal(h.tone, 'bad');
+  assert.equal(h.broken.length, 1);
+  assert.equal(h.pending.length, 0);
+
+  const items = attentionItems({ checks: [] }, failed);
+  assert.equal(items[0].tone, 'bad');
+  assert.match(items[0].title, /Broken is not blocking/);
+  assert.match(items[0].body, /HTTP 404/);
+});
+
+test('a feed that downloaded once and is not in the index is a fault', () => {
+  const unusable = {
+    feeds: [{ ...feed({ enabled: true, loaded: false, lastSuccessAt: hoursAgo(3), loadError: 'cache missing' }), name: 'Gone' }],
+  };
+  const h = feedHealth(unusable);
+  assert.equal(h.tone, 'bad');
+  assert.equal(h.broken.length, 1);
+  assert.equal(h.pending.length, 0);
+});
