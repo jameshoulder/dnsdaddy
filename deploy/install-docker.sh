@@ -498,7 +498,19 @@ port_owner() { # proto port
 # bare "port 53 is in use" tells the reader nothing they did not already know.
 dns_owner_advice() { # owners
   case "$1" in
-    *systemd-resolved*) printf 'systemd-resolved' ;;
+    # "systemd-resolve", not "systemd-resolved".
+    #
+    # The kernel truncates a process name to 15 characters (TASK_COMM_LEN), and
+    # "systemd-resolved" is 16 — so ss reports "systemd-resolve" and a pattern
+    # written with the trailing d never matches. Found by running the installer
+    # on a real Ubuntu 24.04 with something named systemd-resolved holding
+    # port 53: the operator got the generic "stop whatever owns port 53"
+    # instead of the DNSStubListener recipe, on the single most common conflict
+    # on the single most common platform for this product.
+    #
+    # The pattern below matches both spellings, and
+    # TestSystemdResolvedIsRecognisedByItsTruncatedName pins it.
+    *systemd-resolve*) printf 'systemd-resolved' ;;
     *dnsmasq*)          printf 'dnsmasq' ;;
     *named*|*bind*)     printf 'BIND' ;;
     *unbound*)          printf 'Unbound' ;;
@@ -1044,6 +1056,23 @@ configure_https() {
   # Overridable so the rollback paths can be exercised by the test suite
   # against a temporary directory. Not a privilege boundary: anyone who can set
   # this already runs the installer as root.
+  # An IP-address deployment needs a Caddy whose CertMagic knows that Let's
+  # Encrypt issues IP certificates. Checked before the Caddyfile is written, so
+  # the operator is told what to do rather than shown a parse error.
+  if [[ "$HTTPS_TARGET_KIND" != "hostname" ]] \
+     && ! caddy_version_at_least "$CADDY_MIN_IP_MAJOR" "$CADDY_MIN_IP_MINOR"; then
+    HTTPS_STATE="failed"
+    HTTPS_FAIL_REASON="Caddy $(caddy_version) is too old for IP-address certificates; ${CADDY_MIN_IP_MAJOR}.${CADDY_MIN_IP_MINOR} or newer is required."
+    warn "$HTTPS_FAIL_REASON"
+    note "Distribution packages lag a long way behind - Debian 13 ships 2.6.2."
+    note "Install the current release from the upstream repository:"
+    note "  https://caddyserver.com/docs/install#debian-ubuntu-raspbian"
+    note "Then re-run with --https. A hostname works on this Caddy; only the"
+    note "IP-address path needs the newer one."
+    revert_env_to_tunnel
+    return 0
+  fi
+
   local caddyfile="${DNSDADDY_CADDYFILE:-/etc/caddy/Caddyfile}"
   if [[ $DRY_RUN -eq 1 ]]; then
     printf '  [dry-run] would write %s for %s (%s) and reload Caddy\n' \
@@ -1164,8 +1193,21 @@ https_url() {
   fi
 }
 
+# caddy_version prints what `caddy version` says, or a legible stand-in.
+#
+# A Caddy built without a VCS stamp — `go install`, or some distribution
+# builds — prints literally "unknown". Passing that through as "Caddy unknown"
+# reads like a bug in this script rather than a property of that binary, so it
+# is spelled out. The version gate treats an unparseable version as too old,
+# which is the safe direction.
 caddy_version() {
-  caddy version 2>/dev/null | head -1 || printf 'version unknown'
+  local v
+  v="$(caddy version 2>/dev/null | head -1)"
+  v="${v%%$'\n'*}"
+  case "${v:-}" in
+    ""|unknown|"(devel)") printf 'version not reported by this build' ;;
+    *) printf '%s' "$v" ;;
+  esac
 }
 
 # restore_caddyfile puts back whatever was there before this run.
@@ -1319,20 +1361,81 @@ verify_https() {
   if [[ $lax_seen -eq 1 ]]; then
     HTTPS_FAIL_REASON="TLS is answering on ${HTTPS_TARGET}, but the certificate is not publicly trusted."
   elif [[ "$HTTPS_TARGET_KIND" != "hostname" ]]; then
-    HTTPS_FAIL_REASON="No certificate was issued for ${HTTPS_TARGET}. Public certificates for IP addresses need both an ACME provider that issues them and a Caddy that will ask; at the time of writing Caddy refuses IP subjects before sending the order (caddyserver/caddy#7399)."
+    HTTPS_FAIL_REASON="No certificate was issued for ${HTTPS_TARGET}. For an IP address that usually means ports 80 and 443 are not reachable from the internet at this address - the ACME challenge has to arrive there - or the address does not belong to this machine."
   fi
   return 1
 }
 
+# install_caddy adds the upstream Caddy repository and installs from it.
+#
+# Every step is checked, and the reason is a real one this was caught doing:
+# when the Cloudsmith repository cannot be reached — a proxy, a firewall, an
+# outage — the `&&` chain used to run on to `apt-get install caddy`, apt found
+# the distribution's own package, and the install "succeeded" with **Caddy
+# 2.6.2** on Debian 13. That is a 2022 release being put in front of a
+# management interface, and nothing said so.
+#
+# Now: if the repository cannot be added, that is a failure with its own
+# message, and the distribution package is only used as a named, reported
+# fallback rather than as an accident.
 install_caddy() {
-  apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1 &&
-  curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
-    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null &&
-  curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
-    > /etc/apt/sources.list.d/caddy-stable.list 2>/dev/null &&
-  apt-get update -qq >/dev/null 2>&1 &&
-  apt-get install -y -qq caddy >/dev/null 2>&1
+  apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1
+
+  local keyring=/usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  local listfile=/etc/apt/sources.list.d/caddy-stable.list
+  local repo_ok=0
+
+  if curl -1sLf --max-time 20 "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
+       | gpg --dearmor -o "$keyring" 2>/dev/null && [[ -s "$keyring" ]]; then
+    if curl -1sLf --max-time 20 "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
+         > "${listfile}.tmp" 2>/dev/null && [[ -s "${listfile}.tmp" ]]; then
+      mv "${listfile}.tmp" "$listfile"
+      apt-get update -qq >/dev/null 2>&1 && repo_ok=1
+    fi
+  fi
+  rm -f "${listfile}.tmp"
+
+  if [[ $repo_ok -eq 0 ]]; then
+    warn "Could not add the upstream Caddy repository (dl.cloudsmith.io unreachable)."
+    note "Falling back to the distribution's own Caddy package, which is usually"
+    note "much older. The version is checked below and reported either way."
+    rm -f "$listfile"
+    apt-get update -qq >/dev/null 2>&1
+  fi
+
+  apt-get install -y -qq caddy >/dev/null 2>&1 || return 1
+  command -v caddy >/dev/null 2>&1
 }
+
+# caddy_version_at_least compares the installed Caddy against a minimum.
+#
+# Version numbers rather than a feature probe, because this runs *before*
+# anything is written and its whole job is to say "this will not work, and
+# here is why" instead of producing a parse error the operator has to
+# interpret. `caddy validate` is still the authority afterwards — this only
+# turns one common, fixable situation into a sentence somebody can act on.
+caddy_version_at_least() { # major minor
+  local want_major="$1" want_minor="$2" v major minor
+  v="$(caddy version 2>/dev/null | head -1 | grep -oE 'v?[0-9]+\.[0-9]+' | head -1)"
+  v="${v#v}"
+  [[ -n "$v" ]] || return 1
+  major="${v%%.*}"; minor="${v#*.}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > want_major )) && return 0
+  (( major < want_major )) && return 1
+  (( minor >= want_minor ))
+}
+
+# Caddy that can ask a public CA for an IP-address certificate.
+#
+# 2.11 is the first release whose bundled CertMagic knows that Let's Encrypt
+# issues them: certmagic's ACMEIssuer.PreCheck holds a map of public CAs to
+# whether they support IP certificates, and before that map gained
+# `api.letsencrypt.org: true` the request was refused locally, without an
+# order ever being sent. Verified empirically against certmagic v0.25.3 as
+# shipped in Caddy v2.11.4 — see docs/deployment-matrix.md.
+CADDY_MIN_IP_MAJOR=2
+CADDY_MIN_IP_MINOR=11
 
 # reconcile_env brings the keys this installer owns into line with the choice
 # just made — in both directions.
@@ -1905,15 +2008,16 @@ if [[ $DRY_RUN -eq 1 ]]; then
     printf '  a failure, not as success.\n'
     if [[ "$HTTPS_TARGET_KIND" != "hostname" ]]; then
       printf '\n  This is an IP-address deployment. Let'\''s Encrypt issues IP certificates\n'
-      printf '  only through the short-lived ACME profile, so the generated Caddyfile\n'
-      printf '  pins that issuer explicitly rather than letting Caddy fall back to its\n'
-      printf '  own internal CA — a certificate no browser trusts, in front of the\n'
-      printf '  management interface, is not an acceptable outcome.\n'
-      printf '\n  At the time of writing Caddy refuses IP subjects before sending the\n'
-      printf '  ACME order (caddyserver/caddy#7399), so this is expected to fail on\n'
-      printf '  current releases. If it does, the previous Caddyfile is restored, the\n'
-      printf '  HTTPS settings in .env are reverted, and the dashboard is left exactly\n'
-      printf '  where SSH-tunnel mode leaves it: loopback only.\n'
+      printf '  only through the short-lived ACME profile (160-hour lifetime, renewed\n'
+      printf '  automatically), so the generated Caddyfile pins that issuer explicitly\n'
+      printf '  rather than letting Caddy fall back to its own internal CA. A certificate\n'
+      printf '  no browser trusts, in front of the management interface, is not an\n'
+      printf '  acceptable outcome.\n'
+      printf '\n  Needs Caddy %s.%s or newer; distribution packages are usually older.\n' "$CADDY_MIN_IP_MAJOR" "$CADDY_MIN_IP_MINOR"
+      printf '  Ports 80 and 443 must be reachable from the internet at this address.\n'
+      printf '  If issuance fails the previous Caddyfile is restored, the HTTPS settings\n'
+      printf '  in .env are reverted, and the dashboard is left exactly where SSH-tunnel\n'
+      printf '  mode leaves it: loopback only.\n'
     fi
   elif [[ -n "$DASHBOARD_BIND" ]]; then
     printf '    DNSDADDY_DASHBOARD_BIND=%s\n' "$DASHBOARD_BIND"
