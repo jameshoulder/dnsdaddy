@@ -1354,3 +1354,17 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .offender { flex-wrap: wrap; }
   .offender-go { margin-left: 6px; }
 }
+
+/* A consequence stated before the control that causes it, rather than in a
+   toast afterwards. Amber: this is a warning about scope, not an error. */
+.notice-inline {
+  margin: 0 0 var(--s4);
+  padding: var(--s3) var(--s4);
+  border-left: 2px solid var(--warn);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--warn-bg);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted-foreground);
+}
+.notice-inline strong { color: var(--foreground); }
