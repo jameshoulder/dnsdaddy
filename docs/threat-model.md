@@ -24,7 +24,7 @@ Ordered by what an attacker gains from each.
 | **The resolution path itself** | Anyone who controls the answers controls where every device on the network connects. This is the crown jewel; everything else is a route to it. |
 | **Query logs** | A complete record of what every device looked up. Browsing history, device inventory, working patterns, and the software in use, all in one file. |
 | **Behavioural findings** | The same information, condensed and pre-analysed. Also reveals what the operator is capable of detecting. |
-| **The admin password and session key** | Full control of the resolution path. |
+| **The admin password** | Full control of the resolution path. Session cookies are opaque random values held server-side, so there is no signing key whose compromise forges one — but a live cookie is still that session until it expires or is revoked. |
 | **API tokens** | The same, programmatically. |
 | **Policy and network configuration** | Reveals the network's structure; altering it disables filtering. |
 | **The blocklist index** | Corrupting it disables protection without any visible error. |
@@ -294,8 +294,9 @@ token. No session revocation beyond changing the password.
 ### T16 — Secrets handling
 
 **Mitigations.** Passwords bcrypt-hashed, API tokens hashed, the generated
-first-run password written 0600 and printed once. The session key is generated
-locally, never transmitted. Findings and the data directory are 0640/0750.
+first-run password written 0600 and printed once. Session cookies are opaque
+256-bit random values stored as SHA-256, so the database holds no material that
+can be replayed as a session. Findings and the data directory are 0640/0750.
 Secret scanning and dependency scanning run in CI.
 
 **Residual risk.** `DNSDADDY_ADMIN_PASSWORD` in an environment variable is

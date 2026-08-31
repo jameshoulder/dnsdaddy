@@ -167,6 +167,36 @@ data would be worse than saying nothing.
 |---|---|---|---|---|
 | D1 | any 1 GB / 1 vCPU | Docker Compose + Caddy, per `docs/deploy.md` | your own public IP | ☐ not run |
 | D2 | same | same, from a **non-permitted** public address | a different network | ☐ not run |
+| D3 | any | `--vps` (option 2, SSH tunnel) | your own laptop | ☐ not run |
+| D4 | any | `--https` with a hostname (option 3) | a browser | ☐ not run |
+| D5 | any | `--https` with the raw public IP (option 3) | a browser | ☐ not run |
+| D6 | any | `--https` where issuance fails, e.g. 443 blocked at the cloud firewall | a browser | ☐ not run |
+
+**D5 is expected to fail today, and the point is *how* it fails.** Caddy
+refuses IP-address subjects before sending the ACME order
+([caddyserver/caddy#7399](https://github.com/caddyserver/caddy/issues/7399)),
+so on current releases there is no certificate to be had. What must be true
+afterwards:
+
+- the installer says so, naming the reason;
+- `/etc/caddy/Caddyfile` is back to whatever it was before, or gone if there
+  was nothing;
+- `.env` no longer carries `DNSDADDY_SECURE_COOKIES=always`;
+- `curl http://<public-ip>:8080` is refused — the dashboard is on loopback;
+- the SSH tunnel command printed at the end actually works, and login succeeds
+  through it.
+
+That last one is the whole reason the `.env` revert exists. With
+`secure_cookies=always` left behind, the browser accepts the cookie over the
+tunnel and never sends it back, and login fails with nothing to explain it.
+
+**D6 is the same property reached a different way**, and is the row to run if
+you cannot easily reproduce D5. Block 443 inbound at the provider's firewall,
+run `--https` with a real hostname, and check the same five things.
+
+**D4 is the one that should succeed.** Verify additionally that the certificate
+is publicly trusted (a browser, not `curl -k`), that HSTS is present, and that
+`http://<hostname>` redirects to HTTPS.
 
 **D2 must fail, and must fail legibly.** A source address not in
 `dns.allowed_client_cidrs` must be answered `REFUSED`, and
@@ -186,6 +216,115 @@ carries `Secure`, and **`<server>:8080` is not reachable from the internet**.
 
 The README's resource claims should be checked against these rather than
 asserted. If a row disagrees with the README, the README is wrong.
+
+---
+
+## Fresh-VM procedures, copy and paste
+
+Nothing below has been run by the author — there is no hypervisor in the
+environment this was written in. They are written out so that running one is a
+matter of pasting rather than of working out what was meant.
+
+### Debian 13 (trixie), minimal netinst
+
+```bash
+# --- as root on a fresh VM -------------------------------------------------
+apt-get update
+apt-get install -y ca-certificates curl git
+
+# Docker, from Docker's own repository rather than Debian's older packaging.
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+git clone https://github.com/jameshoulder/dnsdaddy.git
+cd dnsdaddy
+
+# See what it would do before it does it. This changes nothing.
+./deploy/install-docker.sh --dry-run
+
+# Then one of the three modes:
+./deploy/install-docker.sh --lan                                  # option 1
+./deploy/install-docker.sh --vps                                  # option 2
+DNSDADDY_HTTPS_HOSTNAME=dns.example.com ./deploy/install-docker.sh --https   # option 3, hostname
+DNSDADDY_HTTPS_HOSTNAME=ip             ./deploy/install-docker.sh --https   # option 3, detected public IP
+```
+
+Debian 12 (bookworm) works the same way; substitute the codename, which the
+`$VERSION_CODENAME` expansion above already does.
+
+### Ubuntu 24.04 LTS, cloud image
+
+```bash
+# --- as root on a fresh VM -------------------------------------------------
+apt-get update
+apt-get install -y ca-certificates curl git
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+git clone https://github.com/jameshoulder/dnsdaddy.git
+cd dnsdaddy
+./deploy/install-docker.sh --dry-run
+```
+
+**Ubuntu needs one extra thing.** `systemd-resolved` holds port 53 on almost
+every Ubuntu install. The installer detects it, names it, and refuses to change
+it for you — altering how a remote machine resolves names is how people lose
+remote machines. Do it yourself first:
+
+```bash
+mkdir -p /etc/systemd/resolved.conf.d
+printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/dnsdaddy.conf
+ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+systemctl restart systemd-resolved
+
+# Confirm 53 is free, and that this machine can still resolve names:
+ss -lnup 'sport = :53'
+getent hosts deb.debian.org
+```
+
+Then run the installer as above.
+
+### What to check afterwards, in every mode
+
+```bash
+# 1. The resolver answers, and the ACL is what you think it is.
+docker compose exec dnsdaddy dnsdaddy doctor
+
+# 2. The management port is NOT on a public address. From another machine:
+curl --max-time 5 http://<server-public-ip>:8080/    # must fail to connect
+
+# 3. From the server itself, liveness only:
+curl -s http://127.0.0.1:8080/api/v1/health
+#    Through the published port this returns {"status":"ok"} and nothing else.
+#    For the detail, ask from inside the container, where the peer is loopback:
+docker compose exec dnsdaddy wget -qO- http://127.0.0.1:8080/api/v1/health
+
+# 4. DNS actually resolves, from a second machine you have permitted:
+dig @<server-ip> example.com
+dig @<server-ip> +tcp example.com
+
+# 5. And an unpermitted source is refused rather than served:
+#    (run from a network you have NOT added under Networks)
+dig @<server-ip> example.com     # expect: status: REFUSED
+```
+
+Record what happened in the tables above, including anything you had to work
+out that this page did not tell you.
 
 ---
 

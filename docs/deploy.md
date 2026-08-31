@@ -528,8 +528,9 @@ Prometheus metrics at `/metrics` (authenticated). The ones worth alerting on:
 ## 10. Backups
 
 Everything lives in the data directory. The database is the only thing you
-cannot regenerate — feed caches re-download and the session key regenerates
-(logging everyone out, which is survivable).
+cannot regenerate — feed caches re-download, and sessions live in the database
+itself, so restoring a backup restores whatever sessions were live when it was
+taken (revoke them with a password change if that matters).
 
 ```bash
 sudo systemctl stop dnsdaddy
@@ -620,7 +621,7 @@ docker compose up -d --build
 ```
 
 Never use `docker compose down -v` — `-v` deletes the `dnsdaddy-data` volume
-holding the database, session key and cached feeds.
+holding the database and cached feeds.
 
 systemd — re-running the installer upgrades the binary and leaves your config
 and database alone:
@@ -688,8 +689,8 @@ sudo rm -rf /var/lib/dnsdaddy /etc/dnsdaddy
 sudo userdel dnsdaddy
 ```
 
-This removes the database, the session key, cached feeds, the generated
-password, and every stored finding.
+This removes the database, cached feeds, the generated password, and every
+stored finding.
 
 ---
 

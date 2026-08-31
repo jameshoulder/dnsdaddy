@@ -58,7 +58,6 @@ WEB_443_OWNER=""
 # different Caddy configuration and have very different failure modes, and
 # because everything that reaches a generated Caddyfile has to have been
 # through a validator that knows which shape it was expecting.
-HTTPS_HOSTNAME=""
 HTTPS_TARGET=""
 HTTPS_TARGET_KIND=""
 # Why an IP attempt failed, when it did. Reported verbatim so the operator is
@@ -299,7 +298,96 @@ require_linux() {
     cp .env.example .env
     docker compose up -d
     docker compose exec dnsdaddy dnsdaddy doctor"
-  pass "Linux $(uname -r)"
+
+  local distro=""
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091  # not present at lint time; guarded above
+    distro="$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-$NAME $VERSION_ID}")"
+  fi
+  pass "Linux $(uname -r)${distro:+  ($distro)}"
+
+  # Named rather than gated. Debian and Ubuntu are what this is developed and
+  # tested against; everything else is very likely fine, and refusing to run on
+  # Fedora because nobody has tried it would be an obstacle rather than a
+  # safeguard. Saying so lets the operator weigh a later failure correctly.
+  case "$distro" in
+    *Debian*|*Ubuntu*|*Raspbian*) ;;
+    "") note "Could not identify the distribution; proceeding." ;;
+    *)  note "Tested on Debian and Ubuntu. Everything here is standard Docker and systemd," ;
+        note "so this should work, but you are the first to find out if it does not." ;;
+  esac
+}
+
+# preflight reports what the machine is, without changing any of it.
+#
+# Every check here answers a question that would otherwise be answered by a
+# confusing failure later. None of them act: this installer does not open
+# firewall ports, does not stop other people's services, and does not edit
+# configuration belonging to software it did not install. Reporting is the
+# whole job.
+preflight() {
+  head_ "Preflight"
+
+  # 1. Privilege. Docker, /etc/caddy and systemd all need it, and finding out
+  #    three steps in leaves a half-configured machine.
+  if [[ "$(id -u)" -eq 0 ]]; then
+    pass "Running as root"
+  elif command -v sudo >/dev/null 2>&1; then
+    warn "Not running as root; Docker and Caddy configuration will need sudo"
+    note "Re-run with: sudo ./deploy/install-docker.sh $*"
+  else
+    warn "Not running as root and sudo is not installed"
+    note "Docker commands and any Caddy configuration will fail."
+  fi
+
+  # 2. The commands this script actually calls. A missing one is a "command
+  #    not found" halfway through otherwise.
+  local missing=()
+  for c in curl sed grep awk; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    pass "Required commands present"
+  else
+    fail "Missing: ${missing[*]}"
+    note "Install them first:  apt-get install -y ${missing[*]}"
+  fi
+
+  # 3. Outbound HTTPS. Feeds download over it, and so does ACME. This says
+  #    nothing about whether the internet can reach *in*, which is the other
+  #    half of what HTTPS mode needs and is not observable from here.
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS --max-time 8 -o /dev/null https://acme-v02.api.letsencrypt.org/directory 2>/dev/null; then
+      pass "Outbound HTTPS works (Let's Encrypt is reachable)"
+    else
+      warn "Could not reach Let'\''s Encrypt over HTTPS from this machine"
+      note "Threat feeds and certificate issuance both need outbound 443."
+    fi
+  fi
+
+  # 4. Firewall. Reported, never changed — the rules on this box are one of
+  #    two firewalls that matter, and the other one is at your cloud provider
+  #    where this script cannot see it. Saying "the firewall is fine" from
+  #    here would be a claim about something unmeasured.
+  if command -v ufw >/dev/null 2>&1; then
+    local ufw_state
+    ufw_state="$(ufw status 2>/dev/null | head -1 || true)"
+    case "$ufw_state" in
+      *inactive*) note "ufw is installed but inactive" ;;
+      *active*)   note "ufw is active — DNS needs 53/udp and 53/tcp, HTTPS mode needs 80/tcp and 443/tcp" ;;
+      *)          ;;
+    esac
+  fi
+  note "Cloud provider firewalls are separate and cannot be seen from this machine."
+
+  # 5. Somewhere to write. /etc/caddy only matters in HTTPS mode, and is
+  #    checked there rather than pre-emptively.
+  if [[ -w "$REPO_ROOT" ]]; then
+    pass "Repository directory is writable (.env goes here)"
+  else
+    fail "Cannot write to ${REPO_ROOT}"
+    note "The .env file is written here. Fix the permissions, or clone somewhere writable."
+  fi
 }
 
 check_docker() {
@@ -435,7 +523,7 @@ stack_is_running() {
 }
 
 check_ports() {
-  local blocked=0 proto owner program ours=0
+  local blocked=0 proto owner ours=0
   # Only an upgrade may treat a busy port as expected. During a fresh install a
   # running stack is a reason to stop and say so, not to carry on into a bind
   # failure.
@@ -453,7 +541,6 @@ check_ports() {
       pass "${proto^^} port 53 is held by this DNS Daddy deployment (expected during an upgrade)"
       continue
     fi
-    program="$(dns_owner_advice "$owner")"
     blocked=1
     fail "${proto^^} port 53 is already in use by: $owner"
   done
@@ -846,7 +933,7 @@ set_https_target() { # value
   v="${v#https://}"; v="${v#http://}"; v="${v%%/*}"
 
   if valid_hostname "$v"; then
-    HTTPS_TARGET="$v"; HTTPS_TARGET_KIND="hostname"; HTTPS_HOSTNAME="$v"
+    HTTPS_TARGET="$v"; HTTPS_TARGET_KIND="hostname"
     pass "HTTPS hostname: ${v}"
     check_hostname_points_here "$v"
     return 0
@@ -854,12 +941,12 @@ set_https_target() { # value
   if valid_ipv4 "$v"; then
     is_public_ipv4 "$v" || die "${v} is not a publicly routable address." \
       "A certificate cannot be issued for a private or reserved address. Use a hostname, or choose option 2 and reach the dashboard over an SSH tunnel."
-    HTTPS_TARGET="$v"; HTTPS_TARGET_KIND="ipv4"; HTTPS_HOSTNAME="$v"
+    HTTPS_TARGET="$v"; HTTPS_TARGET_KIND="ipv4"
     pass "HTTPS address: ${v}"
     return 0
   fi
   if valid_ipv6 "$v"; then
-    HTTPS_TARGET="$v"; HTTPS_TARGET_KIND="ipv6"; HTTPS_HOSTNAME="$v"
+    HTTPS_TARGET="$v"; HTTPS_TARGET_KIND="ipv6"
     pass "HTTPS address: [${v}]"
     return 0
   fi
@@ -1757,6 +1844,7 @@ print_summary() {
 
 head_ "System"
 require_linux
+preflight "$@"
 check_docker
 
 [[ "$MODE" == "uninstall" ]] && do_uninstall
