@@ -235,6 +235,13 @@ elif [[ $ALLOW_PUBLIC_RESOLVER -eq 1 ]]; then
   ACL_KNOWN=0
 else
   echo
+  # The message below is one multi-line double-quoted string that quotes a
+  # dashboard label inside itself. ShellCheck reads that inner quote as the
+  # closing one and warns the string is unterminated; `bash -n` parses the file
+  # correctly. Silenced here rather than left standing, because a deploy script
+  # whose linter always prints a known warning is a deploy script whose linter
+  # nobody reads.
+  # shellcheck disable=SC1078,SC1079
   die "no client CIDRs configured — refusing to deploy an open resolver.
 
   This script FAILS CLOSED by default: it will not deploy a DNS Daddy
@@ -384,6 +391,9 @@ step "8. Deploy onto the existing volume"
 # `up -d` recreates the container and REUSES the named volume. No -v anywhere.
 act docker compose up -d --remove-orphans
 if [[ $DRY_RUN -eq 0 ]]; then
+  # A counted retry, not an indexed one: the loop body polls docker and the
+  # counter exists only to bound the wait, so `i` is deliberately unread.
+  # shellcheck disable=SC2034
   for i in $(seq 1 60); do
     s=$(docker inspect "$CONTAINER" --format '{{.State.Status}}' 2>/dev/null || echo none)
     h=$(docker inspect "$CONTAINER" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || echo none)
