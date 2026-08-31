@@ -32,6 +32,9 @@ type install struct {
 	// because on CI the test process is unprivileged and owns the fixture.
 	unreadable []string
 	unwritable []string
+	// Where caddyfileAt pointed the installer, so a test can read back what
+	// was actually written rather than asserting only on stdout.
+	caddyfile string
 }
 
 func newInstall(t *testing.T) *install {
@@ -127,6 +130,17 @@ if [[ "$*" == *"route get"* ]]; then
   exit 0
 fi
 if [[ "$*" == *"addr show"* ]]; then
+  # The family flag matters. Answering the same list for -4 and -6 made
+  # host_addresses6 report IPv4 addresses as this machine's IPv6 ones, which
+  # silently turned the AAAA check into a comparison that could never match.
+  # A host with no IPv6 stack is the default here, because that is the common
+  # case and the one the check has to handle correctly.
+  if [[ "$*" == *" -6"* || "$*" == "-6 "* ]]; then
+    for a6 in ${STUB_IPV6_ADDRS:-}; do
+      echo "4: ${STUB_IFACE:-eth0}    inet6 ${a6}/64 scope global"
+    done
+    exit 0
+  fi
   echo "2: ${STUB_IFACE:-eth0}    inet ${STUB_PRIMARY_IP:-192.168.1.75}/24 scope global"
   for extra in ${STUB_EXTRA_IPS:-}; do
     echo "3: eth1    inet ${extra}/24 scope global"
@@ -200,7 +214,25 @@ exit 0`)
 	// Installing Caddy must not reach the network from a test.
 	in.stub("apt-get", `exit "${STUB_APT_EXIT:-1}"`)
 	in.stub("gpg", `exit 0`)
-	in.stub("getent", `exit "${STUB_GETENT_EXIT:-2}"`)
+	// getent, which is how the installer learns what a hostname resolves to.
+	// Both families, because the check looks at A and AAAA separately and a
+	// stub that only modelled one would let the other go untested.
+	//
+	//   STUB_GETENT_V4  addresses to return for ahostsv4, space separated
+	//   STUB_GETENT_V6  addresses to return for ahostsv6
+	//   STUB_GETENT_EXIT  exit status when neither is set (default: not found)
+	in.stub("getent", `
+case "${1:-}" in
+  ahostsv4)
+    [[ -n "${STUB_GETENT_V4:-}" ]] || exit "${STUB_GETENT_EXIT:-2}"
+    for a in ${STUB_GETENT_V4}; do printf '%s STREAM %s\n' "$a" "${2:-}"; done
+    exit 0 ;;
+  ahostsv6)
+    [[ -n "${STUB_GETENT_V6:-}" ]] || exit "${STUB_GETENT_EXIT:-2}"
+    for a in ${STUB_GETENT_V6}; do printf '%s STREAM %s\n' "$a" "${2:-}"; done
+    exit 0 ;;
+esac
+exit "${STUB_GETENT_EXIT:-2}"`)
 
 	in.stub("systemctl", `
 case "$*" in
@@ -1418,8 +1450,23 @@ func TestNoWebServerSectionWhenPortsAreFree(t *testing.T) {
 // path, so the rollback paths can be exercised without touching /etc.
 func (in *install) caddyfileAt() string {
 	path := filepath.Join(in.root, "caddy", "Caddyfile")
+	in.caddyfile = path
 	in.setenv("DNSDADDY_CADDYFILE=" + path)
 	return path
+}
+
+// readCaddyfile returns what the installer left behind, or "" if it wrote
+// nothing. Empty rather than fatal: several tests assert that a failed attempt
+// leaves no configuration at all, and that is a legitimate outcome.
+func (in *install) readCaddyfile() string {
+	if in.caddyfile == "" {
+		in.t.Fatal("readCaddyfile without caddyfileAt")
+	}
+	b, err := os.ReadFile(in.caddyfile)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func TestHttpsFailureLeavesTheDashboardOnLoopback(t *testing.T) {
@@ -1798,4 +1845,208 @@ exit 0`)
 			contains(t, out, "systemd-resolved is running")
 		})
 	}
+}
+
+// --- HTTPS diagnosis, hostname DNS, and the measured success posture --------
+
+// The failure that started this work: on a real VPS the installer said "No
+// certificate was issued ... usually means ports 80 and 443 are not reachable"
+// whatever had actually happened, because curl was the only evidence it
+// gathered. Caddy logs the ACME problem document the CA returned. These pin
+// that it is read, and that each cause produces the advice that matches it.
+func TestACMEFailureIsDiagnosedFromCaddysOwnLog(t *testing.T) {
+	cases := []struct {
+		name   string
+		log    string
+		expect string
+		advice string
+		absent string
+	}{
+		{
+			name:   "refused challenge is a firewall, not a mystery",
+			log:    `{"level":"error","logger":"http.acme_client","msg":"challenge failed","identifier":"66.228.32.228","problem":{"type":"urn:ietf:params:acme:error:connection","detail":"66.228.32.228: Connection refused"}}`,
+			expect: "the connection was refused",
+			advice: "cloud firewall",
+			// The old guess must not survive alongside the real answer.
+			absent: "usually means ports 80 and 443",
+		},
+		{
+			name:   "a timed out challenge is named as such",
+			log:    `{"level":"error","problem":{"type":"urn:ietf:params:acme:error:connection","detail":"66.228.32.228: Timeout during connect (likely firewall problem)"}}`,
+			expect: "the challenge timed out",
+			advice: "dropping inbound 80/443",
+		},
+		{
+			name:   "a rate limit says wait, not retry",
+			log:    `{"level":"error","msg":"could not get certificate","error":"urn:ietf:params:acme:error:rateLimited - too many certificates already issued"}`,
+			expect: "rate-limited",
+			advice: "Wait before retrying",
+		},
+		{
+			name:   "an unresolvable name is a DNS problem",
+			log:    `{"level":"error","problem":{"type":"urn:ietf:params:acme:error:dns","detail":"no such host"}}`,
+			expect: "could not resolve",
+			advice: "dig +short",
+		},
+		{
+			name:   "a Caddy too old for IP certificates says so",
+			log:    `{"level":"error","msg":"[66.228.32.228] Obtain: subject '66.228.32.228' cannot have public IP certificate from https://acme-v02.api.letsencrypt.org/directory"}`,
+			expect: "predates Let's Encrypt's IP support",
+			advice: "caddyserver.com/docs/install",
+		},
+		{
+			name:   "a challenge answered by something else is not a firewall",
+			log:    `{"level":"error","problem":{"type":"urn:ietf:params:acme:error:unauthorized","detail":"Invalid response"}}`,
+			expect: "but not this Caddy",
+			advice: "Another host or proxy",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := newInstall(t)
+			in.caddyfileAt()
+			in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=5")
+			// Nothing answers: exactly the state the VPS was left in, where
+			// both curl probes fail and only the log knows why.
+			in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+			in.setenv("DNSDADDY_CADDY_LOG_CMD=printf '%s' " + shellQuote(tc.log))
+
+			out, code := in.run("--https", "--yes")
+			if code != 0 {
+				t.Fatalf("exit %d\n%s", code, out)
+			}
+			contains(t, out, tc.expect)
+			contains(t, out, tc.advice)
+			if tc.absent != "" {
+				notContains(t, out, tc.absent)
+			}
+			// Whatever the cause, the posture is the same: never published.
+			notContains(t, out, "http://66.228.32.228:8080")
+			contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+		})
+	}
+}
+
+// The CA's own words are quoted, because a diagnosis the operator cannot check
+// is one they have to take on trust.
+func TestTheCAsOwnErrorIsQuotedBack(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.setenv(`DNSDADDY_CADDY_LOG_CMD=printf '%s' '{"problem":{"type":"urn:ietf:params:acme:error:connection","detail":"66.228.32.228: Connection refused"}}'`)
+
+	out, _ := in.run("--https", "--yes")
+	contains(t, out, "Caddy reported: 66.228.32.228: Connection refused")
+	contains(t, out, "journalctl -u caddy")
+}
+
+// Hostname mode compares public DNS against this machine, and says plainly
+// which of the two is wrong. It never changes a DNS record: the installer has
+// no business editing somebody's zone and could not do it correctly anyway.
+func TestHostnameResolvingHereIsReportedAsAMatch(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_GETENT_V4=192.168.1.75", "STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "dns.example.com resolves to 192.168.1.75, which is an address on this machine")
+}
+
+func TestHostnamePointingElsewhereIsReportedWithBothAddresses(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_GETENT_V4=203.0.113.10", "STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+
+	out, _ := in.run("--https", "--yes")
+	// Both sides of the comparison, because "does not match" without the two
+	// values leaves the operator to go and find them.
+	contains(t, out, "dns.example.com currently resolves to 203.0.113.10")
+	contains(t, out, "This machine appears to be 192.168.1.75")
+	contains(t, out, "This installer does not change DNS records")
+	// NAT is a legitimate reason for the mismatch and is not treated as fatal.
+	contains(t, out, "behind NAT")
+}
+
+func TestAHostnameThatDoesNotResolveDoesNotPretendPropagationIsInstant(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_GETENT_EXIT=2", "STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+
+	out, _ := in.run("--https", "--yes")
+	contains(t, out, "dns.example.com does not resolve from this machine")
+	contains(t, out, "cannot tell you when it has")
+}
+
+// A stale AAAA on a host with no IPv6 is worth saying, because Let's Encrypt
+// prefers IPv6 when one exists and will send the challenge somewhere this
+// machine is not. The A-only version of this check passed it silently.
+func TestAnAAAARecordOnAHostWithoutIPv6IsFlagged(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_GETENT_V4=192.168.1.75", "STUB_GETENT_V6=2001:db8::1")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+
+	out, _ := in.run("--https", "--yes")
+	contains(t, out, "has an AAAA record")
+	contains(t, out, "prefers IPv6")
+}
+
+// HSTS is a one-year commitment. It goes out after a certificate has actually
+// been served, not on the strength of an attempt that might fail.
+func TestHSTSIsWrittenOnlyAfterTheCertificateIsProven(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0", "STUB_GETENT_V4=192.168.1.75")
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "HSTS enabled now that the certificate is proven")
+	if got := in.readCaddyfile(); !strings.Contains(got, "Strict-Transport-Security") {
+		t.Errorf("a proven certificate should leave HSTS in the Caddyfile:\n%s", got)
+	}
+}
+
+func TestAFailedCertificateLeavesNoHSTSBehind(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.setenv(`DNSDADDY_CADDY_LOG_CMD=printf '%s' '{"problem":{"type":"urn:ietf:params:acme:error:connection","detail":"refused"}}'`)
+
+	out, _ := in.run("--https", "--yes")
+	notContains(t, out, "HSTS enabled")
+	if got := in.readCaddyfile(); strings.Contains(got, "Strict-Transport-Security") {
+		t.Errorf("a failed attempt pinned an HSTS policy anyway:\n%s", got)
+	}
+}
+
+// The distinction the operator most needs and the installer most easily blurs:
+// what this machine measured, versus what no code running here can know.
+func TestReachabilitySeparatesLocalFromExternal(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0", "STUB_GETENT_V4=192.168.1.75")
+
+	out, _ := in.run("--https", "--yes")
+	contains(t, out, "measured on this machine")
+	contains(t, out, "cannot be confirmed from here")
+	contains(t, out, "UNKNOWN  whether inbound TCP 80 and 443 reach this machine")
+	contains(t, out, "does not change firewall rules")
+	// Opening 53 is not the same as running an open resolver, and saying so
+	// here is what stops the next person conflating them.
+	contains(t, out, "does not make this")
+	contains(t, out, "open resolver")
 }
