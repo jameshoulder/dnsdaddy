@@ -71,6 +71,27 @@ HTTPS_TARGET_KIND=""
 HTTPS_FAIL_REASON=""
 HTTPS_FAIL_HINT=""
 HTTPS_FAIL_DETAIL=""
+# Whether caddy_acme_diagnosis actually recognised a cause, as opposed to
+# verify_https writing a fallback sentence. These are different facts and
+# conflating them cost the pending path its reachability: every timeout sets a
+# reason, so a gate on "is the reason empty" was never true for a hostname and
+# the branch it guarded could not run.
+HTTPS_FAIL_DIAGNOSED=0
+# Timestamp taken just before Caddy is reloaded, so the log reader can ignore
+# everything an earlier attempt wrote.
+CADDY_LOG_SINCE=""
+# The HTTPS-mode env keys exactly as they were when this run started, so a
+# failed attempt can put back what was there rather than assuming there was
+# nothing. On a fresh install these are empty and restoring them means
+# disabling, which is the same thing the old code did. On a re-run over a
+# working HTTPS deployment they carry the working values, and blanket-disabling
+# them would have left Caddy still terminating TLS and proxying to an app that
+# no longer knew it was behind TLS: no Secure cookie, and every client
+# appearing to come from the proxy.
+HTTPS_ENV_SNAPSHOT_TAKEN=0
+HTTPS_ENV_BASE_URL_WAS=""
+HTTPS_ENV_SECURE_COOKIES_WAS=""
+HTTPS_ENV_TRUSTED_PROXY_WAS=""
 # What public DNS says about a hostname target: match, mismatch, unresolved,
 # aaaa-orphan, or empty when no hostname was chosen. Recorded rather than only
 # printed, so the pre-ACME summary can restate it without resolving twice.
@@ -1151,7 +1172,7 @@ configure_https() {
     note ""
     note "Either point your existing web server at 127.0.0.1:8080 yourself, or"
     note "free ports 80 and 443 and re-run with --https."
-    revert_env_to_tunnel
+    unwind_https_env
     return 0
   fi
 
@@ -1161,7 +1182,7 @@ configure_https() {
       HTTPS_STATE="failed"
       HTTPS_FAIL_REASON="Caddy could not be installed."
       warn "Caddy could not be installed; the dashboard stays on loopback."
-      revert_env_to_tunnel
+      unwind_https_env
       return 0
     fi
   fi
@@ -1183,7 +1204,7 @@ configure_https() {
     note "  https://caddyserver.com/docs/install#debian-ubuntu-raspbian"
     note "Then re-run with --https. A hostname works on this Caddy; only the"
     note "IP-address path needs the newer one."
-    revert_env_to_tunnel
+    unwind_https_env
     return 0
   fi
 
@@ -1212,7 +1233,7 @@ configure_https() {
       HTTPS_STATE="failed"
       HTTPS_FAIL_REASON="Could not back up ${caddyfile}."
       warn "$HTTPS_FAIL_REASON Refusing to overwrite it."
-      revert_env_to_tunnel
+      unwind_https_env
       return 0
     fi
     chmod 0600 "$CADDYFILE_BACKUP" 2>/dev/null || true
@@ -1243,7 +1264,7 @@ configure_https() {
     HTTPS_FAIL_REASON="Could not write ${caddyfile}."
     warn "$HTTPS_FAIL_REASON"
     restore_caddyfile "$caddyfile"
-    revert_env_to_tunnel
+    unwind_https_env
     return 0
   fi
   # It contains no secret, but it decides what is published; keep it out of
@@ -1267,10 +1288,17 @@ configure_https() {
     warn "$HTTPS_FAIL_REASON Caddy was not reloaded."
     note "$(printf '%s' "$validate_out" | head -3)"
     restore_caddyfile "$caddyfile"
-    revert_env_to_tunnel
+    unwind_https_env
     return 0
   fi
   pass "Caddyfile validated"
+
+  # Stamp the log window before the reload, so verify_https reads only what
+  # this attempt produces. A second earlier than the reload rather than the
+  # exact instant: journald and this clock need not agree to the millisecond,
+  # and losing the first line of the attempt would be worse than including one
+  # line before it.
+  CADDY_LOG_SINCE="$(date -d '-1 second' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')"
 
   systemctl enable --now caddy >/dev/null 2>&1 || true
   if ! systemctl reload caddy >/dev/null 2>&1 && ! systemctl restart caddy >/dev/null 2>&1; then
@@ -1279,7 +1307,7 @@ configure_https() {
     warn "$HTTPS_FAIL_REASON"
     restore_caddyfile "$caddyfile"
     systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
-    revert_env_to_tunnel
+    unwind_https_env
     return 0
   fi
 
@@ -1322,7 +1350,7 @@ configure_https() {
   # http://127.0.0.1:8080 — the operator is handed a tunnel they cannot log in
   # through, with no error naming the cause. Failing closed has to leave a way
   # back in.
-  if [[ -z "$HTTPS_FAIL_REASON" ]] && [[ "$HTTPS_TARGET_KIND" == "hostname" ]]; then
+  if [[ $HTTPS_FAIL_DIAGNOSED -eq 0 ]] && [[ "$HTTPS_TARGET_KIND" == "hostname" ]]; then
     HTTPS_STATE="pending"
     warn "Caddy is configured for ${HTTPS_TARGET}, but no certificate has arrived yet."
     note "Caddy keeps trying in the background, so this can still complete on its"
@@ -1331,7 +1359,7 @@ configure_https() {
     note "Test it:       curl -v https://${HTTPS_TARGET}/api/v1/health"
     note "When it answers, re-run with --https to switch the dashboard over."
     note "Until then the dashboard is reachable through the SSH tunnel below."
-    revert_env_to_tunnel
+    unwind_https_env
     return 0
   fi
 
@@ -1344,7 +1372,7 @@ configure_https() {
   report_https_failure
   restore_caddyfile "$caddyfile"
   systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
-  revert_env_to_tunnel
+  unwind_https_env
   return 0
 }
 
@@ -1499,7 +1527,12 @@ caddy_recent_log() {
     return 0
   fi
   command -v journalctl >/dev/null 2>&1 || return 1
-  journalctl -u caddy --no-pager -n 400 --since "-10 min" 2>/dev/null
+  # Only this attempt. A fixed ten-minute window swept in the previous run's
+  # errors, so re-running the installer — which is a supported and expected
+  # thing to do after opening a firewall — could diagnose a stale refusal and
+  # roll back an attempt that was progressing normally. CADDY_LOG_SINCE is
+  # stamped immediately before the reload that starts this attempt.
+  journalctl -u caddy --no-pager -n 400 --since "${CADDY_LOG_SINCE:--10 min}" 2>/dev/null
 }
 
 # caddy_acme_diagnosis names why the certificate did not arrive.
@@ -1514,6 +1547,16 @@ caddy_recent_log() {
 # something; a silent log means the caller falls back to its own wording rather
 # than inventing a cause from nothing.
 caddy_acme_diagnosis() {
+  # Wrapper so every recognised cause records that it was recognised, rather
+  # than each arm having to remember to.
+  if caddy_acme_diagnose_inner; then
+    HTTPS_FAIL_DIAGNOSED=1
+    return 0
+  fi
+  return 1
+}
+
+caddy_acme_diagnose_inner() {
   local log
   log="$(caddy_recent_log)" || return 1
   [[ -n "$log" ]] || return 1
@@ -1787,6 +1830,7 @@ CADDY_MIN_IP_MINOR=11
 # loopback", Compose republished on the old address, and re-running the fixed
 # installer did not close a dashboard an earlier version had opened.
 reconcile_env() {
+  snapshot_https_env
   if [[ -n "$DASHBOARD_BIND" ]]; then
     env_set DNSDADDY_DASHBOARD_BIND "$DASHBOARD_BIND"
     pass "DNSDADDY_DASHBOARD_BIND=${DASHBOARD_BIND}"
@@ -1843,6 +1887,55 @@ reconcile_env() {
 # DNSDADDY_DASHBOARD_BIND is deliberately not touched: HTTPS mode never set it,
 # the backend has been on loopback throughout, and that is exactly where it
 # should stay.
+# snapshot_https_env records the three keys before this run changes them.
+snapshot_https_env() {
+  [[ $HTTPS_ENV_SNAPSHOT_TAKEN -eq 0 ]] || return 0
+  HTTPS_ENV_BASE_URL_WAS="$(env_value DNSDADDY_BASE_URL)"
+  HTTPS_ENV_SECURE_COOKIES_WAS="$(env_value DNSDADDY_SECURE_COOKIES)"
+  HTTPS_ENV_TRUSTED_PROXY_WAS="$(env_value DNSDADDY_TRUSTED_PROXY_CIDRS)"
+  HTTPS_ENV_SNAPSHOT_TAKEN=1
+}
+
+# https_env_was_working reports whether this .env already described a working
+# HTTPS deployment when the run began.
+#
+# The base URL is the discriminator: reconcile_env writes it only for mode 3,
+# so its presence at snapshot time means a previous successful HTTPS install
+# left it there.
+https_env_was_working() {
+  [[ -n "$HTTPS_ENV_BASE_URL_WAS" ]]
+}
+
+# restore_https_env puts the snapshot back after a failed re-run.
+#
+# Used instead of revert_env_to_tunnel when the Caddyfile that was restored is
+# a working HTTPS configuration: the proxy is still terminating TLS and still
+# forwarding to this app, so telling the app it is on plain HTTP would strip
+# the Secure flag from session cookies on a live public site and collapse every
+# client to the proxy's own address.
+restore_https_env() {
+  env_set DNSDADDY_BASE_URL "$HTTPS_ENV_BASE_URL_WAS"
+  [[ -n "$HTTPS_ENV_SECURE_COOKIES_WAS" ]] && env_set DNSDADDY_SECURE_COOKIES "$HTTPS_ENV_SECURE_COOKIES_WAS"
+  [[ -n "$HTTPS_ENV_TRUSTED_PROXY_WAS" ]] && env_set DNSDADDY_TRUSTED_PROXY_CIDRS "$HTTPS_ENV_TRUSTED_PROXY_WAS"
+  pass "Restored the previous HTTPS settings; the working deployment is unchanged"
+  if "${COMPOSE[@]}" up -d >/dev/null 2>&1; then
+    pass "Restarted DNS Daddy with the settings it had before this run"
+  else
+    warn "Could not restart DNS Daddy to apply the restored settings."
+    note "Run: docker compose up -d"
+  fi
+  return 0
+}
+
+# unwind_https_env picks the right rollback for what was actually restored.
+unwind_https_env() {
+  if https_env_was_working; then
+    restore_https_env
+    return $?
+  fi
+  revert_env_to_tunnel
+}
+
 revert_env_to_tunnel() {
   local changed=0 key
   for key in DNSDADDY_SECURE_COOKIES DNSDADDY_BASE_URL DNSDADDY_TRUSTED_PROXY_CIDRS; do
