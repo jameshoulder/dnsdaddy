@@ -1618,3 +1618,79 @@ test('a feed that downloaded once and is not in the index is a fault', () => {
   assert.equal(h.broken.length, 1);
   assert.equal(h.pending.length, 0);
 });
+
+/*
+ * Design-token integrity.
+ *
+ * A custom property that is referenced but never defined does not raise
+ * anything. The declaration is invalid at computed-value time, the property
+ * falls back to inherited or initial, and the page renders — slightly wrong,
+ * silently, forever. `color: var(--muted)` where the token is spelled
+ * `--muted-foreground` cost the diagnostic evidence text its colour and was
+ * found by grep rather than by looking at it, which is the whole problem.
+ */
+test('every custom property referenced by the stylesheet is defined by it', () => {
+  const css = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.css'), 'utf8');
+
+  const defined = new Set();
+  for (const m of css.matchAll(/(--[a-zA-Z0-9-]+)\s*:/g)) defined.add(m[1]);
+
+  const missing = new Set();
+  for (const m of css.matchAll(/var\(\s*(--[a-zA-Z0-9-]+)\s*([,)])/g)) {
+    // A var() with a fallback still degrades on purpose; one without does not.
+    if (m[2] === ')' && !defined.has(m[1])) missing.add(m[1]);
+  }
+
+  assert.deepEqual([...missing], [],
+    'referenced but never defined, so these silently fall back to inherited values');
+});
+
+test('the semantic colour and radius families are complete', () => {
+  // --info-bg, --violet-bg, --ok-bg and --radius-sm have no rule using them
+  // today. They are kept deliberately: a five-member semantic family with
+  // three members missing is how the next tinted surface gets a hand-written
+  // rgba() instead of a token. This pins that they stay defined, so removing
+  // one is a decision rather than a tidy-up.
+  const css = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.css'), 'utf8');
+
+  for (const token of [
+    '--danger-bg', '--warn-bg', '--info-bg', '--violet-bg', '--ok-bg',
+    '--radius-sm', '--radius', '--radius-lg',
+  ]) {
+    assert.match(css, new RegExp(`${token}\\s*:`), `${token} is no longer defined`);
+  }
+});
+
+/*
+ * Every path that writes markup into the document goes through sanitize().
+ *
+ * Page renders always did — router.render assigns sanitize(await page.render()).
+ * Two assignments did not: the query log's incremental re-render and the token
+ * reveal. Neither was exploitable, because the tagged template escapes every
+ * interpolation and nothing those two build puts server data in an href or
+ * src. But that is a property of today's markup rather than of the assignment,
+ * and the invariant is worth stating as one: the next data-derived link added
+ * to a query row must not be the thing that discovers the exception.
+ */
+test('no innerHTML assignment bypasses sanitize()', () => {
+  const src = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.js'), 'utf8');
+
+  const offenders = [];
+  for (const line of src.split('\n')) {
+    const m = line.match(/\.innerHTML\s*=\s*(.*)$/);
+    if (!m) continue;
+    const rhs = m[1].trim();
+    // The read inside sanitize() itself is how it returns its result.
+    if (/^doc\.body\.innerHTML/.test(line.trim())) continue;
+    if (rhs.startsWith('sanitize(')) continue;
+    // An empty string clears a region and cannot carry markup.
+    if (/^(''|""|``);?$/.test(rhs)) continue;
+    offenders.push(line.trim());
+  }
+
+  assert.deepEqual(offenders, [],
+    'these write markup into the document without the pass that strips on* and javascript:');
+});

@@ -274,6 +274,58 @@ Caddyfile in `/etc/caddy`. Afterwards:
 * **login through the tunnel posture succeeded**, with no `Secure` flag on the
   cookie.
 
+### The shipped container image, built and run
+
+Built from the repository's own `Dockerfile` on `golang:1.27.0-alpine` — the
+base image PR #41 moved to — and run against a named volume:
+
+| What | Result |
+| --- | --- |
+| Image build | succeeds; 41.7 MB final image |
+| Container start | reaches the `HEALTHCHECK`'s `healthy` state |
+| Login and a write | password login succeeds; creating a network returns 201 |
+| `docker restart` | the network and its CIDR survive; the effective ACL comes back as the union of the configured defaults and the added range |
+| Session across a restart | the cookie stays valid — sessions live in the database, not in memory |
+| `GET /api/v1/health` over the published port | `{"status":"ok"}` and nothing else, because the peer is the bridge rather than loopback |
+| Dashboard route walk against the container | all 11 routes, no console errors — which is the check that the `go:embed` assets actually ship |
+
+Not verified here: `apk` cannot reach the Alpine CDN from this sandbox, so the
+runtime stage was built through a local CA and proxy shim. That affects
+*fetching* packages, not the Dockerfile's content — the shipped `Dockerfile` was
+not modified, and `.dockerignore`'s exclusion of `*.crt` was left in place.
+
+### Client access control, against a live resolver
+
+Not a unit test: a real `dnsdaddy serve` with `dns.allowed_client_cidrs` set to
+loopback only, queried over UDP from a second address on this host.
+
+| Step | Result |
+| --- | --- |
+| Query from an address outside the ACL | `REFUSED` |
+| Query from inside the ACL | reaches resolution (`SERVFAIL` here — no upstream in the sandbox — which is the point: it is not `REFUSED`) |
+| `POST /networks` with a globally routable range, no acknowledgement | `409`, naming the exact public ranges |
+| Same request with `publicAck` | `201` |
+| Query from that range afterwards, no restart | permitted |
+| `PATCH allowResolver:false`, no restart | `REFUSED` again |
+| Re-grant, no restart | permitted again |
+
+### Health detail, from a genuinely remote peer
+
+Earlier rounds tested this with `httptest`, which serves on loopback, so the
+peer was always entitled and the assertion could not fail. Repeated against a
+listener bound to `0.0.0.0` and reached from a non-loopback address:
+
+| Request | Response |
+| --- | --- |
+| From loopback | full detail |
+| From a non-loopback peer | `{"status":"ok"}` |
+| Non-loopback peer sending `X-Forwarded-For: 127.0.0.1` | `{"status":"ok"}` |
+| Non-loopback peer sending `X-Real-IP: 127.0.0.1` | `{"status":"ok"}` |
+| A *trusted* proxy sending `X-Forwarded-For: 127.0.0.1` | `{"status":"ok"}` |
+
+The last row is the design: entitlement is decided by the socket peer, never by
+a header, so no proxy configuration can unlock it.
+
 ### Raw-IP HTTPS: what was verified, and what was not
 
 Verified: CertMagic v0.25.3 (as shipped in Caddy 2.11.4) maps

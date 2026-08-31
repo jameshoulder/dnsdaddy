@@ -1691,7 +1691,13 @@ pages.queries = {
         const data = await apiGet(`/queries?${params}`);
         this.state.cursor = data.nextCursor;
         this.state.rows = append ? this.state.rows.concat(data.queries) : data.queries;
-        $('#q-results').innerHTML = queryTable(this.state.rows);
+        // Through sanitize() like every page render. Nothing queryTable
+        // builds today puts server data in an href or src, so escaping alone
+        // is currently enough — but that is a property of today's markup, not
+        // of this assignment, and the next data-derived link added to a query
+        // row would arrive here having skipped the pass that strips
+        // javascript: URLs everywhere else.
+        $('#q-results').innerHTML = sanitize(queryTable(this.state.rows));
         $('#q-count').textContent = `${this.state.rows.length} row${this.state.rows.length === 1 ? '' : 's'}`;
         $('#q-more').hidden = !data.nextCursor;
       } catch (err) {
@@ -3151,12 +3157,12 @@ pages.settings = {
       const form = new FormData(e.target);
       try {
         const token = await apiSend('POST', '/tokens', { name: form.get('name') });
-        $('#token-secret').innerHTML = html`
+        $('#token-secret').innerHTML = sanitize(html`
           <div class="card token-reveal">
             <p class="small reveal-lead"><strong>Copy this now — it is not shown again.</strong></p>
             ${raw(copyBlock(token.secret))}
           </div>
-        `;
+        `);
         paintDynamic($('#token-secret'));
         bindCopyButtons();
         e.target.reset();
@@ -3279,7 +3285,7 @@ const router = {
       $('#refresh-note').textContent = `Updated ${new Date().toLocaleTimeString('en-GB')}`;
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 401)) {
-        view.innerHTML = emptyState('Could not load this page', esc(err.message || 'The request failed.'), { icon: '!' });
+        view.innerHTML = sanitize(emptyState('Could not load this page', esc(err.message || 'The request failed.'), { icon: '!' }));
         reportError(err);
       }
     } finally {
