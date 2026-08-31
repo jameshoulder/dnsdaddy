@@ -365,16 +365,23 @@ session to the browser holding it. If a cookie is captured — a shared machine,
 a proxy log, a backup — it works until one of those three things happens.
 Changing the admin password is the response, and it is now an effective one.
 
-**Raw-IP HTTPS has never been observed issuing a real certificate here.** The
-configuration is verified — the generated Caddyfile validates against Caddy
-2.11.4, adapts to the `shortlived` ACME profile, and CertMagic's own PreCheck
-returns "proceed" for a public IPv4 and a public IPv6 subject against the Let's
-Encrypt production directory — but completing an ACME order needs ports 80 and
-443 reachable from the internet at the address being certified, which the
-environment this was developed in does not have. The failure path is tested end
-to end; the success path is verified up to the point of the order. Row D5 of
-[docs/deployment-matrix.md](docs/deployment-matrix.md) is the test that closes
-that gap.
+**Raw-IP HTTPS has never been observed issuing a real certificate here.** What
+is now verified goes further than it did: against Let's Encrypt *staging*, with
+Caddy 2.11.4 and CertMagic v0.25.3, an ACME **order for an IP identifier was
+accepted** and both `tls-alpn-01` and `http-01` challenges were offered. The
+order failed only at the callback — `urn:ietf:params:acme:error:connection`,
+connection refused — because the challenge could not reach the address from the
+internet. So the capability is real and the remaining unknown is narrow:
+issuance itself, which needs ports 80 and 443 reachable at the address being
+certified.
+
+An earlier version of this paragraph rested on `ACMEIssuer.PreCheck` returning
+"proceed", and a real attempt on a public VPS then failed. PreCheck was the
+wrong layer to test — it is one gate of several — and the claim was replaced
+rather than restated. Rows D4 and D5 of
+[docs/deployment-matrix.md](docs/deployment-matrix.md), with
+[docs/vps-validation.md](docs/vps-validation.md) as the procedure, are what
+close the gap.
 
 **The login rate limiter is in-process and in-memory.** It resets on restart,
 and it counts nothing an attacker cannot cause it to forget by waiting fifteen

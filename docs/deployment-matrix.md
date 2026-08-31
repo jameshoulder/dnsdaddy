@@ -328,17 +328,40 @@ a header, so no proxy configuration can unlock it.
 
 ### Raw-IP HTTPS: what was verified, and what was not
 
-Verified: CertMagic v0.25.3 (as shipped in Caddy 2.11.4) maps
-`api.letsencrypt.org` to *IP certificates supported*. Calling
-`ACMEIssuer.PreCheck` directly against the Let's Encrypt production directory
-returns "proceed" for `66.228.32.228` and for `2606:4700:4700::1111`, and
-refuses a private address. The same call against ZeroSSL still refuses public
-IPs, so the check is live and CA-specific. The Caddyfile this installer
-generates validates against 2.11.4 and adapts to
-`{"module":"acme","profile":"shortlived"}`.
+An earlier round of this work verified only that CertMagic's `ACMEIssuer.PreCheck`
+returns "proceed" for a public IP, and treated that as evidence the path
+worked. It was the wrong layer to test. A real attempt against
+`172.236.31.102` then failed, which is what prompted testing the whole path
+rather than one gate in it.
 
-Not verified: an actual issued certificate. That needs ports 80 and 443
-reachable from the internet at the address being certified. **Row D5.**
+**Verified, against Let's Encrypt staging, with the same stack the VPS runs**
+(Caddy 2.11.4 and CertMagic v0.25.3, both read out of the binary rather than
+assumed):
+
+| Step | Result |
+| --- | --- |
+| `caddy adapt` on the generated IPv4 Caddyfile | selects `{"module":"acme","profile":"shortlived"}` for the IP subject — not the internal CA |
+| `caddy validate` on all four generated shapes | hostname, IPv4, IPv6, and the post-success HSTS variant all valid |
+| ACME account registration | succeeds |
+| **Order creation with an IP identifier** | **accepted** — `/acme/order/332335443/47741991763` |
+| Challenges offered for the IP | `tls-alpn-01`, then `http-01` |
+| Challenge outcome | `urn:ietf:params:acme:error:connection` — `"172.236.31.102: Connection refused"` |
+
+So Let's Encrypt accepts IP identifiers under the `shortlived` profile and
+Caddy 2.11.4 asks for them correctly. The order was created; only the callback
+failed, because the challenge could not reach the address. That is a firewall,
+not a capability gap.
+
+Confirmed in the CertMagic source rather than from a changelog:
+`acmeissuer.go:350-375` maps `api.letsencrypt.org` to *IP certificates
+supported*, so the `"cannot have public IP certificate"` error reported in
+[caddy#7399](https://github.com/caddyserver/caddy/issues/7399) comes from an
+older CertMagic than the one we ship against.
+
+**Still not verified: an actual issued certificate.** Staging proved the order
+is accepted; it did not prove issuance, because that needs ports 80 and 443
+reachable from the internet at the address being certified. **Rows D4 and D5**,
+and [vps-validation.md](vps-validation.md) is the script for them.
 
 Also found: `apt-get install caddy` on Debian 13 gets **Caddy 2.6.2** when the
 upstream repository is unreachable, and 2.6.2 rejects the `profile`
