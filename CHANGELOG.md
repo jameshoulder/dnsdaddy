@@ -22,6 +22,35 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+**Public VPS HTTPS says why it failed.** The installer used to run curl, and
+when no certificate arrived it printed a guess — "usually means ports 80 and
+443 are not reachable" — whatever had actually happened. Caddy logs the ACME
+problem document the CA returned, and that log was never read. It now is, and
+the message names the cause: a refused or timed-out challenge, a rate limit, an
+NXDOMAIN, a rejected account contact, a profile the CA would not take, a Caddy
+too old for IP certificates, or a backend Caddy cannot reach. The CA's own
+words are quoted alongside.
+
+**Three defects behind that.** The 45-second verification timeout was shorter
+than CertMagic's own 60-second retry backoff, so a transient first failure was
+reported as a dead deployment. The untrusted-certificate branch could not fire
+at all, because pinning `issuer acme` removes the internal-CA fallback it was
+written for. And the hostname path never restored `.env`, leaving
+`DNSDADDY_SECURE_COOKIES=always` set and the SSH-tunnel fallback impossible to
+log in through — the same fault that had been fixed for the IP path only.
+
+**Hostname mode checks both DNS families.** A stale or missing AAAA on a host
+reached over IPv6 used to pass silently and then fail validation, because
+Let's Encrypt prefers IPv6 when a AAAA exists.
+
+**HSTS is written only after a certificate has been served,** rather than
+before the attempt that might fail.
+
+**`dnsdaddy doctor` knows the deployment mode.** A dashboard on loopback is
+reported as correct for both public modes rather than as an exposure problem,
+tunnel and proxied deployments are told apart, and proxy trust is checked only
+where a proxy exists.
+
 **A failed DNS start could leave a listener serving.** `Start` returned on the
 first bind error without waiting for the other listeners, so a sibling still on
 its way to bind was left mid-flight; the unwind then skipped it, because
