@@ -1618,3 +1618,47 @@ test('a feed that downloaded once and is not in the index is a fault', () => {
   assert.equal(h.broken.length, 1);
   assert.equal(h.pending.length, 0);
 });
+
+/*
+ * Design-token integrity.
+ *
+ * A custom property that is referenced but never defined does not raise
+ * anything. The declaration is invalid at computed-value time, the property
+ * falls back to inherited or initial, and the page renders — slightly wrong,
+ * silently, forever. `color: var(--muted)` where the token is spelled
+ * `--muted-foreground` cost the diagnostic evidence text its colour and was
+ * found by grep rather than by looking at it, which is the whole problem.
+ */
+test('every custom property referenced by the stylesheet is defined by it', () => {
+  const css = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.css'), 'utf8');
+
+  const defined = new Set();
+  for (const m of css.matchAll(/(--[a-zA-Z0-9-]+)\s*:/g)) defined.add(m[1]);
+
+  const missing = new Set();
+  for (const m of css.matchAll(/var\(\s*(--[a-zA-Z0-9-]+)\s*([,)])/g)) {
+    // A var() with a fallback still degrades on purpose; one without does not.
+    if (m[2] === ')' && !defined.has(m[1])) missing.add(m[1]);
+  }
+
+  assert.deepEqual([...missing], [],
+    'referenced but never defined, so these silently fall back to inherited values');
+});
+
+test('the semantic colour and radius families are complete', () => {
+  // --info-bg, --violet-bg, --ok-bg and --radius-sm have no rule using them
+  // today. They are kept deliberately: a five-member semantic family with
+  // three members missing is how the next tinted surface gets a hand-written
+  // rgba() instead of a token. This pins that they stay defined, so removing
+  // one is a decision rather than a tidy-up.
+  const css = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.css'), 'utf8');
+
+  for (const token of [
+    '--danger-bg', '--warn-bg', '--info-bg', '--violet-bg', '--ok-bg',
+    '--radius-sm', '--radius', '--radius-lg',
+  ]) {
+    assert.match(css, new RegExp(`${token}\\s*:`), `${token} is no longer defined`);
+  }
+});
