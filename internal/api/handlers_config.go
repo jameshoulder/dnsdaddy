@@ -755,7 +755,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := clientKey(r)
+	key := clientKey(r, a.TrustedProxies)
 	if !a.Auth.limiter.allow(key) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts; try again later")
 		return
@@ -766,11 +766,44 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.Auth.limiter.reset(key)
-	a.Auth.SetSessionCookie(w, r)
+
+	token, err := a.Auth.issueSession(r.Context(), "dashboard")
+	if err != nil {
+		// The password was right, but no session could be recorded. Failing
+		// the login is the only honest answer: issuing a cookie the server
+		// cannot recognise would produce a browser that believes it is signed
+		// in and is refused on every subsequent request.
+		a.Log.Error("create session", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not start a session")
+		return
+	}
+	a.Auth.SetSessionCookie(w, r, token)
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true})
 }
 
+// handleLogout revokes the session server-side, then clears the cookie.
+//
+// Both halves matter and in this order. Clearing the cookie alone is what this
+// used to do, and it only asked the browser to forget a credential that stayed
+// valid until its expiry — so a copy taken from a shared machine, a proxy log
+// or a backup kept working for up to twelve hours after the operator believed
+// they had signed out.
+//
+// Deliberately unauthenticated at the router, as it always was: the cookie
+// presented is the only thing revoked, so the worst a stranger can do by
+// calling it is end a session they already hold.
 func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		if err := a.Auth.RevokeSession(r.Context(), c.Value); err != nil {
+			// Do not clear the cookie or report success: the session is still
+			// live, and telling the operator otherwise is the failure mode
+			// this whole change exists to remove.
+			a.Log.Error("revoke session", "error", err)
+			writeError(w, http.StatusInternalServerError,
+				"could not end the session; it is still active")
+			return
+		}
+	}
 	a.Auth.ClearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 }
@@ -795,7 +828,17 @@ func (a *API) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+
+	// SetPassword revoked every session, this one included. Clear the cookie
+	// so the browser stops sending a value the server no longer knows, and say
+	// so in the response: the dashboard shows the login screen rather than
+	// letting the operator discover it on their next click.
+	a.Auth.ClearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":           "updated",
+		"sessionsRevoked":  true,
+		"reauthentication": "required",
+	})
 }
 
 // --- helpers ---------------------------------------------------------------

@@ -153,7 +153,56 @@ plaintext secret is returned exactly once, at creation. Every token carries the
 `dnsd_` prefix so a leaked one is recognisable in a log or a secret scanner.
 
 **The admin password is bcrypt-hashed.** Login attempts are rate limited per
-source address.
+source address, resolved through the same trusted-proxy rules as everything
+else — behind a reverse proxy every request has the same peer, so keying the
+limiter on the raw connection address would have put the whole internet in one
+bucket and let one attacker lock the operator out.
+
+**Sessions are server-side and revocable.** The cookie is 256 bits from
+`crypto/rand` and means nothing on its own; the server stores its SHA-256 with
+an expiry, so a copy of the database is not a set of live sessions. This
+matters for three things that a self-contained signed cookie cannot do:
+
+* **Logout revokes.** The row is deleted, so a cookie captured beforehand stops
+  working immediately rather than at its expiry.
+* **Changing the password signs everything out**, every browser including the
+  one making the change. An operator who changes the password because they
+  think somebody has been in gets what they were asking for.
+* **There is no signing key to lose.** Sessions were previously
+  `<expiry>.<hmac(expiry)>`, which made `<data_dir>/session.key` a permanent
+  forgery capability for anyone who read it. That file is now deleted on
+  startup; nothing reads it.
+
+  What this does *not* solve: an attacker who steals a live cookie is that
+  session until it expires or is revoked. Nothing short of binding the session
+  to something uncopyable changes that, and this is a self-hosted dashboard.
+
+**The management interface binds loopback by default.** `http.listen` is
+`127.0.0.1:8080`, and a wildcard (`:8080`, `0.0.0.0`, `[::]`) or a globally
+routable address is refused unless `http.allow_public_bind` is also set. A
+named private address such as `192.168.1.50:8080` needs no acknowledgement —
+typing it is already a statement of intent, and it is how the LAN deployment is
+configured.
+
+This is a property of the program, not of the container. The image does set
+`DNSDADDY_ALLOW_PUBLIC_BIND`, because inside a network namespace a wildcard
+reaches nothing until Compose publishes the port, and Compose publishes it to
+`127.0.0.1` — but running that image with `--network host` removes that
+boundary and makes the wildcard real.
+
+**The health endpoint answers in two tiers.** `/api/v1/health` is deliberately
+unauthenticated, which in the HTTPS deployment makes it the one management path
+the reverse proxy publishes to the internet. Every caller gets `{"status":"ok"}`
+and nothing else — not the version, not the uptime, not the size of the threat
+index, not whether a configuration reload has failed. An entitled caller gets
+all of that: entitled means authenticated, or a peer address that is loopback,
+which is how `dnsdaddy doctor` and the container's own health check read the
+live index without a credential.
+
+Entitlement is decided from the address that opened the socket and never from a
+forwarding header, so `X-Forwarded-For: 127.0.0.1` buys nothing — including
+from the reverse proxy itself, whose forwarded requests all originate on the
+internet.
 
 **No forwarding header is trusted by default.** `X-Forwarded-For`,
 `X-Real-IP`, and `X-Forwarded-Proto` are honoured only from a peer listed in
@@ -216,6 +265,63 @@ them.
    it is why `secure_cookies` defaults to `auto` rather than `true`. It is not
    acceptable on any interface reachable from the internet.
 
+### The three deployment modes, and what each exposes
+
+`./deploy/install-docker.sh` offers exactly three, and none of them publishes
+the management interface in plaintext.
+
+| | Management access | Listening publicly | DNS Daddy binds |
+|---|---|---|---|
+| **1. Home / LAN** | `http://<lan-ip>:8080` | the dashboard, on your LAN | the LAN address |
+| **2. Public VPS — SSH tunnel** | `http://127.0.0.1:8080` through `ssh -L` | nothing | loopback |
+| **3. Public VPS — HTTPS** | `https://<name-or-ip>` | Caddy, on 80 and 443 | loopback |
+
+Mode 1 is for a machine with no public address. The installer refuses to
+publish the dashboard on an address it can see is publicly routable, and warns
+that a private address on the NIC is not evidence a host has no public one —
+on AWS, GCP, Azure and Hetzner the public address is NATed onto a private NIC,
+and that inference has caused a real exposure here before.
+
+Modes 2 and 3 both keep DNS Daddy itself on `127.0.0.1:8080`. In mode 3 the
+reverse proxy is the internet-facing component and the only thing listening on
+a public interface; the application is unchanged between the two.
+
+**Mode 3 fails closed.** If a publicly trusted certificate cannot be obtained,
+the installer restores the previous Caddyfile — or removes the one it
+generated — reverts the HTTPS settings in `.env`, and leaves the deployment in
+mode 2's posture. It never falls back to plaintext on a public address, and it
+never reports success on the strength of having run the commands: the check is
+`curl` *without* `-k`, so a certificate this machine does not trust counts as a
+failure.
+
+That last point is not theoretical. Left to itself, Caddy issues a certificate
+from its own internal CA for a name it considers unnameable — which would put a
+certificate no browser trusts in front of the management interface and let the
+installer call it done. The generated IP site pins the public ACME issuer
+explicitly so that cannot happen quietly, and success requires a `curl` that
+verifies against this machine's trust store.
+
+**Raw-IP HTTPS needs Caddy 2.11 or newer.** 2.11 is the first release whose
+bundled CertMagic knows that Let's Encrypt issues IP-address certificates;
+before it, the request was refused locally and no order was ever sent. The
+installer checks the version before writing anything and says how to get a
+current Caddy rather than producing a parse error. Distribution packages are
+usually far behind — Debian 13 ships **Caddy 2.6.2** — so the upstream
+repository matters here, and the installer now reports which one it used.
+
+**Firewall exposure**, for the operator to configure — the installer does not
+open ports:
+
+```
+53/udp, 53/tcp    DNS, only where you intend to serve clients
+80/tcp, 443/tcp   mode 3 only, for Caddy and the ACME challenge
+8080/tcp          never publicly, in any mode
+```
+
+Cloud-provider firewalls are separate from `ufw` and cannot be seen from the
+machine. Docker's port publishing bypasses `ufw` entirely, which is why the
+bind address rather than a firewall rule is the control that matters.
+
 **The bare `/dns-query` DoH path requires a token** unless you set
 `http.allow_untokenized_doh`. Behind a public reverse proxy it would otherwise
 be an open DoH resolver for anyone who finds the path.
@@ -247,6 +353,60 @@ block a legitimate domain; the memory saved is not worth that.
 seccomp filter, `CAP_NET_BIND_SERVICE` and nothing else, and memory limits. The
 container runs as an unprivileged user and cannot bind port 53 at all — Compose
 publishes the host port instead.
+
+## Known limitations
+
+Stated here rather than left to be discovered. Each is a real property of the
+current code, not a hypothetical.
+
+**A stolen live session cookie is that session.** Logout and a password change
+both revoke, and sessions expire after twelve hours, but nothing binds a
+session to the browser holding it. If a cookie is captured — a shared machine,
+a proxy log, a backup — it works until one of those three things happens.
+Changing the admin password is the response, and it is now an effective one.
+
+**Raw-IP HTTPS has never been observed issuing a real certificate here.** The
+configuration is verified — the generated Caddyfile validates against Caddy
+2.11.4, adapts to the `shortlived` ACME profile, and CertMagic's own PreCheck
+returns "proceed" for a public IPv4 and a public IPv6 subject against the Let's
+Encrypt production directory — but completing an ACME order needs ports 80 and
+443 reachable from the internet at the address being certified, which the
+environment this was developed in does not have. The failure path is tested end
+to end; the success path is verified up to the point of the order. Row D5 of
+[docs/deployment-matrix.md](docs/deployment-matrix.md) is the test that closes
+that gap.
+
+**The login rate limiter is in-process and in-memory.** It resets on restart,
+and it counts nothing an attacker cannot cause it to forget by waiting fifteen
+minutes. It raises the cost of online guessing; it is not a lockout, and the
+admin password's entropy is what actually protects the account.
+
+**There is no CSRF token.** State-changing cookie-authenticated requests are
+protected by `SameSite=Lax` plus a server-side `Origin`/`Referer` check. That
+combination is sound for a same-origin single-page dashboard and is what the
+tests pin, but a synchroniser token would be the belt to that pair of braces.
+
+**Sessions cannot be listed or revoked individually.** "Revoke everything" is a
+password change. A per-session view — when it was created, when it was last
+used, revoke this one — is data the table already holds and the UI does not yet
+show.
+
+**The installer has now run against a real Docker daemon, in containers rather
+than VMs.** Clean Debian 13 and Ubuntu 24.04, real `dockerd` 29.3.1, real
+Compose, real Caddy 2.11.4 — options 1 and 2, the HTTPS failure path, port-53
+conflict detection, and the resulting sockets and Docker bindings inspected
+directly. [docs/deployment-matrix.md](docs/deployment-matrix.md) records exactly
+what was checked and how.
+
+What that still does not cover: a hypervisor, a real NIC, a second physical
+client on a LAN, and a machine with a public address. So ACME issuance has
+never completed here, IPv6 was tested as classification logic rather than as a
+live socket (this host has no IPv6 stack), and per-client attribution across a
+real subnet is unverified.
+
+**`Forwarded` (RFC 7239) is not parsed.** That is safe in this direction — an
+unparsed header is an ignored one — and there is a test that fails if it ever
+starts being honoured without the trusted-peer check being applied to it.
 
 ## Hardening checklist
 

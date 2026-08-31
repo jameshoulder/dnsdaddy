@@ -9,10 +9,13 @@ the failure that prompted the August 2026 audit
 test could have caught — the code was correct and the shipped configuration was
 not.
 
-> **Current status: none of the matrix below has been executed on real
-> hardware or real VMs.** The rows are the tests, not the results. Running any
-> row and recording the outcome is one of the most useful contributions
-> available to this project right now.
+> **Current status: partly executed.** Several rows have now been run against
+> a real Docker daemon in clean Debian 13 and Ubuntu 24.04 containers — see
+> [What was actually tested](#what-was-actually-tested) below for the exact
+> environment and results. What remains untested is everything that needs a
+> machine with a public address: real ACME issuance, a real LAN with a second
+> physical client, and hypervisor networking. Running any of those rows and
+> recording the outcome is still the most useful contribution available.
 
 ---
 
@@ -167,6 +170,45 @@ data would be worse than saying nothing.
 |---|---|---|---|---|
 | D1 | any 1 GB / 1 vCPU | Docker Compose + Caddy, per `docs/deploy.md` | your own public IP | ☐ not run |
 | D2 | same | same, from a **non-permitted** public address | a different network | ☐ not run |
+| D3 | any | `--vps` (option 2, SSH tunnel) | your own laptop | ☐ not run |
+| D4 | any | `--https` with a hostname (option 3) | a browser | ☐ not run |
+| D5 | any | `--https` with the raw public IP (option 3) | a browser | ☐ not run |
+| D6 | any | `--https` where issuance fails, e.g. 443 blocked at the cloud firewall | a browser | ☐ not run |
+
+**D5 is the row that closes the last open question.** Caddy 2.11 and newer
+*will* ask Let's Encrypt for an IP-address certificate — verified against the
+real binary, see "What was actually tested" below — but completing the order
+needs ports 80 and 443 reachable from the internet at that address, which no
+environment available to the author has. What must be true if it succeeds:
+
+- the browser shows no certificate warning, and the issuer is Let's Encrypt,
+  not Caddy's internal CA (`openssl s_client -connect <ip>:443 | openssl x509
+  -noout -issuer -dates`);
+- the certificate's validity is about 160 hours, not 90 days — that is the
+  `shortlived` profile, and it is the only one Let's Encrypt issues IP
+  certificates under;
+- renewal happens by itself: leave it a few days and check the dates moved.
+
+And if it fails, the same five things as D6 must hold.
+
+**D6 is the failure property, and is testable anywhere.** Block 443 inbound at
+the provider's firewall, run `--https` with a real hostname, and check:
+
+- the installer says so, naming the reason;
+- `/etc/caddy/Caddyfile` is back to whatever it was before, or gone if there
+  was nothing;
+- `.env` no longer carries `DNSDADDY_SECURE_COOKIES=always`;
+- `curl http://<public-ip>:8080` is refused — the dashboard is on loopback;
+- the SSH tunnel command printed at the end works, **and login succeeds through
+  it**.
+
+That last one is the whole reason the `.env` revert exists. With
+`secure_cookies=always` left behind the browser accepts the cookie over the
+tunnel and never sends it back, and login fails with nothing to explain it.
+
+**D4 is the one that should succeed.** Verify additionally that the certificate
+is publicly trusted (a browser, not `curl -k`), that HSTS is present, and that
+`http://<hostname>` redirects to HTTPS.
 
 **D2 must fail, and must fail legibly.** A source address not in
 `dns.allowed_client_cidrs` must be answered `REFUSED`, and
@@ -186,6 +228,186 @@ carries `Secure`, and **`<server>:8080` is not reachable from the internet**.
 
 The README's resource claims should be checked against these rather than
 asserted. If a row disagrees with the README, the README is wrong.
+
+---
+
+## What was actually tested
+
+Run on 2026-08-31 against a real `dockerd` 29.3.1 in clean `debian:13` and
+`ubuntu:24.04` containers, from a clean clone of this branch. **Containers, not
+VMs**: there is no hypervisor available here, so anything depending on a real
+NIC, a real LAN or a public address is still untested and is marked so.
+
+Kernel 6.18.44. Docker Engine 29.3.1, Compose v5.1.1, Caddy v2.11.4 (built from
+source; the distribution package is 2.6.2 — see below).
+
+### Confirmed by inspecting real sockets and real Docker bindings
+
+| What | How it was checked | Result |
+|---|---|---|
+| Option 2 binds loopback only | `docker inspect .NetworkSettings.Ports` | `8080/tcp -> 127.0.0.1:8080` |
+| :8080 is unreachable off-host | `curl http://<host-ip>:8080` | connection refused |
+| No IPv6 exposure | `/proc/net/tcp6` | no entry for 8080 |
+| Option 1 binds one named address | `DNSDADDY_DASHBOARD_BIND=<lan-ip>` | `/proc/net/tcp` shows only that address; **not** `0.0.0.0` |
+| Standalone binary defaults to loopback | real process, `/proc/net/tcp[6]` | `127.0.0.1:8080`, tcp6 none |
+| Public health tier | through the published port | `{"status":"ok"}` and nothing else |
+| Loopback health tier | `docker exec … wget` | full detail |
+| Header spoofing | `X-Forwarded-For: 127.0.0.1`, `X-Real-IP: ::1` | still `{"status":"ok"}` |
+| ACL enforcement | narrowed to `127.0.0.0/8`, queried from the bridge | **REFUSED** |
+| ACL restored | widened again, same client | admitted (SERVFAIL — no upstream here) |
+| Open-resolver refusal | empty ACL, non-loopback listener | refuses to start, names the setting |
+| Login / CSRF / logout | real HTTP against the container | 200 / 403 cross-origin, 201 same-origin / 401 after logout |
+| Cookie attributes over plain HTTP | `Set-Cookie` header | `HttpOnly; SameSite=Lax`, no `Secure` — correct for the tunnel |
+| Port 53 conflict | a process named `systemd-resolved` holding 53 | detected, named, refused to act, printed the DNSStubListener recipe |
+
+### The HTTPS failure path, end to end
+
+Ran `--https` with a hostname that does not resolve here, with a pre-existing
+Caddyfile in `/etc/caddy`. Afterwards:
+
+* `.env` carried `# disabled by install-docker.sh (dashboard kept on loopback)`
+  against `DNSDADDY_BASE_URL`, `DNSDADDY_SECURE_COOKIES` and
+  `DNSDADDY_TRUSTED_PROXY_CIDRS`;
+* Docker binding still `127.0.0.1:8080`; the host's routable address refused;
+* the pre-existing Caddyfile was **byte-identical** to before, with a
+  timestamped backup beside it;
+* **login through the tunnel posture succeeded**, with no `Secure` flag on the
+  cookie.
+
+### Raw-IP HTTPS: what was verified, and what was not
+
+Verified: CertMagic v0.25.3 (as shipped in Caddy 2.11.4) maps
+`api.letsencrypt.org` to *IP certificates supported*. Calling
+`ACMEIssuer.PreCheck` directly against the Let's Encrypt production directory
+returns "proceed" for `66.228.32.228` and for `2606:4700:4700::1111`, and
+refuses a private address. The same call against ZeroSSL still refuses public
+IPs, so the check is live and CA-specific. The Caddyfile this installer
+generates validates against 2.11.4 and adapts to
+`{"module":"acme","profile":"shortlived"}`.
+
+Not verified: an actual issued certificate. That needs ports 80 and 443
+reachable from the internet at the address being certified. **Row D5.**
+
+Also found: `apt-get install caddy` on Debian 13 gets **Caddy 2.6.2** when the
+upstream repository is unreachable, and 2.6.2 rejects the `profile`
+subdirective outright. The installer now checks the version first.
+
+### Still untested
+
+Everything needing a public address or real hardware: ACME issuance (D4, D5),
+a second physical client on a LAN (A*, B*, C*), hypervisor networking (C*),
+IPv6 at runtime — this host has no IPv6 stack, so IPv6 is covered by unit tests
+over the classification logic rather than by a live socket — and constrained
+hardware (E*).
+
+---
+
+## Fresh-VM procedures, copy and paste
+
+Nothing below has been run by the author — there is no hypervisor in the
+environment this was written in. They are written out so that running one is a
+matter of pasting rather than of working out what was meant.
+
+### Debian 13 (trixie), minimal netinst
+
+```bash
+# --- as root on a fresh VM -------------------------------------------------
+apt-get update
+apt-get install -y ca-certificates curl git
+
+# Docker, from Docker's own repository rather than Debian's older packaging.
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+git clone https://github.com/jameshoulder/dnsdaddy.git
+cd dnsdaddy
+
+# See what it would do before it does it. This changes nothing.
+./deploy/install-docker.sh --dry-run
+
+# Then one of the three modes:
+./deploy/install-docker.sh --lan                                  # option 1
+./deploy/install-docker.sh --vps                                  # option 2
+DNSDADDY_HTTPS_HOSTNAME=dns.example.com ./deploy/install-docker.sh --https   # option 3, hostname
+DNSDADDY_HTTPS_HOSTNAME=ip             ./deploy/install-docker.sh --https   # option 3, detected public IP
+```
+
+Debian 12 (bookworm) works the same way; substitute the codename, which the
+`$VERSION_CODENAME` expansion above already does.
+
+### Ubuntu 24.04 LTS, cloud image
+
+```bash
+# --- as root on a fresh VM -------------------------------------------------
+apt-get update
+apt-get install -y ca-certificates curl git
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+git clone https://github.com/jameshoulder/dnsdaddy.git
+cd dnsdaddy
+./deploy/install-docker.sh --dry-run
+```
+
+**Ubuntu needs one extra thing.** `systemd-resolved` holds port 53 on almost
+every Ubuntu install. The installer detects it, names it, and refuses to change
+it for you — altering how a remote machine resolves names is how people lose
+remote machines. Do it yourself first:
+
+```bash
+mkdir -p /etc/systemd/resolved.conf.d
+printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/dnsdaddy.conf
+ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+systemctl restart systemd-resolved
+
+# Confirm 53 is free, and that this machine can still resolve names:
+ss -lnup 'sport = :53'
+getent hosts deb.debian.org
+```
+
+Then run the installer as above.
+
+### What to check afterwards, in every mode
+
+```bash
+# 1. The resolver answers, and the ACL is what you think it is.
+docker compose exec dnsdaddy dnsdaddy doctor
+
+# 2. The management port is NOT on a public address. From another machine:
+curl --max-time 5 http://<server-public-ip>:8080/    # must fail to connect
+
+# 3. From the server itself, liveness only:
+curl -s http://127.0.0.1:8080/api/v1/health
+#    Through the published port this returns {"status":"ok"} and nothing else.
+#    For the detail, ask from inside the container, where the peer is loopback:
+docker compose exec dnsdaddy wget -qO- http://127.0.0.1:8080/api/v1/health
+
+# 4. DNS actually resolves, from a second machine you have permitted:
+dig @<server-ip> example.com
+dig @<server-ip> +tcp example.com
+
+# 5. And an unpermitted source is refused rather than served:
+#    (run from a network you have NOT added under Networks)
+dig @<server-ip> example.com     # expect: status: REFUSED
+```
+
+Record what happened in the tables above, including anything you had to work
+out that this page did not tell you.
 
 ---
 

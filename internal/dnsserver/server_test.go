@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,8 +20,11 @@ func discardLogger() *slog.Logger {
 }
 
 // freePort returns a port nothing is listening on. There is an unavoidable gap
-// between closing the probe and the server binding, but the loopback ephemeral
-// range is not contended inside a test binary.
+// between closing the probe and the server binding. Within one test binary that
+// gap is uncontended, but `go test ./...` runs a binary per package in
+// parallel, so a sibling package's harness can take the port in between. A
+// caller that would misread the theft as a product failure has to say so
+// itself — see TestStartReleasesBoundListenersWhenAnotherFailsToBind.
 func freePort(t *testing.T) string {
 	t.Helper()
 
@@ -125,7 +129,38 @@ func TestStartStopsListenersWhenContextIsCancelled(t *testing.T) {
 // A bind failure has to unwind the listeners that did come up, or a failed
 // start leaves ports held by a process that is about to report an error and
 // carry on.
+// The listeners bind concurrently, so which one reports first is a race and a
+// single run proves very little: the version of this test that polled the port
+// the instant Start returned passed against a Start with the unwind deleted
+// outright, because it re-bound the port before the surviving listener had got
+// to it. Settle first, then ask the listener itself, and run it enough times to
+// exercise both orderings.
 func TestStartReleasesBoundListenersWhenAnotherFailsToBind(t *testing.T) {
+	const runs = 20
+
+	conclusive := 0
+	for i := 0; i < runs; i++ {
+		if startUnwindAttempt(t, i) {
+			conclusive++
+		}
+	}
+	// Every run being inconclusive would make the test vacuous by another
+	// route, so say so rather than reporting green.
+	if conclusive == 0 {
+		t.Fatalf("all %d runs were inconclusive; the unwind path was never exercised", runs)
+	}
+}
+
+// startUnwindAttempt runs the scenario once and reports whether it exercised
+// the unwind path. A false return means the port was taken from under us, not
+// that the product misbehaved — freePort closes its probe before returning, so
+// anything else on the machine may claim the port in between, and reporting
+// that theft as a DNS Daddy failure would be a different bug entirely.
+// Anything that is a real failure is reported through t directly, so the
+// caller's tolerance of inconclusive runs can never mask one.
+func startUnwindAttempt(t *testing.T, run int) bool {
+	t.Helper()
+
 	good := freePort(t)
 
 	// Occupy a port so the TCP listener cannot have it.
@@ -142,22 +177,35 @@ func TestStartReleasesBoundListenersWhenAnotherFailsToBind(t *testing.T) {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	if err := srv.Start(context.Background()); err == nil {
-		t.Fatal("Start returned nil despite an unbindable listener")
+	startErr := srv.Start(context.Background())
+	if startErr == nil {
+		t.Fatalf("run %d: Start returned nil despite an unbindable listener", run)
+	}
+	// Start labels the failure with the listener it belongs to. If it names the
+	// UDP address, that listener never bound and there was nothing to unwind.
+	if strings.Contains(startErr.Error(), "udp "+good) {
+		return false
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		pc, err := net.ListenPacket("udp", good)
-		if err == nil {
-			if err := pc.Close(); err != nil {
-				t.Fatalf("close rebound listener: %v", err)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the UDP port stayed bound after a failed Start: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
+	// Give a listener that Start might have abandoned mid-bind time to finish
+	// binding. The point of the fix is that there is no such listener; without
+	// the wait, a leak simply arrives after the assertion.
+	time.Sleep(250 * time.Millisecond)
+
+	// Ask the listener rather than the port. A closed socket answers nothing,
+	// and an answer here means DNS Daddy is serving queries on a port it has
+	// just told the caller it could not open.
+	c := &dns.Client{Net: "udp", Timeout: time.Second}
+	if _, _, err := c.Exchange(query("example.com", dns.TypeA), good); err == nil {
+		t.Fatalf("run %d: %s is still answering queries after Start reported %v", run, good, startErr)
 	}
+
+	pc, err := net.ListenPacket("udp", good)
+	if err != nil {
+		t.Fatalf("run %d: the UDP port stayed bound after a failed Start: %v", run, err)
+	}
+	if err := pc.Close(); err != nil {
+		t.Fatalf("run %d: close rebound listener: %v", run, err)
+	}
+	return true
 }

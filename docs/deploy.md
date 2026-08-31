@@ -210,26 +210,93 @@ deployment you can accept that; on anything internet-facing, do not.
 `./deploy/install-docker.sh` asks which of these you want, and none of them
 publishes the management interface over plaintext HTTP.
 
-| Mode | Flag | Dashboard reached by | Backend binds |
-|---|---|---|---|
-| LAN / homelab | `--lan` | `http://<lan-ip>:8080` | the LAN address |
-| VPS, SSH tunnel | `--vps` (default) | `http://127.0.0.1:8080` through SSH | `127.0.0.1` |
-| VPS, HTTPS | `--https` | `https://<hostname>` | `127.0.0.1` |
+| Mode | Flag | Dashboard reached by | Backend binds | Needs |
+|---|---|---|---|---|
+| LAN / homelab | `--lan` | `http://<lan-ip>:8080` | the named LAN address | a private address |
+| VPS, SSH tunnel | `--vps` (default) | `http://127.0.0.1:8080` through SSH | `127.0.0.1` | nothing |
+| VPS, HTTPS, hostname | `--https` | `https://<hostname>` | `127.0.0.1` | DNS pointing here, 80+443 open |
+| VPS, HTTPS, public IP | `--https` | `https://<public-ip>` | `127.0.0.1` | Caddy ≥ 2.11, 80+443 open |
 
-Mode 3 automates what the rest of this section describes by hand. It asks for a
-hostname, writes `/etc/caddy/Caddyfile` from
-[`Caddyfile.example`](../deploy/Caddyfile.example) (backing up any existing one),
-validates it, reloads Caddy, and then checks the URL answers before reporting
-success. It sets `DNSDADDY_BASE_URL`, forces `DNSDADDY_SECURE_COOKIES=always`
-and narrows `DNSDADDY_TRUSTED_PROXY_CIDRS` to the Docker bridge subnet. It does
-**not** set `DNSDADDY_DASHBOARD_BIND`, so the container stays on loopback and
-Caddy is the only process listening publicly.
+Mode 3 automates what the rest of this section describes by hand. It writes
+`/etc/caddy/Caddyfile` (backing up any existing one), validates it, reloads
+Caddy, and then requires a **publicly trusted** certificate before reporting
+success — the check is `curl` without `-k`, so a certificate this machine does
+not trust counts as a failure. It sets `DNSDADDY_BASE_URL`, forces
+`DNSDADDY_SECURE_COOKIES=always` and narrows `DNSDADDY_TRUSTED_PROXY_CIDRS` to
+the Docker bridge subnet. It does **not** set `DNSDADDY_DASHBOARD_BIND`, so the
+container stays on loopback and Caddy is the only process listening publicly.
+
+If it cannot get a certificate it puts all of that back — the previous
+Caddyfile, and those three `.env` keys — and leaves you in mode 2's posture,
+reachable over the SSH tunnel. Reverting `DNSDADDY_SECURE_COOKIES` matters:
+left set, the browser accepts the session cookie over the tunnel and never
+sends it back, and login fails with nothing to explain why.
 
 Non-interactively:
 
 ```bash
+# A hostname whose A/AAAA record already points at this machine.
 DNSDADDY_HTTPS_HOSTNAME=dns.example.com ./deploy/install-docker.sh --https --yes
+
+# Or this machine's own public address, detected from its interfaces.
+DNSDADDY_HTTPS_HOSTNAME=ip ./deploy/install-docker.sh --https --yes
 ```
+
+#### HTTPS on a bare IP address
+
+Supported, with one requirement worth knowing about.
+
+Let's Encrypt has issued certificates for IP addresses since January 2026, but
+**only** through the `shortlived` ACME profile — a 160-hour certificate, renewed
+automatically. Caddy learned that in **2.11**: earlier releases refuse an IP
+subject locally and never send the order. The installer checks the version
+before writing anything and tells you how to get a current Caddy rather than
+producing a parse error.
+
+Distribution packages are usually well behind — **Debian 13 ships Caddy
+2.6.2** — so install from
+[Caddy's own repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian).
+The installer does this for you and reports which repository it used; if the
+upstream one is unreachable it says so rather than quietly accepting whatever
+`apt` offers.
+
+A hostname needs none of this and works on much older Caddy. Use an IP when you
+have no name for the machine; use a name when you do.
+
+### Known OS-specific behaviour
+
+Observed on clean Debian 13 and Ubuntu 24.04 with a real Docker daemon, not
+inferred.
+
+**Ubuntu: systemd-resolved holds port 53.** Almost every Ubuntu install binds
+`127.0.0.53:53`. The installer detects it, names it, and refuses to change it
+for you — altering how a remote machine resolves names is how people lose
+remote machines. Do it first:
+
+```bash
+sudo mkdir -p /etc/systemd/resolved.conf.d
+printf '[Resolve]\nDNSStubListener=no\n' | sudo tee /etc/systemd/resolved.conf.d/dnsdaddy.conf
+sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+sudo systemctl restart systemd-resolved
+
+ss -lnup 'sport = :53'      # should now be empty
+getent hosts deb.debian.org # this machine can still resolve
+```
+
+Debian's minimal images generally do not run it, so port 53 is usually free.
+
+**Debian 13: `apt-get install caddy` gets Caddy 2.6.2.** That is a 2022 release.
+It is fine as a TLS-terminating proxy for a hostname, and it cannot do
+IP-address certificates at all. Install from Caddy's own repository, which the
+installer does — and which it now reports on, because a silent fallback to the
+distribution package is how a four-year-old proxy ends up in front of a
+management interface.
+
+**Both: Docker's port publishing bypasses `ufw`.** A published port is reachable
+whatever your firewall rules say, which is why the *bind address* rather than a
+firewall rule is the control that matters here. Your cloud provider's firewall
+is separate again and cannot be seen from the machine; the installer says so
+rather than implying it has checked.
 
 ### Four things that are not the same thing
 
@@ -528,8 +595,9 @@ Prometheus metrics at `/metrics` (authenticated). The ones worth alerting on:
 ## 10. Backups
 
 Everything lives in the data directory. The database is the only thing you
-cannot regenerate — feed caches re-download and the session key regenerates
-(logging everyone out, which is survivable).
+cannot regenerate — feed caches re-download, and sessions live in the database
+itself, so restoring a backup restores whatever sessions were live when it was
+taken (revoke them with a password change if that matters).
 
 ```bash
 sudo systemctl stop dnsdaddy
@@ -620,7 +688,7 @@ docker compose up -d --build
 ```
 
 Never use `docker compose down -v` — `-v` deletes the `dnsdaddy-data` volume
-holding the database, session key and cached feeds.
+holding the database and cached feeds.
 
 systemd — re-running the installer upgrades the binary and leaves your config
 and database alone:
@@ -688,8 +756,8 @@ sudo rm -rf /var/lib/dnsdaddy /etc/dnsdaddy
 sudo userdel dnsdaddy
 ```
 
-This removes the database, the session key, cached feeds, the generated
-password, and every stored finding.
+This removes the database, cached feeds, the generated password, and every
+stored finding.
 
 ---
 

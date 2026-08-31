@@ -310,7 +310,28 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-func clientKey(r *http.Request) string {
+// clientKey identifies who is making login attempts, for rate limiting.
+//
+// This used to read r.RemoteAddr directly, which was wrong in the deployment
+// the rate limiter matters most in. Behind a reverse proxy every request has
+// the same peer — Caddy — so the whole internet shared one bucket of ten
+// attempts per fifteen minutes. That is not a bypass; it is the opposite, and
+// worse in practice: one attacker's failed guesses locked the operator out of
+// their own dashboard, and the lockout was indistinguishable from a forgotten
+// password.
+//
+// httpx.ClientAddr is the same resolution used for DoH client attribution and
+// for the cookie's Secure flag, which is the point of that package existing:
+// those three must never disagree about who the client is, or an attacker
+// picks whichever view suits them. It honours X-Forwarded-For only from a
+// configured proxy, so a direct caller still cannot rotate its own key by
+// inventing a header — it would only be rate-limiting a stranger.
+func clientKey(r *http.Request, trusted *httpx.TrustedProxies) string {
+	if addr := httpx.ClientAddr(r, trusted); addr.IsValid() {
+		return addr.String()
+	}
+	// Unparseable peer: fall back to the raw value rather than returning an
+	// empty key, which would put every such request in one shared bucket.
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}

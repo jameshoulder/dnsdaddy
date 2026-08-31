@@ -1060,37 +1060,51 @@ function protectionState(status) {
 function feedHealth(data) {
   const all = (data && data.feeds) || [];
   const enabled = all.filter((f) => f.enabled);
-  const broken = enabled.filter((f) => !f.loaded);
+
+  // Three states, not two. A feed that has never attempted a download is not
+  // broken — it is a feed on an install that has not finished starting, and
+  // calling that a Fault is the same over-claiming this product avoids
+  // everywhere else, just pointing the other way. On a fresh install every
+  // feed is in that state for the first minute, and the dashboard used to
+  // open with six red faults beside a panel calling the same feeds "Pending".
+  //
+  // This matches feedStatusBadge exactly, which is the point: two components
+  // describing the same feed on the same page must not disagree.
+  //
+  //   loaded                        blocking now
+  //   !loaded && (error || success) attempted and unusable  -> broken
+  //   !loaded && neither            nothing attempted yet   -> pending
+  const broken = enabled.filter((f) => !f.loaded && (f.lastError || f.lastSuccessAt));
+  const pending = enabled.filter((f) => !f.loaded && !f.lastError && !f.lastSuccessAt);
   const stale = enabled.filter((f) => f.loaded && f.lastError);
 
   if (!enabled.length) {
-    return {
-      tone: 'bad',
-      label: 'No threat intelligence enabled',
-      enabled,
-      broken,
-      stale,
-    };
+    return { tone: 'bad', label: 'No threat intelligence enabled', enabled, broken, pending, stale };
   }
   if (broken.length) {
     return {
       tone: 'bad',
       label: `${broken.length} of ${enabled.length} feeds not blocking`,
-      enabled,
-      broken,
-      stale,
+      enabled, broken, pending, stale,
     };
   }
   if (stale.length) {
     return {
       tone: 'warn',
       label: `${stale.length} of ${enabled.length} feeds stale`,
-      enabled,
-      broken,
-      stale,
+      enabled, broken, pending, stale,
     };
   }
-  return { tone: 'ok', label: 'Threat intelligence healthy', enabled, broken, stale };
+  if (pending.length) {
+    return {
+      tone: 'warn',
+      label: pending.length === enabled.length
+        ? 'Threat intelligence still downloading'
+        : `${pending.length} of ${enabled.length} feeds still downloading`,
+      enabled, broken, pending, stale,
+    };
+  }
+  return { tone: 'ok', label: 'Threat intelligence healthy', enabled, broken, pending, stale };
 }
 
 function toneBadgeClass(tone) {
@@ -1202,6 +1216,18 @@ function attentionItems(diagnostics, feedsData) {
         : `This feed has never produced a usable download. ${f.lastError || ''}`.trim(),
     });
   }
+  // Pending is one item, not one per feed: on a fresh install every feed is
+  // pending at once, and six identical rows saying "still downloading" is
+  // noise rather than information.
+  if (health.pending.length && !health.broken.length) {
+    items.push({
+      tone: 'warn',
+      title: health.pending.length === health.enabled.length
+        ? 'Threat intelligence has not downloaded yet'
+        : `${health.pending.length} feeds have not downloaded yet`,
+      body: 'Nothing is being blocked from these sources until the first download finishes. On a new install that takes a minute or two; if it persists, check that this machine can reach them over HTTPS.',
+    });
+  }
   for (const f of health.stale) {
     items.push({
       tone: 'warn',
@@ -1282,6 +1308,52 @@ function recentlyBlocked(rows) {
           </span>
         </div>`
     )
+    .join('');
+}
+
+/**
+ * Domains blocked more than once, presented as recurrence rather than as a
+ * count in a column.
+ *
+ * A number in a table cell is a fact; "47 times, most recently 3 minutes ago"
+ * is the same fact answering the question somebody actually has, which is
+ * whether this is still happening. A single block is a page that loaded a bad
+ * ad once; forty-seven is something on the network retrying, and that is worth
+ * opening the query log for.
+ *
+ * No enrichment beyond what the server recorded: the category is the category
+ * it filed the block under, and the count and timestamp are its own.
+ */
+function repeatOffenders(domains) {
+  if (!domains || !domains.length) {
+    return emptyState(
+      'Nothing has been blocked yet',
+      'Either nothing malicious has been requested, or no device is using the resolver yet.',
+      { icon: '⌾', action: '<a class="btn btn-ghost btn-sm" href="#/setup">Check Setup</a>' }
+    );
+  }
+  const max = Math.max(...domains.map((d) => d.count));
+  return domains
+    .map((d) => {
+      const recurring = d.count > 1;
+      return html`
+        <div class="offender">
+          <div class="offender-body">
+            <span class="offender-name mono">${d.domain}</span>
+            <span class="offender-meta">
+              ${raw(d.category ? categoryBadge(d.category) : '')}
+              <span>${recurring ? `blocked ${num(d.count)} times` : 'blocked once'}</span>
+              ${raw(d.lastSeen ? html`<span>last ${relTime(d.lastSeen)}</span>` : '')}
+            </span>
+            <span class="offender-meter" aria-hidden="true">
+              <span data-width="${raw(Math.max(3, (d.count / max) * 100).toFixed(1))}"
+                    data-bg="${colourFor(d.category)}"></span>
+            </span>
+          </div>
+          <a class="btn btn-ghost btn-sm offender-go" href="#/queries"
+             data-investigate="${d.domain}">Investigate</a>
+        </div>`;
+    })
     .join('');
 }
 
@@ -1447,25 +1519,8 @@ pages.threats = {
           ${raw(barList(catRows))}
         </div>
         <div class="card">
-          <div class="card-head"><div><h2>Repeat offenders</h2><p>Domains blocked most often in 7 days.</p></div></div>
-          ${raw(
-            top.domains.length
-              ? html`<div class="table-wrap"><table>
-                  <thead><tr><th>Domain</th><th>Category</th><th class="num">Blocks</th><th>Last seen</th></tr></thead>
-                  <tbody>${raw(
-                    top.domains
-                      .map(
-                        (d) => html`<tr>
-                          <td class="mono">${d.domain}</td>
-                          <td>${raw(categoryBadge(d.category))}</td>
-                          <td class="num">${num(d.count)}</td>
-                          <td class="muted nowrap">${relTime(d.lastSeen)}</td>
-                        </tr>`
-                      )
-                      .join('')
-                  )}</tbody></table></div>`
-              : emptyState('No threats blocked yet', 'Either nothing malicious has been requested, or no client is using the resolver yet.', { icon: '⚠', action: '<a class="btn btn-ghost btn-sm" href="#/setup">Check Setup</a>' })
-          )}
+          <div class="card-head"><div><h2>Repeat offenders</h2><p>Something on your network keeps asking for these.</p></div></div>
+          ${raw(repeatOffenders(top.domains))}
         </div>
       </div>
 
@@ -1477,6 +1532,17 @@ pages.threats = {
   },
   async mounted() {
     mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
+
+    // Investigate goes to the query log filtered by that domain. That is what
+    // the existing endpoint supports, and it is the whole of what the button
+    // claims: every query for this name, who asked, and when.
+    $('#view').addEventListener('click', (e) => {
+      const el = e.target.closest('[data-investigate]');
+      if (!el) return;
+      e.preventDefault();
+      pages.queries.pendingDomain = el.dataset.investigate;
+      window.location.hash = '#/queries';
+    });
   },
 };
 
@@ -1500,47 +1566,82 @@ function dnssecBadge(status) {
   return html`<span class="badge ${cls}" title="${title}">${text}</span>`;
 }
 
+/**
+ * The query log, as a telemetry stream rather than a spreadsheet.
+ *
+ * Seven columns of equal weight made every row cost the same to read, which on
+ * a page whose whole job is "find the interesting one" is the wrong trade. Each
+ * entry is now one scannable line — outcome, domain, client, time — with the
+ * technical detail behind a disclosure that only the rows worth investigating
+ * pay for.
+ *
+ * <details>/<summary> rather than a click handler: keyboard navigation, screen
+ * reader semantics and browser find-in-page all work without any of it being
+ * reimplemented, and a row stays open across a re-render of its neighbours.
+ */
 function queryTable(queries) {
   if (!queries || !queries.length) {
-    return emptyState('No queries recorded', 'Either query logging is off, or nothing has resolved through DNS Daddy yet.', { icon: '≡', action: '<a class="btn btn-ghost btn-sm" href="#/settings">Check settings</a>' });
+    return emptyState(
+      'No queries recorded',
+      'Either the query log is switched off, or nothing has resolved through DNS Daddy yet.',
+      { icon: '≡', action: '<a class="btn btn-ghost btn-sm" href="#/setup">How to point a device at it</a>' }
+    );
   }
+
+  return html`<div class="qlog">${raw(queries.map(queryRow).join(''))}</div>`;
+}
+
+// One entry. The action decides the row's accent, and the accent is never the
+// only signal: the word is there too, in a badge.
+function queryRow(q) {
+  const action = q.action === 'blocked' ? 'blocked' : q.action === 'error' ? 'error' : 'allowed';
+  const who = q.clientName || q.clientIp || '';
+
+  // Detail rows, each omitted when the server did not record it. An empty row
+  // reading "—" is noise; an absent one is an accurate statement that nothing
+  // was recorded.
+  // Each value is already-escaped HTML: html`` escapes its interpolations,
+  // and categoryBadge/dnssecBadge return escaped markup. They are collected as
+  // strings and marked raw once, at the point of insertion — wrapping them in
+  // raw() here and stringifying later turned the marker object itself into the
+  // output, which is how "[object Object]" reached the page.
+  const facts = [
+    ['Type', q.qtype ? html`<span class="mono">${q.qtype}</span>` : ''],
+    ['Client', who ? html`<span class="mono">${who}</span>` : ''],
+    ['Client address', q.clientName && q.clientIp ? html`<span class="mono">${q.clientIp}</span>` : ''],
+    ['Reason', q.reason ? html`${q.reason}` : ''],
+    ['Category', q.category ? categoryBadge(q.category) : ''],
+    ['Source', q.source ? html`${q.source}` : ''],
+    ['DNSSEC', q.dnssec ? dnssecBadge(q.dnssec) : ''],
+    ['Answered from', q.cached ? 'the local cache' : 'an upstream resolver'],
+    ['Took', typeof q.elapsedMs === 'number' ? html`${q.elapsedMs} ms` : ''],
+    ['Time', q.time ? html`${new Date(q.time).toLocaleString('en-GB')}` : ''],
+  ]
+    .filter(([, v]) => typeof v === 'string' && v !== '')
+    .map(([k, v]) => html`<div class="qfact"><dt>${k}</dt><dd>${raw(v)}</dd></div>`)
+    .join('');
+
   return html`
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th><th>Domain</th><th>Type</th><th>Client</th>
-            <th>Action</th><th>DNSSEC</th><th>Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${raw(
-            queries
-              .map(
-                (q) => html`
-                  <tr>
-                    <td class="muted nowrap">${clockTime(q.time)}</td>
-                    <td class="mono">${q.domain}</td>
-                    <td class="muted">${q.qtype}</td>
-                    <td class="mono muted">${q.clientName || q.clientIp || '—'}</td>
-                    <td>${raw(
-                      q.action === 'blocked'
-                        ? html`<span class="badge bad">Blocked</span>`
-                        : q.action === 'error'
-                          ? html`<span class="badge warn">Error</span>`
-                          : html`<span class="badge ok">Allowed</span>`
-                    )}</td>
-                    <td>${raw(dnssecBadge(q.dnssec))}</td>
-                    <td class="muted">${q.reason || '—'}${raw(q.cached ? ' <span class="badge info">cached</span>' : '')}</td>
-                  </tr>
-                `
-              )
-              .join('')
-          )}
-        </tbody>
-      </table>
-    </div>
-  `;
+    <details class="qrow is-${raw(action)}">
+      <summary>
+        <span class="qmark" aria-hidden="true"></span>
+        <span class="qdomain mono">${q.domain}</span>
+        ${raw(
+          action === 'blocked'
+            ? html`<span class="badge bad qact">Blocked</span>`
+            : action === 'error'
+              ? html`<span class="badge warn qact">Error</span>`
+              : html`<span class="badge qact qact-allowed">Allowed</span>`
+        )}
+        ${raw(q.category ? html`<span class="qcat">${q.category}</span>` : '')}
+        <span class="qclient mono">${who || '—'}</span>
+        <span class="qtime">${clockTime(q.time)}</span>
+      </summary>
+      <dl class="qfacts">${raw(facts)}</dl>
+      <div class="qactions">
+        <a class="btn btn-ghost btn-sm" href="#/queries" data-filter-domain="${q.domain}">Every query for this domain</a>
+      </div>
+    </details>`;
 }
 
 pages.queries = {
@@ -1609,6 +1710,17 @@ pages.queries = {
       }
     });
     $('#q-more').addEventListener('click', () => load(true));
+
+    // The in-row "every query for this domain" shortcut. Delegated because
+    // rows are replaced on every load, and bound once rather than per row.
+    $('#q-results').addEventListener('click', (e) => {
+      const el = e.target.closest('[data-filter-domain]');
+      if (!el) return;
+      e.preventDefault();
+      $('#q-domain').value = el.dataset.filterDomain;
+      this.state.cursor = 0;
+      load(false);
+    });
 
     // Arrived here from the topbar search. Prefill and consume it, so a later
     // visit to this page is not still filtered by something typed once.
@@ -2102,6 +2214,63 @@ pages.networks = {
 
       <div class="card section">
         <div class="card-head">
+          <div><h2>Networks</h2><p>Who may use this resolver, and what they get. Last 24 hours.</p></div>
+        </div>
+        ${raw(
+          networks.networks.length
+            ? networks.networks
+                .map((n) => {
+                  const policy = policies.policies.find((p) => p.id === n.policyId);
+                  const publicRanges = n.publicCidrs || [];
+                  // A network is a record, not a spreadsheet row: name and
+                  // ranges are what you scan for, access is the decision, and
+                  // the traffic figures are context. The eight-column table
+                  // this replaced gave all of them equal weight and pushed the
+                  // access tick-box — the only control on the page — into a
+                  // narrow middle column.
+                  return html`
+                    <div class="rec">
+                      <div class="rec-main">
+                        <div class="rec-title">
+                          <strong>${n.name}</strong>
+                          ${raw(statusBadge(n.status))}
+                          ${raw(accessBadge(n))}
+                        </div>
+                        <div class="rec-meta">
+                          <span class="mono">${n.cidrs.length ? n.cidrs.join(', ') : 'catch-all'}</span>
+                          ${raw(n.location ? html`<span>${n.location}</span>` : '')}
+                          <span>policy: ${policy ? policy.name : n.policyId}</span>
+                          <span>${num(n.queries24h)} queries</span>
+                          <span>${num(n.blocked24h)} blocked</span>
+                        </div>
+                        ${raw(publicRanges.length
+                          ? html`<p class="rec-note is-warn">Publicly routable: <span class="mono">${publicRanges.join(', ')}</span>. Anyone on the internet at these addresses may use this resolver.</p>`
+                          : '')}
+                        ${raw(!n.allowResolver && n.resolvesVia
+                          ? html`<p class="rec-note">Reachable anyway, inside ${n.resolvesVia} — access permissions add up and nothing here subtracts.</p>`
+                          : '')}
+                      </div>
+                      <div class="rec-actions">
+                        <label class="checkline access-cell" title="Allow this network to use DNS Daddy">
+                          <input type="checkbox" data-access="${n.id}" data-name="${n.name}"
+                                 ${raw(n.allowResolver ? 'checked' : '')}>
+                          <span>Allow</span>
+                        </label>
+                        <button class="btn btn-danger btn-sm" data-delete-network="${n.id}"
+                                data-name="${n.name}">Delete</button>
+                      </div>
+                    </div>`;
+                })
+                .join('')
+            : emptyState(
+                'No networks yet',
+                'Every client is matched by the catch-all until you add one. Add a network to give a site or VLAN its own policy, or to permit it to use the resolver at all.',
+                { icon: '◇' }
+              )
+        )}
+      </div>
+      <div class="card section">
+        <div class="card-head">
           <div>
             <h2>Add a network</h2>
             <p>Give each site or VLAN its own policy. Leave the CIDR list empty to make it the catch-all.</p>
@@ -2132,53 +2301,6 @@ pages.networks = {
           ${raw(accessExplainer())}
           <button class="btn btn-primary" type="submit">Add network</button>
         </form>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><div><h2>Networks</h2><p>Traffic over the last 24 hours.</p></div></div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Network</th><th>Client ranges</th><th>Policy</th><th>Access</th>
-                  <th class="num">Queries 24h</th><th class="num">Blocked</th><th>Status</th><th></th></tr>
-            </thead>
-            <tbody>
-              ${raw(
-                networks.networks
-                  .map((n) => {
-                    const policy = policies.policies.find((p) => p.id === n.policyId);
-                    const publicRanges = n.publicCidrs || [];
-                    return html`<tr>
-                      <td><strong>${n.name}</strong><div class="muted small">${n.location || '—'}</div></td>
-                      <td class="mono">${n.cidrs.length ? n.cidrs.join(', ') : 'catch-all'}
-                        ${raw(publicRanges.length
-                          ? html`<div class="muted small">public: ${publicRanges.join(', ')}</div>`
-                          : '')}
-                      </td>
-                      <td>${policy ? policy.name : n.policyId}</td>
-                      <td>
-                        <label class="checkline access-cell" title="Allow this network to use DNS Daddy">
-                          <input type="checkbox" data-access="${n.id}" data-name="${n.name}"
-                                 ${raw(n.allowResolver ? 'checked' : '')}>
-                          <span>${raw(accessBadge(n))}</span>
-                        </label>
-                        ${raw(!n.allowResolver && n.resolvesVia
-                          ? html`<div class="muted small">Reachable anyway, inside ${n.resolvesVia}.
-                                 Access has no deny rules.</div>`
-                          : '')}
-                      </td>
-                      <td class="num">${num(n.queries24h)}</td>
-                      <td class="num">${num(n.blocked24h)}</td>
-                      <td>${raw(statusBadge(n.status))}</td>
-                      <td><button class="btn btn-danger btn-sm" data-delete-network="${n.id}"
-                            data-name="${n.name}">Delete</button></td>
-                    </tr>`;
-                  })
-                  .join('')
-              )}
-            </tbody>
-          </table>
-        </div>
       </div>
     `;
   },
@@ -2307,12 +2429,31 @@ pages.policies = {
           )
           .join('');
 
+        // A policy summary an operator can scan: what it blocks and who uses
+        // it. Every policy used to render its whole editor at once, so three
+        // policies were 2,500 pixels of identical checkbox columns and there
+        // was no way to see at a glance which one enforced what.
+        const enforced = categories.categories.filter((c) => p.categories.includes(c.id));
+        const summaryText = enforced.length
+          ? enforced.map((c) => c.label).join(' · ')
+          : 'Blocks nothing — monitor only';
+
         return html`
-          <div class="card section">
+          <details class="card section policy" ${raw(p.isDefault ? 'open' : '')}>
+            <summary class="policy-head">
+              <span class="policy-caret" aria-hidden="true"></span>
+              <span class="policy-title">
+                <strong>${p.name}</strong>
+                ${raw(p.isDefault ? '<span class="badge ok">default</span>' : '')}
+              </span>
+              <span class="policy-what ${enforced.length ? '' : 'is-monitor'}">${summaryText}</span>
+              <span class="policy-use">${p.assigned} network${p.assigned === 1 ? '' : 's'}</span>
+            </summary>
+
+            <div class="policy-body">
             <div class="card-head">
               <div>
-                <h2>${p.name} ${raw(p.isDefault ? '<span class="badge ok">default</span>' : '')}</h2>
-                <p>${p.description || 'No description.'} · ${p.assigned} network${p.assigned === 1 ? '' : 's'}</p>
+                <p>${p.description || 'No description.'}</p>
               </div>
               <div class="row-end row">
                 <button class="btn btn-ghost btn-sm" data-save-policy="${p.id}">Save changes</button>
@@ -2357,7 +2498,8 @@ pages.policies = {
                 </label>
               </div>
             </div>
-          </div>
+            </div>
+          </details>
         `;
       })
       .join('');
@@ -2434,7 +2576,9 @@ pages.policies = {
 };
 
 pages.feeds = {
-  title: 'Threat feeds',
+  // Matches the navigation label. They said different things, which made the
+  // page look like it belonged to a different product than the link to it.
+  title: 'Threat intelligence',
   subtitle: 'Where the blocking decisions come from.',
   async render() {
     const data = await apiGet('/feeds');
@@ -2452,54 +2596,52 @@ pages.feeds = {
             </button>
           </div>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Feed</th><th>Category</th><th class="num">Domains</th>
-                  <th>Last refreshed</th><th>Status</th><th>Enabled</th></tr>
-            </thead>
-            <tbody>
-              ${raw(
-                data.feeds
-                  .map(
-                    (f) => html`<tr>
-                      <td>
-                        <strong>${f.name}</strong>
-                        <div class="muted small mono">${f.url}</div>
-                        ${raw(f.lastError ? html`<div class="small feed-error">${f.lastError}</div>` : '')}
-                        ${raw(
-                          f.enabled && !f.loaded && f.lastSuccessAt
-                            ? html`<div class="small feed-error">Not in the running blocklist${f.loadError ? ` — ${f.loadError}` : ''}</div>`
-                            : ''
-                        )}
-                      </td>
-                      <td>${raw(categoryBadge(f.category))}
-                        ${raw(
-                          f.format === 'observatory'
-                            ? html`<div class="muted small">plus each indicator's own category</div>`
-                            : ''
-                        )}
-                      </td>
-                      <td class="num">${f.enabled ? num(f.indexedDomains) : '—'}</td>
-                      <td class="muted nowrap">${relTime(f.lastRefreshedAt)}
-                        ${raw(
-                          f.enabled && f.lastError && f.lastSuccessAt
-                            ? html`<div class="small">last good ${relTime(f.lastSuccessAt)}</div>`
-                            : ''
-                        )}
-                      </td>
-                      <td>${raw(feedStatusBadge(f))}</td>
-                      <td>
-                        <input type="checkbox" data-feed="${f.id}" ${raw(f.enabled ? 'checked' : '')}
-                               aria-label="Enable ${f.name}">
-                      </td>
-                    </tr>`
-                  )
-                  .join('')
-              )}
-            </tbody>
-          </table>
-        </div>
+        ${raw(
+          data.feeds
+            .map(
+              (f) => html`
+                <div class="rec">
+                  <div class="rec-main">
+                    <div class="rec-title">
+                      <strong>${f.name}</strong>
+                      ${raw(feedStatusBadge(f))}
+                      ${raw(categoryBadge(f.category))}
+                    </div>
+                    <div class="rec-meta">
+                      <span class="mono">${f.url}</span>
+                    </div>
+                    <div class="rec-meta">
+                      <span>${f.enabled ? `${num(f.indexedDomains)} domains indexed` : 'not enabled'}</span>
+                      <span>refreshed ${relTime(f.lastRefreshedAt)}</span>
+                      ${raw(
+                        f.enabled && f.lastError && f.lastSuccessAt
+                          ? html`<span>last good ${relTime(f.lastSuccessAt)}</span>`
+                          : ''
+                      )}
+                      ${raw(
+                        f.format === 'observatory'
+                          ? html`<span>plus each indicator's own category</span>`
+                          : ''
+                      )}
+                    </div>
+                    ${raw(f.lastError ? html`<p class="rec-note is-warn">${f.lastError}</p>` : '')}
+                    ${raw(
+                      f.enabled && !f.loaded && f.lastSuccessAt
+                        ? html`<p class="rec-note is-warn">Downloaded before, but not in the blocklist answering queries right now${f.loadError ? ` — ${f.loadError}` : ''}.</p>`
+                        : ''
+                    )}
+                  </div>
+                  <div class="rec-actions">
+                    <label class="checkline">
+                      <input type="checkbox" data-feed="${f.id}" ${raw(f.enabled ? 'checked' : '')}
+                             aria-label="Enable ${f.name}">
+                      <span>Enabled</span>
+                    </label>
+                  </div>
+                </div>`
+            )
+            .join('')
+        )}
       </div>
 
       <div class="card">
@@ -2910,14 +3052,33 @@ pages.settings = {
       </div>
 
       <div class="card section">
-        <div class="card-head"><div><h2>Change admin password</h2></div></div>
+        <div class="card-head">
+          <div>
+            <h2>Change admin password</h2>
+            <p>Signs every browser out, including this one.</p>
+          </div>
+        </div>
+        <!--
+          The consequence is stated before the button rather than discovered
+          after it. It is also the reason to use this control: an operator who
+          thinks somebody else is logged in wants exactly this, and until
+          recently a password change left every existing session working.
+        -->
+        <p class="notice-inline">
+          <strong>Every session is revoked.</strong> Any other device signed in
+          to this dashboard is signed out immediately, and so are you — you will
+          be asked to sign in again with the new password. This is what makes a
+          password change an effective response to a session you did not expect.
+        </p>
         <form id="password-form" class="grid grid-3">
           <label class="field"><span>Current password</span>
             <input type="password" name="current" autocomplete="current-password" required></label>
           <label class="field"><span>New password</span>
-            <input type="password" name="next" autocomplete="new-password" minlength="12" required></label>
-          <label class="field"><span>&nbsp;</span><button class="btn btn-primary" type="submit">Update password</button></label>
+            <input type="password" name="next" autocomplete="new-password" minlength="12" required
+                   aria-describedby="pw-req"></label>
+          <label class="field"><span>&nbsp;</span><button class="btn btn-primary" type="submit">Update password and sign out everywhere</button></label>
         </form>
+        <p class="muted small" id="pw-req">At least 12 characters. Longer is the only thing that reliably helps.</p>
       </div>
 
       <div class="card">
@@ -2962,12 +3123,24 @@ pages.settings = {
       e.preventDefault();
       const form = new FormData(e.target);
       try {
-        await apiSend('POST', '/auth/password', {
+        const res = await apiSend('POST', '/auth/password', {
           currentPassword: form.get('current'),
           newPassword: form.get('next'),
         });
-        toast('Password updated');
         e.target.reset();
+
+        // Changing the password revokes every session, including this one —
+        // that is the point of it, and it is what makes the change mean
+        // something to somebody who thinks an intruder is logged in. The
+        // browser's cookie is already dead, so anything else on this page
+        // would fail on its next request with no explanation. Send them to
+        // the login screen instead, and say why.
+        if (res && res.sessionsRevoked) {
+          toast('Password updated. Every session was signed out — sign in again.');
+          showLogin();
+          return;
+        }
+        toast('Password updated');
       } catch (err) {
         reportError(err);
       }
@@ -3255,13 +3428,16 @@ if (typeof module !== 'undefined' && module.exports) {
     feedStatusBadge,
     threatIntelPanel,
     diagnosticsBanner,
+    queryTable,
+    queryRow,
+    feedHealth,
+    repeatOffenders,
     firstClientCard,
     accessBadge,
     clientAccessSummary,
     resolverAccessNote,
     emptyState,
     protectionState,
-    feedHealth,
     statusHero,
     attentionItems,
     attentionPanel,

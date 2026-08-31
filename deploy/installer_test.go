@@ -138,6 +138,42 @@ exit 0`)
 	// Nothing listening. A scenario that wants a busy port overrides this.
 	in.stub("ss", `exit 0`)
 
+	// Caddy. The default version is the real current release, because the
+	// IP-address path is gated on 2.11+ — that is the first Caddy whose
+	// CertMagic knows Let's Encrypt issues IP certificates.
+	//
+	// STUB_CADDY_VERSION drives the version gate; STUB_CADDY_VALIDATE_EXIT
+	// rejects the generated config, which is how the parse-error path is
+	// reached without needing an old Caddy binary.
+	in.stub("caddy", `
+case "${1:-}" in
+  version)  echo "${STUB_CADDY_VERSION:-v2.11.4 h1:stub}" ;;
+  validate) printf '%s\n' "${STUB_CADDY_VALIDATE_MSG:-}"; exit "${STUB_CADDY_VALIDATE_EXIT:-0}" ;;
+esac
+exit 0`)
+
+	// curl, which is how the installer decides whether HTTPS actually works.
+	//
+	//   STUB_CURL_STRICT_EXIT  a request with the system trust store
+	//   STUB_CURL_LAX_EXIT     the same request with -k
+	//
+	// The pair is the whole point: strict failing while lax succeeds is a
+	// certificate the machine does not trust, which is what Caddy's internal
+	// CA looks like from here. Both default to failure, because an installer
+	// that reports HTTPS working when nothing answered is the bug.
+	in.stub("curl", `
+lax=0
+for a in "$@"; do
+  case "$a" in -*k*) lax=1 ;; esac
+done
+if [[ $lax -eq 1 ]]; then exit "${STUB_CURL_LAX_EXIT:-1}"; fi
+exit "${STUB_CURL_STRICT_EXIT:-1}"`)
+
+	// Installing Caddy must not reach the network from a test.
+	in.stub("apt-get", `exit "${STUB_APT_EXIT:-1}"`)
+	in.stub("gpg", `exit 0`)
+	in.stub("getent", `exit "${STUB_GETENT_EXIT:-2}"`)
+
 	in.stub("systemctl", `
 case "$*" in
   *"list-unit-files docker.service"*) exit "${STUB_DOCKER_UNIT_EXIT:-0}" ;;
@@ -151,6 +187,7 @@ exit 0`)
 		"bash", "sh", "sed", "grep", "awk", "cut", "tr", "head", "tail", "sort",
 		"paste", "cp", "cat", "uname", "hostname", "sleep", "rm", "mkdir",
 		"dirname", "basename", "pwd", "seq", "env", "id", "expr", "wc", "ls", "stat",
+		"date", "chmod", "chown", "touch", "mv", "find", "readlink", "printf", "test",
 	} {
 		if path, err := exec.LookPath(name); err == nil {
 			_ = os.Symlink(path, filepath.Join(in.bin, name))
@@ -1167,21 +1204,114 @@ func TestHttpsModeConfiguresTheAppForTLS(t *testing.T) {
 	contains(t, out, "backend stays on loopback")
 }
 
-// A hostname is required, and the failure names what to do instead rather than
-// leaving the operator with a broken TLS config.
-func TestHttpsModeRefusesAnInvalidHostname(t *testing.T) {
-	for _, bad := range []string{"https://dns.example.com", "192.0.2.10", "localhost", ""} {
+// Everything the operator types here ends up in a generated Caddyfile, so what
+// is refused — and why — is a security boundary rather than a usability one.
+//
+// The failure names the specific reason in each case. A shared "that is not
+// one" would pass whether or not the script had understood what it was
+// looking at, which is the mistake the earlier version of this test made.
+func TestHttpsModeRefusesWhatCannotBeServed(t *testing.T) {
+	cases := []struct {
+		value  string
+		reason string
+	}{
+		// Shape.
+		{"localhost", "not a hostname or an IP address"},        // single label
+		{"", "not a hostname or an IP address"},                 //
+		{"dns example com", "not a hostname or an IP address"},  // whitespace
+		{"-dns.example.com", "not a hostname or an IP address"}, // leading hyphen
+		{"999.1.1.1", "not a hostname or an IP address"},        // octet out of range
+		{"1.2.3", "not a hostname or an IP address"},            // short quad
+		{"fe80::1%eth0", "not a hostname or an IP address"},     // zoned link-local
+
+		// Right shape, wrong address: a certificate is not issued for these,
+		// and finding that out here beats finding it out from ACME.
+		{"192.0.2.10", "not a publicly routable address"},  // TEST-NET-1
+		{"10.0.0.5", "not a publicly routable address"},    // RFC 1918
+		{"127.0.0.1", "not a publicly routable address"},   // loopback
+		{"100.64.0.9", "not a publicly routable address"},  // CGNAT
+		{"169.254.1.1", "not a publicly routable address"}, // link-local
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			in := newInstall(t)
+			in.setenv("DNSDADDY_HTTPS_HOSTNAME=" + tc.value)
+
+			out, code := in.run("--https", "--yes", "--dry-run")
+			if code == 0 {
+				t.Fatalf("accepted %q\n%s", tc.value, out)
+			}
+			contains(t, out, tc.reason)
+		})
+	}
+}
+
+// A Caddyfile site address is a shell-free but structured format: a brace or a
+// newline in it closes the site block and opens whatever comes next. None of
+// these may reach the file, and the validators are whitelists precisely so
+// that the list below does not have to be exhaustive to be safe.
+func TestHttpsModeRefusesCaddyfileAndShellInjection(t *testing.T) {
+	for _, bad := range []string{
+		"dns.example.com { respond \"pwned\" }",
+		"dns.example.com\nadmin 0.0.0.0:2019",
+		"dns.example.com;curl evil.example",
+		"dns.example.com$(id)",
+		"dns.example.com`id`",
+		"dns.example.com|id",
+		"$(reboot)",
+		"dns.example.com respond 200",
+		"*.example.com",
+		"dns.example.com:8080",
+	} {
 		t.Run(bad, func(t *testing.T) {
 			in := newInstall(t)
 			in.setenv("DNSDADDY_HTTPS_HOSTNAME=" + bad)
 
 			out, code := in.run("--https", "--yes", "--dry-run")
 			if code == 0 {
-				t.Fatalf("accepted %q as a hostname\n%s", bad, out)
+				t.Fatalf("accepted %q as an HTTPS target\n%s", bad, out)
 			}
-			contains(t, out, "not one")
 		})
 	}
+}
+
+// A pasted URL is a mistake, not an attack. Strip what can be stripped
+// unambiguously and carry on, rather than making somebody retype it.
+func TestHttpsModeNormalisesAPastedURL(t *testing.T) {
+	for _, given := range []string{
+		"https://dns.example.com",
+		"http://dns.example.com",
+		"https://dns.example.com/",
+		"  dns.example.com  ",
+	} {
+		t.Run(given, func(t *testing.T) {
+			in := newInstall(t)
+			in.setenv("DNSDADDY_HTTPS_HOSTNAME=" + given)
+
+			out, code := in.run("--https", "--yes", "--dry-run")
+			if code != 0 {
+				t.Fatalf("rejected %q, which is unambiguously dns.example.com\n%s", given, out)
+			}
+			contains(t, out, "HTTPS hostname: dns.example.com")
+		})
+	}
+}
+
+// A public IPv4 address is accepted and classified as one, which is what makes
+// the ACME issuer be pinned and the certificate be checked.
+func TestHttpsModeAcceptsAPublicIPAddress(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228")
+
+	out, code := in.run("--https", "--yes", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "HTTPS address: 66.228.32.228")
+	contains(t, out, "ipv4")
+	// And it says it will verify rather than assume.
+	contains(t, out, "publicly trusted certificate")
 }
 
 // Something already serving 80/443 is not a DNS Daddy failure, and must not be
@@ -1247,4 +1377,393 @@ func TestNoWebServerSectionWhenPortsAreFree(t *testing.T) {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
 	notContains(t, out, "Existing web server")
+}
+
+// --- Option 3 fails closed ---------------------------------------------------
+//
+// The mandatory property: when HTTPS cannot be completed, the deployment must
+// end up in option 2's posture — loopback only, reachable over an SSH tunnel —
+// and never in plaintext on a public address. These tests drive the real script
+// through each way it can fail and check what it left behind.
+
+// caddyfileAt points the installer at a temporary Caddyfile and returns its
+// path, so the rollback paths can be exercised without touching /etc.
+func (in *install) caddyfileAt() string {
+	path := filepath.Join(in.root, "caddy", "Caddyfile")
+	in.setenv("DNSDADDY_CADDYFILE=" + path)
+	return path
+}
+
+func TestHttpsFailureLeavesTheDashboardOnLoopback(t *testing.T) {
+	// Every distinct reason the HTTPS step can fail. In all of them the
+	// dashboard must be exactly where SSH-tunnel mode leaves it.
+	cases := []struct {
+		name string
+		env  []string
+	}{
+		{"caddy cannot be installed", []string{"STUB_APT_EXIT=1", "PATH_WITHOUT_CADDY=1"}},
+		{"generated config does not validate", []string{"STUB_CADDY_VALIDATE_EXIT=1"}},
+		{"no certificate ever arrives", []string{"STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1"}},
+		{"an untrusted certificate is served", []string{"STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=0"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := newInstall(t)
+			in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=1")
+			in.setenv(tc.env...)
+			in.caddyfileAt()
+			if len(tc.env) > 0 && tc.env[len(tc.env)-1] == "PATH_WITHOUT_CADDY=1" {
+				must(t, os.Remove(filepath.Join(in.bin, "caddy")))
+			}
+
+			out, _ := in.run("--https", "--yes")
+			if !in.envExists() {
+				t.Fatal(".env was never written, so this test would assert nothing")
+			}
+			env := in.readEnv()
+
+			// 1. The backend is not published, in any spelling.
+			for _, line := range strings.Split(env, "\n") {
+				if strings.HasPrefix(line, "DNSDADDY_DASHBOARD_BIND=") &&
+					strings.TrimPrefix(line, "DNSDADDY_DASHBOARD_BIND=") != "" {
+					t.Errorf("a failed HTTPS setup published the dashboard: %q", line)
+				}
+			}
+
+			// 2. Secure cookies are not left on. This is what makes the
+			//    fallback usable rather than merely safe: over an SSH tunnel
+			//    the dashboard is plain HTTP on loopback, and a browser will
+			//    not return a Secure cookie there — login would fail with no
+			//    error that points at the cause.
+			for _, line := range strings.Split(env, "\n") {
+				if strings.HasPrefix(line, "DNSDADDY_SECURE_COOKIES=always") {
+					t.Errorf("a failed HTTPS setup left %q active; the SSH-tunnel fallback "+
+						"cannot log in with that set", line)
+				}
+			}
+
+			// 3. The operator is told what to do, with the real command.
+			contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+			contains(t, out, "http://127.0.0.1:8080")
+			// 4. And is never handed a plaintext public URL.
+			notContains(t, out, "http://66.228.32.228:8080")
+		})
+	}
+}
+
+func TestHttpsRefusesToTreatAnUntrustedCertificateAsSuccess(t *testing.T) {
+	// The specific outcome the IP path exists to prevent: Caddy falls back to
+	// its own internal CA, TLS answers, and a browser shows a warning on the
+	// management interface. An installer that called that "ready" would be
+	// training people to click through certificate warnings on the one page
+	// that must never have one.
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=0") // TLS up, untrusted
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	notContains(t, out, "https://66.228.32.228 is serving")
+	contains(t, out, "HTTPS setup could not be completed")
+	contains(t, out, "does not trust")
+}
+
+func TestHttpsSuccessIsOnlyClaimedAfterATrustedCertificate(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	in.caddyfileAt()
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "Certificate is trusted by this machine's CA store")
+	contains(t, out, "https://dns.example.com")
+	// And the backend still is not published.
+	env := in.readEnv()
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_DASHBOARD_BIND=") &&
+			strings.TrimPrefix(line, "DNSDADDY_DASHBOARD_BIND=") != "" {
+			t.Errorf("successful HTTPS published the backend anyway: %q", line)
+		}
+	}
+}
+
+func TestAnExistingCaddyfileIsBackedUpAndRestoredOnFailure(t *testing.T) {
+	// Somebody's existing Caddy configuration is not this installer's to lose.
+	const existing = "example.org {\n\trespond \"someone else's site\"\n}\n"
+
+	in := newInstall(t)
+	path := in.caddyfileAt()
+	must(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	must(t, os.WriteFile(path, []byte(existing), 0o644))
+
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=0")
+
+	out, _ := in.run("--https", "--yes")
+
+	got, err := os.ReadFile(path)
+	must(t, err)
+	if string(got) != existing {
+		t.Errorf("the existing Caddyfile was not restored after a failed HTTPS setup.\n"+
+			"want:\n%s\ngot:\n%s\noutput:\n%s", existing, got, out)
+	}
+
+	// And a copy was kept, named so it is findable.
+	entries, err := os.ReadDir(filepath.Dir(path))
+	must(t, err)
+	var backups int
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "dnsdaddy-bak-") {
+			backups++
+		}
+	}
+	if backups == 0 {
+		t.Error("no backup of the existing Caddyfile was made before replacing it")
+	}
+}
+
+func TestAGeneratedCaddyfileIsRemovedWhenThereWasNothingBefore(t *testing.T) {
+	// Nothing was there, HTTPS failed, so nothing should be left: an abandoned
+	// site block for a management interface is what nobody thinks to look for.
+	in := newInstall(t)
+	path := in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=0")
+
+	in.run("--https", "--yes")
+
+	if _, err := os.Stat(path); err == nil {
+		body, _ := os.ReadFile(path)
+		t.Errorf("a Caddyfile was left behind after a failed HTTPS setup:\n%s", body)
+	}
+}
+
+func TestTheGeneratedCaddyfileProxiesOnlyLoopback(t *testing.T) {
+	in := newInstall(t)
+	path := in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+
+	body, err := os.ReadFile(path)
+	must(t, err)
+	conf := string(body)
+
+	if !strings.Contains(conf, "reverse_proxy 127.0.0.1:8080") {
+		t.Errorf("the generated Caddyfile does not proxy loopback:\n%s", conf)
+	}
+	// Anything else as an upstream would mean the backend was expected on a
+	// non-loopback address, which is the whole thing this mode avoids.
+	for _, forbidden := range []string{"0.0.0.0:8080", "reverse_proxy dns.example.com"} {
+		if strings.Contains(conf, forbidden) {
+			t.Errorf("the generated Caddyfile contains %q:\n%s", forbidden, conf)
+		}
+	}
+	for _, header := range []string{
+		"Strict-Transport-Security",
+		"X-Content-Type-Options",
+		"Referrer-Policy",
+		"Permissions-Policy",
+	} {
+		if !strings.Contains(conf, header) {
+			t.Errorf("the generated Caddyfile does not set %s:\n%s", header, conf)
+		}
+	}
+}
+
+func TestAnIPCaddyfilePinsThePublicIssuer(t *testing.T) {
+	// If Caddy is left to decide, it uses its internal CA for an address it
+	// considers unnameable — a certificate no browser trusts, in front of the
+	// management interface. Naming the public issuer means the attempt either
+	// produces a real certificate or fails visibly.
+	in := newInstall(t)
+	path := in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+
+	body, err := os.ReadFile(path)
+	must(t, err)
+	conf := string(body)
+	for _, want := range []string{"issuer acme", "profile shortlived"} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("an IP site does not pin %q, so Caddy may fall back to its internal CA:\n%s",
+				want, conf)
+		}
+	}
+	if !strings.Contains(conf, "66.228.32.228 {") {
+		t.Errorf("the site address is not the IP address:\n%s", conf)
+	}
+}
+
+func TestACaddyTooOldForTheACMEProfileIsReportedAsSuch(t *testing.T) {
+	// Capability, not a version number. The installer does not try to know
+	// which Caddy releases support the profile subdirective; it writes the
+	// config and lets `caddy validate` answer.
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CADDY_VALIDATE_EXIT=1",
+		"STUB_CADDY_VALIDATE_MSG=unrecognized subdirective profile")
+
+	out, _ := in.run("--https", "--yes")
+	contains(t, out, "does not understand the ACME 'profile' setting")
+}
+
+// --- Caddy version gating ----------------------------------------------------
+
+// Public IP-address certificates need Caddy 2.11 or newer. Before that release
+// its bundled CertMagic held a map of public CAs to whether they issue IP
+// certificates, and Let's Encrypt was marked false — so the request was refused
+// locally and no ACME order was ever sent.
+//
+// Verified empirically against certmagic v0.25.3 as shipped in Caddy v2.11.4:
+// PreCheck with the Let's Encrypt production directory returns nil for a public
+// IPv4 and a public IPv6 subject, and an error for the same subjects against
+// ZeroSSL. See docs/deployment-matrix.md for the transcript.
+func TestIPModeRefusesACaddyTooOldForIPCertificates(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CADDY_VERSION=v2.6.2")
+
+	out, _ := in.run("--https", "--yes")
+
+	contains(t, out, "too old for IP-address certificates")
+	contains(t, out, "caddyserver.com/docs/install")
+	// And it fails closed like every other HTTPS failure.
+	env := in.readEnv()
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_DASHBOARD_BIND=") &&
+			strings.TrimPrefix(line, "DNSDADDY_DASHBOARD_BIND=") != "" {
+			t.Errorf("an old Caddy left the dashboard published: %q", line)
+		}
+		if strings.HasPrefix(line, "DNSDADDY_SECURE_COOKIES=always") {
+			t.Error("an old Caddy left secure cookies on; the SSH-tunnel fallback could not log in")
+		}
+	}
+	contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+}
+
+// The same old Caddy is fine for a hostname, which is the far more common
+// deployment. Refusing it there would be an obstacle rather than a safeguard.
+func TestHostnameModeAcceptsAnOlderCaddy(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CADDY_VERSION=v2.6.2", "STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	notContains(t, out, "too old for IP-address certificates")
+	contains(t, out, "Certificate is trusted by this machine's CA store")
+}
+
+// caddy_version_at_least is the comparison the gate depends on, and an
+// off-by-one there either blocks a working deployment or lets a broken one
+// through.
+//
+// The function is extracted from the real script and sourced on its own —
+// sourcing the whole installer would run its main body. What is under test is
+// therefore the exact text that ships, not a reimplementation of it.
+func TestCaddyVersionComparison(t *testing.T) {
+	repo := repoRoot(t)
+	body, err := os.ReadFile(filepath.Join(repo, "deploy", "install-docker.sh"))
+	must(t, err)
+
+	src := string(body)
+	from := strings.Index(src, "caddy_version_at_least() {")
+	if from < 0 {
+		t.Fatal("caddy_version_at_least is no longer defined in install-docker.sh")
+	}
+	to := strings.Index(src[from:], "\n}\n")
+	if to < 0 {
+		t.Fatal("could not find the end of caddy_version_at_least")
+	}
+	fn := src[from : from+to+3]
+
+	cases := []struct {
+		version string
+		ok      bool
+	}{
+		{"v2.11.4 h1:abc", true},
+		{"v2.11.0", true},
+		{"v2.12.0", true},
+		{"v3.0.0", true},
+		{"2.11.4", true},
+		{"v2.10.2", false},
+		{"v2.6.2", false},
+		{"v1.99.0", false},
+		{"(devel)", false}, // unparseable must not pass
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.version, func(t *testing.T) {
+			script := "caddy() { echo " + shellQuote(tc.version) + "; }\n" + fn +
+				"\nif caddy_version_at_least 2 11; then echo YES; else echo NO; fi\n"
+			out, err := exec.Command("bash", "-c", script).CombinedOutput()
+			if err != nil && !strings.Contains(string(out), "NO") && !strings.Contains(string(out), "YES") {
+				t.Fatalf("running the extracted function failed: %v\n%s", err, out)
+			}
+			got := strings.Contains(string(out), "YES")
+			if got != tc.ok {
+				t.Errorf("caddy_version_at_least(2,11) for %q = %v, want %v\n%s",
+					tc.version, got, tc.ok, out)
+			}
+		})
+	}
+}
+
+// shellQuote wraps a value in single quotes for embedding in a generated
+// script, escaping any single quote it contains.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// The kernel truncates process names to 15 characters (TASK_COMM_LEN), so the
+// 16-character "systemd-resolved" is reported by ss and /proc as
+// "systemd-resolve". A pattern written with the trailing d silently never
+// matched, and the operator got generic advice instead of the DNSStubListener
+// recipe — on the most common port-53 conflict, on the most common platform
+// for this product. Found by running the installer on a real Ubuntu 24.04.
+func TestSystemdResolvedIsRecognisedByItsTruncatedName(t *testing.T) {
+	for _, owner := range []string{
+		"systemd-resolve",                         // what the kernel actually reports
+		"systemd-resolved",                        // the full name, e.g. from a units listing
+		`users:(("systemd-resolve",pid=1,fd=12))`, // the shape ss prints
+	} {
+		t.Run(owner, func(t *testing.T) {
+			in := newInstall(t)
+			in.stub("ss", `
+if [[ "$*" == *-l* ]]; then
+  echo 'udp   UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:*    users:(("`+strings.TrimSuffix(strings.TrimPrefix(owner, `users:(("`), `",pid=1,fd=12))`)+`",pid=1,fd=12))'
+  echo 'tcp   LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:*  users:(("`+strings.TrimSuffix(strings.TrimPrefix(owner, `users:(("`), `",pid=1,fd=12))`)+`",pid=1,fd=12))'
+fi
+exit 0`)
+
+			out, code := in.run("--vps", "--yes")
+			if code == 0 {
+				t.Fatalf("the installer continued with port 53 held\n%s", out)
+			}
+			// The tailored advice, not the generic fallback.
+			contains(t, out, "DNSStubListener=no")
+			contains(t, out, "systemd-resolved is running")
+		})
+	}
 }

@@ -1344,3 +1344,277 @@ test('a category label from the server is escaped', () => {
   assert.doesNotMatch(out, /<script>alert/);
   assert.match(out, /&lt;script&gt;/);
 });
+
+/* ==========================================================================
+ * Query log and threat presentation
+ *
+ * The query log was seven equal columns; it is now one scannable line per
+ * event with the detail behind a disclosure. The tests that matter are the
+ * ones a markup change can quietly break: escaping of values an attacker
+ * chooses, and the rule that nothing is displayed that the server did not
+ * record.
+ * ======================================================================== */
+
+const { queryTable, queryRow, repeatOffenders } = require('./static/app.js');
+
+function q(o = {}) {
+  return {
+    time: now(),
+    domain: 'malware.example',
+    qtype: 'A',
+    action: 'blocked',
+    reason: 'Domain is on a malware distribution list',
+    category: 'malware',
+    source: 'abuse.ch URLhaus',
+    clientIp: '10.0.0.4',
+    clientName: '',
+    cached: false,
+    elapsedMs: 3,
+    dnssec: 'unvalidated',
+    ...o,
+  };
+}
+
+test('a query row states its outcome in words, not only as a colour', () => {
+  assert.match(queryRow(q({ action: 'blocked' })), />Blocked</);
+  assert.match(queryRow(q({ action: 'allowed' })), />Allowed</);
+  assert.match(queryRow(q({ action: 'error' })), />Error</);
+
+  // Strip every class attribute — the accent rail and the row tint both live
+  // there — and the outcome must still be readable.
+  const bare = queryRow(q({ action: 'blocked' })).replace(/class="[^"]*"/g, '');
+  assert.match(bare, /Blocked/);
+});
+
+test('the detail lists only what the server actually recorded', () => {
+  const sparse = queryRow(q({
+    reason: '', category: '', source: '', clientIp: '', clientName: '',
+    dnssec: '', elapsedMs: undefined,
+  }));
+  // No empty rows reading "—": an absent fact is an accurate statement that
+  // nothing was recorded, and a dash is an invitation to wonder.
+  assert.doesNotMatch(sparse, /<dt>Reason<\/dt>/);
+  assert.doesNotMatch(sparse, /<dt>Category<\/dt>/);
+  assert.doesNotMatch(sparse, /<dt>Source<\/dt>/);
+  assert.doesNotMatch(sparse, /<dt>DNSSEC<\/dt>/);
+
+  const full = queryRow(q());
+  assert.match(full, /<dt>Reason<\/dt>/);
+  assert.match(full, /Domain is on a malware distribution list/);
+  assert.match(full, /abuse\.ch URLhaus/);
+});
+
+test('a badge in the detail is rendered, not stringified', () => {
+  // Collecting already-escaped markup and then calling String() on a raw()
+  // marker produced "[object Object]" on the page. This is that bug.
+  const out = queryRow(q());
+  assert.doesNotMatch(out, /\[object Object\]/);
+  assert.match(out, /<dt>Category<\/dt>[\s\S]*?malware/);
+});
+
+test('the domain is monospace and the row is keyboard reachable', () => {
+  const out = queryRow(q({ domain: 'paypaI-secure.example' }));
+  assert.match(out, /class="qdomain mono">paypaI-secure\.example</);
+  // <details>/<summary> rather than a click handler, so focus, Enter and
+  // find-in-page all work without reimplementing them.
+  assert.match(out, /<details class="qrow/);
+  assert.match(out, /<summary>/);
+});
+
+test('every field a hostile server or client could influence is escaped', () => {
+  const out = queryRow(q({
+    domain: '<img src=x onerror="alert(1)">.example',
+    reason: '<script>alert(2)</script>',
+    source: '<b>feed</b>',
+    clientName: '<svg onload="alert(3)">',
+    qtype: '<i>A</i>',
+  }));
+  assert.doesNotMatch(out, /<img/);
+  assert.doesNotMatch(out, /<script>alert/);
+  assert.doesNotMatch(out, /<svg onload/);
+  assert.doesNotMatch(out, /<b>feed<\/b>/);
+  assert.match(out, /&lt;img/);
+  // Escaped exactly once — a double-escaped domain is unreadable.
+  assert.doesNotMatch(out, /&amp;lt;/);
+});
+
+test('an empty query log explains both reasons it could be empty', () => {
+  const out = queryTable([]);
+  assert.match(out, /query log is switched off/i);
+  assert.doesNotMatch(out, /example\.com|malware\.example/);
+});
+
+test('repeat offenders describe recurrence rather than printing a count column', () => {
+  const out = repeatOffenders([
+    { domain: 'a.example', category: 'malware', count: 47, lastSeen: hoursAgo(1) },
+    { domain: 'b.example', category: 'phishing', count: 1, lastSeen: hoursAgo(3) },
+  ]);
+  assert.match(out, /blocked 47 times/);
+  // One block is a page that loaded a bad ad; saying "blocked 1 times" would
+  // be both wrong and louder than the fact deserves.
+  assert.match(out, /blocked once/);
+  assert.doesNotMatch(out, /blocked 1 times/);
+  assert.match(out, /last 1h ago/);
+});
+
+test('repeat offenders escape the domain and the category', () => {
+  const out = repeatOffenders([
+    { domain: '<img src=x onerror="alert(1)">', category: '<b>x</b>', count: 2, lastSeen: now() },
+  ]);
+  assert.doesNotMatch(out, /<img/);
+  assert.doesNotMatch(out, /<b>x<\/b>/);
+  assert.match(out, /&lt;img/);
+  assert.doesNotMatch(out, /&amp;lt;/);
+});
+
+test('no offenders is an explained empty state', () => {
+  const out = repeatOffenders([]);
+  assert.match(out, /Nothing has been blocked yet/);
+  assert.doesNotMatch(out, /offender-meter/);
+});
+
+/* ---------- the login page ----------------------------------------------- */
+
+test('the sign-in page reports no system state', () => {
+  const block = indexHtml.slice(indexHtml.indexOf('<div id="login"'), indexHtml.indexOf('<div id="app"'));
+  // Comments removed: they are delivered to the browser, but a comment
+  // explaining that this page discloses nothing is not itself a disclosure,
+  // and matching on it made this test fail on its own rationale.
+  const login = block.replace(/<!--[\s\S]*?-->/g, '');
+
+  // The page is reachable from the internet in the HTTPS deployment. It must
+  // not say what version this is, how long it has been up, whether a blocklist
+  // is loaded, or whether a password has been configured.
+  for (const leak of [/version/i, /uptime/i, /blocklist/i, /degraded/i]) {
+    assert.doesNotMatch(login, leak, `the login page discloses ${leak}`);
+  }
+  // And nothing writes into it at runtime either: every id the login markup
+  // carries is one the login form itself owns.
+  for (const id of ['sidebar-version', 'sidebar-status-text', 'page-title', 'refresh-note']) {
+    assert.ok(!login.includes(`id="${id}"`), `the login page carries ${id}, which shows system state`);
+  }
+  // The password field is a password field, and the browser is told what it is.
+  assert.match(login, /type="password"/);
+  assert.match(login, /autocomplete="current-password"/);
+  assert.match(login, /<label for="password">/);
+  // The decorative panel is hidden from assistive technology.
+  assert.match(login, /class="login-aside" aria-hidden="true"/);
+});
+
+/* ---------- one product, not several generations of one ------------------- */
+
+test('every page title matches the navigation label that leads to it', () => {
+  // "Threat feeds" in the header under a "Threat intelligence" nav link made
+  // the page look like it belonged to a different product than the link.
+  const nav = {};
+  for (const m of indexHtml.matchAll(/data-route="([a-z-]+)"[\s\S]*?<span>([^<]+)<\/span>/g)) {
+    nav[m[1]] = m[2];
+  }
+  const src = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.js'), 'utf8');
+
+  let checked = 0;
+  for (const m of src.matchAll(/pages\.([a-z]+) = \{\s*(?:\/\/[^\n]*\n\s*)*title: '([^']+)'/g)) {
+    const [, route, title] = m;
+    if (!nav[route]) continue;
+    checked++;
+    assert.equal(title, nav[route],
+      `#/${route}: the page header says ${JSON.stringify(title)} but the nav link says ${JSON.stringify(nav[route])}`);
+  }
+  assert.ok(checked >= 10, `only matched ${checked} pages; the parse is probably wrong`);
+});
+
+test('the configuration pages use the shared record row, not their own tables', () => {
+  // Networks, feeds and policies were each a bespoke multi-column table. A
+  // reader met three different list designs in one product. They now share
+  // .rec (and policies the same <details> disclosure as the query log), so
+  // there is one list idiom to learn.
+  const src = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.js'), 'utf8');
+
+  const page = (name) => {
+    const from = src.indexOf(`pages.${name} = {`);
+    const to = src.indexOf('\npages.', from + 1);
+    return src.slice(from, to === -1 ? undefined : to);
+  };
+
+  for (const name of ['networks', 'feeds']) {
+    const body = page(name);
+    assert.ok(body.includes('class="rec"'),
+      `pages.${name} does not use the shared record row`);
+    assert.ok(!body.includes('<thead>'),
+      `pages.${name} still renders a bespoke table`);
+  }
+  assert.ok(page('policies').includes('<details class="card section policy"'),
+    'pages.policies no longer collapses each policy');
+});
+
+test('no stylesheet rule falls back to a colour literal for a token that does not exist', () => {
+  // var(--muted, #a3acba) looked like a themed value and was not: --muted was
+  // never defined, so three rules silently used the literal and drifted from
+  // --muted-foreground when the palette changed.
+  const css = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, 'static', 'app.css'), 'utf8');
+
+  const defined = new Set([...css.matchAll(/^\s*(--[a-z0-9-]+):/gm)].map((m) => m[1]));
+  for (const m of css.matchAll(/var\((--[a-z0-9-]+),\s*(#[0-9a-fA-F]{3,8}|[a-z]+)\)/g)) {
+    assert.ok(defined.has(m[1]),
+      `var(${m[1]}, ${m[2]}) falls back to a literal because ${m[1]} is never defined`);
+  }
+});
+
+test('a feed that has never attempted a download is pending, not a fault', () => {
+  // The dashboard opened on a fresh install with six red "is not blocking"
+  // faults, beside a panel calling the same six feeds "Pending". Two verdicts
+  // on the same state, on the same page. A feed that has not run yet is not
+  // broken — that is over-claiming, just pointing the other way.
+  const neverRan = {
+    feeds: [
+      { ...feed({ enabled: true, loaded: false, lastError: '', lastSuccessAt: null }), id: 'a', name: 'A' },
+      { ...feed({ enabled: true, loaded: false, lastError: '', lastSuccessAt: null }), id: 'b', name: 'B' },
+    ],
+  };
+
+  const h = feedHealth(neverRan);
+  assert.equal(h.broken.length, 0, 'a feed that never ran was counted as broken');
+  assert.equal(h.pending.length, 2);
+  assert.equal(h.tone, 'warn', 'never-run feeds should warn, not fault');
+  assert.match(h.label, /downloading/);
+
+  // And the two components agree, which is the actual requirement.
+  for (const f of neverRan.feeds) {
+    assert.match(feedStatusBadge(f), />Pending</);
+  }
+
+  const items = attentionItems({ checks: [] }, neverRan);
+  assert.equal(items.length, 1, 'one item, not one per feed');
+  assert.equal(items[0].tone, 'warn');
+  assert.match(items[0].title, /has not downloaded yet/);
+  assert.doesNotMatch(items[0].title, /is not blocking/);
+});
+
+test('a feed that attempted and failed is still a fault', () => {
+  // The distinction has to cut both ways, or it is just a downgrade.
+  const failed = {
+    feeds: [{ ...feed({ enabled: true, loaded: false, lastError: 'HTTP 404' }), name: 'Broken' }],
+  };
+  const h = feedHealth(failed);
+  assert.equal(h.tone, 'bad');
+  assert.equal(h.broken.length, 1);
+  assert.equal(h.pending.length, 0);
+
+  const items = attentionItems({ checks: [] }, failed);
+  assert.equal(items[0].tone, 'bad');
+  assert.match(items[0].title, /Broken is not blocking/);
+  assert.match(items[0].body, /HTTP 404/);
+});
+
+test('a feed that downloaded once and is not in the index is a fault', () => {
+  const unusable = {
+    feeds: [{ ...feed({ enabled: true, loaded: false, lastSuccessAt: hoursAgo(3), loadError: 'cache missing' }), name: 'Gone' }],
+  };
+  const h = feedHealth(unusable);
+  assert.equal(h.tone, 'bad');
+  assert.equal(h.broken.length, 1);
+  assert.equal(h.pending.length, 0);
+});
