@@ -119,16 +119,27 @@ func (s *Server) Start(ctx context.Context) error {
 		}()
 	}
 
+	// Wait for every listener to report, even once one has already failed.
+	// Returning on the first error would unwind while a sibling goroutine is
+	// still on its way to bind: ShutdownContext refuses a server whose started
+	// flag is not yet set, so that listener would come up *after* the unwind,
+	// on a port the caller has just been told could not be opened, and with
+	// s.servers already cleared there would be nothing left holding a
+	// reference to stop it. Draining every readiness signal first means each
+	// server has either bound or failed by the time Shutdown runs.
+	var firstErr error
 	for range servers {
-		if err := <-ready; err != nil {
-			// One listener failed to bind, so unwind the ones that did. Nothing
-			// is serving traffic yet, but the same bounded context is used so a
-			// failed start cannot hang either.
-			shutdownCtx, cancel := shutdownContext(ctx)
-			s.Shutdown(shutdownCtx)
-			cancel()
-			return err
+		if err := <-ready; err != nil && firstErr == nil {
+			firstErr = err
 		}
+	}
+	if firstErr != nil {
+		// The same bounded context is used, so a failed start cannot hang
+		// either.
+		shutdownCtx, cancel := shutdownContext(ctx)
+		s.Shutdown(shutdownCtx)
+		cancel()
+		return firstErr
 	}
 
 	for _, srv := range servers {
