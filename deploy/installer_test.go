@@ -138,12 +138,16 @@ exit 0`)
 	// Nothing listening. A scenario that wants a busy port overrides this.
 	in.stub("ss", `exit 0`)
 
-	// Caddy. STUB_CADDY_VALIDATE_EXIT lets a scenario reject the generated
-	// config, which is how the "too old for the ACME profile subdirective"
-	// path is reached without needing an old Caddy binary.
+	// Caddy. The default version is the real current release, because the
+	// IP-address path is gated on 2.11+ — that is the first Caddy whose
+	// CertMagic knows Let's Encrypt issues IP certificates.
+	//
+	// STUB_CADDY_VERSION drives the version gate; STUB_CADDY_VALIDATE_EXIT
+	// rejects the generated config, which is how the parse-error path is
+	// reached without needing an old Caddy binary.
 	in.stub("caddy", `
 case "${1:-}" in
-  version)  echo "${STUB_CADDY_VERSION:-v2.10.0 h1:stub}" ;;
+  version)  echo "${STUB_CADDY_VERSION:-v2.11.4 h1:stub}" ;;
   validate) printf '%s\n' "${STUB_CADDY_VALIDATE_MSG:-}"; exit "${STUB_CADDY_VALIDATE_EXIT:-0}" ;;
 esac
 exit 0`)
@@ -1617,4 +1621,149 @@ func TestACaddyTooOldForTheACMEProfileIsReportedAsSuch(t *testing.T) {
 
 	out, _ := in.run("--https", "--yes")
 	contains(t, out, "does not understand the ACME 'profile' setting")
+}
+
+// --- Caddy version gating ----------------------------------------------------
+
+// Public IP-address certificates need Caddy 2.11 or newer. Before that release
+// its bundled CertMagic held a map of public CAs to whether they issue IP
+// certificates, and Let's Encrypt was marked false — so the request was refused
+// locally and no ACME order was ever sent.
+//
+// Verified empirically against certmagic v0.25.3 as shipped in Caddy v2.11.4:
+// PreCheck with the Let's Encrypt production directory returns nil for a public
+// IPv4 and a public IPv6 subject, and an error for the same subjects against
+// ZeroSSL. See docs/deployment-matrix.md for the transcript.
+func TestIPModeRefusesACaddyTooOldForIPCertificates(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=66.228.32.228", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CADDY_VERSION=v2.6.2")
+
+	out, _ := in.run("--https", "--yes")
+
+	contains(t, out, "too old for IP-address certificates")
+	contains(t, out, "caddyserver.com/docs/install")
+	// And it fails closed like every other HTTPS failure.
+	env := in.readEnv()
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_DASHBOARD_BIND=") &&
+			strings.TrimPrefix(line, "DNSDADDY_DASHBOARD_BIND=") != "" {
+			t.Errorf("an old Caddy left the dashboard published: %q", line)
+		}
+		if strings.HasPrefix(line, "DNSDADDY_SECURE_COOKIES=always") {
+			t.Error("an old Caddy left secure cookies on; the SSH-tunnel fallback could not log in")
+		}
+	}
+	contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+}
+
+// The same old Caddy is fine for a hostname, which is the far more common
+// deployment. Refusing it there would be an obstacle rather than a safeguard.
+func TestHostnameModeAcceptsAnOlderCaddy(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CADDY_VERSION=v2.6.2", "STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	notContains(t, out, "too old for IP-address certificates")
+	contains(t, out, "Certificate is trusted by this machine's CA store")
+}
+
+// caddy_version_at_least is the comparison the gate depends on, and an
+// off-by-one there either blocks a working deployment or lets a broken one
+// through.
+//
+// The function is extracted from the real script and sourced on its own —
+// sourcing the whole installer would run its main body. What is under test is
+// therefore the exact text that ships, not a reimplementation of it.
+func TestCaddyVersionComparison(t *testing.T) {
+	repo := repoRoot(t)
+	body, err := os.ReadFile(filepath.Join(repo, "deploy", "install-docker.sh"))
+	must(t, err)
+
+	src := string(body)
+	from := strings.Index(src, "caddy_version_at_least() {")
+	if from < 0 {
+		t.Fatal("caddy_version_at_least is no longer defined in install-docker.sh")
+	}
+	to := strings.Index(src[from:], "\n}\n")
+	if to < 0 {
+		t.Fatal("could not find the end of caddy_version_at_least")
+	}
+	fn := src[from : from+to+3]
+
+	cases := []struct {
+		version string
+		ok      bool
+	}{
+		{"v2.11.4 h1:abc", true},
+		{"v2.11.0", true},
+		{"v2.12.0", true},
+		{"v3.0.0", true},
+		{"2.11.4", true},
+		{"v2.10.2", false},
+		{"v2.6.2", false},
+		{"v1.99.0", false},
+		{"(devel)", false}, // unparseable must not pass
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.version, func(t *testing.T) {
+			script := "caddy() { echo " + shellQuote(tc.version) + "; }\n" + fn +
+				"\nif caddy_version_at_least 2 11; then echo YES; else echo NO; fi\n"
+			out, err := exec.Command("bash", "-c", script).CombinedOutput()
+			if err != nil && !strings.Contains(string(out), "NO") && !strings.Contains(string(out), "YES") {
+				t.Fatalf("running the extracted function failed: %v\n%s", err, out)
+			}
+			got := strings.Contains(string(out), "YES")
+			if got != tc.ok {
+				t.Errorf("caddy_version_at_least(2,11) for %q = %v, want %v\n%s",
+					tc.version, got, tc.ok, out)
+			}
+		})
+	}
+}
+
+// shellQuote wraps a value in single quotes for embedding in a generated
+// script, escaping any single quote it contains.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// The kernel truncates process names to 15 characters (TASK_COMM_LEN), so the
+// 16-character "systemd-resolved" is reported by ss and /proc as
+// "systemd-resolve". A pattern written with the trailing d silently never
+// matched, and the operator got generic advice instead of the DNSStubListener
+// recipe — on the most common port-53 conflict, on the most common platform
+// for this product. Found by running the installer on a real Ubuntu 24.04.
+func TestSystemdResolvedIsRecognisedByItsTruncatedName(t *testing.T) {
+	for _, owner := range []string{
+		"systemd-resolve",                         // what the kernel actually reports
+		"systemd-resolved",                        // the full name, e.g. from a units listing
+		`users:(("systemd-resolve",pid=1,fd=12))`, // the shape ss prints
+	} {
+		t.Run(owner, func(t *testing.T) {
+			in := newInstall(t)
+			in.stub("ss", `
+if [[ "$*" == *-l* ]]; then
+  echo 'udp   UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:*    users:(("`+strings.TrimSuffix(strings.TrimPrefix(owner, `users:(("`), `",pid=1,fd=12))`)+`",pid=1,fd=12))'
+  echo 'tcp   LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:*  users:(("`+strings.TrimSuffix(strings.TrimPrefix(owner, `users:(("`), `",pid=1,fd=12))`)+`",pid=1,fd=12))'
+fi
+exit 0`)
+
+			out, code := in.run("--vps", "--yes")
+			if code == 0 {
+				t.Fatalf("the installer continued with port 53 held\n%s", out)
+			}
+			// The tailored advice, not the generic fallback.
+			contains(t, out, "DNSStubListener=no")
+			contains(t, out, "systemd-resolved is running")
+		})
+	}
 }
