@@ -548,6 +548,12 @@ func TestNoScriptCallsAHelperItDoesNotDefine(t *testing.T) {
 	}
 
 	defines := regexp.MustCompile(`(?m)^([a-z_][a-z0-9_]*)\(\)`)
+	// `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`. The delimiter is captured so the
+	// body can be skipped up to its own terminator rather than to the next
+	// thing that looks like one.
+	// RE2 has no backreferences, so the three quoting styles are alternatives
+	// rather than a captured quote matched again at the end.
+	heredocStart := regexp.MustCompile(`<<-?\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))`)
 	// Command positions, not just the start of a line: `if ! act foo` and
 	// `x && helper` are calls too, and the first version of this test missed
 	// exactly that — an `act` borrowed from the sibling script slipped past it.
@@ -568,12 +574,44 @@ func TestNoScriptCallsAHelperItDoesNotDefine(t *testing.T) {
 		}
 	}
 
+	// An assignment is not a call. `x=1`, `local x=1` and
+	// `out="$(cmd ...)"` all put a snake_case word at the head of a fragment
+	// without invoking anything, and reading them as calls produced a page of
+	// false positives the first time this test met a function that used local
+	// variables with underscores in their names.
+	assignment := regexp.MustCompile(`^(local\s+|declare\s+|export\s+|readonly\s+)?[a-z_][a-z0-9_]*(\[[^]]*\])?\+?=`)
+
 	for name, body := range scripts {
+		// A quoted heredoc body is data, not script. The Caddyfile this
+		// installer generates contains `reverse_proxy`, `header_up` and
+		// `roll_size` at the start of a line, none of which are shell at all —
+		// they are Caddy's configuration language being written to a file.
+		// Reading them as calls is how this test started reporting a working
+		// script as broken.
+		inHeredoc := ""
 		for i, line := range strings.Split(body, "\n") {
+			if inHeredoc != "" {
+				if strings.TrimSpace(line) == inHeredoc {
+					inHeredoc = ""
+				}
+				continue
+			}
+			if m := heredocStart.FindStringSubmatch(line); m != nil {
+				for _, g := range m[1:] {
+					if g != "" {
+						inHeredoc = g
+						break
+					}
+				}
+				continue
+			}
 			for _, frag := range sep.Split(line, -1) {
 				frag = strings.TrimSpace(frag)
 				for _, prefix := range []string{"if ", "elif ", "while ", "until ", "! ", "!"} {
 					frag = strings.TrimSpace(strings.TrimPrefix(frag, prefix))
+				}
+				if assignment.MatchString(frag) {
+					continue
 				}
 				m := head.FindStringSubmatch(frag)
 				if m == nil {
