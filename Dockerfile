@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # A separate image, used only by `docker compose --profile lab`. It contains
 # the traffic generator and the synthetic responder, which have no business
 # being in the image that answers a real network's DNS.
-FROM alpine:3.21 AS lab
+FROM alpine:3.24 AS lab
 
 RUN addgroup -g 10001 -S dnsdaddy \
     && adduser -u 10001 -S -G dnsdaddy dnsdaddy
@@ -44,7 +44,7 @@ ENTRYPOINT ["/usr/local/bin/dnsdaddy-lab"]
 #
 # Deliberately last: Docker builds the final stage by default, so plain
 # `docker build .` produces the resolver image and never the lab one.
-FROM alpine:3.21 AS runtime
+FROM alpine:3.24 AS runtime
 
 # ca-certificates for HTTPS feed downloads and DNS-over-TLS upstream
 # verification; tzdata so report timestamps render in the operator's timezone.
