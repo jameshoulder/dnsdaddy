@@ -755,7 +755,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := clientKey(r)
+	key := clientKey(r, a.TrustedProxies)
 	if !a.Auth.limiter.allow(key) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts; try again later")
 		return
