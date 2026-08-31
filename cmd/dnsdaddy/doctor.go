@@ -84,6 +84,16 @@ func runDoctor(args []string) error {
 	checks = append(checks, doctorClientAccess(ctx, st, cfg, acl, aclStale)...)
 	checks = append(checks, doctorUpstreams(cfg, *timeout)...)
 	checks = append(checks, webChecks...)
+	// What kind of deployment this is, and whether the dashboard is where that
+	// kind should put it. Derived from configuration, so it answers even when
+	// the dashboard itself did not respond — which is exactly when an operator
+	// most wants to know whether it is meant to be reachable from here.
+	checks = append(checks, diag.Deployment(diag.DeploymentInput{
+		Listen:            cfg.HTTP.Listen,
+		BaseURL:           cfg.HTTP.BaseURL,
+		SecureCookies:     cfg.HTTP.SecureCookies,
+		TrustedProxyCIDRs: cfg.HTTP.TrustedProxyCIDRs,
+	})...)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
