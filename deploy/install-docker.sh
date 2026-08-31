@@ -60,9 +60,21 @@ WEB_443_OWNER=""
 # through a validator that knows which shape it was expecting.
 HTTPS_TARGET=""
 HTTPS_TARGET_KIND=""
-# Why an IP attempt failed, when it did. Reported verbatim so the operator is
-# told the real reason rather than "something went wrong".
+# Why an HTTPS attempt failed, when it did. Reported verbatim so the operator
+# is told the real reason rather than "something went wrong".
+#
+# REASON is one sentence naming the cause. HINT is the specific thing to do
+# about it, which is usually not on this machine — a cloud firewall, a DNS
+# record. DETAIL is the CA's own words, kept separate because quoting the
+# upstream error verbatim is what makes the diagnosis checkable rather than
+# something the operator has to take on trust.
 HTTPS_FAIL_REASON=""
+HTTPS_FAIL_HINT=""
+HTTPS_FAIL_DETAIL=""
+# What public DNS says about a hostname target: match, mismatch, unresolved,
+# aaaa-orphan, or empty when no hostname was chosen. Recorded rather than only
+# printed, so the pre-ACME summary can restate it without resolving twice.
+HOSTNAME_DNS_STATE=""
 # The Caddyfile as it was before this run, so a failed attempt can put it back.
 CADDYFILE_BACKUP=""
 CADDYFILE_EXISTED=0
@@ -360,7 +372,7 @@ preflight() {
     if curl -fsS --max-time 8 -o /dev/null https://acme-v02.api.letsencrypt.org/directory 2>/dev/null; then
       pass "Outbound HTTPS works (Let's Encrypt is reachable)"
     else
-      warn "Could not reach Let'\''s Encrypt over HTTPS from this machine"
+      warn "Could not reach Let's Encrypt over HTTPS from this machine"
       note "Threat feeds and certificate issuance both need outbound 443."
     fi
   fi
@@ -667,19 +679,23 @@ choose_deployment() {
 
   Where is DNS Daddy running?
 
-  1. Home / LAN / homelab   dashboard published on ${HOST_IP:-this machine}:8080.
-                            Choose this ONLY if the machine has no public
-                            address at all. Most cloud VPSes show a private
-                            address here and are still reachable from the
-                            internet.
-  2. Public VPS — SSH tunnel  dashboard stays on loopback. Reach it through an
-                            encrypted SSH tunnel. Nothing is published to the
-                            internet. (default)
-  3. Public VPS — HTTPS     dashboard reachable at https://your-hostname, with
-                            Caddy terminating TLS in front of it. The dashboard
-                            itself still binds loopback only; Caddy is the only
-                            thing listening publicly. Needs a hostname whose
-                            DNS already points here.
+  1. LAN / Homelab
+     Dashboard available on your trusted LAN, at ${HOST_IP:-this machine}:8080.
+     Choose this ONLY if the machine has no public address at all. Most cloud
+     VPSes show a private address here and are still reachable from the
+     internet.
+
+  2. Public VPS — SSH tunnel                              (recommended, default)
+     Dashboard stays private on this server. You reach it through an encrypted
+     SSH tunnel. Nothing is published to the internet.
+
+  3. Public VPS — HTTPS dashboard
+     Dashboard is available in a browser through Caddy over HTTPS. DNS Daddy
+     itself still stays private on 127.0.0.1:8080 — Caddy is the only thing
+     listening publicly, and it proxies to the loopback backend.
+       Preferred: a hostname whose DNS points at this machine.
+       Advanced:  this machine's public IP address, which Let's Encrypt can now
+                  certify directly. Needs inbound 80 and 443 from the internet.
 
   Modes 2 and 3 both keep the dashboard off the public internet in plaintext.
   There is no option that publishes the management interface unencrypted, and
@@ -976,26 +992,124 @@ set_https_target() { # value
 # that the record was never created, and finding that out now — before Caddy
 # has been reconfigured and 45 seconds have been spent waiting — is the
 # difference between a clear message and a mystery.
+# host_addresses6 lists this machine's global IPv6 addresses, if it has any.
+#
+# Separate from host_addresses because a host with no IPv6 stack is normal and
+# must not be reported as a mismatch: an AAAA record that resolves to something
+# this machine cannot confirm is a different statement from one that resolves
+# to the wrong place.
+host_addresses6() {
+  ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^$' || true
+}
+
+# check_hostname_points_here compares public DNS against this machine.
+#
+# It reports and never changes anything: editing somebody's DNS is not this
+# installer's business, and it could not do it correctly anyway. What it can do
+# is tell the operator, before ACME runs, whether the record they think they
+# set is the record the CA will see — which is the single most common reason a
+# hostname deployment fails.
+#
+# Both families are checked. The old version looked at A records only, so a
+# host reached over IPv6 with a stale or missing AAAA got a clean PASS and then
+# an unexplained challenge failure.
 check_hostname_points_here() { # hostname
-  local name="$1" resolved="" mine="" a
+  local name="$1" a4="" a6="" mine4 mine6 addr matched=0 mismatched=""
+
   if command -v getent >/dev/null 2>&1; then
-    resolved="$(getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' | sort -u)"
+    a4="$(getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' | sort -u)"
+    a6="$(getent ahostsv6 "$name" 2>/dev/null | awk '{print $1}' | sort -u)"
   fi
-  if [[ -z "$resolved" ]]; then
-    note "Could not resolve ${name} from this machine; ACME will need it to resolve publicly."
+
+  if [[ -z "$a4" && -z "$a6" ]]; then
+    warn "${name} does not resolve from this machine."
+    note "Let's Encrypt has to resolve it publicly before it will issue a"
+    note "certificate. Create the record, then check with: dig +short ${name}"
+    note "A new record can take minutes to hours to propagate; this installer"
+    note "cannot tell you when it has."
+    HOSTNAME_DNS_STATE="unresolved"
     return 0
   fi
-  mine="$( { printf '%s\n' "${HOST_IP:-}"; host_addresses; } | grep -v '^$' | sort -u)"
-  while read -r a; do
-    [[ -n "$a" ]] || continue
-    if printf '%s\n' "$mine" | grep -qxF "$a"; then
-      pass "${name} resolves to ${a}, which is an address on this machine"
-      return 0
+
+  mine4="$( { printf '%s\n' "${HOST_IP:-}"; host_addresses; } | grep -v '^$' | sort -u)"
+  mine6="$(host_addresses6 | sort -u)"
+
+  while read -r addr; do
+    [[ -n "$addr" ]] || continue
+    if printf '%s\n' "$mine4" | grep -qxF "$addr"; then
+      pass "${name} resolves to ${addr}, which is an address on this machine"
+      matched=1
+    else
+      mismatched="${mismatched}${mismatched:+, }${addr}"
     fi
-  done <<<"$resolved"
-  warn "${name} resolves to $(printf '%s' "$resolved" | paste -sd, -), which is not an address on this machine."
-  note "If this host is behind a NAT that forwards 80 and 443, that is expected."
-  note "Otherwise the certificate request will fail: the A record must point here."
+  done <<<"$a4"
+
+  while read -r addr; do
+    [[ -n "$addr" ]] || continue
+    if printf '%s\n' "$mine6" | grep -qxF "$addr"; then
+      pass "${name} resolves to ${addr} (IPv6), which is an address on this machine"
+      matched=1
+    elif [[ -n "$mine6" ]]; then
+      mismatched="${mismatched}${mismatched:+, }${addr}"
+    else
+      # An AAAA record on a host with no IPv6 stack. Worth saying, because the
+      # CA may prefer IPv6 and fail against an address this machine never had.
+      warn "${name} has an AAAA record (${addr}) but this machine has no global IPv6 address."
+      note "Let's Encrypt prefers IPv6 when a AAAA exists. If that record is stale,"
+      note "remove it, or the challenge will be sent somewhere this host is not."
+      HOSTNAME_DNS_STATE="aaaa-orphan"
+    fi
+  done <<<"$a6"
+
+  if [[ $matched -eq 1 ]]; then
+    [[ -n "$mismatched" ]] && note "It also resolves to ${mismatched}, which is not this machine."
+    [[ -n "$HOSTNAME_DNS_STATE" ]] || HOSTNAME_DNS_STATE="match"
+    return 0
+  fi
+
+  warn "${name} currently resolves to ${mismatched}."
+  note "This machine appears to be $(printf '%s' "${HOST_IP:-unknown}")."
+  note "If this host is behind NAT that forwards 80 and 443, that is expected"
+  note "and the certificate can still be issued. Otherwise the record has to"
+  note "point here before Let's Encrypt will issue one — change it at your DNS"
+  note "provider, then re-run. This installer does not change DNS records."
+  HOSTNAME_DNS_STATE="mismatch"
+  return 0
+}
+
+# report_reachability separates what this host can measure from what it cannot.
+#
+# The installer knows whether it can bind a port. It cannot know whether a
+# packet from the internet arrives at it — a cloud firewall sits somewhere this
+# script cannot see, and on the VPS this was first tested against that is
+# exactly what stopped issuance. Presenting both as one list of checks would
+# imply a confidence that does not exist, so they are printed as two.
+report_reachability() {
+  printf '\n  %sLocal%s — measured on this machine\n' "$BOLD" "$OFF"
+  if [[ -z "$WEB_80_OWNER" ]]; then
+    pass "TCP port 80 is free"
+  else
+    warn "TCP port 80 is held by ${WEB_80_OWNER}"
+  fi
+  if [[ -z "$WEB_443_OWNER" ]]; then
+    pass "TCP port 443 is free"
+  else
+    warn "TCP port 443 is held by ${WEB_443_OWNER}"
+  fi
+
+  printf '\n  %sExternal%s — cannot be confirmed from here\n' "$BOLD" "$OFF"
+  note "UNKNOWN  whether inbound TCP 80 and 443 reach this machine"
+  note ""
+  note "Let's Encrypt validates by connecting to this address from the"
+  note "internet. If your provider has a firewall in front of the host —"
+  note "Linode Cloud Firewall, an AWS security group, an Azure NSG, a GCP"
+  note "firewall rule — both ports must allow inbound traffic there as well."
+  note "This installer does not change firewall rules, on this host or at"
+  note "your provider."
+  note ""
+  note "DNS itself needs UDP 53 and TCP 53. Opening those does not make this"
+  note "an open resolver: which clients may query is decided by the client"
+  note "ACL under Networks, not by the firewall."
 }
 
 # https_port_conflict names what would stop Caddy binding, or prints nothing.
@@ -1105,6 +1219,25 @@ configure_https() {
     pass "Existing Caddyfile saved to ${CADDYFILE_BACKUP}"
   fi
 
+  report_reachability
+
+  printf '\n  %sWhat happens next%s\n' "$BOLD" "$OFF"
+  if [[ "$HTTPS_TARGET_KIND" == "hostname" ]]; then
+    note "Caddy will ask Let's Encrypt for a certificate for ${HTTPS_TARGET}."
+    note "Let's Encrypt will connect back to that name on port 443, then 80, to"
+    note "check you control it. Nothing is published until that succeeds."
+  else
+    note "Caddy will ask Let's Encrypt for a certificate for the IP address"
+    note "${HTTPS_TARGET}, using the 'shortlived' profile — the only one Let's"
+    note "Encrypt issues IP certificates under. It is valid for about six days"
+    note "and Caddy renews it automatically, like any other certificate."
+    note "Let's Encrypt will connect back to ${HTTPS_TARGET} on port 443, then"
+    note "80, to check you control it. Nothing is published until that succeeds."
+  fi
+  note ""
+  note "If it does not succeed, the dashboard stays private on 127.0.0.1:8080"
+  note "and you reach it over an SSH tunnel. It is never published in plaintext."
+
   if ! write_caddyfile "$caddyfile"; then
     HTTPS_STATE="failed"
     HTTPS_FAIL_REASON="Could not write ${caddyfile}."
@@ -1151,33 +1284,64 @@ configure_https() {
   fi
 
   if verify_https; then
+    # The certificate is real and trusted, so the HSTS policy can go out now.
+    # Written on a second pass rather than up front: a one-year policy is not
+    # something to publish on the strength of an attempt that might fail.
+    if write_caddyfile "$caddyfile" 1 && caddy validate --config "$caddyfile" >/dev/null 2>&1; then
+      if systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1; then
+        pass "HSTS enabled now that the certificate is proven"
+      else
+        # Not fatal, and not silent: the deployment works, it just has one
+        # header fewer than intended.
+        warn "Could not reload Caddy to enable HSTS; the dashboard is serving without it."
+      fi
+    else
+      warn "Could not enable HSTS; the dashboard is serving without it."
+      write_caddyfile "$caddyfile" 0 || true
+    fi
+    verify_https_posture
     HTTPS_STATE="active"
     return 0
   fi
 
   # Everything below is a failure to obtain a publicly trusted certificate.
   #
-  # For a hostname this is usually DNS or a firewall and is worth waiting on,
-  # so the previous configuration stays in place and the operator is told what
-  # to watch. For an IP it is a hard stop with a known cause, and leaving the
-  # site configured would leave Caddy answering :443 for an address it cannot
-  # produce a trusted certificate for — a browser warning on the management
-  # interface, which is the outcome this whole path exists to avoid.
-  if [[ "$HTTPS_TARGET_KIND" == "hostname" ]]; then
+  # What separates the two outcomes is whether the cause is known, not whether
+  # the target is a hostname. Caddy told us or it did not:
+  #
+  #   known    a refused challenge, a rate limit, an NXDOMAIN. None of these
+  #            resolve by waiting, so the whole attempt is rolled back and the
+  #            operator is told the one thing to change.
+  #   unknown  issuance may genuinely still be in flight — DNS propagation is
+  #            not instant and CertMagic retries for up to 30 days. The site
+  #            stays configured so that retrying continues.
+  #
+  # Either way .env goes back to the tunnel configuration. That is not
+  # optional: reconcile_env has already set DNSDADDY_SECURE_COOKIES=always, and
+  # leaving it set means the browser will not return the session cookie over
+  # http://127.0.0.1:8080 — the operator is handed a tunnel they cannot log in
+  # through, with no error naming the cause. Failing closed has to leave a way
+  # back in.
+  if [[ -z "$HTTPS_FAIL_REASON" ]] && [[ "$HTTPS_TARGET_KIND" == "hostname" ]]; then
     HTTPS_STATE="pending"
-    warn "Caddy is configured for ${HTTPS_TARGET}, but the URL did not answer yet."
-    note "This is usually DNS or certificate issuance still in progress, or ports"
-    note "80/443 not reachable from the internet. DNS Daddy itself is running."
-    note "Check with:"
-    note "  systemctl status caddy"
-    note "  journalctl -u caddy --no-pager -n 30"
-    note "  curl -v https://${HTTPS_TARGET}/api/v1/health"
+    warn "Caddy is configured for ${HTTPS_TARGET}, but no certificate has arrived yet."
+    note "Caddy keeps trying in the background, so this can still complete on its"
+    note "own — DNS propagation is not instant. Nothing here says it will."
+    note "Watch it:      journalctl -u caddy -f"
+    note "Test it:       curl -v https://${HTTPS_TARGET}/api/v1/health"
+    note "When it answers, re-run with --https to switch the dashboard over."
+    note "Until then the dashboard is reachable through the SSH tunnel below."
+    revert_env_to_tunnel
     return 0
   fi
 
+  # A known cause, or an IP that did not come up. Leaving the site configured
+  # for an address Caddy cannot produce a trusted certificate for would put a
+  # browser warning on the management interface, which is the outcome this
+  # whole path exists to avoid.
   HTTPS_STATE="failed"
   [[ -n "$HTTPS_FAIL_REASON" ]] || HTTPS_FAIL_REASON="No publicly trusted certificate was issued for ${HTTPS_TARGET}."
-  warn "$HTTPS_FAIL_REASON"
+  report_https_failure
   restore_caddyfile "$caddyfile"
   systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
   revert_env_to_tunnel
@@ -1237,8 +1401,8 @@ restore_caddyfile() { # path
 # so it cannot close the site block and open one of its own. The heredoc is
 # quoted where nothing is substituted and the substitution is a single
 # validated word where it is not.
-write_caddyfile() { # path
-  local out="$1" site tls_block=""
+write_caddyfile() { # path [with_hsts]
+  local out="$1" with_hsts="${2:-0}" site tls_block="" hsts_line=""
 
   case "$HTTPS_TARGET_KIND" in
     hostname) site="$HTTPS_TARGET" ;;
@@ -1259,6 +1423,19 @@ write_caddyfile() { # path
   # success, which is worse than failing.
   if [[ "$HTTPS_TARGET_KIND" != "hostname" ]]; then
     tls_block=$'\n\ttls {\n\t\tissuer acme {\n\t\t\tprofile shortlived\n\t\t}\n\t}\n'
+  fi
+
+  # HSTS is written only on the second pass, after a publicly trusted
+  # certificate has actually been served.
+  #
+  # The comment that used to sit on this header claimed exactly that and was
+  # wrong: write_caddyfile runs before verify_https, so the header went out
+  # with the first reload regardless of whether a certificate ever arrived.
+  # A browser ignores HSTS over an untrusted connection, so nothing was
+  # broken — but a one-year policy is not something to publish on the strength
+  # of an attempt, and the ordering now matches what the comment says.
+  if [[ "$with_hsts" == "1" ]]; then
+    hsts_line=$'\t\tStrict-Transport-Security "max-age=31536000; includeSubDomains"\n'
   fi
 
   {
@@ -1289,12 +1466,9 @@ EOF
 	encode gzip
 
 	header {
-		# The dashboard is HTTPS-only from here on. Safe because this site
-		# block is only ever written for a deployment that just proved it can
-		# serve a publicly trusted certificate — the installer restores the
-		# previous configuration when that fails, rather than leaving an HSTS
-		# policy pinned to a name it cannot serve.
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+EOF
+    printf '%s' "$hsts_line"
+    cat <<'EOF'
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		Cross-Origin-Opener-Policy "same-origin"
@@ -1314,22 +1488,118 @@ EOF
   } > "$out"
 }
 
+# caddy_recent_log prints what Caddy has said recently.
+#
+# Overridable so the test suite can feed it a captured log rather than needing
+# a journal. Not a privilege boundary: anyone who can set it already runs this
+# script as root.
+caddy_recent_log() {
+  if [[ -n "${DNSDADDY_CADDY_LOG_CMD:-}" ]]; then
+    eval "${DNSDADDY_CADDY_LOG_CMD}" 2>/dev/null
+    return 0
+  fi
+  command -v journalctl >/dev/null 2>&1 || return 1
+  journalctl -u caddy --no-pager -n 400 --since "-10 min" 2>/dev/null
+}
+
+# caddy_acme_diagnosis names why the certificate did not arrive.
+#
+# The old code guessed. It printed "usually means ports 80 and 443 are not
+# reachable" whatever had happened, because the only evidence it gathered was
+# whether curl worked. Caddy knows the answer exactly — it logs the ACME
+# problem document the CA returned — and that log was never read.
+#
+# Sets HTTPS_FAIL_REASON to a sentence naming the cause and HTTPS_FAIL_HINT to
+# the specific thing to do about it. Returns 0 only when the log actually said
+# something; a silent log means the caller falls back to its own wording rather
+# than inventing a cause from nothing.
+caddy_acme_diagnosis() {
+  local log
+  log="$(caddy_recent_log)" || return 1
+  [[ -n "$log" ]] || return 1
+
+  # Newest evidence first: a retry that has since succeeded must not be
+  # diagnosed from the attempt before it.
+  local recent
+  recent="$(printf '%s\n' "$log" | tail -120)"
+
+  # Ordered most specific first. Each arm names a cause the operator can act
+  # on, rather than a category they still have to interpret.
+  if printf '%s' "$recent" | grep -q 'cannot have public IP certificate'; then
+    HTTPS_FAIL_REASON="This Caddy's certificate library refuses public IP certificates; it predates Let's Encrypt's IP support."
+    HTTPS_FAIL_HINT="Install the current Caddy from https://caddyserver.com/docs/install and re-run with --https."
+    return 0
+  fi
+  if printf '%s' "$recent" | grep -qi 'acme:error:rateLimited\|too many certificates\|rate limit'; then
+    HTTPS_FAIL_REASON="Let's Encrypt rate-limited this request."
+    HTTPS_FAIL_HINT="Wait before retrying — repeating now makes it worse. https://letsencrypt.org/docs/rate-limits/"
+    return 0
+  fi
+  if printf '%s' "$recent" | grep -qi 'acme:error:invalidContact\|forbidden domain'; then
+    HTTPS_FAIL_REASON="Let's Encrypt rejected the ACME account contact address."
+    HTTPS_FAIL_HINT="Remove or correct the email in the tls block of ${DNSDADDY_CADDYFILE:-/etc/caddy/Caddyfile}."
+    return 0
+  fi
+  if printf '%s' "$recent" | grep -qiE 'profile.*(unknown|not supported|malformed)|(unknown|unsupported).*profile'; then
+    HTTPS_FAIL_REASON="Let's Encrypt did not accept the certificate profile this deployment asked for."
+    HTTPS_FAIL_HINT="Your Caddy may be older than the profile it is being asked to use. https://caddyserver.com/docs/install"
+    return 0
+  fi
+
+  # The connection family is the common one, and the detail distinguishes two
+  # very different situations: nothing listening at all, versus a packet that
+  # never arrived. Both are outside this host, which is exactly the point.
+  if printf '%s' "$recent" | grep -qi 'acme:error:connection'; then
+    local detail
+    detail="$(printf '%s' "$recent" | grep -oiE '"detail":"[^"]*"' | tail -1 | cut -d'"' -f4)"
+    if printf '%s' "$detail" | grep -qi 'timeout\|timed out'; then
+      HTTPS_FAIL_REASON="Let's Encrypt could not reach ${HTTPS_TARGET} — the challenge timed out."
+      HTTPS_FAIL_HINT="A firewall is dropping inbound 80/443. Open both to the internet in your cloud provider's firewall, then re-run with --https."
+    else
+      HTTPS_FAIL_REASON="Let's Encrypt could not reach ${HTTPS_TARGET} — the connection was refused."
+      HTTPS_FAIL_HINT="Inbound TCP 80 and 443 are not reaching this machine. Check your cloud firewall (Linode Cloud Firewall, AWS security group, Azure NSG, GCP firewall) allows both, then re-run with --https."
+    fi
+    [[ -n "$detail" ]] && HTTPS_FAIL_DETAIL="$detail"
+    return 0
+  fi
+  if printf '%s' "$recent" | grep -qi 'acme:error:dns\|no such host'; then
+    HTTPS_FAIL_REASON="Let's Encrypt could not resolve ${HTTPS_TARGET}."
+    HTTPS_FAIL_HINT="The public DNS record does not exist yet, or has not propagated. Check with: dig +short ${HTTPS_TARGET}"
+    return 0
+  fi
+  if printf '%s' "$recent" | grep -qi 'acme:error:unauthorized'; then
+    HTTPS_FAIL_REASON="The ACME challenge reached something at ${HTTPS_TARGET}, but not this Caddy."
+    HTTPS_FAIL_HINT="Another host or proxy is answering for that address on port 80/443. Confirm the address really points at this machine."
+    return 0
+  fi
+  if printf '%s' "$recent" | grep -qi 'dial tcp 127.0.0.1:8080\|connect: connection refused.*8080'; then
+    HTTPS_FAIL_REASON="Caddy is running, but it cannot reach DNS Daddy on 127.0.0.1:8080."
+    HTTPS_FAIL_HINT="Check the container is up: docker compose ps"
+    return 0
+  fi
+
+  return 1
+}
+
 # verify_https decides whether HTTPS actually works, and is the only thing
 # allowed to conclude that it does.
 #
-# Two probes, and the difference between them is the whole check:
+# Three sources of evidence, in decreasing order of how much they prove:
 #
 #   strict   curl with this machine's trust store. Success means a browser
 #            will be happy, which is the only definition of "working" worth
 #            printing.
+#   log      what Caddy says. A definite ACME failure is available here in
+#            seconds and means waiting out the timeout is pointless — and it
+#            names the cause, which curl never can.
 #   lax      curl -k. Success while strict fails means something IS serving
-#            TLS on 443 and its certificate is not publicly trusted — Caddy's
-#            internal CA, almost always. That is a definite answer, available
-#            immediately, and it means waiting longer is pointless.
+#            TLS and its certificate is not publicly trusted.
 #
-# Without the second probe an IP deployment would sit through the whole
-# timeout and then report "still in progress" about a state that was never
-# going to improve.
+# The lax probe used to carry the IP path on its own, on the theory that Caddy
+# would fall back to its internal CA. It does not: write_caddyfile pins
+# `issuer acme`, so when ACME fails there is no certificate at all and the
+# handshake fails too. Both probes then fail identically and the old code fell
+# through to a guess. The log is what actually distinguishes the cases.
 verify_https() {
   local url deadline lax_seen=0
   case "$HTTPS_TARGET_KIND" in
@@ -1338,32 +1608,104 @@ verify_https() {
   esac
 
   printf '  Waiting for a publicly trusted certificate for %s...\n' "$HTTPS_TARGET"
-  deadline=$((SECONDS + ${DNSDADDY_HTTPS_TIMEOUT:-45}))
+  printf '    Let'"'"'s Encrypt must reach this machine on TCP 80 and 443 to issue it.\n'
+
+  # Long enough to outlast CertMagic's own retry cadence. It backs off 60s
+  # after a failed attempt, so the old 45s default declared failure before the
+  # second attempt had started — a transient first failure was reported as a
+  # dead deployment. Three minutes covers a retry and the issuance after it.
+  deadline=$((SECONDS + ${DNSDADDY_HTTPS_TIMEOUT:-180}))
   while (( SECONDS < deadline )); do
     if curl -fsS --max-time 5 "$url" >/dev/null 2>&1; then
       pass "${url%/api/v1/health} is serving the dashboard over HTTPS"
       pass "Certificate is trusted by this machine's CA store"
       return 0
     fi
-    # -k succeeding means TLS is up and the certificate is not trusted. For a
-    # hostname that can still be a transient state during issuance, so it is
-    # only recorded; for an IP it is the answer.
+
+    # Ask Caddy before waiting again. A refused challenge or a rate limit is
+    # not going to resolve itself inside this loop, and the operator is better
+    # served by the real reason now than by a spinner and a guess later.
+    if caddy_acme_diagnosis; then
+      return 1
+    fi
+
     if curl -fsSk --max-time 5 "$url" >/dev/null 2>&1; then
       lax_seen=1
-      if [[ "$HTTPS_TARGET_KIND" != "hostname" ]]; then
-        HTTPS_FAIL_REASON="Caddy is serving a certificate for ${HTTPS_TARGET} that this machine does not trust — it fell back to its own internal CA rather than obtaining a public one."
-        return 1
-      fi
     fi
     sleep 3
   done
 
   if [[ $lax_seen -eq 1 ]]; then
     HTTPS_FAIL_REASON="TLS is answering on ${HTTPS_TARGET}, but the certificate is not publicly trusted."
-  elif [[ "$HTTPS_TARGET_KIND" != "hostname" ]]; then
-    HTTPS_FAIL_REASON="No certificate was issued for ${HTTPS_TARGET}. For an IP address that usually means ports 80 and 443 are not reachable from the internet at this address - the ACME challenge has to arrive there - or the address does not belong to this machine."
+    HTTPS_FAIL_HINT="Something other than this deployment's Caddy may be serving that address."
+  elif [[ "$HTTPS_TARGET_KIND" == "hostname" ]]; then
+    HTTPS_FAIL_REASON="No certificate has arrived for ${HTTPS_TARGET} yet, and Caddy has not reported why."
+    HTTPS_FAIL_HINT="Issuance can outlast this installer. Watch it with: journalctl -u caddy -f"
+  else
+    HTTPS_FAIL_REASON="No certificate was issued for ${HTTPS_TARGET}, and Caddy has not reported why."
+    HTTPS_FAIL_HINT="Check that inbound TCP 80 and 443 reach this machine from the internet, then re-run with --https."
   fi
   return 1
+}
+
+# verify_https_posture proves the parts of the deployment that can be proved.
+#
+# "HTTPS works" is a claim with several independent halves, and a deployment
+# can get most of them right while failing the one that matters. Each line
+# below is a separate measurement rather than an inference from the one above:
+# a certificate that verifies says nothing about whether 8080 is private, and
+# a redirect that works says nothing about the certificate.
+verify_https_posture() {
+  local url host_hdr
+  case "$HTTPS_TARGET_KIND" in
+    ipv6) url="https://[${HTTPS_TARGET}]" ;;
+    *)    url="https://${HTTPS_TARGET}" ;;
+  esac
+
+  # The certificate covers the name or address actually being used. curl
+  # already refuses a mismatch, so reaching here having used the strict probe
+  # is the check; this states it rather than leaving it implied.
+  pass "Certificate matches ${HTTPS_TARGET} and verifies against the public trust store"
+
+  # The proxy really is reaching the backend, rather than serving an error page
+  # of its own that happens to be over TLS.
+  if curl -fsS --max-time 8 "${url}/api/v1/health" 2>/dev/null | grep -q '"status"'; then
+    pass "Caddy is reaching DNS Daddy on 127.0.0.1:8080"
+  else
+    warn "TLS is up, but the dashboard API did not answer through Caddy."
+    note "Check the container: docker compose ps"
+  fi
+
+  # HTTP must not serve the dashboard. Caddy's automatic redirect is expected;
+  # a 200 here would mean the management interface is answering in plaintext.
+  host_hdr="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://${HTTPS_TARGET}/" 2>/dev/null || echo "000")"
+  case "$host_hdr" in
+    30*) pass "Plain HTTP redirects to HTTPS (${host_hdr})" ;;
+    000) note "Port 80 did not answer from here; the redirect could not be checked." ;;
+    200) warn "http://${HTTPS_TARGET}/ answered 200 rather than redirecting."
+         note "Something is serving the dashboard in plaintext. Investigate before use." ;;
+    *)   note "Plain HTTP answered ${host_hdr}; not a redirect, but not the dashboard either." ;;
+  esac
+
+  # The whole point of the architecture: the backend is not published.
+  if curl -fsS --max-time 5 "http://${HTTPS_TARGET}:8080/api/v1/health" >/dev/null 2>&1; then
+    fail "The dashboard backend is reachable at http://${HTTPS_TARGET}:8080 — it must not be."
+    note "Check DNSDADDY_DASHBOARD_BIND in ${ENV_FILE} and the ports: block in docker-compose.yml."
+  else
+    pass "Port 8080 is not reachable from outside; the backend stays on loopback"
+  fi
+}
+
+# report_https_failure prints the diagnosis, then the evidence for it.
+#
+# Kept separate from the wording above so every failure path prints the same
+# shape: what went wrong, what to do, and the CA's own words when there are
+# any — rather than each call site inventing its own layout.
+report_https_failure() {
+  warn "${HTTPS_FAIL_REASON:-HTTPS could not be configured.}"
+  [[ -n "$HTTPS_FAIL_HINT" ]]   && note "$HTTPS_FAIL_HINT"
+  [[ -n "$HTTPS_FAIL_DETAIL" ]] && note "Caddy reported: ${HTTPS_FAIL_DETAIL}"
+  note "Full detail: journalctl -u caddy --no-pager -n 50"
 }
 
 # install_caddy adds the upstream Caddy repository and installs from it.
@@ -2007,7 +2349,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
     printf '  HTTPS as working. A certificate this machine does not trust counts as\n'
     printf '  a failure, not as success.\n'
     if [[ "$HTTPS_TARGET_KIND" != "hostname" ]]; then
-      printf '\n  This is an IP-address deployment. Let'\''s Encrypt issues IP certificates\n'
+      printf '\n  This is an IP-address deployment. Let'"'"'s Encrypt issues IP certificates\n'
       printf '  only through the short-lived ACME profile (160-hour lifetime, renewed\n'
       printf '  automatically), so the generated Caddyfile pins that issuer explicitly\n'
       printf '  rather than letting Caddy fall back to its own internal CA. A certificate\n'

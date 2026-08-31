@@ -161,13 +161,41 @@ exit 0`)
 	// certificate the machine does not trust, which is what Caddy's internal
 	// CA looks like from here. Both default to failure, because an installer
 	// that reports HTTPS working when nothing answered is the bug.
+	// The stub distinguishes what a real curl would, because the installer now
+	// asks it several different questions and treating them as one made the
+	// posture checks meaningless: a stub that succeeds for every URL "proves"
+	// the backend is exposed on 8080 in a test where nothing is listening at
+	// all.
+	//
+	//   STUB_CURL_STRICT_EXIT   HTTPS with the system trust store
+	//   STUB_CURL_LAX_EXIT      the same request with -k
+	//   STUB_CURL_8080_EXIT     the public :8080 probe. Defaults to failure,
+	//                           which is the correct posture: the backend is
+	//                           on loopback and must not answer from outside.
+	//   STUB_CURL_HTTP_CODE     what plain HTTP returns, for the redirect check
+	//   STUB_CURL_HEALTH_BODY   what the health endpoint returns through Caddy
 	in.stub("curl", `
-lax=0
+lax=0; want_code=0; url=""
 for a in "$@"; do
-  case "$a" in -*k*) lax=1 ;; esac
+  case "$a" in
+    -*k*)          lax=1 ;;
+    '%{http_code}') want_code=1 ;;
+    http://*|https://*) url="$a" ;;
+  esac
 done
+case "$url" in
+  *:8080*) exit "${STUB_CURL_8080_EXIT:-1}" ;;
+esac
+if [[ $want_code -eq 1 ]]; then
+  printf '%s' "${STUB_CURL_HTTP_CODE:-301}"
+  exit 0
+fi
 if [[ $lax -eq 1 ]]; then exit "${STUB_CURL_LAX_EXIT:-1}"; fi
-exit "${STUB_CURL_STRICT_EXIT:-1}"`)
+if [[ "${STUB_CURL_STRICT_EXIT:-1}" != "0" ]]; then exit "${STUB_CURL_STRICT_EXIT:-1}"; fi
+case "$url" in
+  */api/v1/health) printf '%s' "${STUB_CURL_HEALTH_BODY:-{\"status\":\"ok\"}}" ;;
+esac
+exit 0`)
 
 	// Installing Caddy must not reach the network from a test.
 	in.stub("apt-get", `exit "${STUB_APT_EXIT:-1}"`)
@@ -1467,7 +1495,11 @@ func TestHttpsRefusesToTreatAnUntrustedCertificateAsSuccess(t *testing.T) {
 
 	notContains(t, out, "https://66.228.32.228 is serving")
 	contains(t, out, "HTTPS setup could not be completed")
-	contains(t, out, "does not trust")
+	contains(t, out, "not publicly trusted")
+	// And it fell back rather than leaving the browser to meet that
+	// certificate: the tunnel is what the operator is handed instead.
+	contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+	notContains(t, out, "http://66.228.32.228:8080")
 }
 
 func TestHttpsSuccessIsOnlyClaimedAfterATrustedCertificate(t *testing.T) {
