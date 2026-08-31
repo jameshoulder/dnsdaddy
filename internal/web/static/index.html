@@ -34,6 +34,50 @@
 </svg>
 
 <div id="login" class="login" hidden>
+  <!--
+    The login page is the first thing anyone sees, and for a lot of installs it
+    is the only page they see before deciding whether this is a serious piece of
+    software. The left panel is DNS Daddy saying what it is; the right is the
+    smallest possible form.
+
+    It states no system facts. Not the version, not whether setup is complete,
+    not whether a password has been configured — a sign-in page that reports the
+    state of the thing behind it is a reconnaissance surface, and this one is
+    reachable from the internet in the HTTPS deployment.
+  -->
+  <div class="login-aside" aria-hidden="true">
+    <svg class="login-grid" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid slice" focusable="false">
+      <defs>
+        <pattern id="lg" width="40" height="40" patternUnits="userSpaceOnUse">
+          <path d="M40 0H0V40" fill="none" stroke="currentColor" stroke-width="0.5"/>
+        </pattern>
+        <radialGradient id="lgfade" cx="50%" cy="45%" r="60%">
+          <stop offset="0%" stop-color="#fff" stop-opacity="0.85"/>
+          <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+        </radialGradient>
+        <mask id="lgmask"><rect width="400" height="400" fill="url(#lgfade)"/></mask>
+      </defs>
+      <rect width="400" height="400" fill="url(#lg)" mask="url(#lgmask)"/>
+      <!-- A resolver: one query fanning out to the sources that answer it. -->
+      <g mask="url(#lgmask)" fill="none" stroke="currentColor">
+        <path d="M200 300V210" stroke-width="1.5"/>
+        <path d="M200 210C200 160 130 170 120 120" stroke-width="1.5"/>
+        <path d="M200 210C200 160 270 170 280 120" stroke-width="1.5"/>
+        <path d="M200 210V120" stroke-width="1.5"/>
+        <circle cx="200" cy="300" r="7" fill="currentColor" stroke="none"/>
+        <circle cx="200" cy="210" r="5"/>
+        <circle cx="120" cy="120" r="4"/>
+        <circle cx="200" cy="120" r="4"/>
+        <circle cx="280" cy="120" r="4"/>
+      </g>
+    </svg>
+    <div class="login-aside-copy">
+      <span class="login-eyebrow">Protective DNS</span>
+      <p class="login-lede">Every name your network asks for, checked against threat
+        intelligence before it is answered.</p>
+    </div>
+  </div>
+
   <form class="login-card" id="login-form" autocomplete="on">
     <div class="login-brand">
       <svg class="logo-mark" viewBox="0 0 40 40" aria-hidden="true">
@@ -42,14 +86,14 @@
       <span class="wordmark">DNS <b>Daddy</b></span>
     </div>
     <h1>Sign in</h1>
-    <p class="muted">Protective DNS control centre.</p>
+    <p class="muted">This is the control plane for your resolver.</p>
     <label for="password">Admin password</label>
     <input type="password" id="password" name="password" autocomplete="current-password" required>
     <p class="form-error" id="login-error" role="alert" hidden></p>
     <button type="submit" class="btn btn-primary btn-block">Sign in</button>
     <p class="login-hint muted">
       First run? The generated password is in
-      <code>&lt;data-dir&gt;/initial-password.txt</code> and in the startup log.
+      <code>&lt;data-dir&gt;/initial-password.txt</code> on the server.
     </p>
   </form>
 </div>
