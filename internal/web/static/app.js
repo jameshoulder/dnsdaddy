@@ -1286,6 +1286,52 @@ function recentlyBlocked(rows) {
 }
 
 /**
+ * Domains blocked more than once, presented as recurrence rather than as a
+ * count in a column.
+ *
+ * A number in a table cell is a fact; "47 times, most recently 3 minutes ago"
+ * is the same fact answering the question somebody actually has, which is
+ * whether this is still happening. A single block is a page that loaded a bad
+ * ad once; forty-seven is something on the network retrying, and that is worth
+ * opening the query log for.
+ *
+ * No enrichment beyond what the server recorded: the category is the category
+ * it filed the block under, and the count and timestamp are its own.
+ */
+function repeatOffenders(domains) {
+  if (!domains || !domains.length) {
+    return emptyState(
+      'Nothing has been blocked yet',
+      'Either nothing malicious has been requested, or no device is using the resolver yet.',
+      { icon: '⌾', action: '<a class="btn btn-ghost btn-sm" href="#/setup">Check Setup</a>' }
+    );
+  }
+  const max = Math.max(...domains.map((d) => d.count));
+  return domains
+    .map((d) => {
+      const recurring = d.count > 1;
+      return html`
+        <div class="offender">
+          <div class="offender-body">
+            <span class="offender-name mono">${d.domain}</span>
+            <span class="offender-meta">
+              ${raw(d.category ? categoryBadge(d.category) : '')}
+              <span>${recurring ? `blocked ${num(d.count)} times` : 'blocked once'}</span>
+              ${raw(d.lastSeen ? html`<span>last ${relTime(d.lastSeen)}</span>` : '')}
+            </span>
+            <span class="offender-meter" aria-hidden="true">
+              <span data-width="${raw(Math.max(3, (d.count / max) * 100).toFixed(1))}"
+                    data-bg="${colourFor(d.category)}"></span>
+            </span>
+          </div>
+          <a class="btn btn-ghost btn-sm offender-go" href="#/queries"
+             data-investigate="${d.domain}">Investigate</a>
+        </div>`;
+    })
+    .join('');
+}
+
+/**
  * Which kinds of threat were blocked, as a share of the blocks in the period.
  *
  * Deliberately not a progress bar: the meter is a proportion of the largest
@@ -1447,25 +1493,8 @@ pages.threats = {
           ${raw(barList(catRows))}
         </div>
         <div class="card">
-          <div class="card-head"><div><h2>Repeat offenders</h2><p>Domains blocked most often in 7 days.</p></div></div>
-          ${raw(
-            top.domains.length
-              ? html`<div class="table-wrap"><table>
-                  <thead><tr><th>Domain</th><th>Category</th><th class="num">Blocks</th><th>Last seen</th></tr></thead>
-                  <tbody>${raw(
-                    top.domains
-                      .map(
-                        (d) => html`<tr>
-                          <td class="mono">${d.domain}</td>
-                          <td>${raw(categoryBadge(d.category))}</td>
-                          <td class="num">${num(d.count)}</td>
-                          <td class="muted nowrap">${relTime(d.lastSeen)}</td>
-                        </tr>`
-                      )
-                      .join('')
-                  )}</tbody></table></div>`
-              : emptyState('No threats blocked yet', 'Either nothing malicious has been requested, or no client is using the resolver yet.', { icon: '⚠', action: '<a class="btn btn-ghost btn-sm" href="#/setup">Check Setup</a>' })
-          )}
+          <div class="card-head"><div><h2>Repeat offenders</h2><p>Something on your network keeps asking for these.</p></div></div>
+          ${raw(repeatOffenders(top.domains))}
         </div>
       </div>
 
@@ -1477,6 +1506,17 @@ pages.threats = {
   },
   async mounted() {
     mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
+
+    // Investigate goes to the query log filtered by that domain. That is what
+    // the existing endpoint supports, and it is the whole of what the button
+    // claims: every query for this name, who asked, and when.
+    $('#view').addEventListener('click', (e) => {
+      const el = e.target.closest('[data-investigate]');
+      if (!el) return;
+      e.preventDefault();
+      pages.queries.pendingDomain = el.dataset.investigate;
+      window.location.hash = '#/queries';
+    });
   },
 };
 
@@ -1500,47 +1540,82 @@ function dnssecBadge(status) {
   return html`<span class="badge ${cls}" title="${title}">${text}</span>`;
 }
 
+/**
+ * The query log, as a telemetry stream rather than a spreadsheet.
+ *
+ * Seven columns of equal weight made every row cost the same to read, which on
+ * a page whose whole job is "find the interesting one" is the wrong trade. Each
+ * entry is now one scannable line — outcome, domain, client, time — with the
+ * technical detail behind a disclosure that only the rows worth investigating
+ * pay for.
+ *
+ * <details>/<summary> rather than a click handler: keyboard navigation, screen
+ * reader semantics and browser find-in-page all work without any of it being
+ * reimplemented, and a row stays open across a re-render of its neighbours.
+ */
 function queryTable(queries) {
   if (!queries || !queries.length) {
-    return emptyState('No queries recorded', 'Either query logging is off, or nothing has resolved through DNS Daddy yet.', { icon: '≡', action: '<a class="btn btn-ghost btn-sm" href="#/settings">Check settings</a>' });
+    return emptyState(
+      'No queries recorded',
+      'Either the query log is switched off, or nothing has resolved through DNS Daddy yet.',
+      { icon: '≡', action: '<a class="btn btn-ghost btn-sm" href="#/setup">How to point a device at it</a>' }
+    );
   }
+
+  return html`<div class="qlog">${raw(queries.map(queryRow).join(''))}</div>`;
+}
+
+// One entry. The action decides the row's accent, and the accent is never the
+// only signal: the word is there too, in a badge.
+function queryRow(q) {
+  const action = q.action === 'blocked' ? 'blocked' : q.action === 'error' ? 'error' : 'allowed';
+  const who = q.clientName || q.clientIp || '';
+
+  // Detail rows, each omitted when the server did not record it. An empty row
+  // reading "—" is noise; an absent one is an accurate statement that nothing
+  // was recorded.
+  // Each value is already-escaped HTML: html`` escapes its interpolations,
+  // and categoryBadge/dnssecBadge return escaped markup. They are collected as
+  // strings and marked raw once, at the point of insertion — wrapping them in
+  // raw() here and stringifying later turned the marker object itself into the
+  // output, which is how "[object Object]" reached the page.
+  const facts = [
+    ['Type', q.qtype ? html`<span class="mono">${q.qtype}</span>` : ''],
+    ['Client', who ? html`<span class="mono">${who}</span>` : ''],
+    ['Client address', q.clientName && q.clientIp ? html`<span class="mono">${q.clientIp}</span>` : ''],
+    ['Reason', q.reason ? html`${q.reason}` : ''],
+    ['Category', q.category ? categoryBadge(q.category) : ''],
+    ['Source', q.source ? html`${q.source}` : ''],
+    ['DNSSEC', q.dnssec ? dnssecBadge(q.dnssec) : ''],
+    ['Answered from', q.cached ? 'the local cache' : 'an upstream resolver'],
+    ['Took', typeof q.elapsedMs === 'number' ? html`${q.elapsedMs} ms` : ''],
+    ['Time', q.time ? html`${new Date(q.time).toLocaleString('en-GB')}` : ''],
+  ]
+    .filter(([, v]) => typeof v === 'string' && v !== '')
+    .map(([k, v]) => html`<div class="qfact"><dt>${k}</dt><dd>${raw(v)}</dd></div>`)
+    .join('');
+
   return html`
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th><th>Domain</th><th>Type</th><th>Client</th>
-            <th>Action</th><th>DNSSEC</th><th>Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${raw(
-            queries
-              .map(
-                (q) => html`
-                  <tr>
-                    <td class="muted nowrap">${clockTime(q.time)}</td>
-                    <td class="mono">${q.domain}</td>
-                    <td class="muted">${q.qtype}</td>
-                    <td class="mono muted">${q.clientName || q.clientIp || '—'}</td>
-                    <td>${raw(
-                      q.action === 'blocked'
-                        ? html`<span class="badge bad">Blocked</span>`
-                        : q.action === 'error'
-                          ? html`<span class="badge warn">Error</span>`
-                          : html`<span class="badge ok">Allowed</span>`
-                    )}</td>
-                    <td>${raw(dnssecBadge(q.dnssec))}</td>
-                    <td class="muted">${q.reason || '—'}${raw(q.cached ? ' <span class="badge info">cached</span>' : '')}</td>
-                  </tr>
-                `
-              )
-              .join('')
-          )}
-        </tbody>
-      </table>
-    </div>
-  `;
+    <details class="qrow is-${raw(action)}">
+      <summary>
+        <span class="qmark" aria-hidden="true"></span>
+        <span class="qdomain mono">${q.domain}</span>
+        ${raw(
+          action === 'blocked'
+            ? html`<span class="badge bad qact">Blocked</span>`
+            : action === 'error'
+              ? html`<span class="badge warn qact">Error</span>`
+              : html`<span class="badge qact qact-allowed">Allowed</span>`
+        )}
+        ${raw(q.category ? html`<span class="qcat">${q.category}</span>` : '')}
+        <span class="qclient mono">${who || '—'}</span>
+        <span class="qtime">${clockTime(q.time)}</span>
+      </summary>
+      <dl class="qfacts">${raw(facts)}</dl>
+      <div class="qactions">
+        <a class="btn btn-ghost btn-sm" href="#/queries" data-filter-domain="${q.domain}">Every query for this domain</a>
+      </div>
+    </details>`;
 }
 
 pages.queries = {
@@ -1609,6 +1684,17 @@ pages.queries = {
       }
     });
     $('#q-more').addEventListener('click', () => load(true));
+
+    // The in-row "every query for this domain" shortcut. Delegated because
+    // rows are replaced on every load, and bound once rather than per row.
+    $('#q-results').addEventListener('click', (e) => {
+      const el = e.target.closest('[data-filter-domain]');
+      if (!el) return;
+      e.preventDefault();
+      $('#q-domain').value = el.dataset.filterDomain;
+      this.state.cursor = 0;
+      load(false);
+    });
 
     // Arrived here from the topbar search. Prefill and consume it, so a later
     // visit to this page is not still filtered by something typed once.
@@ -2962,12 +3048,24 @@ pages.settings = {
       e.preventDefault();
       const form = new FormData(e.target);
       try {
-        await apiSend('POST', '/auth/password', {
+        const res = await apiSend('POST', '/auth/password', {
           currentPassword: form.get('current'),
           newPassword: form.get('next'),
         });
-        toast('Password updated');
         e.target.reset();
+
+        // Changing the password revokes every session, including this one —
+        // that is the point of it, and it is what makes the change mean
+        // something to somebody who thinks an intruder is logged in. The
+        // browser's cookie is already dead, so anything else on this page
+        // would fail on its next request with no explanation. Send them to
+        // the login screen instead, and say why.
+        if (res && res.sessionsRevoked) {
+          toast('Password updated. Every session was signed out — sign in again.');
+          showLogin();
+          return;
+        }
+        toast('Password updated');
       } catch (err) {
         reportError(err);
       }
@@ -3255,6 +3353,9 @@ if (typeof module !== 'undefined' && module.exports) {
     feedStatusBadge,
     threatIntelPanel,
     diagnosticsBanner,
+    queryTable,
+    queryRow,
+    repeatOffenders,
     firstClientCard,
     accessBadge,
     clientAccessSummary,

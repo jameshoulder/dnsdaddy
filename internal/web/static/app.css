@@ -111,21 +111,61 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 /* ---------- login ------------------------------------------------------- */
 
+/* Two panels: what this is, and the way in. The left one is the only
+   decorative surface in the product, and it is a diagram of what a resolver
+   does rather than an abstract pattern. */
 .login {
   min-height: 100vh;
   display: grid;
-  place-items: center;
-  padding: 24px;
+  grid-template-columns: 1.1fr 1fr;
+  align-items: stretch;
+}
+
+.login-aside {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  padding: var(--s8);
+  overflow: hidden;
+  background: linear-gradient(160deg, #0b0f0a 0%, var(--background) 55%);
+  border-right: 1px solid var(--border);
+  color: var(--primary);
+}
+.login-grid {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.28;
+}
+.login-aside-copy { position: relative; max-width: 30ch; }
+.login-eyebrow {
+  display: inline-block;
+  margin-bottom: var(--s3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+.login-lede {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  line-height: 1.35;
+  letter-spacing: -0.015em;
+  color: var(--foreground);
 }
 
 .login-card {
   width: 100%;
   max-width: 380px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 28px;
-  box-shadow: 0 24px 60px rgb(0 0 0 / 0.45);
+  align-self: center;
+  justify-self: center;
+  padding: var(--s7);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
 
 .login-brand {
@@ -148,6 +188,13 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .login-hint { margin: 16px 0 0; font-size: 11.5px; line-height: 1.5; }
 .login-hint code { font-size: 11px; color: var(--muted-foreground); }
+
+/* Below the split, the panel stops earning its column. */
+@media (max-width: 860px) {
+  .login { grid-template-columns: 1fr; }
+  .login-aside { display: none; }
+  .login-card { padding: var(--s6); }
+}
 
 .form-error {
   margin: 10px 0 0;
@@ -1138,4 +1185,172 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   /* 44px minimum touch target. */
   .nav a { padding: 11px 12px; }
   .btn { min-height: 38px; }
+}
+
+/* ============================================================================
+ * Query log
+ *
+ * A stream of events, not a table. Every entry is one line until somebody
+ * wants more, and the accent rail is the fastest way to find the blocked ones
+ * while scrolling — with the word "Blocked" beside it, because a colour on its
+ * own is not a status.
+ * ========================================================================== */
+
+.qlog { display: flex; flex-direction: column; }
+
+.qrow {
+  border-top: 1px solid var(--border);
+  transition: background 0.12s ease;
+}
+.qrow:first-child { border-top: 0; }
+.qrow:hover { background: var(--surface-2); }
+.qrow[open] { background: var(--surface-2); }
+
+/* Flex, not grid. The number of children varies — a category is only present
+   when the server recorded one — and a fixed column count put the last child
+   on a second row for exactly the entries that had the most to say. */
+.qrow > summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  padding: 9px var(--s3);
+  cursor: pointer;
+  list-style: none;
+  font-size: 12.5px;
+}
+.qrow > summary::-webkit-details-marker { display: none; }
+.qrow > summary:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--radius); }
+
+/* The rail. Decorative — every row also carries its outcome as a word. */
+.qmark {
+  flex: none;
+  width: 3px;
+  align-self: stretch;
+  min-height: 16px;
+  border-radius: 2px;
+  background: transparent;
+}
+.qrow.is-blocked .qmark { background: var(--danger); }
+.qrow.is-error   .qmark { background: var(--warn); }
+.qrow.is-allowed .qmark { background: var(--border-strong); }
+
+.qdomain {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
+}
+.qrow.is-allowed .qdomain { color: var(--muted-foreground); }
+
+.qact { flex: none; }
+/* An allowed query is the common case and should not shout. */
+.qact-allowed { color: var(--faint); border-color: var(--border); }
+
+.qcat {
+  flex: none;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.qclient { flex: none; font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.qtime {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The detail. Only the rows somebody opened pay for this. */
+.qfacts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: var(--s2) var(--s5);
+  margin: 0;
+  padding: var(--s2) var(--s3) var(--s4) 18px;
+}
+.qfact { min-width: 0; }
+.qfact dt {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.qfact dd {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+.qactions { padding: 0 var(--s3) var(--s4) 18px; }
+
+@media (max-width: 720px) {
+  /* The domain claims a full line and the metadata wraps under it, rather
+     than five things competing for a phone's width. */
+  .qrow > summary { flex-wrap: wrap; row-gap: 3px; }
+  .qdomain { flex: 1 1 100%; order: 1; }
+  .qmark { order: 0; }
+  .qact, .qcat, .qclient, .qtime { order: 2; }
+  .qfacts { grid-template-columns: 1fr; }
+}
+
+/* --- Repeat offenders ------------------------------------------------------
+ *
+ * The bar is the recurrence, drawn as a proportion of the worst offender, and
+ * the count that produced it is stated beside it in words. A domain asked for
+ * forty-seven times is a different problem from one asked for once, and the
+ * table this replaced made them look identical apart from a digit.
+ */
+.offender {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.offender:first-of-type { border-top: 0; }
+/* A proportion of the worst offender, drawn under the name rather than as a
+   rail beside it: a percentage width needs a horizontal track, and a
+   percentage height would need the row to have a definite one. Purely a
+   second reading of the count already stated in words above it. */
+.offender-meter {
+  display: block;
+  /* Capped, so it reads as a bar rather than as a rule under the row. */
+  max-width: 200px;
+  height: 3px;
+  margin-top: 7px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.offender-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  opacity: 0.75;
+}
+.offender-body { flex: 1 1 auto; min-width: 0; }
+.offender-name {
+  display: block;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
+}
+.offender-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px var(--s3);
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.offender-go { flex: none; }
+
+@media (max-width: 520px) {
+  .offender { flex-wrap: wrap; }
+  .offender-go { margin-left: 6px; }
 }

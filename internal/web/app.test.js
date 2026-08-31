@@ -1344,3 +1344,159 @@ test('a category label from the server is escaped', () => {
   assert.doesNotMatch(out, /<script>alert/);
   assert.match(out, /&lt;script&gt;/);
 });
+
+/* ==========================================================================
+ * Query log and threat presentation
+ *
+ * The query log was seven equal columns; it is now one scannable line per
+ * event with the detail behind a disclosure. The tests that matter are the
+ * ones a markup change can quietly break: escaping of values an attacker
+ * chooses, and the rule that nothing is displayed that the server did not
+ * record.
+ * ======================================================================== */
+
+const { queryTable, queryRow, repeatOffenders } = require('./static/app.js');
+
+function q(o = {}) {
+  return {
+    time: now(),
+    domain: 'malware.example',
+    qtype: 'A',
+    action: 'blocked',
+    reason: 'Domain is on a malware distribution list',
+    category: 'malware',
+    source: 'abuse.ch URLhaus',
+    clientIp: '10.0.0.4',
+    clientName: '',
+    cached: false,
+    elapsedMs: 3,
+    dnssec: 'unvalidated',
+    ...o,
+  };
+}
+
+test('a query row states its outcome in words, not only as a colour', () => {
+  assert.match(queryRow(q({ action: 'blocked' })), />Blocked</);
+  assert.match(queryRow(q({ action: 'allowed' })), />Allowed</);
+  assert.match(queryRow(q({ action: 'error' })), />Error</);
+
+  // Strip every class attribute — the accent rail and the row tint both live
+  // there — and the outcome must still be readable.
+  const bare = queryRow(q({ action: 'blocked' })).replace(/class="[^"]*"/g, '');
+  assert.match(bare, /Blocked/);
+});
+
+test('the detail lists only what the server actually recorded', () => {
+  const sparse = queryRow(q({
+    reason: '', category: '', source: '', clientIp: '', clientName: '',
+    dnssec: '', elapsedMs: undefined,
+  }));
+  // No empty rows reading "—": an absent fact is an accurate statement that
+  // nothing was recorded, and a dash is an invitation to wonder.
+  assert.doesNotMatch(sparse, /<dt>Reason<\/dt>/);
+  assert.doesNotMatch(sparse, /<dt>Category<\/dt>/);
+  assert.doesNotMatch(sparse, /<dt>Source<\/dt>/);
+  assert.doesNotMatch(sparse, /<dt>DNSSEC<\/dt>/);
+
+  const full = queryRow(q());
+  assert.match(full, /<dt>Reason<\/dt>/);
+  assert.match(full, /Domain is on a malware distribution list/);
+  assert.match(full, /abuse\.ch URLhaus/);
+});
+
+test('a badge in the detail is rendered, not stringified', () => {
+  // Collecting already-escaped markup and then calling String() on a raw()
+  // marker produced "[object Object]" on the page. This is that bug.
+  const out = queryRow(q());
+  assert.doesNotMatch(out, /\[object Object\]/);
+  assert.match(out, /<dt>Category<\/dt>[\s\S]*?malware/);
+});
+
+test('the domain is monospace and the row is keyboard reachable', () => {
+  const out = queryRow(q({ domain: 'paypaI-secure.example' }));
+  assert.match(out, /class="qdomain mono">paypaI-secure\.example</);
+  // <details>/<summary> rather than a click handler, so focus, Enter and
+  // find-in-page all work without reimplementing them.
+  assert.match(out, /<details class="qrow/);
+  assert.match(out, /<summary>/);
+});
+
+test('every field a hostile server or client could influence is escaped', () => {
+  const out = queryRow(q({
+    domain: '<img src=x onerror="alert(1)">.example',
+    reason: '<script>alert(2)</script>',
+    source: '<b>feed</b>',
+    clientName: '<svg onload="alert(3)">',
+    qtype: '<i>A</i>',
+  }));
+  assert.doesNotMatch(out, /<img/);
+  assert.doesNotMatch(out, /<script>alert/);
+  assert.doesNotMatch(out, /<svg onload/);
+  assert.doesNotMatch(out, /<b>feed<\/b>/);
+  assert.match(out, /&lt;img/);
+  // Escaped exactly once — a double-escaped domain is unreadable.
+  assert.doesNotMatch(out, /&amp;lt;/);
+});
+
+test('an empty query log explains both reasons it could be empty', () => {
+  const out = queryTable([]);
+  assert.match(out, /query log is switched off/i);
+  assert.doesNotMatch(out, /example\.com|malware\.example/);
+});
+
+test('repeat offenders describe recurrence rather than printing a count column', () => {
+  const out = repeatOffenders([
+    { domain: 'a.example', category: 'malware', count: 47, lastSeen: hoursAgo(1) },
+    { domain: 'b.example', category: 'phishing', count: 1, lastSeen: hoursAgo(3) },
+  ]);
+  assert.match(out, /blocked 47 times/);
+  // One block is a page that loaded a bad ad; saying "blocked 1 times" would
+  // be both wrong and louder than the fact deserves.
+  assert.match(out, /blocked once/);
+  assert.doesNotMatch(out, /blocked 1 times/);
+  assert.match(out, /last 1h ago/);
+});
+
+test('repeat offenders escape the domain and the category', () => {
+  const out = repeatOffenders([
+    { domain: '<img src=x onerror="alert(1)">', category: '<b>x</b>', count: 2, lastSeen: now() },
+  ]);
+  assert.doesNotMatch(out, /<img/);
+  assert.doesNotMatch(out, /<b>x<\/b>/);
+  assert.match(out, /&lt;img/);
+  assert.doesNotMatch(out, /&amp;lt;/);
+});
+
+test('no offenders is an explained empty state', () => {
+  const out = repeatOffenders([]);
+  assert.match(out, /Nothing has been blocked yet/);
+  assert.doesNotMatch(out, /offender-meter/);
+});
+
+/* ---------- the login page ----------------------------------------------- */
+
+test('the sign-in page reports no system state', () => {
+  const block = indexHtml.slice(indexHtml.indexOf('<div id="login"'), indexHtml.indexOf('<div id="app"'));
+  // Comments removed: they are delivered to the browser, but a comment
+  // explaining that this page discloses nothing is not itself a disclosure,
+  // and matching on it made this test fail on its own rationale.
+  const login = block.replace(/<!--[\s\S]*?-->/g, '');
+
+  // The page is reachable from the internet in the HTTPS deployment. It must
+  // not say what version this is, how long it has been up, whether a blocklist
+  // is loaded, or whether a password has been configured.
+  for (const leak of [/version/i, /uptime/i, /blocklist/i, /degraded/i]) {
+    assert.doesNotMatch(login, leak, `the login page discloses ${leak}`);
+  }
+  // And nothing writes into it at runtime either: every id the login markup
+  // carries is one the login form itself owns.
+  for (const id of ['sidebar-version', 'sidebar-status-text', 'page-title', 'refresh-note']) {
+    assert.ok(!login.includes(`id="${id}"`), `the login page carries ${id}, which shows system state`);
+  }
+  // The password field is a password field, and the browser is told what it is.
+  assert.match(login, /type="password"/);
+  assert.match(login, /autocomplete="current-password"/);
+  assert.match(login, /<label for="password">/);
+  // The decorative panel is hidden from assistive technology.
+  assert.match(login, /class="login-aside" aria-hidden="true"/);
+});
