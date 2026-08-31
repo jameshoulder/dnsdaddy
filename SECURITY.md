@@ -395,8 +395,13 @@ show.
 than VMs.** Clean Debian 13 and Ubuntu 24.04, real `dockerd` 29.3.1, real
 Compose, real Caddy 2.11.4 — options 1 and 2, the HTTPS failure path, port-53
 conflict detection, and the resulting sockets and Docker bindings inspected
-directly. [docs/deployment-matrix.md](docs/deployment-matrix.md) records exactly
-what was checked and how.
+directly. The shipped `Dockerfile` has since been built and run as well: the
+image reaches its `HEALTHCHECK`'s healthy state, a network created through the
+API survives `docker restart` in its named volume, and `/api/v1/health` over
+the published port answers `{"status":"ok"}` and nothing more, because the peer
+is the Docker bridge rather than loopback.
+[docs/deployment-matrix.md](docs/deployment-matrix.md) records exactly what was
+checked and how.
 
 What that still does not cover: a hypervisor, a real NIC, a second physical
 client on a LAN, and a machine with a public address. So ACME issuance has

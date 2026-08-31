@@ -22,6 +22,21 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+**A failed DNS start could leave a listener serving.** `Start` returned on the
+first bind error without waiting for the other listeners, so a sibling still on
+its way to bind was left mid-flight; the unwind then skipped it, because
+`ShutdownContext` refuses a server whose started flag is not yet set, and it
+came up afterwards holding the port the caller had just been told could not be
+opened. `cmd/dnsdaddy` exits on that error, so a real deployment lost the
+listener with the process — but the guarantee did not hold, and the test
+covering it could not fail. Both fixed.
+
+**Two hardening changes with no behaviour change.** Three `innerHTML` writes in
+the dashboard now go through the same sanitiser every page render already used;
+and the split between the public and authenticated route sets is pinned by a
+test rather than by which of two near-identical mux variables a line happened to
+name.
+
 **Installation and network access.** Two failures a real deployment ran into:
 installing was still too manual, and adding a network in the dashboard did not
 let that network use the resolver.
