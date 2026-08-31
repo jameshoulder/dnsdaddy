@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -2049,4 +2050,164 @@ func TestReachabilitySeparatesLocalFromExternal(t *testing.T) {
 	// here is what stops the next person conflating them.
 	contains(t, out, "does not make this")
 	contains(t, out, "open resolver")
+}
+
+// --- Rollback fidelity, log windowing, and the pending path -----------------
+
+// Re-running --https over a deployment that already works must not leave the
+// app worse off than it found it.
+//
+// The failure path restores the previous Caddyfile — which, on a working
+// deployment, is a Caddyfile that still terminates TLS and still proxies to
+// this app. Blanket-disabling the HTTPS env alongside it left the proxy up and
+// the app believing it was on plain HTTP: no Secure flag on session cookies of
+// a live public site, and every client collapsing to the proxy's own address
+// because the trusted-proxy list was gone.
+func TestARerunThatFailsKeepsAWorkingHTTPSDeploymentIntact(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	// An .env that a previous successful HTTPS install would have left.
+	in.writeEnv(strings.Join([]string{
+		"DNSDADDY_BASE_URL=https://admin.example.com",
+		"DNSDADDY_SECURE_COOKIES=always",
+		"DNSDADDY_TRUSTED_PROXY_CIDRS=172.17.0.0/16",
+	}, "\n"))
+
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=admin.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1", "STUB_GETENT_V4=192.168.1.75")
+	in.setenv(`DNSDADDY_CADDY_LOG_CMD=printf '%s' '{"problem":{"type":"urn:ietf:params:acme:error:rateLimited","detail":"too many certificates"}}'`)
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+
+	env := in.readEnv()
+	for _, want := range []string{
+		"DNSDADDY_BASE_URL=https://admin.example.com",
+		"DNSDADDY_SECURE_COOKIES=always",
+		"DNSDADDY_TRUSTED_PROXY_CIDRS=172.17.0.0/16",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("a failed re-run dropped %q from a working deployment:\n%s", want, env)
+		}
+	}
+	// And it still must not publish the backend.
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_DASHBOARD_BIND=") &&
+			strings.TrimPrefix(line, "DNSDADDY_DASHBOARD_BIND=") != "" {
+			t.Errorf("a failed re-run published the backend: %q", line)
+		}
+	}
+}
+
+// The same rollback on a FIRST install still goes to the tunnel, because there
+// was no working HTTPS configuration to preserve. Without this the fix above
+// would just be a way to leave secure cookies on where they break login.
+func TestAFailedFirstInstallStillRevertsToTheTunnel(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=admin.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1", "STUB_GETENT_V4=192.168.1.75")
+	in.setenv(`DNSDADDY_CADDY_LOG_CMD=printf '%s' '{"problem":{"type":"urn:ietf:params:acme:error:connection","detail":"refused"}}'`)
+
+	out, _ := in.run("--https", "--yes")
+	contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+
+	env := in.readEnv()
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_SECURE_COOKIES=always") {
+			t.Errorf("a failed first install left %q active; tunnel login would fail silently", line)
+		}
+	}
+}
+
+// A hostname whose issuance is simply slow must stay pending rather than being
+// rolled back. The gate for that used to test whether the failure message was
+// empty — but every timeout writes one, so the branch could never run and slow
+// issuance was always treated as a hard failure.
+func TestSlowHostnameIssuanceStaysPendingRatherThanRollingBack(t *testing.T) {
+	in := newInstall(t)
+	caddyfile := in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=admin.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1", "STUB_GETENT_V4=192.168.1.75")
+	// Caddy has logged nothing recognisable: no cause, so nothing to act on.
+	in.setenv("DNSDADDY_CADDY_LOG_CMD=printf ''")
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, out, "no certificate has arrived yet")
+	contains(t, out, "keeps trying in the background")
+	// The site stays configured, so those retries have something to retry.
+	body, err := os.ReadFile(caddyfile)
+	if err != nil {
+		t.Fatalf("the Caddyfile was rolled back despite an undiagnosed delay: %v", err)
+	}
+	if !strings.Contains(string(body), "admin.example.com") {
+		t.Errorf("the site block was removed:\n%s", body)
+	}
+	// But .env still goes back, or the tunnel it offers cannot be logged into.
+	env := in.readEnv()
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_SECURE_COOKIES=always") {
+			t.Errorf("pending left %q active; the tunnel it offers would not accept a login", line)
+		}
+	}
+}
+
+// A diagnosed hostname failure is NOT pending: it does not improve by waiting,
+// so it rolls back and says what to change.
+func TestADiagnosedHostnameFailureRollsBack(t *testing.T) {
+	in := newInstall(t)
+	caddyfile := in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=admin.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1", "STUB_GETENT_V4=192.168.1.75")
+	in.setenv(`DNSDADDY_CADDY_LOG_CMD=printf '%s' '{"problem":{"type":"urn:ietf:params:acme:error:connection","detail":"admin.example.com: Connection refused"}}'`)
+
+	out, _ := in.run("--https", "--yes")
+	notContains(t, out, "keeps trying in the background")
+	contains(t, out, "the connection was refused")
+	if body, err := os.ReadFile(caddyfile); err == nil && strings.Contains(string(body), "admin.example.com") {
+		t.Errorf("a diagnosed failure left the site configured:\n%s", body)
+	}
+}
+
+// The log reader must not diagnose from the previous run's errors. A fixed
+// ten-minute window did exactly that, so re-running after opening a firewall —
+// the expected recovery — could roll back an attempt that was going fine.
+func TestTheLogWindowStartsAtThisAttempt(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=admin.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	// The failure path, so the diagnosis actually runs and journalctl is
+	// actually invoked. Written against the success path first, this test
+	// passed with the old fixed window still in place: the log was never read
+	// at all, so there were no arguments to assert on.
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1", "STUB_GETENT_V4=192.168.1.75")
+
+	argsLog := filepath.Join(in.root, "journalctl-args.txt")
+	in.setenv("JOURNAL_ARGS_LOG=" + argsLog)
+	// Records how it was called and returns nothing, so no cause is diagnosed
+	// and the installer keeps polling — which is when the window matters.
+	in.stub("journalctl", `printf '%s\n' "$*" >> "$JOURNAL_ARGS_LOG"`)
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+
+	recorded, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("journalctl was never invoked, so the log was not consulted at all: %v", err)
+	}
+	got := string(recorded)
+	if strings.Contains(got, "-10 min") {
+		t.Errorf("the log was read with a fixed window rather than this attempt's start:\n%s", got)
+	}
+	// A timestamp, which is what confines the read to this attempt.
+	if !regexp.MustCompile(`--since \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`).MatchString(got) {
+		t.Errorf("expected --since with this attempt's timestamp, got:\n%s", got)
+	}
 }
