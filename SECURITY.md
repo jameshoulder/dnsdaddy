@@ -294,14 +294,20 @@ never reports success on the strength of having run the commands: the check is
 `curl` *without* `-k`, so a certificate this machine does not trust counts as a
 failure.
 
-That last point is not theoretical. Caddy currently refuses IP-address subjects
-before sending the ACME order ([caddyserver/caddy#7399][c7399]), so on current
-releases the raw-IP path fails — and the failure mode without care would be
-Caddy's own internal CA serving a certificate no browser trusts, in front of
-the management interface. The generated IP site pins the public ACME issuer
-explicitly so that cannot happen quietly.
+That last point is not theoretical. Left to itself, Caddy issues a certificate
+from its own internal CA for a name it considers unnameable — which would put a
+certificate no browser trusts in front of the management interface and let the
+installer call it done. The generated IP site pins the public ACME issuer
+explicitly so that cannot happen quietly, and success requires a `curl` that
+verifies against this machine's trust store.
 
-[c7399]: https://github.com/caddyserver/caddy/issues/7399
+**Raw-IP HTTPS needs Caddy 2.11 or newer.** 2.11 is the first release whose
+bundled CertMagic knows that Let's Encrypt issues IP-address certificates;
+before it, the request was refused locally and no order was ever sent. The
+installer checks the version before writing anything and says how to get a
+current Caddy rather than producing a parse error. Distribution packages are
+usually far behind — Debian 13 ships **Caddy 2.6.2** — so the upstream
+repository matters here, and the installer now reports which one it used.
 
 **Firewall exposure**, for the operator to configure — the installer does not
 open ports:
@@ -359,16 +365,16 @@ session to the browser holding it. If a cookie is captured — a shared machine,
 a proxy log, a backup — it works until one of those three things happens.
 Changing the admin password is the response, and it is now an effective one.
 
-**Raw-IP HTTPS (mode 3 with an address rather than a name) cannot succeed on
-current Caddy.** Let's Encrypt issues IP certificates through the `shortlived`
-profile, and Caddy understands the syntax, but it refuses IP subjects before
-sending the order ([caddyserver/caddy#7399][c7399-2]). The mode is implemented,
-verified and fails closed, so nothing is left in a bad state — but until that
-issue is fixed, a hostname or the SSH tunnel is the working answer. No code
-change should be needed when it is fixed: the capability is probed, not
-assumed.
-
-[c7399-2]: https://github.com/caddyserver/caddy/issues/7399
+**Raw-IP HTTPS has never been observed issuing a real certificate here.** The
+configuration is verified — the generated Caddyfile validates against Caddy
+2.11.4, adapts to the `shortlived` ACME profile, and CertMagic's own PreCheck
+returns "proceed" for a public IPv4 and a public IPv6 subject against the Let's
+Encrypt production directory — but completing an ACME order needs ports 80 and
+443 reachable from the internet at the address being certified, which the
+environment this was developed in does not have. The failure path is tested end
+to end; the success path is verified up to the point of the order. Row D5 of
+[docs/deployment-matrix.md](docs/deployment-matrix.md) is the test that closes
+that gap.
 
 **The login rate limiter is in-process and in-memory.** It resets on restart,
 and it counts nothing an attacker cannot cause it to forget by waiting fifteen
@@ -385,13 +391,18 @@ password change. A per-session view — when it was created, when it was last
 used, revoke this one — is data the table already holds and the UI does not yet
 show.
 
-**Neither installer has run against a real Docker daemon.** They are driven in
-tests against stubbed `docker`, `caddy`, `curl`, `ip`, `ss`, `systemctl` and
-`apt-get`, which is a large improvement on reading them, and not the same as
-running them. Every row of
-[docs/deployment-matrix.md](docs/deployment-matrix.md) is marked *not run*, and
-that page now carries copy-and-paste procedures for Debian and Ubuntu so that
-changing a row is a matter of pasting.
+**The installer has now run against a real Docker daemon, in containers rather
+than VMs.** Clean Debian 13 and Ubuntu 24.04, real `dockerd` 29.3.1, real
+Compose, real Caddy 2.11.4 — options 1 and 2, the HTTPS failure path, port-53
+conflict detection, and the resulting sockets and Docker bindings inspected
+directly. [docs/deployment-matrix.md](docs/deployment-matrix.md) records exactly
+what was checked and how.
+
+What that still does not cover: a hypervisor, a real NIC, a second physical
+client on a LAN, and a machine with a public address. So ACME issuance has
+never completed here, IPv6 was tested as classification logic rather than as a
+live socket (this host has no IPv6 stack), and per-client attribution across a
+real subnet is unverified.
 
 **`Forwarded` (RFC 7239) is not parsed.** That is safe in this direction — an
 unparsed header is an ignored one — and there is a test that fails if it ever
