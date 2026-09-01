@@ -1,44 +1,85 @@
 /*
- * DNS Daddy dashboard.
+ * DNS Daddy dashboard — V3.
  *
- * Design tokens are lifted directly from the DNS Daddy brand guide and the
- * marketing site's styles.css so the self-hosted dashboard, the marketing
- * page, and the hosted control centre read as one product.
+ * The identity is a globe carrying network nodes under a protective shield,
+ * and the palette says the same thing the mark does: cyan is the network you
+ * are watching, green is the protection over it. That split is the whole
+ * point of the V3 colour system and it is load-bearing, not decorative —
+ * "everything accented green" was what made V2 read as a dark admin panel
+ * with lime buttons rather than as a security console.
+ *
+ * The rule, stated once so it can be applied everywhere below:
+ *
+ *   CYAN    observation, network, telemetry, selection, "here is data"
+ *   GREEN   protection, healthy, success, the primary affirmative action
+ *   RED     genuine danger — malicious, failed, blocked-because-hostile
+ *   AMBER   warning, degraded, needs attention but not broken
+ *   VIOLET  behavioural detections, which are alerts and not verdicts
+ *
+ * Never green for a thing that is merely clickable. Never colour alone for a
+ * state: every coloured signal in this file has a word beside it.
  */
 
 :root {
-  /* Primary dark palette.
+  /* Ground and surfaces.
    *
-   * V2 moves the page ground darker and the raised surfaces lighter, so cards
-   * separate by value rather than by outline. Borders survive only where they
-   * carry meaning — table rules, inputs, the sidebar edge — which is most of
-   * what made V1 read as an admin panel. */
-  --background: #07080b;   /* Graphite, near black */
-  --surface: #101318;      /* Elevated card */
-  --surface-2: #171b22;    /* Input, hover, table head */
-  --surface-3: #1e232c;    /* Highest: hero, popovers */
-  --border: #232932;       /* Quieter than V1's #2a313b */
-  --border-strong: #313945;
-  --foreground: #f2f5f8;
-  --muted-foreground: #99a3b2;
-  --faint: #828d9e;        /* 4.7:1 on the darkest card, so small labels still pass AA */
+   * Midnight navy rather than V2's neutral graphite. The hue is what lets
+   * cyan sit on the page as a sibling of the background instead of as a
+   * sticker on top of it, and it gives the surfaces somewhere to go: each
+   * step up is lighter AND very slightly bluer, so depth reads even where
+   * there is no border at all. */
+  --background: #060B14;   /* Deep midnight. The page itself. */
+  --surface: #0C1524;      /* Card, sidebar */
+  --surface-2: #121D30;    /* Input, hover, table head */
+  --surface-3: #18263D;    /* Highest: hero, popovers, active nav */
+  --border: #1E2C42;       /* Quiet separation */
+  --border-strong: #2A3D59; /* Where a line has to be seen */
 
-  --primary: #bfed6d;      /* DNS Lime */
-  --primary-foreground: #090b0f;
-  --primary-dim: #a8d644;  /* Lime accent, for text on dark */
+  --foreground: #EAF2FA;   /* Near white, faintly cool */
+  --muted-foreground: #94A9C4;  /* 5.1:1 on --surface */
+  --faint: #7E93B0;        /* 4.6:1 on --surface, so small labels pass AA */
 
-  /* Semantic colour. Each has one job, and lime is not one of them: lime is
-   * brand, healthy and primary action only, so a lime thing is never a
-   * warning and a red thing is always real. */
-  --danger: #ff6b7a;       /* Genuine security or error conditions only */
-  --warn: #f5b05a;         /* Warnings, never errors */
-  --info: #6db3fb;         /* Informational */
-  --violet: #b48ef0;       /* Detections */
+  /* Brand cyan — the network. Used for observation, telemetry, selection and
+   * the decorative topology motifs. Three weights because a hover state, a
+   * chart line and a 1px indicator need different amounts of presence. */
+  --brand-cyan: #22D3EE;
+  --brand-cyan-soft: #67E8F9;   /* Lighter: nodes, small text on dark */
+  --brand-cyan-dim: #0E7490;    /* Darker: rules, inactive indicators */
+  --brand-cyan-bg: rgb(34 211 238 / 0.10);
+
+  /* Brand green — protection. The primary action colour, and deliberately
+   * rationed: if everything affirmative is green then nothing is. */
+  --primary: #BFED6D;      /* DNS Lime */
+  --primary-foreground: #06121A;
+  --primary-dim: #A8D644;  /* Text weight on dark */
+  --primary-bg: rgb(191 237 109 / 0.10);
+
+  /* Semantic. Each has one job. */
+  --danger: #FF6B7A;       /* Genuine security or error conditions only */
+  --warn: #F5B05A;         /* Warnings, never errors */
+  --info: var(--brand-cyan);  /* Informational is the network colour */
+  --violet: #B48EF0;       /* Detections */
   --danger-bg: rgb(255 107 122 / 0.10);
   --warn-bg: rgb(245 176 90 / 0.10);
-  --info-bg: rgb(109 179 251 / 0.10);
+  --info-bg: var(--brand-cyan-bg);
   --violet-bg: rgb(180 142 240 / 0.10);
-  --ok-bg: rgb(191 237 109 / 0.10);
+  --ok-bg: var(--primary-bg);
+  /* Keylines at the same hue as the tints above. Each semantic colour needs a
+   * background AND a border weight, and hand-writing the second one is how a
+   * palette drifts: three rules below still carried V2's blue and V2's red
+   * long after the tokens moved, so a "cyan" badge was drawing itself in the
+   * old sky blue. Derived once, used everywhere. */
+  --danger-line: rgb(255 107 122 / 0.35);
+  /* A deeper red for the one place danger is a fill rather than a mark.
+   * --danger is tuned to be read AS TEXT on midnight, which makes it a hot
+   * pink when it becomes a background: fifty filled pills down a block log
+   * looked like a consumer app shouting, and loud is not the same as serious.
+   * The deeper fill is still unmistakably the heaviest thing on the row. */
+  --danger-solid: #B3273A;
+  --warn-line: rgb(245 176 90 / 0.35);
+  --info-line: rgb(34 211 238 / 0.35);
+  --violet-line: rgb(180 142 240 / 0.35);
+  --ok-line: rgb(191 237 109 / 0.35);
 
   --radius: 0.5rem;
   --radius-lg: 0.75rem;
@@ -55,15 +96,32 @@
   --s7: 32px;
   --s8: 40px;
 
-  /* Depth. Borders do most of the work on a dark UI; shadows are kept faint
-   * so cards separate from the background without looking like they float. */
-  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.28);
-  --shadow-2: 0 2px 8px rgb(0 0 0 / 0.32), 0 1px 2px rgb(0 0 0 / 0.24);
-  --ring: 0 0 0 2px rgb(191 237 109 / 0.45);
+  /* Depth. Tonal layering does most of the work; shadows stay faint so cards
+   * separate from the background without looking like they float, and there is
+   * no glow on ordinary content. Glow is reserved for the two or three places
+   * that carry the brand. */
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35);
+  --shadow-2: 0 4px 16px rgb(0 0 0 / 0.40), 0 1px 2px rgb(0 0 0 / 0.30);
+
+  /* Focus is cyan, not green.
+   *
+   * Green is the action colour, so a green ring on a focused destructive
+   * button said two contradictory things at once. Cyan is the selection and
+   * attention colour throughout, it has more contrast against midnight than
+   * lime does, and it never collides with the meaning of the control it is
+   * sitting on. */
+  --ring: 0 0 0 2px rgb(34 211 238 / 0.55);
 
   /* A hairline lift on raised surfaces: one pixel of light along the top edge
-   * reads as depth far more cheaply than a glow. */
-  --edge: inset 0 1px 0 rgb(255 255 255 / 0.04);
+   * reads as depth far more cheaply than a glow. NOTE: this is a box-shadow,
+   * not a colour. Using it in a `border` silently produces no border at all.  */
+  --edge: inset 0 1px 0 rgb(255 255 255 / 0.05);
+
+  /* Atmosphere. Two radial washes used sparingly — the status hero and the
+   * login aside — to give the brand somewhere to breathe. Anything that uses
+   * these should still be legible with them switched off. */
+  --glow-cyan: radial-gradient(60% 80% at 78% 8%, rgb(34 211 238 / 0.13), transparent 70%);
+  --glow-green: radial-gradient(50% 70% at 12% 100%, rgb(191 237 109 / 0.09), transparent 72%);
 
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-display: 'Space Grotesk', 'Inter', ui-sans-serif, system-ui, sans-serif;
@@ -98,7 +156,9 @@ h1, h2, h3, h4 {
   margin: 0;
 }
 
-::selection { background: var(--primary); color: var(--primary-foreground); }
+/* Selection is cyan, not green: the same colour that marks the selected nav
+   item, the focus ring and the active filter. Green is reserved for actions. */
+::selection { background: var(--brand-cyan); color: var(--primary-foreground); }
 
 a { color: var(--primary-dim); }
 
@@ -117,44 +177,71 @@ code, pre, .mono { font-family: var(--font-mono); }
 .login {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 1.1fr 1fr;
+  grid-template-columns: 1.15fr 1fr;
   align-items: stretch;
+  /* The form side is a shade lighter than the brand side, so the split reads
+     as two deliberate halves rather than as a panel floating next to a void.
+     Very slight: enough to see the seam, not enough to become a second card. */
+  background: linear-gradient(180deg, #0A1120 0%, var(--background) 70%);
 }
 
 .login-aside {
   position: relative;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
   padding: var(--s8);
   overflow: hidden;
-  background: linear-gradient(160deg, #0b0f0a 0%, var(--background) 55%);
+  background: var(--glow-cyan), var(--glow-green), linear-gradient(160deg, #0A1526 0%, var(--background) 62%);
   border-right: 1px solid var(--border);
+  /* The wireframe inherits this, so the whole illustration is one colour and
+     the nodes read as part of the same network rather than as decoration
+     scattered over it. */
+  color: var(--brand-cyan);
+}
+
+.login-globe {
+  width: min(86%, 440px);
+  height: auto;
+  flex: none;
+  opacity: 1;
+  filter: drop-shadow(0 0 46px rgb(34 211 238 / 0.22));
+}
+
+/* The one live node in the illustration. A slow pulse, because a resolver
+   that is running is doing something; everything else in the drawing is
+   still. Switched off entirely under reduced motion. */
+.login-globe-core {
   color: var(--primary);
+  animation: node-pulse 3.4s ease-in-out infinite;
+  transform-origin: 210px 178px;
 }
-.login-grid {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0.28;
+@keyframes node-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(1.28); }
 }
-.login-aside-copy { position: relative; max-width: 30ch; }
-.login-eyebrow {
-  display: inline-block;
-  margin-bottom: var(--s3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
+
+.login-aside-copy { position: relative; max-width: 36ch; text-align: center; margin-top: var(--s7); }
+
+/* PROTECT. OBSERVE. RESPOND. — the supporting phrase, used here and on
+   Assurance, and deliberately not in the sidebar where it would be noise. */
+.login-tagline {
+  margin: 0 0 var(--s3);
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: var(--primary);
+  color: var(--brand-cyan-soft);
 }
 .login-lede {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 22px;
-  line-height: 1.35;
-  letter-spacing: -0.015em;
-  color: var(--foreground);
+  font-size: 19px;
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  color: var(--muted-foreground);
 }
 
 .login-card {
@@ -171,9 +258,11 @@ code, pre, .mono { font-family: var(--font-mono); }
 .login-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 22px;
+  gap: 11px;
+  margin-bottom: 26px;
 }
+.logo-mark-lg { width: 38px; height: 38px; filter: drop-shadow(0 0 14px rgb(34 211 238 / 0.3)); }
+.wordmark-lg { font-size: 21px; }
 
 .login-card h1 { font-size: 22px; }
 .login-card > p { margin: 6px 0 20px; }
@@ -212,8 +301,13 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .sidebar {
   border-right: 1px solid var(--border);
-  background: rgb(15 19 25 / 0.6);
-  backdrop-filter: blur(8px);
+  /* A very slight vertical lift and one cyan hairline down the inside edge.
+   * The hairline is what makes the sidebar read as the edge of a console
+   * rather than as a column of links on the same sheet as the content. */
+  background:
+    linear-gradient(180deg, rgb(24 38 61 / 0.55) 0%, rgb(12 21 36 / 0.75) 42%, rgb(12 21 36 / 0.75) 100%);
+  box-shadow: inset -1px 0 0 rgb(34 211 238 / 0.07);
+  backdrop-filter: blur(10px);
   display: flex;
   flex-direction: column;
   padding: 18px 14px;
@@ -230,6 +324,10 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 
 .logo-mark { width: 28px; height: 28px; flex: none; }
+
+/* The mark carries the only glow in the sidebar, and a small one: it marks
+ * the product, and nothing else in the chrome competes with it. */
+.brand .logo-mark { filter: drop-shadow(0 0 10px rgb(34 211 238 / 0.28)); }
 
 .wordmark {
   font-family: var(--font-display);
@@ -251,8 +349,8 @@ code, pre, .mono { font-family: var(--font-mono); }
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--muted-foreground);
-  opacity: 0.65;
+  color: var(--faint);
+  opacity: 0.9;
 }
 .nav-group:first-child { padding-top: var(--s2); }
 
@@ -269,7 +367,10 @@ code, pre, .mono { font-family: var(--font-mono); }
   transition: background 0.12s, color 0.12s;
 }
 
-.nav a:hover { background: var(--surface-2); color: var(--foreground); }
+.nav a:hover {
+  background: rgb(34 211 238 / 0.06);
+  color: var(--foreground);
+}
 .nav a .nav-ico {
   width: 17px;
   height: 17px;
@@ -287,24 +388,33 @@ code, pre, .mono { font-family: var(--font-mono); }
 .nav a[data-route="threats"] .nav-ico circle { fill: currentColor; stroke: none; }
 .nav a:hover .nav-ico, .nav a.active .nav-ico { opacity: 1; }
 
-/* The active item gets a lime rail rather than only a fill, so the current
- * page is findable at a glance instead of by comparing background tints. */
+/* The active item.
+ *
+ * V2 made it green text on a green-tinted rectangle, which put the action
+ * colour on a thing that is not an action and left "where am I" competing
+ * with "what should I click". V3 states it three ways instead, none of them
+ * green: a cyan rail, a cyan surface, and full-contrast text against the
+ * muted rest of the list. Colour is never the only carrier — the text weight
+ * and contrast shift too, so the current item is findable with the hue
+ * removed entirely. */
 .nav a.active::before {
   content: '';
   position: absolute;
   left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 2px;
-  border-radius: 0 2px 2px 0;
-  background: var(--primary);
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--brand-cyan);
+  box-shadow: 0 0 8px rgb(34 211 238 / 0.5);
 }
 
 .nav a.active {
-  background: rgb(191 237 109 / 0.1);
-  color: var(--primary);
-  font-weight: 500;
+  background: linear-gradient(90deg, rgb(34 211 238 / 0.14), rgb(34 211 238 / 0.04));
+  color: var(--foreground);
+  font-weight: 600;
 }
+.nav a.active .nav-ico { color: var(--brand-cyan-soft); }
 
 .nav-ico { width: 16px; text-align: center; opacity: 0.85; font-size: 13px; }
 
@@ -327,9 +437,21 @@ code, pre, .mono { font-family: var(--font-mono); }
   flex: none;
 }
 
-.status-chip.ok .dot { background: var(--primary); box-shadow: 0 0 0 3px rgb(191 237 109 / 0.15); }
-.status-chip.warn .dot { background: var(--warn); box-shadow: 0 0 0 3px rgb(255 180 90 / 0.15); }
-.status-chip.bad .dot { background: var(--danger); box-shadow: 0 0 0 3px rgb(249 117 131 / 0.15); }
+.status-chip.ok .dot {
+  background: var(--primary);
+  box-shadow: 0 0 0 3px rgb(191 237 109 / 0.15);
+  animation: live-pulse 3s ease-in-out infinite;
+}
+
+/* The one ambient animation in the chrome: a slow breath on the "resolver
+   online" dot, because a resolver that is up is doing something continuously.
+   Nothing else in the interface moves on its own. */
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgb(191 237 109 / 0.15); }
+  50%      { box-shadow: 0 0 0 5px rgb(191 237 109 / 0.06); }
+}
+.status-chip.warn .dot { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-bg); }
+.status-chip.bad .dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-bg); }
 
 .main { display: flex; flex-direction: column; min-width: 0; }
 
@@ -341,7 +463,7 @@ code, pre, .mono { font-family: var(--font-mono); }
   position: sticky;
   top: 0;
   z-index: 20;
-  background: rgb(7 8 11 / 0.86);
+  background: rgb(6 11 20 / 0.88);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
 }
@@ -362,7 +484,13 @@ code, pre, .mono { font-family: var(--font-mono); }
   border-radius: 999px;
   transition: border-color 0.12s ease;
 }
-.topbar-search:focus-within { border-color: var(--primary-dim); box-shadow: var(--ring); }
+.topbar-search:hover { border-color: var(--border-strong); }
+.topbar-search:focus-within {
+  border-color: var(--brand-cyan);
+  box-shadow: var(--ring);
+  background: var(--surface-3);
+}
+.topbar-search:focus-within svg { stroke: var(--brand-cyan); }
 .topbar-search svg { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--faint); }
 .topbar-search input {
   border: 0;
@@ -413,18 +541,37 @@ a.btn.btn-primary { color: var(--primary-foreground); }
   border-color: transparent;
   box-shadow: var(--shadow-1);
 }
-.btn-primary:hover:not(:disabled) { background: #cbf383; }
+.btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 84%, #fff); }
 .btn-primary:active:not(:disabled) { background: var(--primary-dim); }
 
+/* Ghost is the default control: quiet, neutral, and the one used most.
+ * Hover picks up a cyan edge rather than a green one — these are things you
+ * look at with, not things you commit with. */
 .btn-ghost {
-  background: var(--surface);
+  background: var(--surface-2);
   border-color: var(--border);
   color: var(--foreground);
 }
-.btn-ghost:hover:not(:disabled) { background: var(--surface-2); }
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--brand-cyan-dim);
+}
+
+/* Investigation actions — "Query log", "All threats", "View details" — are
+ * cyan-tinted so a page's navigational verbs are visibly a different family
+ * from its committing verbs. */
+.btn-observe {
+  background: rgb(34 211 238 / 0.09);
+  border-color: rgb(34 211 238 / 0.28);
+  color: var(--brand-cyan-soft);
+}
+.btn-observe:hover:not(:disabled) {
+  background: rgb(34 211 238 / 0.16);
+  border-color: var(--brand-cyan);
+}
 
 .btn-danger { background: transparent; border-color: var(--border); color: var(--danger); }
-.btn-danger:hover:not(:disabled) { background: rgb(249 117 131 / 0.1); }
+.btn-danger:hover:not(:disabled) { background: var(--danger-bg); }
 
 .btn-block { width: 100%; display: block; margin-top: 4px; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
@@ -451,14 +598,33 @@ input, select, textarea {
   border-radius: var(--radius);
 }
 
+/* Checkboxes and radios are the last unbranded thing on the page.
+ *
+ * Nothing set accent-color, so every tick in the product — the blocked
+ * categories, the resolver-access boxes, the query-log filters — was drawn in
+ * the browser's default blue, a colour that appears nowhere in the palette.
+ * Cyan, because a tick is a selection, and selection is cyan throughout. */
+input[type="checkbox"], input[type="radio"] { accent-color: var(--brand-cyan); }
+
+/* A text field a thousand pixels wide holding "10.0.10.0/24" is not generous,
+   it is unmeasured. Wide screens get whitespace; the field keeps a length that
+   matches what goes in it. Grid columns narrower than this are unaffected. */
+label.field { max-width: 46rem; }
+
+
+/* Focus is cyan everywhere, including on green and red controls.
+ *
+ * A focus ring says "keyboard is here". Drawing it in the action colour meant
+ * a focused Delete button wore a green ring, which is the colour that means
+ * "safe, go ahead" two lines above it. One colour, one meaning. */
 input:focus-visible, select:focus-visible, textarea:focus-visible,
 .btn:focus-visible, .nav a:focus-visible, a:focus-visible, summary:focus-visible {
   outline: none;
   box-shadow: var(--ring);
-  border-color: var(--primary-dim);
+  border-color: var(--brand-cyan);
 }
 input:focus, select:focus, textarea:focus, .btn:focus-visible, .nav a:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--brand-cyan);
   outline-offset: 1px;
 }
 
@@ -489,24 +655,69 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 .checkline input { width: auto; margin-top: 2px; flex: none; }
 .checkline .cat-desc { display: block; font-size: 11.5px; color: var(--muted-foreground); }
 
+/* A ticked box that enforces nothing.
+ *
+ * The count beside each category is honest on its own, but "Cryptomining ✓ ·
+ * 0 domains indexed" reads at a glance as "cryptomining is handled" when what
+ * it means is that the list behind it never loaded. Amber, because this is a
+ * gap in protection the operator has not been told about anywhere else. */
+.checkline .cat-empty {
+  display: block;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--warn);
+}
+.checkline .cat-empty a { color: var(--warn); }
+
 /* ---------- layout primitives ------------------------------------------- */
 
-.grid { display: grid; gap: var(--s4); }
+/* Grids size their cards to content, not to the tallest sibling.
+ *
+ * Stretching left a category breakdown with three rows sitting in a card as
+ * tall as the eight-row list beside it, and half of a dashboard column was
+ * empty navy. Cards that genuinely want to fill their row opt in with
+ * .grid-stretch. */
+.grid { display: grid; gap: var(--s4); align-items: start; }
+.grid-stretch { align-items: stretch; }
 .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* A narrow summary beside the thing it summarises.
+ *
+ * Two equal columns are wrong when one holds a four-row breakdown and the
+ * other holds twenty-five records: the short card leaves a column of empty
+ * page as tall as the long one, and the long one is squeezed into half the
+ * width it needs. Sized to the content instead. */
+.grid-side { grid-template-columns: minmax(0, 320px) minmax(0, 1fr); }
 .stack { display: flex; flex-direction: column; gap: var(--s4); }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row-end { margin-left: auto; }
 .section { margin-bottom: var(--s6); }
 
+/* Cards.
+ *
+ * A card should exist because information belongs together, not because text
+ * needs a rectangle. V2 gave every card the same border, the same radius and
+ * the same shadow, so a page of six sections read as six identical boxes and
+ * the hierarchy came entirely from the headings inside them.
+ *
+ * V3 keeps one card class but makes it quieter: the separation comes from the
+ * surface being a step lighter than the page and from a hairline along the top
+ * edge, with the border reduced to something you notice only where two cards
+ * meet. Radius is smaller — a 12px radius on a 900px panel reads as a widget,
+ * not as a console. */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius);
   padding: var(--s5);
-  box-shadow: var(--shadow-1), var(--edge);
+  box-shadow: var(--edge);
 }
+
+/* Cards that carry an accent do it with a single left rule in the semantic
+ * colour, which is cheaper than a tinted background and never fights the
+ * content sitting on it. */
+.card.is-accent { border-left: 2px solid var(--brand-cyan-dim); }
 
 /* A card that leads a page carries a little more presence than one in a
  * grid of four. */
@@ -519,7 +730,13 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
   margin-bottom: 14px;
 }
 
-.card-head h2 { font-size: 14.5px; letter-spacing: -0.005em; }
+.card-head h2 {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+}
 .card-head p { margin: 3px 0 0; font-size: 12px; color: var(--muted-foreground); max-width: 68ch; }
 
 /* An eyebrow above a card title carries the category without spending a
@@ -552,8 +769,19 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 }
 
 .metric .sub { font-size: 12px; color: var(--muted-foreground); margin-top: 2px; }
-.metric.accent .value { color: var(--primary); }
-.metric.danger .value { color: var(--danger); }
+
+/* Tones, named for the words the callers actually pass.
+ *
+ * These were `.accent` and `.danger`, which nothing produced: metricCard is
+ * called with tone 'bad' and 'detect', so a non-zero high-severity count —
+ * the one number on the page that has to be seen — rendered in the same
+ * neutral white as the zeroes beside it. A style rule keyed to a class name
+ * no caller emits is not a subtle bug; it is a control that silently does
+ * nothing, which is the same failure mode as an unreachable branch. */
+.metric.ok .value { color: var(--primary); }
+.metric.warn .value { color: var(--warn); }
+.metric.bad .value { color: var(--danger); }
+.metric.detect .value { color: var(--violet); }
 
 /* ---------- badges ------------------------------------------------------ */
 
@@ -562,7 +790,10 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
   align-items: center;
   gap: 5px;
   padding: 2px 8px;
-  border-radius: 999px;
+  /* A chip, not a pill. A capsule reads as a sticker applied to the page; at
+   * the density these appear — one per log row, several per table row — the
+   * softer corner keeps them as what they are, a value in a column. */
+  border-radius: var(--radius-sm);
   font-size: 11.5px;
   font-weight: 600;
   border: 1px solid var(--border);
@@ -574,10 +805,53 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 /* A dot carries state faster than a colour-shifted label, and survives being
  * read by someone who cannot separate the hues. */
 .badge .dot { width: 6px; height: 6px; border-radius: 999px; background: currentColor; flex: none; }
-.badge.ok { color: var(--primary); border-color: rgb(191 237 109 / 0.35); background: rgb(191 237 109 / 0.1); }
-.badge.bad { color: var(--danger); border-color: rgb(249 117 131 / 0.35); background: rgb(249 117 131 / 0.1); }
-.badge.warn { color: var(--warn); border-color: rgb(255 180 90 / 0.35); background: rgb(255 180 90 / 0.1); }
-.badge.info { color: var(--info); border-color: rgb(126 196 255 / 0.35); background: rgb(126 196 255 / 0.1); }
+.badge.ok { color: var(--primary); border-color: var(--ok-line); background: var(--ok-bg); }
+/* Filled rather than outlined, so a blocked threat is visibly heavier than
+   the amber warning badge beside it. In the query log both appear on the same
+   row, and the outlined pair gave a transient resolver error the same weight
+   as a malware block. */
+.badge.bad {
+  color: #FFECEF;
+  border-color: var(--danger-solid);
+  background: var(--danger-solid);
+  font-weight: 700;
+}
+.badge.warn { color: var(--warn); border-color: var(--warn-line); background: var(--warn-bg); }
+/* Detections are violet across the product, and a maturity tier is a property
+   of the detector rather than a caution about the traffic. It used to be amber,
+   sitting one column from an amber "medium" severity: two different meanings
+   wearing the same colour, in the same row. */
+.badge.tier { color: var(--violet); border-color: var(--violet-line); background: var(--violet-bg); }
+
+/* A claim chip sits inside a heading, so it must not inherit the heading's
+   weight or ride its baseline. */
+.badge.claim {
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 2px;
+  margin-left: var(--s2);
+}
+
+/* The key that gives those chips their meaning. Definition list, because that
+   is what it is: a term and what the term is being used to say. */
+.claim-key { margin: var(--s4) 0 0; display: grid; gap: var(--s3); }
+.claim-key-row {
+  display: grid;
+  /* The term column is as wide as the longest chip, not a guessed pixel
+     value: "Not verified" is half as wide again as "Tested". */
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: baseline;
+}
+.claim-key-row dt { margin: 0; }
+.claim-key-row dt .badge.claim { margin-left: 0; vertical-align: 0; }
+.claim-key-row dd { margin: 0; font-size: 12.5px; color: var(--muted-foreground); }
+
+@media (max-width: 620px) {
+  .claim-key-row { grid-template-columns: minmax(0, 1fr); gap: var(--s1); }
+}
+.badge.info { color: var(--info); border-color: var(--info-line); background: var(--info-bg); }
 
 /* ---------- tables ------------------------------------------------------ */
 
@@ -630,17 +904,33 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   align-items: center;
   gap: var(--s2);
 }
+/* Empty states.
+ *
+ * An absence is not a success, so the badge is not green. It is the network
+ * colour with a faint node ring around it — the same motif as the mark — which
+ * says "nothing has arrived here yet" rather than "all clear". The
+ * distinction matters on a security product: a dashboard that renders an
+ * unmeasured state in the safe colour is lying by decoration. */
 .empty-ico {
-  width: 34px;
-  height: 34px;
+  position: relative;
+  width: 40px;
+  height: 40px;
   display: grid;
   place-items: center;
-  border-radius: 10px;
-  margin-bottom: var(--s1);
-  background: rgb(191 237 109 / 0.08);
-  border: 1px solid rgb(191 237 109 / 0.18);
-  color: var(--primary);
+  border-radius: 999px;
+  margin-bottom: var(--s2);
+  background: rgb(34 211 238 / 0.07);
+  border: 1px solid rgb(34 211 238 / 0.2);
+  color: var(--brand-cyan-soft);
   font-size: 15px;
+}
+/* One concentric ring, echoing the hero topology. Decorative. */
+.empty-ico::after {
+  content: '';
+  position: absolute;
+  inset: -7px;
+  border-radius: 999px;
+  border: 1px solid rgb(34 211 238 / 0.12);
 }
 .empty p { margin: 0; max-width: 46ch; line-height: 1.6; }
 .empty .row { justify-content: center; margin-top: var(--s2); }
@@ -675,7 +965,10 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   color: var(--foreground);
 }
 
-.copy-row { display: flex; gap: 8px; align-items: stretch; }
+/* Capped for the same reason the form fields are: a resolver address or a
+   DoH URL is sixty characters, and a box a thousand pixels wide holding sixty
+   characters puts the Copy button a hand's width from the text it copies. */
+.copy-row { display: flex; gap: 8px; align-items: stretch; max-width: 46rem; }
 .copy-row .code { flex: 1; min-width: 0; }
 
 /* ---------- toasts ------------------------------------------------------ */
@@ -711,13 +1004,19 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  /* Explicitly stopped rather than left to the blanket rule above: an
+     infinite loop with a 0.001ms duration still runs, it just runs
+     imperceptibly fast, which is not the same as being off. */
+  .status-chip.ok .dot,
+  .login-globe-core { animation: none !important; }
+  .login-globe-core { opacity: 1; transform: none; }
 }
 
 /* ---------- responsive -------------------------------------------------- */
 
 @media (max-width: 980px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .grid-3, .grid-2 { grid-template-columns: 1fr; }
+  .grid-3, .grid-2, .grid-side { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 760px) {
@@ -839,8 +1138,15 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
  * page that asks the operator for a decision — not because the Observatory is
  * better intelligence than the independent feeds it sits alongside.
  */
+/* Cyan, not green.
+ *
+ * This card is an offer of threat intelligence, not a report that anything is
+ * healthy — and it sits above the actual threat data, so a green rail made the
+ * brightest thing on a page about blocked malware read as reassurance. Cyan is
+ * the colour of information and of the feeds themselves. The Enable button
+ * inside it stays green: that one really is a protective commitment. */
 .observatory {
-  border-left: 3px solid var(--primary);
+  border-left: 3px solid var(--brand-cyan-dim);
 }
 
 .observatory p { margin: 0 0 8px; }
@@ -991,15 +1297,52 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
  * ==========================================================================*/
 
 /* --- Status hero ---------------------------------------------------------- */
+/* The status hero.
+ *
+ * This is the one element allowed atmosphere: a cyan wash from the top right
+ * and a green one from the bottom left, echoing the mark's own split. It also
+ * carries a decorative topology motif (.hero-topo below), which is drawn in
+ * CSS and is explicitly NOT data — see the note there.
+ *
+ * Everything here must stay legible with both washes removed, because they
+ * are the first thing a reduced-transparency or forced-colours mode drops. */
 .hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.025), transparent 40%),
-    var(--surface);
-  border: 1px solid var(--border);
+    var(--glow-cyan),
+    var(--glow-green),
+    linear-gradient(180deg, rgb(255 255 255 / 0.03), transparent 42%),
+    var(--surface-3);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   padding: var(--s6);
   margin-bottom: var(--s5);
   box-shadow: var(--shadow-2), var(--edge);
+}
+
+/* Decorative topology.
+ *
+ * Concentric rings and a faint grid, drawn behind the hero's content at very
+ * low opacity. It is a brand motif and nothing more: it encodes no value, is
+ * identical on every install, and is marked aria-hidden where it is emitted.
+ * It must never be mistaken for a measurement, so it has no labels, no scale,
+ * and no relationship to any number on the page. */
+.hero-topo {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image:
+    repeating-radial-gradient(circle at 88% 12%,
+      transparent 0 38px, rgb(34 211 238 / 0.055) 38px 39px, transparent 39px 76px),
+    linear-gradient(rgb(34 211 238 / 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(34 211 238 / 0.028) 1px, transparent 1px);
+  background-size: auto, 34px 34px, 34px 34px;
+  -webkit-mask-image: radial-gradient(70% 100% at 85% 10%, #000 10%, transparent 78%);
+  mask-image: radial-gradient(70% 100% at 85% 10%, #000 10%, transparent 78%);
 }
 .hero-top { display: flex; align-items: flex-start; gap: var(--s5); flex-wrap: wrap; }
 /* Shrinkable, so the period badge stays on the same line as the status rather
@@ -1176,7 +1519,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .topbar-search { flex: 0 1 240px; min-width: 180px; }
 }
 @media (max-width: 860px) {
-  .grid-2, .grid-3, .grid-4 { grid-template-columns: minmax(0, 1fr); }
+  .grid-2, .grid-3, .grid-4, .grid-side { grid-template-columns: minmax(0, 1fr); }
   .topbar-search { display: none; }
   .hero { padding: var(--s5); }
   .hero-word { font-size: 22px; }
@@ -1239,9 +1582,19 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .qrow.is-error   .qmark { background: var(--warn); }
 .qrow.is-allowed .qmark { background: var(--border-strong); }
 
+/* Capped, not greedy.
+ *
+ * Left to grow without a limit the domain absorbed every spare pixel, so on a
+ * 1440 screen each row put the name hard against the left edge and the verdict,
+ * category, client and time hard against the right, with a thousand pixels of
+ * nothing in between. The columns lined up; nobody could read across to them.
+ * A maximum turns the same flex line into a fixed set of columns whenever
+ * there is room — the metadata sits a readable distance from the name — while
+ * still shrinking on a narrow window, which a fixed width would not. */
 .qdomain {
   flex: 1 1 auto;
   min-width: 0;
+  max-width: 46ch;
   overflow-wrap: anywhere;
   color: var(--foreground);
 }
@@ -1325,7 +1678,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   /* Capped, so it reads as a bar rather than as a rule under the row. */
   max-width: 200px;
   height: 3px;
-  margin-top: 7px;
+  margin-top: 6px;
   border-radius: 2px;
   background: var(--surface-3);
   overflow: hidden;
@@ -1336,7 +1689,10 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   border-radius: 2px;
   opacity: 0.75;
 }
-.offender-body { flex: 1 1 auto; min-width: 0; }
+/* Capped for the same reason .qdomain is: with the card given its full width,
+   an uncapped body pushed Investigate a thousand pixels away from the domain
+   it investigates. */
+.offender-body { flex: 1 1 auto; min-width: 0; max-width: 46rem; }
 .offender-name {
   display: block;
   font-size: 12.5px;
@@ -1412,8 +1768,15 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 }
 .policy[open] > summary .policy-caret { transform: rotate(90deg); }
 
-.policy-title { flex: none; display: flex; align-items: center; gap: var(--s2); }
-.policy-title strong { font-size: 14px; color: var(--foreground); }
+/* Shrinkable, and the name inside it wraps.
+ *
+ * `flex: none` here meant a policy called anything longer than a few words
+ * pushed the summary row wider than its own card, and with nothing clipping it
+ * the whole page gained a horizontal scrollbar: 398px of overflow at 1024 and
+ * 654px at 768 from a single 130-character name. Names come from operators,
+ * so their length is not something the layout gets to assume. */
+.policy-title { flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
+.policy-title strong { font-size: 14px; color: var(--foreground); overflow-wrap: anywhere; }
 .policy-what {
   flex: 1 1 auto;
   min-width: 0;

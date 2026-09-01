@@ -22,6 +22,51 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+**A palette where each colour means one thing.** The dashboard's identity has
+been rebuilt around a semantic separation it did not previously have: green is
+protection and the primary affirmative action, cyan is observation — telemetry,
+selection, focus, the network itself — red is genuine danger, amber is a
+warning, and violet is behavioural detection. Green was previously doing all of
+those jobs at once, including on the malware category swatch, which was drawn
+in the brand lime. Rationing it is the point: a colour used for everything
+affirms nothing.
+
+**A new mark.** The lime resolver-ring "D" is retired. `logo.svg` and
+`favicon.svg` are hand-drawn on a 40-unit grid — a cyan globe carrying network
+nodes under a green shield — with no gradients, no traced paths and no embedded
+bitmap, because a gradient is a smudge at 16px. The favicon is deliberately a
+reduction of the mark rather than the mark itself.
+
+**Four things the stylesheet was quietly not doing.** `.metric.accent` and
+`.metric.danger` were styled but never emitted, so a non-zero high-severity
+detection count rendered in the same neutral white as the zeroes beside it.
+Three rules still carried the previous palette's blue and red, so a badge that
+called itself cyan drew itself in the old sky blue. A long policy name pushed
+its summary row past its own card and gave the page a horizontal scrollbar —
+398px of overflow at 1024, 654px at 768. And nothing set `accent-color`, so
+every checkbox in the product was the browser's default blue.
+
+**Numbers that were never measured now say so.** Upstream average latency read
+"0 ms" with no queries behind it; the cache hit rate read "0%" with nothing
+looked up; the dashboard's block rate read "0%" for a period with no traffic.
+Each shows an em dash instead. `GET /api/v1/settings` gains `cacheLookups`,
+the denominator that lets a client tell a measured zero from an unmeasured one
+— additive, and the only server-side change in this work. The block rate is
+also rounded now (it read "28.46%" over 246 queries), except below one per
+cent, where the server's figure passes through so a real 0.25% is not flattened
+to nothing.
+
+**A ticked category that blocks nothing says so.** "Cryptomining ✓ · 0 domains
+indexed" reads as handled; what it means is that the list behind it never
+loaded. The policy editor now names that gap and links to Threat intelligence.
+
+**Assurance states the strength of each claim.** Verified, Tested,
+Experimental and Not verified are defined on the page in the narrow sense each
+is used — "Verified" means CI re-checks it on every change, and nothing more.
+The limitations are unchanged: no independent professional security review has
+taken place, scanners are not proof, the software is early, and exposure of the
+dashboard remains the operator's decision.
+
 **Public VPS HTTPS says why it failed.** The installer used to run curl, and
 when no certificate arrived it printed a guess — "usually means ports 80 and
 443 are not reachable" — whatever had actually happened. Caddy logs the ACME

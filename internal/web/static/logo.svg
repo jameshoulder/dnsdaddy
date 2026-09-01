@@ -1,27 +1,55 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
   <!--
-    DNS Daddy mark: a "D" built from a resolver ring — lime on the request
-    side, white on the response side — with circuit traces feeding in from the
-    left and a dot at the centre for the resolved answer.
+    DNS Daddy mark: a globe carrying network nodes, with a protective shield.
+    Three ideas, in the order they should read: the network you are watching,
+    the nodes on it, the protection over it.
+
+    Handcrafted rather than traced. Every coordinate is on a whole or half
+    pixel of the 40-unit grid so the shape stays crisp when it is scaled to
+    16px, and there are no gradients: a gradient at favicon scale is a smudge.
+    Colour is flat and comes from the brand palette — cyan is the network,
+    green is the protection.
+
+    One symbol ships here: #mark, the globe and shield.
+
+    The wordmark stays in HTML rather than joining it. An SVG <text> wordmark
+    clipped its own viewBox the moment the display font was unavailable — which
+    is the normal case, because no font is bundled — and a mark that loses its
+    last two letters on a fallback stack is worse than no lockup at all. HTML
+    text reflows, scales with the type ramp, and is readable by a screen reader
+    without a duplicate label.
   -->
   <symbol id="mark" viewBox="0 0 40 40">
+    <!-- Globe. The outer ring is the heaviest stroke in the mark, because at
+         16px it is the only part that survives as a recognisable shape. -->
     <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <!-- circuit traces feeding the resolver -->
-      <path d="M3 8 v10 M3 22 v10" stroke="#BFED6D" stroke-width="2.6"/>
-      <path d="M7.5 5 v13 q0 2 2 2" stroke="#BFED6D" stroke-width="2.6"/>
-      <path d="M7.5 35 v-9" stroke="#F5F7FA" stroke-width="2.6"/>
-
-      <!-- resolver ring: lime upper arc (query), white lower arc (answer) -->
-      <path d="M20 6 a14 14 0 0 1 0 28" stroke="#BFED6D" stroke-width="4.4"/>
-      <path d="M20 34 a14 14 0 0 1 -9.9 -23.9" stroke="#F5F7FA" stroke-width="4.4"/>
-
-      <!-- the "D" upright -->
-      <path d="M20 6 v28" stroke="#BFED6D" stroke-width="4.4"/>
-
-      <!-- connector stub -->
-      <path d="M24 4.5 h4 v3" stroke="#BFED6D" stroke-width="2.4"/>
+      <circle cx="18" cy="18" r="13" stroke="#22D3EE" stroke-width="2.4"/>
+      <!-- One meridian and one equator: enough to read as a globe, few enough
+           not to turn into noise when the mark is small. -->
+      <ellipse cx="18" cy="18" rx="5.6" ry="13" stroke="#22D3EE" stroke-width="1.5" opacity="0.75"/>
+      <path d="M5.4 18 h25.2" stroke="#22D3EE" stroke-width="1.5" opacity="0.75"/>
+      <!-- Node links. Short, and only between nodes that exist below. -->
+      <path d="M11.2 10.6 L18 13.4 L25.4 10.2" stroke="#67E8F9" stroke-width="1.4" opacity="0.9"/>
+      <path d="M18 13.4 L13.4 24.6" stroke="#67E8F9" stroke-width="1.4" opacity="0.9"/>
     </g>
-    <circle cx="20" cy="20" r="3.6" fill="#BFED6D"/>
+    <!-- Nodes. Filled, so they hold at small sizes where a stroked ring fills in. -->
+    <g fill="#67E8F9">
+      <circle cx="11.2" cy="10.6" r="1.9"/>
+      <circle cx="25.4" cy="10.2" r="1.7"/>
+      <circle cx="13.4" cy="24.6" r="1.7"/>
+    </g>
+    <circle cx="18" cy="13.4" r="2.3" fill="#F2F7FA"/>
+
+    <!-- Shield. Sits over the globe's lower right, with a dark keyline so it
+         reads as being in front rather than merged into the ring behind it. -->
+    <path d="M29 22.2 l7.4 2.6 v5.1 c0 4.6-3.3 7.7-7.4 8.9 -4.1-1.2-7.4-4.3-7.4-8.9 v-5.1 Z"
+          fill="#07101A" stroke="#07101A" stroke-width="2.4" stroke-linejoin="round"/>
+    <path d="M29 22.2 l7.4 2.6 v5.1 c0 4.6-3.3 7.7-7.4 8.9 -4.1-1.2-7.4-4.3-7.4-8.9 v-5.1 Z"
+          fill="#BFED6D"/>
+    <!-- The check is the only white inside the shield, so it stays legible
+         against the green at every size. -->
+    <path d="M25.6 30.2 l2.6 2.6 4.5-5.2" fill="none" stroke="#07101A"
+          stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
   </symbol>
 
   <use href="#mark"/>

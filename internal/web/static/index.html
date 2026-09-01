@@ -46,44 +46,64 @@
     reachable from the internet in the HTTPS deployment.
   -->
   <div class="login-aside" aria-hidden="true">
-    <svg class="login-grid" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid slice" focusable="false">
+    <!--
+      Brand panel. Everything here is decorative or a fixed product statement:
+      no version, no health, no feed state, no hostname, nothing about the
+      instance behind the form. This page is reachable from the internet in
+      the HTTPS deployment, so it is a reconnaissance surface and stays inert.
+    -->
+    <svg class="login-globe" viewBox="0 0 420 420" preserveAspectRatio="xMidYMid meet" focusable="false">
       <defs>
-        <pattern id="lg" width="40" height="40" patternUnits="userSpaceOnUse">
-          <path d="M40 0H0V40" fill="none" stroke="currentColor" stroke-width="0.5"/>
-        </pattern>
-        <radialGradient id="lgfade" cx="50%" cy="45%" r="60%">
-          <stop offset="0%" stop-color="#fff" stop-opacity="0.85"/>
+        <radialGradient id="lgfade" cx="50%" cy="50%" r="62%">
+          <stop offset="0%" stop-color="#fff" stop-opacity="0.9"/>
           <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
         </radialGradient>
-        <mask id="lgmask"><rect width="400" height="400" fill="url(#lgfade)"/></mask>
+        <mask id="lgmask"><rect width="420" height="420" fill="url(#lgfade)"/></mask>
       </defs>
-      <rect width="400" height="400" fill="url(#lg)" mask="url(#lgmask)"/>
-      <!-- A resolver: one query fanning out to the sources that answer it. -->
+
       <g mask="url(#lgmask)" fill="none" stroke="currentColor">
-        <path d="M200 300V210" stroke-width="1.5"/>
-        <path d="M200 210C200 160 130 170 120 120" stroke-width="1.5"/>
-        <path d="M200 210C200 160 270 170 280 120" stroke-width="1.5"/>
-        <path d="M200 210V120" stroke-width="1.5"/>
-        <circle cx="200" cy="300" r="7" fill="currentColor" stroke="none"/>
-        <circle cx="200" cy="210" r="5"/>
-        <circle cx="120" cy="120" r="4"/>
-        <circle cx="200" cy="120" r="4"/>
-        <circle cx="280" cy="120" r="4"/>
+        <!-- Latitude/longitude shell. A globe drawn as a wireframe rather than
+             a map: DNS Daddy knows nothing about geography, and a map here
+             would imply it did. -->
+        <circle cx="210" cy="210" r="132" stroke-width="1.4" opacity="0.55"/>
+        <ellipse cx="210" cy="210" rx="52" ry="132" stroke-width="1" opacity="0.32"/>
+        <ellipse cx="210" cy="210" rx="98" ry="132" stroke-width="1" opacity="0.22"/>
+        <path d="M78 210h264" stroke-width="1" opacity="0.32"/>
+        <path d="M96 152h228" stroke-width="1" opacity="0.18"/>
+        <path d="M96 268h228" stroke-width="1" opacity="0.18"/>
+        <!-- Outer observation ring. -->
+        <circle cx="210" cy="210" r="176" stroke-width="1" opacity="0.14"/>
       </g>
+
+      <!-- Node constellation and the links between them. Positions are fixed
+           and arbitrary; they are a motif, not a topology of anything. -->
+      <g mask="url(#lgmask)" stroke="currentColor" stroke-width="1.2" opacity="0.55" fill="none">
+        <path d="M132 148 L210 178 L292 140"/>
+        <path d="M210 178 L168 268"/>
+        <path d="M210 178 L286 246"/>
+      </g>
+      <g mask="url(#lgmask)" fill="currentColor">
+        <circle cx="132" cy="148" r="4.5"/>
+        <circle cx="292" cy="140" r="4"/>
+        <circle cx="168" cy="268" r="4"/>
+        <circle cx="286" cy="246" r="3.5"/>
+      </g>
+      <circle class="login-globe-core" cx="210" cy="178" r="7" fill="currentColor" mask="url(#lgmask)"/>
     </svg>
+
     <div class="login-aside-copy">
-      <span class="login-eyebrow">Protective DNS</span>
-      <p class="login-lede">Every name your network asks for, checked against threat
-        intelligence before it is answered.</p>
+      <p class="login-tagline">Protect. Observe. Respond.</p>
+      <p class="login-lede">Protective DNS with visibility into what your
+        network is asking for.</p>
     </div>
   </div>
 
   <form class="login-card" id="login-form" autocomplete="on">
     <div class="login-brand">
-      <svg class="logo-mark" viewBox="0 0 40 40" aria-hidden="true">
+      <svg class="logo-mark logo-mark-lg" viewBox="0 0 40 40" aria-hidden="true">
         <use href="/logo.svg#mark"></use>
       </svg>
-      <span class="wordmark">DNS <b>Daddy</b></span>
+      <span class="wordmark wordmark-lg">DNS <b>Daddy</b></span>
     </div>
     <h1>Sign in</h1>
     <p class="muted">This is the control plane for your resolver.</p>

@@ -36,19 +36,31 @@ function html(strings, ...values) {
 
 const raw = (value) => ({ __raw: true, value });
 
+// Threat and policy categories, as a categorical palette.
+//
+// Not one of these is green, and that is the point. Every value here labels
+// something that was BLOCKED, and green in this product means protected,
+// healthy, or the affirmative action — so rendering `malware` in the brand
+// lime, as V2 did, put the safest colour in the interface on the most
+// dangerous word in it.
+//
+// Severity descends roughly through the list: red for outright malicious,
+// amber and violet for suspicious, cooler hues for the policy categories that
+// are choices rather than threats. They stay far enough apart in hue to be
+// told apart in the breakdown meter, where they appear side by side.
 const CATEGORY_COLOURS = {
-  malware: '#bfed6d',
-  phishing: '#7ec4ff',
-  c2: '#ffb45a',
-  cryptomining: '#f97583',
-  'newly-registered': '#c792ea',
-  ads: '#5eead4',
-  adult: '#fda4af',
-  gambling: '#fbbf24',
-  custom: '#94a3b8',
+  malware: '#FF6B7A',            // danger — outright malicious
+  phishing: '#FF9E64',           // credential theft
+  c2: '#F472B6',                 // command-and-control
+  cryptomining: '#FBBF24',       // resource abuse
+  'newly-registered': '#B48EF0', // suspicion, not proof
+  ads: '#5EEAD4',                // policy, not a threat
+  adult: '#FDA4AF',              // policy
+  gambling: '#FCD34D',           // policy
+  custom: '#94A9C4',             // operator's own list
 };
 
-const colourFor = (cat) => CATEGORY_COLOURS[cat] || '#94a3b8';
+const colourFor = (cat) => CATEGORY_COLOURS[cat] || '#94A9C4';
 
 function sanitize(htmlString) {
   const doc = new DOMParser().parseFromString(htmlString, 'text/html');
@@ -110,6 +122,43 @@ function duration(seconds) {
   if (d) return `${d}d ${h}h`;
   if (h) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+/*
+ * Tidy a Go duration string for display.
+ *
+ * The detector catalogue reports its window exactly as the runtime formats it,
+ * which is how "5m0s" and "30m0s" reached a product surface: correct, and
+ * plainly machine output. This drops the zero components and nothing else. An
+ * input it does not recognise is returned untouched rather than guessed at —
+ * a window nobody can parse should be shown as the server stated it, not
+ * replaced by a plausible-looking number.
+ */
+function goDuration(text) {
+  if (typeof text !== 'string' || !/^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)([\d.]+(ns|us|µs|ms|s|m|h))*$/.test(text)) {
+    return text == null ? '' : String(text);
+  }
+  const parts = text.match(/\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h)/g) || [];
+  const kept = parts.filter((part) => parseFloat(part) !== 0);
+  return kept.length ? kept.join(' ') : parts[parts.length - 1];
+}
+
+/*
+ * A percentage sized for a headline.
+ *
+ * The server reports two decimal places, which is the right amount for an API
+ * and two too many for a number set at forty-eight pixels: "28.46%" reads as a
+ * measurement taken to the hundredth of a percent by a resolver that counted
+ * 246 queries. Rounded to a whole number — except below one per cent, where
+ * the server's own figure is passed through untouched, because rounding a real
+ * 0.25% down to "0%" would make a small but genuine block rate look like the
+ * absence of one.
+ */
+function rate(value) {
+  const n = Number(value);
+  if (!isFinite(n)) return '—';
+  if (n > 0 && n < 1) return String(value);
+  return String(Math.round(n));
 }
 
 /* ---------- API --------------------------------------------------------- */
@@ -223,7 +272,7 @@ function areaChart(buckets) {
   const gridlines = [0.25, 0.5, 0.75]
     .map((f) => {
       const y = padTop + plotH * f;
-      return `<line x1="${padX}" y1="${y}" x2="${W - padX}" y2="${y}" stroke="#232932" stroke-width="1" stroke-dasharray="3 4"/>`;
+      return `<line x1="${padX}" y1="${y}" x2="${W - padX}" y2="${y}" stroke="#1E2C42" stroke-width="1" stroke-dasharray="3 4"/>`;
     })
     .join('');
 
@@ -232,21 +281,25 @@ function areaChart(buckets) {
          aria-label="DNS queries and blocks over time">
       <defs>
         <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#bfed6d" stop-opacity="0.28"/>
-          <stop offset="100%" stop-color="#bfed6d" stop-opacity="0"/>
+          <stop offset="0%" stop-color="#22D3EE" stop-opacity="0.26"/>
+          <stop offset="100%" stop-color="#22D3EE" stop-opacity="0"/>
         </linearGradient>
       </defs>
       ${raw(gridlines)}
       <path d="${raw(area(totalPts))}" fill="url(#areaFill)"/>
-      <path d="${raw(line(totalPts))}" fill="none" stroke="#bfed6d" stroke-width="2"
+      <!-- Traffic is cyan because it is observation, and blocks are red
+           because they are the threat. Reversing that — as V2 did, drawing
+           total volume in the protection colour — made the busiest hour look
+           like the safest one. -->
+      <path d="${raw(line(totalPts))}" fill="none" stroke="#22D3EE" stroke-width="2"
             stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-      <path d="${raw(line(blockedPts))}" fill="none" stroke="#ff6b7a" stroke-width="1.75"
+      <path d="${raw(line(blockedPts))}" fill="none" stroke="#FF6B7A" stroke-width="1.75"
             stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
     </svg>
     <div class="chart-axis">${raw(axis)}</div>
     <div class="chart-legend">
-      <span><i class="swatch" data-bg="#bfed6d"></i>Total queries · peak ${compact(max)}/h</span>
-      <span><i class="swatch" data-bg="#ff6b7a"></i>Blocked</span>
+      <span><i class="swatch" data-bg="#22D3EE"></i>Total queries · peak ${compact(max)}/h</span>
+      <span><i class="swatch" data-bg="#FF6B7A"></i>Blocked</span>
     </div>
   `;
 }
@@ -292,7 +345,9 @@ function statusBadge(status) {
     healthy: ['ok', 'Healthy'],
     ok: ['ok', 'OK'],
     degraded: ['warn', 'Degraded'],
-    'no-traffic': ['warn', 'No traffic yet'],
+    // Cyan, not amber. Nothing has been measured here yet; that is an
+    // observation, and it sat beside genuine cautions wearing their colour.
+    'no-traffic': ['info', 'No traffic yet'],
     disabled: ['', 'Disabled'],
     offline: ['bad', 'Offline'],
     down: ['bad', 'Down'],
@@ -975,7 +1030,7 @@ function threatIntelPanel(data) {
           <h2>Threat intelligence</h2>
           <p>${num(data.totalIndexedDomains)} domains indexed across enabled feeds.</p>
         </div>
-        <div class="row-end"><a class="btn btn-ghost btn-sm" href="#/feeds">Manage</a></div>
+        <div class="row-end"><a class="btn btn-observe btn-sm" href="#/feeds">Manage</a></div>
       </div>
       <div class="intel-list">
         ${raw(observatoryRow)}
@@ -1142,6 +1197,13 @@ function statusHero(overview, feedsData, detections) {
 
   return html`
     <section class="hero is-${state.tone}" aria-label="Protection status">
+      <!--
+        Decorative only. Concentric rings and a grid, identical on every
+        install, encoding nothing. aria-hidden because there is nothing here
+        for a screen reader to convey, and deliberately unlabelled so it can
+        never be read as a measurement of anything.
+      -->
+      <div class="hero-topo" aria-hidden="true"></div>
       <div class="hero-top">
         <div class="hero-state">
           <span class="hero-dot" aria-hidden="true"></span>
@@ -1159,7 +1221,12 @@ function statusHero(overview, feedsData, detections) {
       <div class="hero-stats">
         <div class="hero-stat"><span class="n">${num(overview.queries24h)}</span><span class="k">DNS queries</span></div>
         <div class="hero-stat is-blocked"><span class="n">${num(overview.threatsBlocked24h)}</span><span class="k">Threats blocked</span></div>
-        <div class="hero-stat"><span class="n">${overview.blockRate24h}%</span><span class="k">Of all queries</span></div>
+        <!-- No queries in the period means no rate to state. Zero per cent is
+             a measurement; this is the absence of one. -->
+        <div class="hero-stat">
+          <span class="n">${overview.queries24h ? `${rate(overview.blockRate24h)}%` : '—'}</span>
+          <span class="k">Of all queries</span>
+        </div>
         ${raw(detectionStat)}
       </div>
     </section>
@@ -1293,7 +1360,7 @@ function recentlyBlocked(rows) {
     return emptyState(
       'Nothing blocked in the log yet',
       'Either the query log is switched off, or nothing resolving through DNS Daddy has asked for a blocked domain yet.',
-      { icon: '⃠', action: '<a class="btn btn-ghost btn-sm" href="#/threats">Open Threats</a>' }
+      { icon: '⃠', action: '<a class="btn btn-observe btn-sm" href="#/threats">Open Threats</a>' }
     );
   }
   return rows
@@ -1434,7 +1501,7 @@ pages.dashboard = {
             <h2>Threat activity</h2>
             <p>Queries and blocks over the last 24 hours, in hourly buckets.</p>
           </div>
-          <div class="row-end"><a class="btn btn-ghost btn-sm" href="#/queries">Query log</a></div>
+          <div class="row-end"><a class="btn btn-observe btn-sm" href="#/queries">Query log</a></div>
         </div>
         ${raw(
           hadTraffic
@@ -1451,7 +1518,7 @@ pages.dashboard = {
         <div class="card">
           <div class="card-head">
             <div><h2>Recently blocked</h2><p>Newest first, as recorded in the query log.</p></div>
-            <div class="row-end"><a class="btn btn-ghost btn-sm" href="#/threats">All threats</a></div>
+            <div class="row-end"><a class="btn btn-observe btn-sm" href="#/threats">All threats</a></div>
           </div>
           ${raw(recentlyBlocked(recent ? recent.queries : null))}
         </div>
@@ -1513,7 +1580,7 @@ pages.threats = {
         }))}
       </div>
 
-      <div class="section grid grid-2">
+      <div class="section grid grid-side">
         <div class="card">
           <div class="card-head"><div><h2>By category</h2><p>Last 7 days · ${num(total)} blocked.</p></div></div>
           ${raw(barList(catRows))}
@@ -1639,7 +1706,7 @@ function queryRow(q) {
       </summary>
       <dl class="qfacts">${raw(facts)}</dl>
       <div class="qactions">
-        <a class="btn btn-ghost btn-sm" href="#/queries" data-filter-domain="${q.domain}">Every query for this domain</a>
+        <a class="btn btn-observe btn-sm" href="#/queries" data-filter-domain="${q.domain}">Every query for this domain</a>
       </div>
     </details>`;
 }
@@ -1666,7 +1733,7 @@ pages.queries = {
             <option value="">All networks</option>
             ${raw(networks.networks.map((n) => html`<option value="${n.id}">${n.name}</option>`).join(''))}
           </select>
-          <button class="btn btn-primary" id="q-apply">Apply</button>
+          <button class="btn btn-observe" id="q-apply">Apply</button>
           <span class="row-end muted small" id="q-count"></span>
         </div>
       </div>
@@ -1893,7 +1960,7 @@ pages.detections = {
         ${raw(metricCard({ label: 'High', value: num(bySeverity.high), sub: 'Last 7 days', tone: bySeverity.high ? 'bad' : '' }))}
         ${raw(metricCard({ label: 'Medium', value: num(bySeverity.medium), sub: 'Last 7 days' }))}
         ${raw(metricCard({ label: 'Low', value: num(bySeverity.low), sub: 'Last 7 days' }))}
-        ${raw(metricCard({ label: 'Detectors', value: num(catalogue.detectors.length), sub: 'All alert-only' }))}
+        ${raw(metricCard({ label: 'Detectors', value: num(catalogue.detectors.length), sub: 'All alert-only', tone: 'detect' }))}
       </div>
 
       <div class="card">
@@ -1928,7 +1995,8 @@ pages.detections = {
             : emptyState(
                 'No findings yet',
                 'Either nothing has behaved unusually, or not enough traffic has passed through yet. ' +
-                  'The lab in labs/ generates traffic that will trigger these detectors safely.'
+                  'This is not a statement that the network is clean: it is a statement that these ' +
+                  'detectors have not raised anything.'
               )
         )}
       </div>
@@ -1948,8 +2016,8 @@ pages.detections = {
                         <span class="mono">${d.name}</span>
                         <div class="muted small">${d.description}</div>
                       </td>
-                      <td><span class="badge warn">${d.maturity}</span></td>
-                      <td class="muted mono nowrap">${d.window}</td>
+                      <td><span class="badge tier">${d.maturity}</span></td>
+                      <td class="muted mono nowrap">${goDuration(d.window)}</td>
                       <td>${raw(severityBadge(d.maxSeverity))}</td>
                       <td class="muted">${d.enforces ? 'yes' : 'no'}</td>
                     </tr>`
@@ -2429,6 +2497,13 @@ pages.policies = {
                 <span>
                   ${c.label}
                   <span class="cat-desc">${c.description} · ${num(c.indexedDomains)} domains indexed</span>
+                  ${raw(
+                    p.categories.includes(c.id) && !c.indexedDomains
+                      ? html`<span class="cat-empty">Ticked, but the index holds no domains for
+                          this category, so it is blocking nothing. Check
+                          <a href="#/feeds">Threat intelligence</a>.</span>`
+                      : ''
+                  )}
                 </span>
               </label>
             `
@@ -2597,7 +2672,7 @@ pages.feeds = {
                Disabled feeds cost nothing.</p>
           </div>
           <div class="row-end">
-            <button class="btn btn-primary" id="refresh-feeds" ${raw(data.refreshing ? 'disabled' : '')}>
+            <button class="btn btn-observe" id="refresh-feeds" ${raw(data.refreshing ? 'disabled' : '')}>
               ${data.refreshing ? 'Refreshing…' : 'Refresh now'}
             </button>
           </div>
@@ -2804,7 +2879,10 @@ pages.setup = {
                         : html`<span class="badge warn">${u.protocol} · plaintext</span>`)}</td>
                       <td class="num">${num(u.queries)}</td>
                       <td class="num">${num(u.errors)}</td>
-                      <td class="num">${u.avgLatencyMs} ms</td>
+                      <!-- No queries means no samples, and no samples is not
+                           zero milliseconds. An em dash says nothing was
+                           measured; "0 ms" claims an impossibly fast upstream. -->
+                      <td class="num">${raw(u.queries ? html`${u.avgLatencyMs} ms` : html`<span class="muted">&mdash;</span>`)}</td>
                     </tr>`
                   )
                   .join('')
@@ -2905,6 +2983,36 @@ function evidenceRow(what, where, detail) {
   </tr>`;
 }
 
+/*
+ * Claim strength, as a word with a fixed meaning.
+ *
+ * The Assurance page states several different kinds of thing — something CI
+ * re-checks on every commit, something a scanner did once in August, something
+ * shipped but not calibrated, and something nobody has done at all — and until
+ * now they were all set in the same grey prose. A reader had to infer the
+ * strength of each claim from its wording, which is precisely the inference an
+ * assurance page should not be asking anyone to make.
+ *
+ * The words are deliberately narrow. "Verified" here means one thing only:
+ * automation re-runs it on every change and you can read the workflow. It does
+ * not mean reviewed, certified, or audited, and the Limitations card below
+ * still says so in as many words.
+ */
+const CLAIM_TIERS = {
+  verified: ['ok', 'Verified', 'Re-checked automatically on every change, in CI. The workflow is in the repository.'],
+  tested: ['info', 'Tested', 'Exercised once, by a tool or a person, at a stated point in time. Not re-run on every change.'],
+  experimental: ['tier', 'Experimental', 'Shipped and working, but calibrated against synthetic traffic rather than a production network.'],
+  unverified: ['warn', 'Not verified', 'Nobody has checked this. Where the word appears, treat the claim as open.'],
+  limitation: ['warn', 'Limitation', 'A boundary of what this product, or the evidence behind it, can show.'],
+};
+
+function claimChip(tier) {
+  const entry = CLAIM_TIERS[tier];
+  if (!entry) return '';
+  const [cls, label, meaning] = entry;
+  return html`<span class="badge ${cls} claim" title="${meaning}">${label}</span>`;
+}
+
 pages.assurance = {
   title: 'Assurance',
   subtitle: 'What is checked, by what, and what that does not prove.',
@@ -2926,7 +3034,7 @@ pages.assurance = {
           rather than a page about it.
         </p>
         <div class="row note-loose">
-          <a class="btn btn-primary" href="${REPO}/docs/assurance.md" target="_blank" rel="noopener noreferrer">Engineering assurance</a>
+          <a class="btn btn-ghost" href="${REPO}/docs/assurance.md" target="_blank" rel="noopener noreferrer">Engineering assurance</a>
           <a class="btn btn-ghost" href="${REPO}/docs/threat-model.md" target="_blank" rel="noopener noreferrer">Threat model</a>
           <a class="btn btn-ghost" href="${REPO}/docs/security-testing.md" target="_blank" rel="noopener noreferrer">Security testing</a>
         </div>
@@ -2935,8 +3043,36 @@ pages.assurance = {
       <div class="card section">
         <div class="card-head">
           <div>
+            <div class="card-eyebrow">Vocabulary</div>
+            <h2>How to read this page</h2>
+            <p>Four words, used consistently across the product. Each one is a claim of a
+               specific strength, and none of them means audited.</p>
+          </div>
+        </div>
+        <dl class="claim-key">
+          ${raw(
+            ['verified', 'tested', 'experimental', 'unverified']
+              .map(
+                (tier) => html`<div class="claim-key-row">
+                  <dt>${raw(claimChip(tier))}</dt>
+                  <dd>${CLAIM_TIERS[tier][2]}</dd>
+                </div>`
+              )
+              .join('')
+          )}
+        </dl>
+        <p class="muted small note-tight">
+          None of these words is a substitute for the one claim that cannot be made here:
+          no independent professional security review has taken place. That is stated in
+          full below.
+        </p>
+      </div>
+
+      <div class="card section">
+        <div class="card-head">
+          <div>
             <div class="card-eyebrow">Automated</div>
-            <h2>What runs on every change</h2>
+            <h2>What runs on every change ${raw(claimChip('verified'))}</h2>
             <p>These run in CI on every push and pull request. They are not a substitute for
                review by a person; they are the floor beneath it.</p>
           </div>
@@ -2962,7 +3098,7 @@ pages.assurance = {
         <div class="card-head">
           <div>
             <div class="card-eyebrow">Testing</div>
-            <h2>Vulnerability scanning</h2>
+            <h2>Vulnerability scanning ${raw(claimChip('tested'))}</h2>
             <p>Scanning was performed with Tenable Vulnerability Management / Nessus across
                several scan types, before and after deployment. Methodology and findings are
                documented in full.</p>
@@ -2984,7 +3120,7 @@ pages.assurance = {
       </div>
 
       <div class="card section diag-banner">
-        <div class="diag-title">Limitations</div>
+        <div class="diag-title">Limitations ${raw(claimChip('limitation'))}</div>
         <p class="diag-lede">Stated here rather than in a footnote, because they are the part
            most worth knowing.</p>
         <ul class="first-client-steps">
@@ -3030,8 +3166,22 @@ pages.settings = {
       <div class="section grid grid-4">
         ${raw(metricCard({ label: 'Version', value: settings.version }))}
         ${raw(metricCard({ label: 'Uptime', value: duration(settings.uptimeSeconds) }))}
-        ${raw(metricCard({ label: 'Memory', value: `${settings.memoryMb} MB`, sub: `${settings.goroutines} goroutines` }))}
-        ${raw(metricCard({ label: 'Cache hit rate', value: `${settings.cacheHitRate}%`, sub: `${num(settings.cacheEntries)} entries` }))}
+        ${raw(metricCard({ label: 'Memory', value: `${Math.round(settings.memoryMb)} MB`, sub: `${settings.goroutines} goroutines` }))}
+        <!--
+          A hit rate of 0% and a cache nothing has asked about yet are not the
+          same reading, and until the API reported the denominator the second
+          was displayed as the first. An em dash is what "not measured" looks
+          like; it is never rounded up into a number.
+        -->
+        ${raw(
+          metricCard({
+            label: 'Cache hit rate',
+            value: settings.cacheLookups ? `${settings.cacheHitRate}%` : '—',
+            sub: settings.cacheLookups
+              ? `${num(settings.cacheEntries)} entries · ${num(settings.cacheLookups)} lookups`
+              : 'No lookups yet',
+          })
+        )}
       </div>
 
       <div class="card section">
@@ -3050,7 +3200,7 @@ pages.settings = {
                   <span class="muted">(${num(settings.queryLogRows)} rows stored)</span></td></tr>
               <tr><td>Statistics retention</td><td>${settings.rollupDays} days</td></tr>
               <tr><td>Answer cache</td><td>${settings.cacheEnabled ? `Enabled, max ${num(settings.cacheMaxEntries)} entries` : 'Disabled'}</td></tr>
-              <tr><td>Feed refresh interval</td><td>${settings.feedRefreshInterval}</td></tr>
+              <tr><td>Feed refresh interval</td><td>${goDuration(settings.feedRefreshInterval)}</td></tr>
               <tr><td>Upstream mode</td><td>${settings.upstreamMode}</td></tr>
             </tbody>
           </table>
@@ -3451,5 +3601,10 @@ if (typeof module !== 'undefined' && module.exports) {
     protectionBreakdown,
     pages,
     routeName,
+    goDuration,
+    rate,
+    claimChip,
+    CLAIM_TIERS,
+    CATEGORY_COLOURS,
   };
 }
