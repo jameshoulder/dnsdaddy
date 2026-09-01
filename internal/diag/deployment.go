@@ -37,6 +37,13 @@ type DeploymentInput struct {
 	// PublicPlaintextRequests counts management requests that arrived from a
 	// public address over plain HTTP. Non-zero is evidence, not inference.
 	PublicPlaintextRequests uint64
+
+	// Runtime is where this process is running. The zero value is
+	// RuntimeHost's meaning — an unset field must not be the thing that
+	// relaxes a finding — and callers that know better set it explicitly.
+	//
+	// It changes exactly one verdict: a wildcard bind. See ModeContainerBound.
+	Runtime Runtime
 }
 
 // Mode names the deployment shape, for the summary line and for tests.
@@ -48,6 +55,19 @@ const (
 	ModeLAN     Mode = "LAN"             // a private address, reachable on the local network
 	ModePublic  Mode = "publicly bound"  // a wildcard or public address
 	ModeUnknown Mode = "unknown"
+
+	// ModeContainerBound is a wildcard bind inside a container: every
+	// interface of the container's own namespace, with the host's port
+	// publication deciding what that reaches and not observable from in here.
+	//
+	// Its own mode rather than a variant of ModePublic because it is a
+	// different claim. ModePublic says "this is exposed"; this says "whether
+	// this is exposed was decided somewhere I cannot see". Collapsing the two
+	// in either direction produces a wrong answer: as ModePublic it is the
+	// false FAIL a correctly deployed container got on a real VPS, and as
+	// ModeTunnel it is a green light for a container someone really did
+	// publish on 0.0.0.0.
+	ModeContainerBound Mode = "container-internal"
 )
 
 // Classify decides the deployment shape from configuration alone.
@@ -61,7 +81,17 @@ func Classify(in DeploymentInput) Mode {
 		return ModeTunnel
 	case config.BindPrivate:
 		return ModeLAN
-	case config.BindWildcard, config.BindPublic:
+	case config.BindWildcard:
+		// A wildcard inside a container is a different fact from a wildcard on
+		// a host. A specific public address is not: an operator who typed one
+		// into a container's listen address has still asked for something the
+		// container will offer to whatever can route to it, and the host
+		// mapping cannot make that address private.
+		if in.Runtime == RuntimeContainer {
+			return ModeContainerBound
+		}
+		return ModePublic
+	case config.BindPublic:
 		return ModePublic
 	}
 	return ModeUnknown
@@ -71,7 +101,17 @@ func Classify(in DeploymentInput) Mode {
 func Deployment(in DeploymentInput) []Check {
 	mode := Classify(in)
 	checks := []Check{deploymentBind(in, mode)}
-	if mode == ModeProxied {
+
+	// Keyed on whether a front end exists, not on which mode was inferred.
+	//
+	// It used to be `mode == ModeProxied`, which is loopback-only — so the
+	// moment a container's wildcard bind stopped classifying as ModeProxied,
+	// the proxy-trust check silently vanished for exactly the deployment that
+	// most needs it: a container behind Caddy, where every request arrives
+	// from the proxy and X-Forwarded-For is the only thing that can tell
+	// clients apart. A check that disappears when the shape changes is worse
+	// than one that never existed, because its absence looks like a pass.
+	if strings.TrimSpace(in.BaseURL) != "" {
 		checks = append(checks, proxyTrust(in))
 	}
 	return checks
@@ -110,6 +150,32 @@ func deploymentBind(in DeploymentInput, mode Mode) Check {
 		c.Summary = fmt.Sprintf("Bound to %s, which publishes the management API beyond this machine.", listen)
 		c.Action = "Bind 127.0.0.1:8080 and reach it over an SSH tunnel, or put a TLS reverse " +
 			"proxy in front of loopback. The management API should never be published in plaintext."
+	case ModeContainerBound:
+		// Not a pass and not a failure: an unknown, stated as one.
+		//
+		// This check used to report the container case as ModePublic, which on
+		// a correctly deployed VPS — Compose publishing 127.0.0.1:8080:8080,
+		// Caddy in front, host port 8080 proven unreachable from outside —
+		// printed "publishes the management API beyond this machine" about a
+		// deployment where it demonstrably did not. The bind is right; it is
+		// the only bind that works, because a container that listened on its
+		// own loopback could not be reached by the host at all.
+		c.Status = StatusWarn
+		c.Summary = fmt.Sprintf(
+			"Listening on %s inside the container. Host exposure is set by Docker's published-port "+
+				"mapping and cannot be proven from in here.", listen)
+		c.Evidence = []string{"mode: " + string(mode), "listen: " + listen, "runtime: container"}
+		c.Action = "Check the mapping from the host: `docker compose port dnsdaddy 8080` should say " +
+			"127.0.0.1:8080, not 0.0.0.0:8080. Do not \"fix\" this by binding 127.0.0.1 inside the " +
+			"container — the host could then not reach it at all."
+		if strings.TrimSpace(in.BaseURL) != "" && in.SecureCookies != "always" {
+			// The front end is real, so this one is not an unknown.
+			c.Summary = fmt.Sprintf(
+				"Listening on %s inside the container behind %s, but session cookies are not marked Secure.",
+				listen, in.BaseURL)
+			c.Action = `Set http.secure_cookies to "always" (DNSDADDY_SECURE_COOKIES=always). ` +
+				"Behind TLS there is no reason for the cookie to be sent over plain HTTP."
+		}
 	default:
 		c.Status = StatusWarn
 		c.Summary = fmt.Sprintf("Could not tell what %q publishes.", listen)

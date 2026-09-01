@@ -48,11 +48,18 @@ dns.example.co.uk {
 		-Server
 	}
 
+	# Access logs to Caddy's stderr, which systemd puts in the journal:
+	#
+	#   journalctl -u caddy -f
+	#
+	# Writing to a file under /var/log/caddy instead needs that directory to
+	# exist and to be writable by the Caddy *service* account — not by root.
+	# Getting that wrong makes Caddy exit at startup with "opening log writer
+	# ... permission denied", which takes the site down for the sake of a log.
+	# If you do want a file, create it and chown it to the service user first,
+	# and check `systemctl is-active caddy` afterwards.
 	log {
-		output file /var/log/caddy/dnsdaddy.log {
-			roll_size 10MiB
-			roll_keep 5
-		}
+		output stderr
 	}
 }
 

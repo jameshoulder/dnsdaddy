@@ -358,10 +358,48 @@ supported*, so the `"cannot have public IP certificate"` error reported in
 [caddy#7399](https://github.com/caddyserver/caddy/issues/7399) comes from an
 older CertMagic than the one we ship against.
 
-**Still not verified: an actual issued certificate.** Staging proved the order
-is accepted; it did not prove issuance, because that needs ports 80 and 443
-reachable from the internet at the address being certified. **Rows D4 and D5**,
-and [vps-validation.md](vps-validation.md) is the script for them.
+**Now verified: an actual issued certificate, on a real VPS.**
+
+Staging proved the order was accepted but not that a certificate arrived,
+because that needs ports 80 and 443 reachable from the internet at the address
+being certified. That has since been done, once, on a real deployment:
+
+| | |
+| --- | --- |
+| Host | Debian GNU/Linux 13 (trixie), Linux 6.12 |
+| Docker | 26.1.5, Compose 2.26.1 |
+| Caddy | 2.11.4, installed from the upstream repository |
+| Target | the VPS's own public IPv4 address, no hostname |
+
+What was observed on that deployment:
+
+- Let's Encrypt issued a **publicly trusted certificate for the raw IPv4
+  address** under the `shortlived` profile;
+- the certificate verified against the system CA store with ordinary `curl` —
+  not `curl -k`, which proves nothing;
+- the certificate matched the address being used;
+- HSTS was enabled, and plain HTTP redirected to HTTPS with a 308;
+- Caddy reached DNS Daddy on `127.0.0.1:8080`;
+- **host port 8080 was not reachable from outside**, checked from off the host;
+- the DNS UDP and TCP listeners, the dashboard health endpoint and the threat
+  feeds were all working.
+
+So the architecture in row D4 is proven end to end:
+
+    Internet → :443 (Caddy, TLS) → 127.0.0.1:8080 → container :8080
+
+**What this does not establish.** One host, one distribution, one cloud
+provider. Nothing here says Ubuntu, RHEL, Alpine, or any particular provider's
+firewall behaves the same way, and a certificate that issued once is not a
+guarantee about rate limits or profile availability later.
+[vps-validation.md](vps-validation.md) remains the script for repeating it.
+
+**Do not point installer development at production Let's Encrypt.** Repeated
+runs against a live CA burn the duplicate-certificate and failed-authorisation
+limits for the identifier, and those limits are measured in days. The staging
+endpoint exists for this; the installer's own test suite reaches no ACME server
+at all, and feeds captured journal text through the same `journalctl` the
+diagnosis reads.
 
 Also found: `apt-get install caddy` on Debian 13 gets **Caddy 2.6.2** when the
 upstream repository is unreachable, and 2.6.2 rejects the `profile`

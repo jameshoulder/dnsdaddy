@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // install is one scripted run of the installer.
@@ -96,6 +97,26 @@ case "$1 $2" in
   "inspect --format")  echo "sha256:${STUB_PREVIOUS_IMAGE:-0000000000000000000000000000000000000000000000000000000000000000}" ;;
   *) ;;
 esac
+# docker port <container> — the port map, which is how the installer proves that
+# a busy host port belongs to THIS project's own container rather than a
+# stranger's. Real output looks like:
+#
+#   5353/udp -> 0.0.0.0:53
+#   8080/tcp -> 127.0.0.1:8080
+#
+# Note that the container port and the host port differ: the container runs
+# unprivileged and cannot bind 53, so docker-compose.yml publishes "53:5353".
+#
+#   STUB_DOCKER_PUBLISHED  space-separated "<container>/<proto>:<host>" lines
+#                          this project publishes. Empty means it publishes
+#                          nothing, which is how a foreign container holding
+#                          port 53 is modelled: the port is busy and not ours.
+if [[ "$1" == "port" ]]; then
+  for p in ${STUB_DOCKER_PUBLISHED:-}; do
+    printf '%s -> 0.0.0.0:%s\n' "${p%%:*}" "${p##*:}"
+  done
+  exit 0
+fi
 if [[ "$1" == "compose" ]]; then
   printf '%s\n' "$*" >> "$STUB_LOG"
   case "$2" in
@@ -107,9 +128,17 @@ if [[ "$1" == "compose" ]]; then
       shift 4
       case "${1:-}" in
         wget)
+          # STUB_HEALTH_FAIL_AFTER makes the container stop answering after N
+          # successful probes, which is what a container that comes up for the
+          # install and then crashes on reverted settings looks like. Counted in
+          # a file because each invocation is a fresh process.
+          if [[ -n "${STUB_HEALTH_FAIL_AFTER:-}" ]]; then
+            n=$(( $(cat "$STUB_LOG.health" 2>/dev/null || echo 0) + 1 ))
+            printf '%s' "$n" > "$STUB_LOG.health"
+            (( n > STUB_HEALTH_FAIL_AFTER )) && exit 1
+          fi
           [[ "${STUB_HEALTHY:-1}" == "1" ]] || exit 1
           printf '{"status":"ok"}\n'
-          
           ;;
         cat)
           [[ -n "${STUB_ADMIN_PASSWORD:-}" ]] || exit 1
@@ -235,11 +264,60 @@ case "${1:-}" in
 esac
 exit "${STUB_GETENT_EXIT:-2}"`)
 
+	// systemctl. Caddy's unit is modelled separately from docker's because the
+	// installer now asks three different questions about it, and answering
+	// them all from one variable is how a test ends up asserting nothing:
+	//
+	//   STUB_CADDY_ENABLE_EXIT  `systemctl enable --now caddy`
+	//   STUB_CADDY_ACTIVE_EXIT  `systemctl is-active --quiet caddy` — the
+	//                           check that a reload which returned zero left a
+	//                           process actually running
+	//   STUB_CADDY_UNIT_USER    what `systemctl show -p User --value caddy`
+	//                           reports, i.e. the account Caddy runs as
 	in.stub("systemctl", `
 case "$*" in
   *"list-unit-files docker.service"*) exit "${STUB_DOCKER_UNIT_EXIT:-0}" ;;
+  *"show -p User"*)                   printf '%s\n' "${STUB_CADDY_UNIT_USER:-}"; exit 0 ;;
+  *"enable --now caddy"*)             exit "${STUB_CADDY_ENABLE_EXIT:-0}" ;;
+  *"is-active"*caddy*)                exit "${STUB_CADDY_ACTIVE_EXIT:-0}" ;;
   *"is-active"*)                      exit "${STUB_SYSTEMCTL_ACTIVE_EXIT:-0}" ;;
 esac
+exit 0`)
+
+	// journalctl, so the ACME diagnosis has something to read.
+	//
+	// STUB_CADDY_JOURNAL is the captured log text. The installer also accepts
+	// DNSDADDY_CADDY_LOG_CMD as a seam, but going through the real code path —
+	// journalctl, invoked with the window the installer computed — is what
+	// proves the diagnosis is reading what it thinks it is.
+	in.stub("journalctl", `printf '%s\n' "${STUB_CADDY_JOURNAL:-}"`)
+
+	// id, so a scenario can say whether the Caddy service account exists
+	// without depending on the test machine's user database.
+	//
+	//   STUB_KNOWN_USERS  space-separated account names that exist.
+	//
+	// `id -u` with no operand still answers for real, because the installer
+	// uses it for the root check and a stub that got that wrong would change
+	// which half of the script runs.
+	in.stub("id", `
+if [[ $# -le 1 ]]; then exec /usr/bin/id "$@"; fi
+for u in ${STUB_KNOWN_USERS:-}; do
+  if [[ "$u" == "${!#}" ]]; then echo 999; exit 0; fi
+done
+exit 1`)
+
+	// sudo, which is how the installer asks whether the Caddy service account
+	// can read the configuration.
+	//
+	//   STUB_SUDO_TEST_EXIT  what `sudo -n -u <user> test -r <path>` returns.
+	//                        Defaults to success; a scenario wanting the
+	//                        permission-denied case sets it to 1.
+	in.stub("sudo", `
+args=("$@")
+for a in "${args[@]}"; do
+  if [[ "$a" == "test" ]]; then exit "${STUB_SUDO_TEST_EXIT:-0}"; fi
+done
 exit 0`)
 
 	// The script's own dependencies, taken from the real system so the shims
@@ -247,7 +325,7 @@ exit 0`)
 	for _, name := range []string{
 		"bash", "sh", "sed", "grep", "awk", "cut", "tr", "head", "tail", "sort",
 		"paste", "cp", "cat", "uname", "hostname", "sleep", "rm", "mkdir",
-		"dirname", "basename", "pwd", "seq", "env", "id", "expr", "wc", "ls", "stat",
+		"dirname", "basename", "pwd", "seq", "env", "expr", "wc", "ls", "stat",
 		"date", "chmod", "chown", "touch", "mv", "find", "readlink", "printf", "test",
 	} {
 		if path, err := exec.LookPath(name); err == nil {
@@ -937,6 +1015,12 @@ func TestHelpDescribesEveryMode(t *testing.T) {
 func TestUpgradeProceedsWhenDockerProxyHoldsPortFiftyThree(t *testing.T) {
 	in := newInstall(t)
 	in.setenv("STUB_STACK_RUNNING=1", "STUB_ADMIN_PASSWORD=test-password-1234")
+	// The stack publishes 53, as docker-compose.yml does: host 53 to the
+	// container's unprivileged 5353. Modelling this is now part of the
+	// scenario, because "our stack is running" and "our stack holds this port"
+	// became separate facts — a running stack no longer waves through a port
+	// somebody else is on.
+	in.setenv("STUB_DOCKER_PUBLISHED=5353/tcp:53 5353/udp:53 8080/tcp:8080")
 	in.stub("ss", `echo 'LISTEN 0 0 0.0.0.0:53 0.0.0.0:* users:(("docker-proxy",pid=9,fd=4))'`)
 	in.writeEnv("TZ=UTC\n")
 
@@ -944,7 +1028,7 @@ func TestUpgradeProceedsWhenDockerProxyHoldsPortFiftyThree(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--upgrade refused to run behind docker-proxy: exit %d\n%s", code, out)
 	}
-	contains(t, out, "held by this DNS Daddy deployment")
+	contains(t, out, "published by this DNS Daddy deployment")
 	if !strings.Contains(in.composeLog(), "--build") {
 		t.Errorf("the upgrade never rebuilt; compose log:\n%s", in.composeLog())
 	}
@@ -2210,4 +2294,536 @@ func TestTheLogWindowStartsAtThisAttempt(t *testing.T) {
 	if !regexp.MustCompile(`--since \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`).MatchString(got) {
 		t.Errorf("expected --since with this attempt's timestamp, got:\n%s", got)
 	}
+}
+
+// ============================================================================
+// Real-VPS regressions.
+//
+// Everything below reproduces something that actually happened during a
+// deployment on Debian 13 (trixie) with Docker 26.1.5 and Caddy 2.11.4. The
+// final architecture — Internet :443 → Caddy → 127.0.0.1:8080 → container —
+// works, and Let's Encrypt issued a publicly trusted certificate for the raw
+// IPv4 address using the shortlived profile. These are the defects encountered
+// on the way there.
+//
+// No test here contacts an ACME server. The captured Caddy journal text is fed
+// through the same journalctl the installer reads.
+//
+// The target is dns.example.com — RFC 2606's reserved documentation name —
+// rather than the VPS's real address. RFC 5737 documentation *addresses* are
+// not usable here: the installer refuses them as not publicly routable, which
+// is correct behaviour and not something to weaken for a test's convenience.
+// It also means an IP-shaped target in these tests would never reach the HTTPS
+// path at all, and the assertions would quietly prove nothing. The ACME
+// diagnosis, the permission checks and the service-state checks are all
+// independent of whether the target is a name or an address.
+// ============================================================================
+
+// caddyJournalSuccess is Caddy narrating a completely successful issuance.
+//
+// The two "internal rate limiter" lines are CertMagic pacing its own requests.
+// They appear in every healthy issuance and mean nothing about the CA.
+const caddyJournalSuccess = `
+Jan 01 12:00:01 vps caddy[900]: {"level":"info","msg":"obtaining certificate","identifier":"dns.example.com"}
+Jan 01 12:00:01 vps caddy[900]: {"level":"info","msg":"waiting on internal rate limiter","identifiers":["dns.example.com"]}
+Jan 01 12:00:02 vps caddy[900]: {"level":"info","msg":"done waiting on internal rate limiter","identifiers":["dns.example.com"]}
+Jan 01 12:00:05 vps caddy[900]: {"level":"info","msg":"authorization finalized","identifier":"dns.example.com","authz_status":"valid"}
+Jan 01 12:00:05 vps caddy[900]: {"level":"info","msg":"validations succeeded; finalizing order"}
+Jan 01 12:00:07 vps caddy[900]: {"level":"info","msg":"successfully downloaded available certificate chains"}
+Jan 01 12:00:07 vps caddy[900]: {"level":"info","msg":"certificate obtained successfully","identifier":"dns.example.com"}
+`
+
+// The exact defect: the installer read "waiting on internal rate limiter",
+// announced a Let's Encrypt rate limit, and started rolling HTTPS back —
+// seconds before the same attempt logged "certificate obtained successfully".
+func TestCaddyInternalRateLimiterIsNotALetsEncryptRateLimit(t *testing.T) {
+	// Non-vacuity first, in the test itself: the matcher that shipped was a
+	// case-insensitive "rate limit", and this is the text it was applied to.
+	// If that pattern does not match this log the rest of the test proves
+	// nothing, because there would have been no bug to fix.
+	old := regexp.MustCompile(`(?i)acme:error:rateLimited|too many certificates|rate limit`)
+	if !old.MatchString(caddyJournalSuccess) {
+		t.Fatal("the old broad matcher does not match this log, so this regression test is vacuous")
+	}
+
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=2")
+	in.setenv("STUB_CADDY_JOURNAL=" + caddyJournalSuccess)
+	// TLS never comes up from this machine's point of view, so the diagnosis
+	// runs. That is the situation the false positive was found in.
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	notContains(t, out, "rate-limited")
+	notContains(t, out, "letsencrypt.org/docs/rate-limits")
+}
+
+func TestAGenuineAcmeRateLimitIsStillDiagnosed(t *testing.T) {
+	journal := `
+Jan 01 12:00:01 vps caddy[900]: {"level":"info","msg":"waiting on internal rate limiter"}
+Jan 01 12:00:02 vps caddy[900]: {"level":"error","msg":"could not get certificate from issuer","error":"HTTP 429 urn:ietf:params:acme:error:rateLimited - too many certificates (5) already issued for this exact set of identifiers"}
+`
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=2")
+	in.setenv("STUB_CADDY_JOURNAL=" + journal)
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	contains(t, out, "rate-limited")
+	contains(t, out, "letsencrypt.org/docs/rate-limits")
+}
+
+// A log line is evidence of what was true when it was written. An error
+// followed by a success in the same attempt has been superseded, and
+// diagnosing the attempt from it reports a failure that has already resolved.
+func TestALaterSuccessOverridesAnEarlierAcmeError(t *testing.T) {
+	journal := `
+Jan 01 12:00:01 vps caddy[900]: {"level":"error","msg":"challenge failed","error":"HTTP 400 urn:ietf:params:acme:error:connection - dns.example.com: Connection refused"}
+Jan 01 12:01:03 vps caddy[900]: {"level":"info","msg":"waiting on internal rate limiter"}
+Jan 01 12:01:09 vps caddy[900]: {"level":"info","msg":"validations succeeded; finalizing order"}
+Jan 01 12:01:11 vps caddy[900]: {"level":"info","msg":"certificate obtained successfully","identifier":"dns.example.com"}
+`
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=2")
+	in.setenv("STUB_CADDY_JOURNAL=" + journal)
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	// The stale connection error must not be presented as this attempt's cause.
+	notContains(t, out, "the connection was refused")
+	notContains(t, out, "rate-limited")
+
+	// And the same error with nothing after it must still be diagnosed, or
+	// this test has only shown that the diagnosis is broken in general.
+	in2 := newInstall(t)
+	in2.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=2")
+	in2.setenv("STUB_CADDY_JOURNAL=" + `
+Jan 01 12:00:01 vps caddy[900]: {"level":"error","msg":"challenge failed","error":"HTTP 400 urn:ietf:params:acme:error:connection - dns.example.com: Connection refused"}
+`)
+	in2.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in2.caddyfileAt()
+	out2, _ := in2.run("--https", "--yes")
+	contains(t, out2, "the connection was refused")
+}
+
+// Caddy exited at startup with "opening log writer ... open
+// /var/log/caddy/dnsdaddy.log: permission denied" because the service account
+// could not write that path. An access log is not worth a failure mode that
+// takes the management interface down.
+func TestGeneratedCaddyfileDoesNotDependOnAVarLogDirectory(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	in.caddyfileAt()
+
+	in.run("--https", "--yes")
+
+	cfg := in.readCaddyfile()
+	if cfg == "" {
+		t.Fatal("no Caddyfile was written, so this test would assert nothing")
+	}
+	if strings.Contains(cfg, "/var/log/caddy") {
+		t.Errorf("the generated Caddyfile still writes to /var/log/caddy:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, "output stderr") {
+		t.Errorf("the generated Caddyfile does not log to stderr:\n%s", cfg)
+	}
+	// The fixture has no /var/log/caddy at all, so a clean install completing
+	// is itself the proof that nothing depends on one existing.
+}
+
+func TestShippedCaddyfileExampleDoesNotDependOnAVarLogDirectory(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "Caddyfile.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	// The explanation of why it is not used may mention the path; a directive
+	// writing to it may not.
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/var/log/caddy") {
+			t.Errorf("Caddyfile.example still configures a file log: %q", trimmed)
+		}
+	}
+}
+
+// `caddy validate` runs as root. The Caddy systemd unit does not. On the real
+// VPS that produced "PASS Caddyfile validated" immediately followed by
+// "open /etc/caddy/Caddyfile: permission denied".
+func TestCaddyfileReadabilityIsCheckedAsTheServiceUser(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=30")
+	in.setenv("STUB_CADDY_UNIT_USER=caddy", "STUB_KNOWN_USERS=caddy", "STUB_SUDO_TEST_EXIT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	// Syntax and consumability are separate claims, reported separately.
+	contains(t, out, "Caddyfile syntax validated")
+	contains(t, out, "cannot read")
+	// Failing closed: HTTPS is not declared working, and the tunnel is offered.
+	notContains(t, out, "is serving the dashboard over HTTPS")
+	contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+}
+
+func TestCaddyfileReadableByTheServiceUserIsReportedSeparately(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CADDY_UNIT_USER=caddy", "STUB_KNOWN_USERS=caddy", "STUB_SUDO_TEST_EXIT=0")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	in.caddyfileAt()
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("a healthy HTTPS install exited %d:\n%s", code, out)
+	}
+	contains(t, out, "Caddyfile syntax validated")
+	contains(t, out, "can read")
+}
+
+// The backup is deliberately 0600. Restoring it with `cp -p` handed the live
+// Caddyfile that mode, and the operator was told "Your previous Caddyfile has
+// been restored" about a file Caddy could no longer read.
+func TestRollbackRestoresTheLiveCaddyfileMode(t *testing.T) {
+	in := newInstall(t)
+	path := in.caddyfileAt()
+	must(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	const original = "example.com {\n\trespond \"someone else's site\"\n}\n"
+	must(t, os.WriteFile(path, []byte(original), 0o644))
+
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	// A diagnosed, terminal failure, which is the path that rolls the whole
+	// attempt back. An undiagnosed hostname timeout deliberately leaves the
+	// site configured so CertMagic can keep retrying, and would not exercise
+	// restore_caddyfile at all.
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.setenv("STUB_CADDY_JOURNAL=" + `
+Jan 01 12:00:01 vps caddy[900]: {"level":"error","msg":"challenge failed","error":"HTTP 400 urn:ietf:params:acme:error:connection - dns.example.com: Connection refused"}
+`)
+
+	out, _ := in.run("--https", "--yes")
+
+	// 1. The operator's own configuration is back, byte for byte.
+	got := in.readCaddyfile()
+	if got != original {
+		t.Errorf("the previous Caddyfile was not restored:\n--- want ---\n%s\n--- got ---\n%s", original, got)
+	}
+
+	// 2. And with the mode it had, not the backup's 0600. This is the check
+	//    that matters: asserting the helper returned zero would have passed
+	//    against the broken version.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("restored Caddyfile has mode %04o, want 0644 — Caddy's service account cannot read 0600", perm)
+	}
+
+	// 3. The backup itself stays private.
+	matches, err := filepath.Glob(path + ".dnsdaddy-bak-*")
+	if err != nil || len(matches) == 0 {
+		t.Fatalf("no backup was taken (glob err=%v)", err)
+	}
+	bi, err := os.Stat(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := bi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("backup has mode %04o, want 0600 — it is a copy of what this host publishes", perm)
+	}
+	contains(t, out, "previous Caddyfile has been restored")
+}
+
+// A reload that returns zero is not a service that is running. The installer
+// spent three minutes waiting for a certificate from a Caddy that had exited.
+func TestADeadCaddyStopsTheAcmeWaitImmediately(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com")
+	// A timeout long enough that waiting it out would be obvious. If the
+	// installer polls ACME at all this test takes 120s; it should take ~0.
+	in.setenv("DNSDADDY_HTTPS_TIMEOUT=120")
+	in.setenv("STUB_CADDY_ACTIVE_EXIT=1")
+	in.setenv("STUB_CADDY_JOURNAL=" +
+		"Jan 01 12:00:01 vps caddy[900]: run: loading initial config: opening log writer: permission denied\n")
+	in.caddyfileAt()
+
+	start := time.Now()
+	out, _ := in.run("--https", "--yes")
+	elapsed := time.Since(start)
+
+	if elapsed > 60*time.Second {
+		t.Errorf("took %s — the installer waited for a certificate from a Caddy that is not running", elapsed)
+	}
+	contains(t, out, "not running")
+	// Caddy's own words, not a summary of them.
+	contains(t, out, "permission denied")
+	// It must never claim the certificate wait even started.
+	notContains(t, out, "is serving the dashboard over HTTPS")
+	contains(t, out, "ssh -L 8080:127.0.0.1:8080")
+}
+
+func TestFailedCaddyEnableIsNotSwallowed(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CADDY_ENABLE_EXIT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+	contains(t, out, "Could not enable the Caddy service to start at boot")
+}
+
+// "PASS TCP port 80 is free" sat directly above "UNKNOWN whether inbound TCP 80
+// and 443 reach this machine", and was read as contradicting it.
+func TestPortWordingDescribesAvailabilityNotReachability(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	contains(t, out, "Port 80 available for Caddy")
+	contains(t, out, "Port 443 available for Caddy")
+	notContains(t, out, "TCP port 80 is free")
+	notContains(t, out, "TCP port 443 is free")
+	// The honest unknown stays, and is not quietly upgraded.
+	contains(t, out, "UNKNOWN  whether inbound TCP 80 and 443 reach this machine")
+}
+
+func TestCaddyAlreadyHoldingPort80IsExpectedNotAConflict(t *testing.T) {
+	in := newInstall(t)
+	in.stub("ss", `
+if [[ "$*" == *"-t"* ]]; then
+  echo 'LISTEN 0 4096 0.0.0.0:80 0.0.0.0:* users:(("caddy",pid=700,fd=9))'
+  echo 'LISTEN 0 4096 0.0.0.0:443 0.0.0.0:* users:(("caddy",pid=700,fd=10))'
+fi
+exit 0`)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	contains(t, out, "Port 80 already held by Caddy (expected)")
+	contains(t, out, "Port 443 already held by Caddy (expected)")
+}
+
+// `./deploy/install-docker.sh --https` on a running deployment refused, because
+// TCP/UDP 53 were held by docker-proxy and only MODE=upgrade treated the
+// project's own ports as expected. The operator was told to use --upgrade,
+// which is not the operation they asked for: moving an existing deployment
+// from SSH-tunnel mode to HTTPS is a reconfiguration, not a rebuild.
+func TestHttpsMayRunOverThisProjectsOwnRunningDeployment(t *testing.T) {
+	in := newInstall(t)
+	// Our own stack is up and publishing 53, as Docker's userland proxy does.
+	in.setenv("STUB_STACK_RUNNING=1", "STUB_DOCKER_PUBLISHED=5353/tcp:53 5353/udp:53 8080/tcp:8080")
+	in.stub("ss", `
+echo 'LISTEN 0 4096 0.0.0.0:53 0.0.0.0:* users:(("docker-proxy",pid=800,fd=4))'
+exit 0`)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	in.caddyfileAt()
+
+	out, code := in.run("--https", "--yes")
+
+	if code != 0 {
+		t.Fatalf("--https over this project's own deployment exited %d:\n%s", code, out)
+	}
+	contains(t, out, "port 53 is published by this DNS Daddy deployment")
+	notContains(t, out, "Port 53 is not available")
+	notContains(t, out, "Use --upgrade")
+
+	// The data has to survive: a reconfiguration is not a reinstall.
+	if log := in.composeLog(); strings.Contains(log, "down -v") || strings.Contains(log, "--volumes") {
+		t.Errorf("the persistent volume was removed during a mode change:\n%s", log)
+	}
+}
+
+func TestAForeignContainerOnPort53IsStillAHardConflict(t *testing.T) {
+	in := newInstall(t)
+	// Our stack is running, but it publishes nothing on 53 — somebody else's
+	// container has it. From the socket the two are indistinguishable, which
+	// is the whole reason ownership is proven through Docker instead.
+	in.setenv("STUB_STACK_RUNNING=1", "STUB_DOCKER_PUBLISHED=8080/tcp:8080")
+	in.stub("ss", `
+echo 'LISTEN 0 4096 0.0.0.0:53 0.0.0.0:* users:(("docker-proxy",pid=800,fd=4))'
+exit 0`)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com")
+	in.caddyfileAt()
+
+	out, code := in.run("--https", "--yes")
+
+	if code == 0 {
+		t.Fatalf("--https continued past a foreign container holding port 53:\n%s", out)
+	}
+	contains(t, out, "port 53 is already in use by")
+	contains(t, out, "Port 53 is not available")
+}
+
+func TestAnotherDnsServerOnPort53IsStillAHardConflict(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_STACK_RUNNING=1", "STUB_DOCKER_PUBLISHED=8080/tcp:8080")
+	in.stub("ss", `
+echo 'LISTEN 0 4096 0.0.0.0:53 0.0.0.0:* users:(("systemd-resolve",pid=310,fd=12))'
+exit 0`)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com")
+	in.caddyfileAt()
+
+	out, code := in.run("--https", "--yes")
+
+	if code == 0 {
+		t.Fatalf("--https continued past systemd-resolved on port 53:\n%s", out)
+	}
+	contains(t, out, "port 53 is already in use by")
+	// And still gives the recipe for the most common conflict on Debian and
+	// Ubuntu rather than a generic "stop whatever owns it".
+	contains(t, out, "DNSStubListener=no")
+}
+
+// The rollback reverted .env, recreated the container, and doctor was run
+// immediately — so doctor reported "Nothing is listening on :5353" and
+// "dashboard connection refused" about a container two seconds into start-up
+// that became healthy a moment later. The diagnosis was asked at the wrong
+// instant. The fix is ordering, not suppression.
+func TestDoctorRunsOnlyAfterARollbackRestartHasBecomeHealthy(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.setenv("STUB_CADDY_JOURNAL=" + `
+Jan 01 12:00:01 vps caddy[900]: {"level":"error","msg":"challenge failed","error":"HTTP 400 urn:ietf:params:acme:error:connection - dns.example.com: Connection refused"}
+`)
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	// Marker choice is the whole test, and both obvious choices are wrong.
+	//
+	//   "dnsdaddy doctor"          also appears in the next-steps text, so
+	//                              Index finds a mention rather than a run.
+	//   LastIndex("...responding") lands in the end-of-run summary, which
+	//                              re-prints every PASS line.
+	//
+	// So: the stub's own banner for the run, and the first health line *after*
+	// the restart for the wait. An offset comparison against the wrong marker
+	// is a test that reports an ordering it never measured.
+	restarted := strings.Index(out, "Restarted DNS Daddy with the tunnel configuration")
+	if restarted < 0 {
+		t.Fatalf("the rollback never restarted DNS Daddy:\n%s", out)
+	}
+	rel := strings.Index(out[restarted:], "DNS Daddy is responding")
+	if rel < 0 {
+		t.Fatalf("nothing waited for health after the rollback restart:\n%s", out)
+	}
+	healthy := restarted + rel
+
+	doctor := strings.Index(out, "DNS Daddy doctor — test")
+	if doctor < 0 {
+		t.Fatalf("doctor never ran:\n%s", out)
+	}
+	if doctor < healthy {
+		t.Errorf("doctor ran at offset %d, before the post-rollback health check at %d — "+
+			"that is the race that produced 'dashboard connection refused' about a "+
+			"container that was still starting", doctor, healthy)
+	}
+}
+
+// A rollback that cannot get DNS Daddy back up is reported as incomplete, with
+// the container's own log. "Reverted the HTTPS settings" on its own reads as
+// though the machine is back to how it started, and it may not be.
+func TestAnIncompleteRollbackIsSaidPlainly(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.setenv("STUB_CADDY_JOURNAL=" + `
+Jan 01 12:00:01 vps caddy[900]: {"level":"error","msg":"challenge failed","error":"HTTP 400 urn:ietf:params:acme:error:connection - dns.example.com: Connection refused"}
+`)
+	// Healthy for the install, dead for the rollback restart.
+	in.setenv("STUB_HEALTH_FAIL_AFTER=1")
+	in.caddyfileAt()
+
+	out, _ := in.run("--https", "--yes")
+
+	contains(t, out, "ROLLBACK INCOMPLETE")
+	contains(t, out, "did not come back up")
+}
+
+// Caddy exiting after a rollback is a different failure from DNS Daddy exiting,
+// and it takes down whatever else the operator was serving through Caddy.
+// Claiming "your previous Caddyfile has been restored" without saying the
+// service is down would be the reassuring half of the truth.
+func TestAFailedCaddyRestartAfterRollbackIsReported(t *testing.T) {
+	in := newInstall(t)
+	path := in.caddyfileAt()
+	must(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	must(t, os.WriteFile(path, []byte("example.com {\n\trespond \"hi\"\n}\n"), 0o644))
+
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1")
+	in.setenv("STUB_CADDY_JOURNAL=" + `
+Jan 01 12:00:01 vps caddy[900]: {"level":"error","msg":"challenge failed","error":"HTTP 400 urn:ietf:params:acme:error:connection - dns.example.com: Connection refused"}
+`)
+	// Caddy never comes back after the restore.
+	in.setenv("STUB_CADDY_ACTIVE_EXIT=1")
+
+	out, _ := in.run("--https", "--yes")
+
+	contains(t, out, "ROLLBACK INCOMPLETE")
+	contains(t, out, "Caddy is not running")
+}
+
+// The five states an HTTPS setup passes through are reported as five separate
+// lines, because a PASS for an earlier one must not be read as the later one.
+// "Port 443 available for Caddy" is not "Caddy is listening", which is not
+// "a publicly trusted certificate exists".
+func TestTheHttpsStatesAreReportedSeparately(t *testing.T) {
+	in := newInstall(t)
+	in.stub("ss", `
+if [[ "$*" == *"-t"* ]]; then
+  echo 'LISTEN 0 4096 0.0.0.0:443 0.0.0.0:* users:(("caddy",pid=700,fd=10))'
+fi
+exit 0`)
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	in.caddyfileAt()
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("a healthy HTTPS install exited %d:\n%s", code, out)
+	}
+
+	// Each of these is a distinct measurement, in order.
+	want := []string{
+		"Port 443 already held by Caddy (expected)",
+		"Caddyfile syntax validated",
+		"Caddy service is active",
+		"Caddy is listening on TCP 443",
+		"is serving the dashboard over HTTPS",
+		"Certificate is trusted by this machine's CA store",
+		"Caddy is reaching DNS Daddy on 127.0.0.1:8080",
+	}
+	at := 0
+	for _, w := range want {
+		i := strings.Index(out[at:], w)
+		if i < 0 {
+			t.Fatalf("missing or out of order: %q\n%s", w, out)
+		}
+		at += i
+	}
+
+	// And the one that must stay honest: the backend is not reachable from
+	// outside, checked rather than assumed.
+	contains(t, out, "not reachable from outside")
 }
