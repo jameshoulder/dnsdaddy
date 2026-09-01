@@ -27,6 +27,62 @@ type Config struct {
 	Feeds   Feeds   `yaml:"feeds"`
 	// Detection is the behavioural detection engine. It is alert-only.
 	Detection Detection `yaml:"detection"`
+	// Integrations is the external API provider subsystem. Off by default.
+	Integrations Integrations `yaml:"integrations"`
+}
+
+// Integrations configures the "bring your own intelligence" subsystem: the
+// external threat-intelligence, reputation and enrichment APIs an operator
+// attaches themselves.
+//
+// Every value here defaults to the inert one. A deployment that never opens
+// the Integrations page starts no workers, reads no provider table, and
+// resolves exactly as it did before. See docs/external-apis.md.
+type Integrations struct {
+	// Enabled starts the engine. With it off, no worker runs and the provider
+	// tables are never read — the feature costs nothing at all.
+	Enabled bool `yaml:"enabled"`
+
+	// Workers drain the lookup queue. Two is right for a small VPS: the work
+	// is network-bound, and more goroutines would mostly mean more concurrent
+	// requests at a metered API.
+	Workers int `yaml:"workers"`
+
+	// QueueSize bounds the lookup queue. When it is full, lookups are dropped
+	// and counted rather than making anything wait — the same contract the
+	// query log and the detection engine already have.
+	QueueSize int `yaml:"queue_size"`
+
+	// CacheEntries bounds the in-memory verdict cache. This is the layer the
+	// resolution path reads.
+	CacheEntries int `yaml:"cache_entries"`
+
+	// ReputationMode is how far the policy engine may rely on providers:
+	//
+	//   off         never consulted during resolution. The default.
+	//   cache_only  reads the local cache and never waits. A miss returns
+	//               "unknown" at once and queues a lookup for next time.
+	//   blocking    reads the cache and, on a miss, waits up to
+	//               reputation_budget before failing open.
+	//
+	// blocking is deliberately not offered in the dashboard. It is the only
+	// mode that puts a third party's latency in front of a DNS answer, and
+	// that should be a decision somebody made while reading the
+	// documentation rather than a radio button they clicked past. Setting it
+	// here is exactly that decision.
+	ReputationMode string `yaml:"reputation_mode"`
+
+	// ReputationBudget is the hard ceiling on a blocking-mode wait. A
+	// ceiling, not a target: most lookups are cache hits and cost nothing.
+	ReputationBudget Duration `yaml:"reputation_budget"`
+
+	// Enrichment attaches provider context to query-log rows and findings.
+	// Always asynchronous, never on the resolution path.
+	Enrichment bool `yaml:"enrichment"`
+
+	// DefaultCacheTTL is how long a verdict stays fresh when the provider
+	// gives no hint of its own.
+	DefaultCacheTTL Duration `yaml:"default_cache_ttl"`
 }
 
 // DNS holds the resolver-side settings: what we listen on and where we forward.
@@ -359,6 +415,18 @@ func Default() Config {
 			FindingsFileMaxBytes: 32 << 20,
 			FindingsFileKeep:     3,
 			WindowScale:          1,
+		},
+		Integrations: Integrations{
+			// Off. Everything below is what the subsystem uses once an
+			// operator turns it on, and none of it runs until they do.
+			Enabled:          false,
+			Workers:          2,
+			QueueSize:        1024,
+			CacheEntries:     4096,
+			ReputationMode:   "off",
+			ReputationBudget: Duration(50 * time.Millisecond),
+			Enrichment:       false,
+			DefaultCacheTTL:  Duration(6 * time.Hour),
 		},
 	}
 }
