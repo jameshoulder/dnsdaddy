@@ -1453,6 +1453,15 @@ components:
         cacheMaxEntries: { type: integer }
         cacheEntries: { type: integer }
         cacheHitRate: { type: number, format: double }
+        cacheLookups:
+          type: integer
+          format: int64
+          description: >-
+            Hits plus misses since start. The denominator behind cacheHitRate:
+            a rate of 0 means either that the cache answered none of the
+            lookups it saw or that it has not seen any, and only this field
+            separates the two. A client showing the rate should show nothing
+            when this is zero.
         feedRefreshInterval: { type: string }
         upstreamMode: { type: string, enum: [failover, race] }
         queryLogRows: { type: integer, format: int64 }
