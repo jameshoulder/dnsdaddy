@@ -2138,15 +2138,16 @@ func TestSlowHostnameIssuanceStaysPendingRatherThanRollingBack(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	contains(t, out, "no certificate has arrived yet")
-	contains(t, out, "keeps trying in the background")
-	// The site stays configured, so those retries have something to retry.
-	body, err := os.ReadFile(caddyfile)
-	if err != nil {
-		t.Fatalf("the Caddyfile was rolled back despite an undiagnosed delay: %v", err)
-	}
-	if !strings.Contains(string(body), "admin.example.com") {
-		t.Errorf("the site block was removed:\n%s", body)
+	contains(t, out, "No certificate arrived for admin.example.com")
+	contains(t, out, "That is usually DNS")
+	contains(t, out, "dig +short admin.example.com")
+	// The site must NOT stay configured. Leaving it would let a later
+	// background retry publish the dashboard over HTTPS while the app is back
+	// in tunnel configuration: no Secure flag on the session cookie, and every
+	// client appearing to come from the proxy. Both halves move together or
+	// neither does.
+	if body, err := os.ReadFile(caddyfile); err == nil && strings.Contains(string(body), "admin.example.com") {
+		t.Errorf("a pending attempt left a public site configured:\n%s", body)
 	}
 	// But .env still goes back, or the tunnel it offers cannot be logged into.
 	env := in.readEnv()
@@ -2209,5 +2210,41 @@ func TestTheLogWindowStartsAtThisAttempt(t *testing.T) {
 	// A timestamp, which is what confines the read to this attempt.
 	if !regexp.MustCompile(`--since \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`).MatchString(got) {
 		t.Errorf("expected --since with this attempt's timestamp, got:\n%s", got)
+	}
+}
+
+// The snapshot has to remember whether a key existed, not just what it held.
+//
+// An .env carrying only DNSDADDY_BASE_URL is enough for https_env_was_working
+// to choose the restore path. If the restore then skips the keys that were
+// absent, it leaves the DNSDADDY_SECURE_COOKIES=always that reconcile_env just
+// wrote — and after the Caddyfile is rolled back the operator is sent to a
+// plain-HTTP tunnel their browser will not send that cookie over.
+func TestRestoringAnEnvPutsBackKeysThatWereAbsent(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.writeEnv("DNSDADDY_BASE_URL=https://admin.example.com")
+
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=admin.example.com", "DNSDADDY_HTTPS_TIMEOUT=5")
+	in.setenv("STUB_CURL_STRICT_EXIT=1", "STUB_CURL_LAX_EXIT=1", "STUB_GETENT_V4=192.168.1.75")
+	in.setenv(`DNSDADDY_CADDY_LOG_CMD=printf '%s' '{"problem":{"type":"urn:ietf:params:acme:error:connection","detail":"refused"}}'`)
+
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+
+	env := in.readEnv()
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_SECURE_COOKIES=") {
+			t.Errorf("a key absent before the run was left set afterwards: %q\n%s", line, env)
+		}
+		if strings.HasPrefix(line, "DNSDADDY_TRUSTED_PROXY_CIDRS=") {
+			t.Errorf("a key absent before the run was left set afterwards: %q\n%s", line, env)
+		}
+	}
+	// The one that WAS there is still there.
+	if !strings.Contains(env, "DNSDADDY_BASE_URL=https://admin.example.com") {
+		t.Errorf("the key that existed before the run was lost:\n%s", env)
 	}
 }

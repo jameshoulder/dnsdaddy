@@ -88,7 +88,12 @@ CADDY_LOG_SINCE=""
 # them would have left Caddy still terminating TLS and proxying to an app that
 # no longer knew it was behind TLS: no Secure cookie, and every client
 # appearing to come from the proxy.
+# Each key is remembered as "value" or as the sentinel below, because "was
+# empty" and "was not there" call for different restores: writing an empty
+# value back is not the same as putting the key back to absent, and leaving a
+# key alone means keeping whatever reconcile_env wrote this run.
 HTTPS_ENV_SNAPSHOT_TAKEN=0
+HTTPS_ENV_ABSENT="__dnsdaddy_absent__"
 HTTPS_ENV_BASE_URL_WAS=""
 HTTPS_ENV_SECURE_COOKIES_WAS=""
 HTTPS_ENV_TRUSTED_PROXY_WAS=""
@@ -1352,13 +1357,22 @@ configure_https() {
   # back in.
   if [[ $HTTPS_FAIL_DIAGNOSED -eq 0 ]] && [[ "$HTTPS_TARGET_KIND" == "hostname" ]]; then
     HTTPS_STATE="pending"
-    warn "Caddy is configured for ${HTTPS_TARGET}, but no certificate has arrived yet."
-    note "Caddy keeps trying in the background, so this can still complete on its"
-    note "own — DNS propagation is not instant. Nothing here says it will."
-    note "Watch it:      journalctl -u caddy -f"
-    note "Test it:       curl -v https://${HTTPS_TARGET}/api/v1/health"
-    note "When it answers, re-run with --https to switch the dashboard over."
-    note "Until then the dashboard is reachable through the SSH tunnel below."
+    warn "No certificate arrived for ${HTTPS_TARGET} in the time allowed, and Caddy has not said why."
+    note "That is usually DNS: a record created minutes ago may not have reached"
+    note "Let's Encrypt yet. It is not a misconfiguration this installer can see."
+    note ""
+    note "Check whether it resolves publicly, then run this again:"
+    note "  dig +short ${HTTPS_TARGET}"
+    note "  sudo DNSDADDY_HTTPS_HOSTNAME=${HTTPS_TARGET} ./deploy/install-docker.sh --https"
+    note ""
+    note "The site has been removed from Caddy for now. Leaving it configured"
+    note "would let a later background retry publish the dashboard over HTTPS"
+    note "while this app is back in tunnel configuration — no Secure flag on the"
+    note "session cookie, and every client appearing to come from the proxy."
+    note "Re-running is the way to turn HTTPS on, so that both halves move"
+    note "together."
+    restore_caddyfile "$caddyfile"
+    systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
     unwind_https_env
     return 0
   fi
@@ -1890,10 +1904,32 @@ reconcile_env() {
 # snapshot_https_env records the three keys before this run changes them.
 snapshot_https_env() {
   [[ $HTTPS_ENV_SNAPSHOT_TAKEN -eq 0 ]] || return 0
-  HTTPS_ENV_BASE_URL_WAS="$(env_value DNSDADDY_BASE_URL)"
-  HTTPS_ENV_SECURE_COOKIES_WAS="$(env_value DNSDADDY_SECURE_COOKIES)"
-  HTTPS_ENV_TRUSTED_PROXY_WAS="$(env_value DNSDADDY_TRUSTED_PROXY_CIDRS)"
+  HTTPS_ENV_BASE_URL_WAS="$(snapshot_one DNSDADDY_BASE_URL)"
+  HTTPS_ENV_SECURE_COOKIES_WAS="$(snapshot_one DNSDADDY_SECURE_COOKIES)"
+  HTTPS_ENV_TRUSTED_PROXY_WAS="$(snapshot_one DNSDADDY_TRUSTED_PROXY_CIDRS)"
   HTTPS_ENV_SNAPSHOT_TAKEN=1
+}
+
+# snapshot_one prints the key's active value, or the absent sentinel.
+snapshot_one() { # key
+  if [[ -f "$ENV_FILE" ]] && grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null; then
+    env_value "$1"
+    return 0
+  fi
+  printf '%s' "$HTTPS_ENV_ABSENT"
+}
+
+# restore_one puts a key back to exactly what the snapshot recorded.
+restore_one() { # key snapshot
+  if [[ "$2" == "$HTTPS_ENV_ABSENT" ]]; then
+    # It was not there before this run, so it must not be there after a failed
+    # one. Leaving it alone would keep whatever reconcile_env wrote — which for
+    # DNSDADDY_SECURE_COOKIES is "always", and a browser will not send that
+    # cookie over the plain-HTTP tunnel the operator is being sent to.
+    env_disable "$1" >/dev/null 2>&1
+    return 0
+  fi
+  env_set "$1" "$2"
 }
 
 # https_env_was_working reports whether this .env already described a working
@@ -1903,7 +1939,7 @@ snapshot_https_env() {
 # so its presence at snapshot time means a previous successful HTTPS install
 # left it there.
 https_env_was_working() {
-  [[ -n "$HTTPS_ENV_BASE_URL_WAS" ]]
+  [[ -n "$HTTPS_ENV_BASE_URL_WAS" && "$HTTPS_ENV_BASE_URL_WAS" != "$HTTPS_ENV_ABSENT" ]]
 }
 
 # restore_https_env puts the snapshot back after a failed re-run.
@@ -1914,9 +1950,9 @@ https_env_was_working() {
 # the Secure flag from session cookies on a live public site and collapse every
 # client to the proxy's own address.
 restore_https_env() {
-  env_set DNSDADDY_BASE_URL "$HTTPS_ENV_BASE_URL_WAS"
-  [[ -n "$HTTPS_ENV_SECURE_COOKIES_WAS" ]] && env_set DNSDADDY_SECURE_COOKIES "$HTTPS_ENV_SECURE_COOKIES_WAS"
-  [[ -n "$HTTPS_ENV_TRUSTED_PROXY_WAS" ]] && env_set DNSDADDY_TRUSTED_PROXY_CIDRS "$HTTPS_ENV_TRUSTED_PROXY_WAS"
+  restore_one DNSDADDY_BASE_URL "$HTTPS_ENV_BASE_URL_WAS"
+  restore_one DNSDADDY_SECURE_COOKIES "$HTTPS_ENV_SECURE_COOKIES_WAS"
+  restore_one DNSDADDY_TRUSTED_PROXY_CIDRS "$HTTPS_ENV_TRUSTED_PROXY_WAS"
   pass "Restored the previous HTTPS settings; the working deployment is unchanged"
   if "${COMPOSE[@]}" up -d >/dev/null 2>&1; then
     pass "Restarted DNS Daddy with the settings it had before this run"
