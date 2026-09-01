@@ -88,11 +88,19 @@ func runDoctor(args []string) error {
 	// kind should put it. Derived from configuration, so it answers even when
 	// the dashboard itself did not respond — which is exactly when an operator
 	// most wants to know whether it is meant to be reachable from here.
+	//
+	// Runtime is part of the input because the same listen address means
+	// different things in different places: ":8080" on a host is every
+	// interface of a machine that may have a public address, while inside a
+	// container it is every interface of that container's own namespace, with
+	// the host's published-port mapping — which this process cannot see —
+	// deciding what any of it reaches.
 	checks = append(checks, diag.Deployment(diag.DeploymentInput{
 		Listen:            cfg.HTTP.Listen,
 		BaseURL:           cfg.HTTP.BaseURL,
 		SecureCookies:     cfg.HTTP.SecureCookies,
 		TrustedProxyCIDRs: cfg.HTTP.TrustedProxyCIDRs,
+		Runtime:           diag.DetectRuntime(),
 	})...)
 
 	if *asJSON {

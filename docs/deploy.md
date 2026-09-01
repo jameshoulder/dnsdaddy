@@ -242,6 +242,21 @@ DNSDADDY_HTTPS_HOSTNAME=dns.example.com ./deploy/install-docker.sh --https --yes
 DNSDADDY_HTTPS_HOSTNAME=ip ./deploy/install-docker.sh --https --yes
 ```
 
+#### Caddy's access log
+
+The generated Caddyfile sends Caddy's access log to **stderr**, which systemd
+collects into the journal:
+
+```bash
+journalctl -u caddy -f
+```
+
+It does not write to `/var/log/caddy/`. That directory has to exist and be
+writable by the Caddy *service account* — not by root — and on a real Debian 13
+VPS it was not, so Caddy exited at start-up with `opening log writer ...
+permission denied`. An access log is not worth a failure mode that stops the
+management interface coming up.
+
 #### HTTPS on a bare IP address
 
 Supported, with one requirement worth knowing about.
@@ -262,6 +277,22 @@ upstream one is unreachable it says so rather than quietly accepting whatever
 
 A hostname needs none of this and works on much older Caddy. Use an IP when you
 have no name for the machine; use a name when you do.
+
+**This has been done for real, once.** On Debian 13 (trixie) with Docker 26.1.5
+and Caddy 2.11.4, Let's Encrypt issued a publicly trusted certificate directly
+for the VPS's IPv4 address under the `shortlived` profile. The certificate
+verified against the system CA store with ordinary `curl`, HSTS was enabled,
+plain HTTP redirected with a 308, Caddy reached the backend on
+`127.0.0.1:8080`, and host port 8080 was confirmed unreachable from outside.
+
+That is one host on one distribution behind one provider's firewall. It is not
+a claim that every distribution or provider behaves the same way.
+
+**If you are developing or testing the installer, do not point it at production
+Let's Encrypt.** Repeated attempts burn the duplicate-certificate and
+failed-authorisation limits for that identifier, and those reset in days, not
+minutes. Use the staging endpoint. The installer's own test suite contacts no
+ACME server at all.
 
 ### Known OS-specific behaviour
 
@@ -780,6 +811,38 @@ Under Docker it must be run **inside the container**: the dashboard is published
 on loopback only and the database lives in a named volume, so a run on the host
 would report failures that are artefacts of where it was run. Each affected
 check says so rather than reporting a false failure.
+
+#### What `doctor` cannot see from inside a container
+
+The dashboard backend listens on `:8080` **inside the container**, and that is
+correct — a container that bound its own `127.0.0.1` could not be reached by the
+host at all, so the port mapping would never work. What that bind reaches is
+decided by how Compose publishes it:
+
+```
+127.0.0.1:8080:8080     the dashboard is on the host's loopback only  (what DNS Daddy configures)
+0.0.0.0:8080:8080       the dashboard is published to every interface (what you must not do)
+```
+
+Those two produce an **identical** listener inside the container. `doctor` runs
+in there and cannot tell which one it got, so for a container-internal wildcard
+bind it reports a **warning, not a failure**, and says why. It used to report
+this as definite public exposure, which was false on every correctly deployed
+Docker install.
+
+Check the mapping from the host, where the answer actually is:
+
+```bash
+docker compose port dnsdaddy 8080     # expect 127.0.0.1:8080
+```
+
+Two things are unaffected by any of this:
+
+- a bind to a **specific public address** inside a container is still a
+  failure — no port mapping makes `203.0.113.10` private;
+- a management request that has **actually arrived from a public address over
+  plain HTTP** is still a failure, container or not. Observation outranks
+  inference, and that particular observation is proof the mapping is open.
 
 What it tells apart, which `dig` alone cannot:
 

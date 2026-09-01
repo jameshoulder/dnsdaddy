@@ -22,6 +22,85 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+**Nine defects found by deploying to a real VPS.** Debian 13 (trixie), Docker
+26.1.5, Caddy 2.11.4, dashboard published on host loopback with Caddy
+terminating TLS in front of it. The architecture works — Let's Encrypt issued a
+publicly trusted certificate directly for the IPv4 address under the
+`shortlived` profile, and host port 8080 was confirmed unreachable from
+outside — but getting there went through all of the following.
+
+**Caddy saying "rate limit" is not Let's Encrypt saying it.** The ACME
+diagnosis matched the bare substring `rate limit`, and CertMagic logs "waiting
+on internal rate limiter" / "done waiting on internal rate limiter" while
+pacing its own requests during a perfectly healthy issuance. The installer read
+one of those, announced "Let's Encrypt rate-limited this request" and began
+rolling HTTPS back — seconds before the same attempt logged "certificate
+obtained successfully". Only the CA's own structured error counts now, and
+every diagnosis arm additionally requires its evidence to be *newer* than the
+last success line: an error Caddy has since superseded is describing a moment
+that has passed.
+
+**Caddy could not write its own access log, and the installer waited three
+minutes for a certificate from a process that had exited.** The generated
+Caddyfile logged to `/var/log/caddy/dnsdaddy.log`, which the Caddy service
+account could not write, so Caddy exited at start-up with `opening log writer
+... permission denied`. Access logs now go to stderr and therefore to the
+journal, which is where the installer already reads Caddy's diagnostics from.
+Separately, a reload returning zero is no longer taken as proof that Caddy is
+running: `systemctl is-active` is checked before any ACME waiting begins, and a
+dead service short-circuits straight to rollback with Caddy's own words.
+
+**"Caddyfile validated" was root's opinion.** `caddy validate` runs as root;
+the Caddy systemd unit does not. On the VPS that produced `PASS Caddyfile
+validated` immediately followed by `open /etc/caddy/Caddyfile: permission
+denied`. Syntax validity and "the service can actually read it" are now
+separate checks, reported separately, with the second performed as the unit's
+real `User=` and failing closed.
+
+**Rollback restored the backup's permissions along with its contents.** The
+backup is deliberately `0600`; `cp -p` gave the live `/etc/caddy/Caddyfile`
+that mode, so a rollback that reported success left a configuration Caddy could
+not read. The live file's mode and owner are now recorded before the backup is
+hardened, and restored separately from the contents. A rollback that leaves
+Caddy or DNS Daddy down says `ROLLBACK INCOMPLETE` rather than "your previous
+Caddyfile has been restored".
+
+**`doctor` was run two seconds into a container restart.** After an HTTPS
+rollback reverted `.env` and recreated the container, `doctor` ran immediately
+and reported "Nothing is listening on :5353" and "dashboard connection refused"
+about a service that became healthy a moment later. The rollback now waits on
+the same `wait_for_health` the install path uses.
+
+**`--https` refused to run on a running deployment.** Only `--upgrade` treated
+this project's own busy ports as expected, so moving an existing SSH-tunnel
+deployment to HTTPS was refused with advice to run a different operation.
+An explicitly requested deployment mode may now run over this project's own
+containers — proven through Docker's own port map for the container
+`docker compose ps` names, not through the socket, because `docker-proxy` looks
+identical whoever's container is behind it. A foreign container or another DNS
+server on port 53 is still a hard conflict.
+
+**"TCP port 80 is free" read as "the internet can reach port 80"**, printed
+directly above a line admitting that reachability is unknown. It now says
+"Port 80 available for Caddy", or "already held by Caddy (expected)" when
+re-running over a working deployment. The external reachability line stays
+`UNKNOWN`: a cloud firewall is not visible from the host, and no third-party
+port checker is being added to turn it green.
+
+**`doctor` called a container's internal `:8080` definite public exposure.**
+Compose published the dashboard as `127.0.0.1:8080:8080`, Caddy proxied to it,
+and external probing proved host port 8080 unreachable — and
+`docker compose exec dnsdaddy dnsdaddy doctor` reported `[FAIL] Bound to :8080,
+which publishes the management API beyond this machine`. It does not: inside a
+container that bind means every interface of the container's own namespace, and
+`127.0.0.1:8080:8080` and `0.0.0.0:8080:8080` produce an identical listener
+that the process cannot tell apart. A container-internal wildcard bind is now a
+warning that says exactly that and points at `docker compose port dnsdaddy
+8080`. A wildcard bind on a host is still a failure, a specific public address
+inside a container is still a failure, and a management request actually
+observed arriving from a public address in plaintext is still a failure
+either way — observation outranks inference.
+
 **A palette where each colour means one thing.** The dashboard's identity has
 been rebuilt around a semantic separation it did not previously have: green is
 protection and the primary affirmative action, cyan is observation — telemetry,

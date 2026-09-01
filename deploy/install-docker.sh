@@ -80,6 +80,15 @@ HTTPS_FAIL_DIAGNOSED=0
 # Timestamp taken just before Caddy is reloaded, so the log reader can ignore
 # everything an earlier attempt wrote.
 CADDY_LOG_SINCE=""
+# The slice of Caddy's log the diagnosis is reasoning about, and the line
+# number within it of the last "the certificate arrived". Held as state rather
+# than passed around because every diagnosis arm needs both, and because an
+# arm that forgot the second one is exactly the bug this pair exists to stop.
+ACME_LOG_WINDOW=""
+ACME_SUCCESS_LINE=0
+# The account the Caddy systemd unit runs as, resolved once and reported in
+# failure messages so the operator knows whose permissions to fix.
+CADDY_SERVICE_USER=""
 # The HTTPS-mode env keys exactly as they were when this run started, so a
 # failed attempt can put back what was there rather than assuming there was
 # nothing. On a fresh install these are empty and restoring them means
@@ -97,7 +106,14 @@ HTTPS_ENV_TRUSTED_PROXY_WAS=""
 # printed, so the pre-ACME summary can restate it without resolving twice.
 HOSTNAME_DNS_STATE=""
 # The Caddyfile as it was before this run, so a failed attempt can put it back.
+#
+# The mode and owner are recorded separately from the backup file because the
+# backup is hardened to 0600 the moment it is made, and restoring its
+# permissions along with its contents is what once left a rolled-back
+# /etc/caddy/Caddyfile that Caddy could not read.
 CADDYFILE_BACKUP=""
+CADDYFILE_ORIG_MODE=""
+CADDYFILE_ORIG_OWNER=""
 CADDYFILE_EXISTED=0
 HTTPS_STATE=""
 
@@ -110,6 +126,15 @@ DASHBOARD_BIND=""
 # said otherwise.
 CHOICE=2
 
+# Whether the operator named a deployment mode on the command line.
+#
+# `--https` over an already-running deployment is a reconfiguration, not a
+# fresh install: the ports it finds busy are its own. Without this the
+# installer refused, told the operator to use --upgrade, and left them with no
+# supported way to move an existing tunnel deployment to HTTPS short of taking
+# the resolver down.
+DEPLOYMENT_REQUESTED=0
+
 for arg in "$@"; do
   case "$arg" in
     --upgrade)   MODE="upgrade" ;;
@@ -117,9 +142,9 @@ for arg in "$@"; do
     --purge)     PURGE_DATA=1 ;;
     --dry-run)   DRY_RUN=1 ;;
     --yes|-y)    ASSUME_YES=1 ;;
-    --lan)       DEPLOYMENT="lan" ;;
-    --vps)       DEPLOYMENT="vps" ;;
-    --https)     DEPLOYMENT="https" ;;
+    --lan)       DEPLOYMENT="lan"; DEPLOYMENT_REQUESTED=1 ;;
+    --vps)       DEPLOYMENT="vps"; DEPLOYMENT_REQUESTED=1 ;;
+    --https)     DEPLOYMENT="https"; DEPLOYMENT_REQUESTED=1 ;;
     --help|-h)   sed -n '2,27p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; exit 2 ;;
   esac
@@ -567,12 +592,49 @@ stack_is_running() {
   [[ -n "$("${COMPOSE[@]}" ps -q dnsdaddy 2>/dev/null)" ]]
 }
 
+# project_publishes_port proves that THIS Compose project's dnsdaddy container
+# is the thing publishing a given HOST port.
+#
+# The distinction matters because `ss` names the holder of a published port as
+# `docker-proxy`, which says only that some container has it — not whose. A
+# stranger's DNS container and our own are indistinguishable from the socket.
+# The container id comes from `docker compose ps -q dnsdaddy`, which is scoped
+# to this project, so its port map is an answer that cannot be confused.
+#
+# Reads the whole map rather than asking about one port, because the argument
+# form of `docker port` takes the CONTAINER port and the caller here knows the
+# HOST one. Those differ: the container runs unprivileged and cannot bind 53,
+# so docker-compose.yml publishes "53:5353". Asking `docker port <cid> 53/udp`
+# would have been asking whether the container listens on 53 internally, which
+# it never does — a check that always says no is the same as no check at all.
+#
+#   $ docker port <cid>
+#   5353/tcp -> 0.0.0.0:53
+#   5353/udp -> 0.0.0.0:53
+#   8080/tcp -> 127.0.0.1:8080
+project_publishes_port() { # proto host_port
+  local proto="$1" port="$2" cid
+  cid="$("${COMPOSE[@]}" ps -q dnsdaddy 2>/dev/null | head -1)"
+  [[ -n "$cid" ]] || return 1
+  docker port "$cid" 2>/dev/null \
+    | grep -qE "^[0-9]+/${proto}[[:space:]]+->[[:space:]].*:${port}\$"
+}
+
 check_ports() {
   local blocked=0 proto owner ours=0
-  # Only an upgrade may treat a busy port as expected. During a fresh install a
-  # running stack is a reason to stop and say so, not to carry on into a bind
-  # failure.
-  if [[ "$MODE" == "upgrade" ]] && stack_is_running; then
+  # A busy port may be treated as expected only when this project's own
+  # deployment is what is holding it, and only for an operation that is
+  # legitimately performed over a running deployment:
+  #
+  #   --upgrade    rebuild and restart in place
+  #   --https etc. change the deployment mode of what is already running
+  #
+  # `--https` used to fall outside this, so an operator moving an existing
+  # tunnel deployment to HTTPS was told their own resolver was in the way and
+  # advised to run --upgrade, which is not the operation they asked for. A
+  # fresh install with no mode requested still stops: there, a running stack is
+  # genuinely unexpected.
+  if [[ "$MODE" == "upgrade" || $DEPLOYMENT_REQUESTED -eq 1 ]] && stack_is_running; then
     ours=1
   fi
 
@@ -582,8 +644,11 @@ check_ports() {
       pass "${proto^^} port 53 is free"
       continue
     fi
-    if [[ $ours -eq 1 ]]; then
-      pass "${proto^^} port 53 is held by this DNS Daddy deployment (expected during an upgrade)"
+    # "Our deployment is running" is not on its own a reason to accept a busy
+    # port: something else may hold it while our container publishes nothing.
+    # Both halves have to be true.
+    if [[ $ours -eq 1 ]] && project_publishes_port "$proto" 53; then
+      pass "${proto^^} port 53 is published by this DNS Daddy deployment (expected)"
       continue
     fi
     blocked=1
@@ -598,8 +663,8 @@ check_ports() {
   local dash_port="${DASHBOARD_PORT:-8080}"
   owner="$(port_owner tcp "$dash_port")"
   if [[ -n "$owner" ]]; then
-    if [[ $ours -eq 1 ]]; then
-      pass "TCP port ${dash_port} is held by this DNS Daddy deployment (expected during an upgrade)"
+    if [[ $ours -eq 1 ]] && project_publishes_port tcp "$dash_port"; then
+      pass "TCP port ${dash_port} is published by this DNS Daddy deployment (expected)"
     else
       warn "TCP port ${dash_port} is in use by: $owner — the dashboard will not start until it is free"
     fi
@@ -664,7 +729,10 @@ EOF
       ;;
     "DNS Daddy")
       printf '\n  Another DNS Daddy instance is already running here.\n'
-      printf '  Use --upgrade to rebuild and restart it, or `docker compose down` first.\n'
+      printf '  To rebuild and restart it:            --upgrade\n'
+      printf '  To move it to HTTPS or another mode:  --https, --lan or --vps\n'
+      printf '  Neither takes the resolver down or touches your data.\n'
+      printf '  If it is not this project, `docker compose down` in its own directory first.\n'
       ;;
     Docker)
       # docker-proxy publishes somebody's container port. Whose, this script
@@ -1107,16 +1175,25 @@ check_hostname_points_here() { # hostname
 # imply a confidence that does not exist, so they are printed as two.
 report_reachability() {
   printf '\n  %sLocal%s — measured on this machine\n' "$BOLD" "$OFF"
-  if [[ -z "$WEB_80_OWNER" ]]; then
-    pass "TCP port 80 is free"
-  else
-    warn "TCP port 80 is held by ${WEB_80_OWNER}"
-  fi
-  if [[ -z "$WEB_443_OWNER" ]]; then
-    pass "TCP port 443 is free"
-  else
-    warn "TCP port 443 is held by ${WEB_443_OWNER}"
-  fi
+  # "Port 80 is free" and "the internet can reach port 80" are different facts,
+  # and the first wording was routinely read as the second — printed, as it is,
+  # directly above a line admitting the second is unknown. What this host can
+  # actually establish is whether Caddy will be able to bind, so that is what
+  # it now says.
+  local p
+  for p in 80 443; do
+    local owner
+    [[ "$p" == "80" ]] && owner="$WEB_80_OWNER" || owner="$WEB_443_OWNER"
+    if [[ -z "$owner" ]]; then
+      pass "Port ${p} available for Caddy"
+    elif printf '%s' "$owner" | grep -qi 'caddy'; then
+      # Re-running --https over a working deployment: Caddy holding its own
+      # ports is the expected state, not a conflict.
+      pass "Port ${p} already held by Caddy (expected)"
+    else
+      warn "Port ${p} is held by ${owner}, which will stop Caddy binding it"
+    fi
+  done
 
   printf '\n  %sExternal%s — cannot be confirmed from here\n' "$BOLD" "$OFF"
   note "UNKNOWN  whether inbound TCP 80 and 443 reach this machine"
@@ -1229,6 +1306,21 @@ configure_https() {
   if [[ -f "$caddyfile" ]]; then
     CADDYFILE_EXISTED=1
     CADDYFILE_BACKUP="${caddyfile}.dnsdaddy-bak-$(date +%F-%H%M%S)"
+
+    # The live file's own mode and ownership, captured BEFORE the backup is
+    # hardened.
+    #
+    # The backup is deliberately 0600 — it is a copy of a file that decides
+    # what this machine publishes, and it sits in a directory the operator may
+    # not have thought about. But rollback used `cp -p`, which copies mode as
+    # well as content, so restoring handed the live Caddyfile the backup's
+    # 0600. On a real VPS that produced "open /etc/caddy/Caddyfile: permission
+    # denied" *after* a rollback that reported success: the configuration was
+    # correct and unreadable by the service meant to read it. Content and
+    # permissions come from different places now, and this is the second one.
+    CADDYFILE_ORIG_MODE="$(stat -c '%a' "$caddyfile" 2>/dev/null || printf '644')"
+    CADDYFILE_ORIG_OWNER="$(stat -c '%U:%G' "$caddyfile" 2>/dev/null || printf 'root:root')"
+
     if ! cp -p "$caddyfile" "$CADDYFILE_BACKUP"; then
       HTTPS_STATE="failed"
       HTTPS_FAIL_REASON="Could not back up ${caddyfile}."
@@ -1236,8 +1328,13 @@ configure_https() {
       unwind_https_env
       return 0
     fi
-    chmod 0600 "$CADDYFILE_BACKUP" 2>/dev/null || true
-    pass "Existing Caddyfile saved to ${CADDYFILE_BACKUP}"
+    if ! chmod 0600 "$CADDYFILE_BACKUP"; then
+      # Not fatal — the backup exists and rollback will still work — but the
+      # operator should know a copy of their configuration is more readable
+      # than intended.
+      warn "Could not restrict permissions on ${CADDYFILE_BACKUP}."
+    fi
+    pass "Existing Caddyfile saved to ${CADDYFILE_BACKUP} (mode ${CADDYFILE_ORIG_MODE}, owner ${CADDYFILE_ORIG_OWNER} recorded for rollback)"
   fi
 
   report_reachability
@@ -1267,10 +1364,24 @@ configure_https() {
     unwind_https_env
     return 0
   fi
-  # It contains no secret, but it decides what is published; keep it out of
-  # world-readable reach and owned by root like the rest of /etc/caddy.
-  chown root:root "$caddyfile" 2>/dev/null || true
-  chmod 0644 "$caddyfile" 2>/dev/null || true
+  # It contains no secret, but it decides what is published; keep it owned by
+  # root like the rest of /etc/caddy, and readable — Caddy runs as an
+  # unprivileged service account and has to read it.
+  #
+  # These used to end in `|| true`. A chmod that silently fails here is how a
+  # configuration ends up correct and unreadable, and the failure only surfaces
+  # minutes later as a service that will not start.
+  if ! chown root:root "$caddyfile"; then
+    warn "Could not set ownership on ${caddyfile}."
+  fi
+  if ! chmod 0644 "$caddyfile"; then
+    HTTPS_STATE="failed"
+    HTTPS_FAIL_REASON="Could not set permissions on ${caddyfile}."
+    warn "$HTTPS_FAIL_REASON Caddy would not be able to read it."
+    restore_caddyfile "$caddyfile"
+    unwind_https_env
+    return 0
+  fi
 
   # Validate before activating. A Caddyfile that does not parse would take down
   # whatever Caddy was already serving — and for an IP target this is also the
@@ -1291,7 +1402,26 @@ configure_https() {
     unwind_https_env
     return 0
   fi
-  pass "Caddyfile validated"
+  pass "Caddyfile syntax validated"
+
+  # Syntax valid and "the service can actually read it" are different claims,
+  # and the first was being reported as though it covered the second.
+  #
+  # `caddy validate` above ran as root. The Caddy systemd unit does not: it
+  # runs as its own service account, and root being able to parse a file is no
+  # evidence at all that an unprivileged user can open it. On a real VPS this
+  # produced "PASS Caddyfile validated" followed immediately by
+  # "Error: reading config from file: open /etc/caddy/Caddyfile: permission
+  # denied". Two checks, reported separately, because they fail separately.
+  if ! caddy_service_can_read "$caddyfile"; then
+    HTTPS_STATE="failed"
+    HTTPS_FAIL_REASON="The Caddy service account (${CADDY_SERVICE_USER:-unknown}) cannot read ${caddyfile}."
+    warn "$HTTPS_FAIL_REASON Caddy was not reloaded."
+    note "Fix the permissions on ${caddyfile} and every directory above it, then re-run with --https."
+    restore_caddyfile "$caddyfile"
+    unwind_https_env
+    return 0
+  fi
 
   # Stamp the log window before the reload, so verify_https reads only what
   # this attempt produces. A second earlier than the reload rather than the
@@ -1300,15 +1430,61 @@ configure_https() {
   # line before it.
   CADDY_LOG_SINCE="$(date -d '-1 second' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')"
 
-  systemctl enable --now caddy >/dev/null 2>&1 || true
+  # `|| true` used to swallow this. Enabling the unit is the step that makes
+  # Caddy survive a reboot, and a machine whose management interface quietly
+  # stops being reachable after a restart is a bad way to find that out.
+  if ! systemctl enable --now caddy >/dev/null 2>&1; then
+    warn "Could not enable the Caddy service to start at boot."
+    note "Check it by hand: systemctl status caddy"
+  fi
+
   if ! systemctl reload caddy >/dev/null 2>&1 && ! systemctl restart caddy >/dev/null 2>&1; then
     HTTPS_STATE="failed"
     HTTPS_FAIL_REASON="Caddy would not reload with the new configuration."
     warn "$HTTPS_FAIL_REASON"
+    report_caddy_service_error
     restore_caddyfile "$caddyfile"
-    systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
+    restart_caddy_after_rollback
     unwind_https_env
     return 0
+  fi
+
+  # A reload that returned zero is not the same as a service that is running.
+  #
+  # systemd reports success for the reload request; Caddy can still exit
+  # milliseconds later while parsing its new configuration or opening a log
+  # writer it has no permission for. That is exactly what happened on the real
+  # VPS, and the installer then spent three minutes waiting for a certificate
+  # from a process that was not there. There is no certificate coming from a
+  # dead Caddy, so this is checked before any waiting starts.
+  if ! caddy_is_active; then
+    HTTPS_STATE="failed"
+    HTTPS_FAIL_REASON="Caddy accepted the configuration but is not running."
+    warn "$HTTPS_FAIL_REASON"
+    report_caddy_service_error
+    restore_caddyfile "$caddyfile"
+    restart_caddy_after_rollback
+    unwind_https_env
+    return 0
+  fi
+  pass "Caddy service is active"
+
+  # Active and listening are still not the same thing, and the operator is
+  # about to wait minutes on the difference. Five separate states get five
+  # separate lines, because a PASS for one must not be read as the next:
+  #
+  #   1. the port was available for Caddy      report_reachability, above
+  #   2. the Caddy service is active           the check above
+  #   3. Caddy is listening on it              here
+  #   4. ACME validation is happening          the wait below
+  #   5. a publicly trusted certificate exists verify_https
+  if [[ -n "$(port_owner tcp 443)" ]]; then
+    pass "Caddy is listening on TCP 443"
+  else
+    # Not fatal on its own — `ss` may be absent, and a race between systemd
+    # reporting active and the socket appearing is possible — so this informs
+    # rather than aborts. A genuinely dead Caddy was already caught above.
+    note "Nothing is listening on TCP 443 yet; the certificate wait may not succeed."
   fi
 
   if verify_https; then
@@ -1316,16 +1492,31 @@ configure_https() {
     # Written on a second pass rather than up front: a one-year policy is not
     # something to publish on the strength of an attempt that might fail.
     if write_caddyfile "$caddyfile" 1 && caddy validate --config "$caddyfile" >/dev/null 2>&1; then
-      if systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1; then
+      if { systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1; } \
+         && caddy_is_active; then
         pass "HSTS enabled now that the certificate is proven"
       else
-        # Not fatal, and not silent: the deployment works, it just has one
-        # header fewer than intended.
-        warn "Could not reload Caddy to enable HSTS; the dashboard is serving without it."
+        # The reload is the one place a working deployment can still be taken
+        # down by this script, so "did it come back" is asked here too rather
+        # than assumed from a zero exit status.
+        warn "Caddy did not come back after the HSTS reload."
+        restore_caddyfile "$caddyfile"
+        restart_caddy_after_rollback
+        HTTPS_STATE="failed"
+        HTTPS_FAIL_REASON="A certificate was issued, but Caddy stopped when HSTS was applied."
+        unwind_https_env
+        return 0
       fi
     else
       warn "Could not enable HSTS; the dashboard is serving without it."
-      write_caddyfile "$caddyfile" 0 || true
+      # Put the file back to the configuration Caddy is currently running, so a
+      # reboot does not start it on a half-written one. Caddy was never
+      # reloaded onto the HSTS version, so no reload is needed here — but a
+      # failure to rewrite it leaves exactly that mismatch, and is said.
+      if ! write_caddyfile "$caddyfile" 0; then
+        warn "${caddyfile} may not match the configuration Caddy is running."
+        note "Check it before rebooting: caddy validate --config ${caddyfile}"
+      fi
     fi
     verify_https_posture
     HTTPS_STATE="active"
@@ -1371,7 +1562,7 @@ configure_https() {
   [[ -n "$HTTPS_FAIL_REASON" ]] || HTTPS_FAIL_REASON="No publicly trusted certificate was issued for ${HTTPS_TARGET}."
   report_https_failure
   restore_caddyfile "$caddyfile"
-  systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1 || true
+  restart_caddy_after_rollback
   unwind_https_env
   return 0
 }
@@ -1402,6 +1593,127 @@ caddy_version() {
   esac
 }
 
+# caddy_is_active reports whether the Caddy service is running right now.
+#
+# Overridable for the test suite, which has no systemd. Not a privilege
+# boundary: anyone who can set it already runs this script as root.
+caddy_is_active() {
+  if [[ -n "${DNSDADDY_CADDY_ACTIVE_CMD:-}" ]]; then
+    eval "${DNSDADDY_CADDY_ACTIVE_CMD}" >/dev/null 2>&1
+    return $?
+  fi
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl is-active --quiet caddy 2>/dev/null
+}
+
+# report_caddy_service_error shows what the service actually said.
+#
+# Reached only when Caddy failed to reload or exited after being told to start,
+# which is precisely when the operator needs Caddy's own words rather than this
+# script's summary of them. Restricted to this attempt's window for the same
+# reason the ACME diagnosis is: a previous run's error is not this one's.
+report_caddy_service_error() {
+  local log
+  log="$(caddy_recent_log)" || return 0
+  [[ -n "$log" ]] || return 0
+  note "Caddy said:"
+  printf '%s\n' "$log" | grep -iE 'error|fatal|denied|cannot|failed' | tail -5 | while IFS= read -r line; do
+    note "  ${line}"
+  done
+}
+
+# restart_caddy_after_rollback puts Caddy back on the restored configuration
+# and says plainly whether that worked.
+#
+# The old code ended in `|| true`, so a rollback that left Caddy dead printed
+# "Your previous Caddyfile has been restored" and nothing else — which reads as
+# though the machine is back to how it started. It may not be: whatever Caddy
+# was serving before this run is down until somebody notices.
+restart_caddy_after_rollback() {
+  if systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy >/dev/null 2>&1; then
+    if caddy_is_active; then
+      pass "Caddy restarted on the restored configuration"
+      return 0
+    fi
+  fi
+  warn "ROLLBACK INCOMPLETE: the previous Caddyfile is back, but Caddy is not running."
+  note "Anything else this machine was serving through Caddy is down until you fix it."
+  note "  systemctl status caddy"
+  note "  journalctl -u caddy -n 50"
+  report_caddy_service_error
+  return 1
+}
+
+# caddy_service_user names the account the Caddy systemd unit actually runs as.
+#
+# Not guessed. `systemctl show` reports the unit's resolved User=, which is
+# what matters; the Debian and upstream packages both use "caddy", but an
+# operator may have changed it and a guess that is wrong would either pass a
+# check that should fail or fail one that should pass.
+#
+# Prints nothing when it cannot be determined, which the caller treats as
+# "cannot prove either way" rather than as a failure.
+caddy_service_user() {
+  if [[ -n "${DNSDADDY_CADDY_USER:-}" ]]; then
+    printf '%s' "$DNSDADDY_CADDY_USER"
+    return 0
+  fi
+  command -v systemctl >/dev/null 2>&1 || return 0
+  local u
+  u="$(systemctl show -p User --value caddy 2>/dev/null)"
+  # An empty User= means the unit runs as root, which can read anything.
+  [[ -n "$u" ]] || return 0
+  printf '%s' "$u"
+}
+
+# caddy_service_can_read proves the Caddy service account can open the live
+# configuration, including traversing every directory above it.
+#
+# `sudo -u <user> test -r` is the check, because it is the same syscall path
+# Caddy itself will take: a mode-0644 file inside a mode-0700 directory is
+# readable by root and unreadable by everyone else, and only an attempt from
+# the right account discovers that.
+#
+# Returns 0 when the account can read it, or when there is no unprivileged
+# account to test (root unit, no systemd, no sudo). Fails closed only on a
+# proven negative: refusing to proceed because a check could not run would
+# block deployments that are actually fine.
+caddy_service_can_read() { # path
+  local path="$1" user
+  user="$(caddy_service_user)"
+  CADDY_SERVICE_USER="$user"
+
+  if [[ -z "$user" || "$user" == "root" ]]; then
+    pass "Caddy runs as root; configuration readability is not in question"
+    return 0
+  fi
+  if ! id -u "$user" >/dev/null 2>&1; then
+    note "Caddy's service user (${user}) does not exist yet; readability will be decided at start."
+    return 0
+  fi
+  if ! command -v sudo >/dev/null 2>&1 && ! command -v runuser >/dev/null 2>&1; then
+    note "No sudo or runuser here, so ${user}'s access to ${path} could not be tested."
+    return 0
+  fi
+
+  local as=(sudo -n -u "$user")
+  command -v sudo >/dev/null 2>&1 || as=(runuser -u "$user" --)
+
+  if "${as[@]}" test -r "$path" 2>/dev/null; then
+    pass "Caddy service account (${user}) can read ${path}"
+    return 0
+  fi
+
+  # Distinguish "the file" from "the path to it": both produce the same error
+  # from Caddy and need different fixes.
+  local dir
+  dir="$(dirname "$path")"
+  if ! "${as[@]}" test -x "$dir" 2>/dev/null; then
+    warn "${user} cannot traverse ${dir}."
+  fi
+  return 1
+}
+
 # restore_caddyfile puts back whatever was there before this run.
 #
 # When there was nothing, the generated file is removed rather than left
@@ -1410,11 +1722,24 @@ caddy_version() {
 restore_caddyfile() { # path
   local caddyfile="$1"
   if [[ $CADDYFILE_EXISTED -eq 1 && -n "$CADDYFILE_BACKUP" && -f "$CADDYFILE_BACKUP" ]]; then
-    if cp -p "$CADDYFILE_BACKUP" "$caddyfile"; then
-      note "Your previous Caddyfile has been restored."
-    else
+    # Content from the backup; permissions from what the live file had.
+    #
+    # `cp -p` did both from the backup, and the backup is deliberately 0600,
+    # so a rollback silently made the restored configuration unreadable by the
+    # Caddy service account. The operator was told "Your previous Caddyfile has
+    # been restored" while Caddy refused to start on it. Note the missing -p.
+    if ! cp "$CADDYFILE_BACKUP" "$caddyfile"; then
       warn "Could not restore ${caddyfile} from ${CADDYFILE_BACKUP} — do it by hand."
+      return 0
     fi
+    if ! chown "${CADDYFILE_ORIG_OWNER:-root:root}" "$caddyfile"; then
+      warn "Restored ${caddyfile}, but could not put its ownership back to ${CADDYFILE_ORIG_OWNER:-root:root}."
+    fi
+    if ! chmod "${CADDYFILE_ORIG_MODE:-644}" "$caddyfile"; then
+      warn "Restored ${caddyfile}, but could not put its mode back to ${CADDYFILE_ORIG_MODE:-644}."
+      note "Check it is readable by Caddy before relying on this machine's other sites."
+    fi
+    note "Your previous Caddyfile has been restored (mode ${CADDYFILE_ORIG_MODE:-644}, owner ${CADDYFILE_ORIG_OWNER:-root:root})."
     return 0
   fi
   rm -f "$caddyfile"
@@ -1466,6 +1791,17 @@ write_caddyfile() { # path [with_hsts]
     hsts_line=$'\t\tStrict-Transport-Security "max-age=31536000; includeSubDomains"\n'
   fi
 
+  # Access logging goes to stderr, which systemd collects into the journal —
+  # the same place caddy_recent_log already reads Caddy's diagnostics from.
+  #
+  # It used to be `output file /var/log/caddy/dnsdaddy.log`. On a real Debian 13
+  # VPS the Caddy service account could not write that path, so Caddy exited at
+  # startup with "opening log writer ... permission denied"; and because
+  # `caddy validate` had passed as root, the installer went on to wait three
+  # minutes for a certificate from a process that was no longer running. An
+  # optional access log is not worth a failure mode that can stop the
+  # management interface coming up at all, and journald already rotates, already
+  # has the right permissions, and is already where anyone debugging this looks.
   {
     cat <<'EOF'
 # Generated by deploy/install-docker.sh. Re-running the installer replaces it,
@@ -1505,11 +1841,9 @@ EOF
 		-Server
 	}
 
+	# Access logs go to the journal:  journalctl -u caddy -f
 	log {
-		output file /var/log/caddy/dnsdaddy.log {
-			roll_size 10MiB
-			roll_keep 5
-		}
+		output stderr
 	}
 }
 EOF
@@ -1556,6 +1890,31 @@ caddy_acme_diagnosis() {
   return 1
 }
 
+# log_last_line prints the 1-based number of the last line matching a pattern,
+# or 0. The whole point is ordering: which of two things Caddy said happened
+# last.
+log_last_line() { # pattern text
+  local n
+  n="$(printf '%s\n' "$2" | grep -n -iE "$1" 2>/dev/null | tail -1 | cut -d: -f1)"
+  printf '%s' "${n:-0}"
+}
+
+# acme_evidence is true when a pattern matched AND nothing since then said the
+# certificate arrived.
+#
+# On the real VPS an attempt that ultimately succeeded logged a transient error
+# on its way there, and the installer diagnosed the attempt from that line
+# while Caddy was still working. Seconds later the same attempt logged
+# "certificate obtained successfully". A log line is evidence of what was true
+# when it was written, not of what is true now, and the only thing that makes
+# an error line current is that nothing has superseded it.
+acme_evidence() { # pattern
+  local hit
+  hit="$(log_last_line "$1" "$ACME_LOG_WINDOW")"
+  [[ "$hit" != "0" ]] || return 1
+  (( hit > ACME_SUCCESS_LINE ))
+}
+
 caddy_acme_diagnose_inner() {
   local log
   log="$(caddy_recent_log)" || return 1
@@ -1563,27 +1922,53 @@ caddy_acme_diagnose_inner() {
 
   # Newest evidence first: a retry that has since succeeded must not be
   # diagnosed from the attempt before it.
-  local recent
-  recent="$(printf '%s\n' "$log" | tail -120)"
+  ACME_LOG_WINDOW="$(printf '%s\n' "$log" | tail -120)"
+
+  # Where the last "it worked" sits, so every arm below can ask whether its
+  # own evidence is older than that. Both phrases are Caddy's, logged by
+  # CertMagic when an order finalises.
+  ACME_SUCCESS_LINE="$(log_last_line \
+    'certificate obtained successfully|successfully downloaded available certificate chains' \
+    "$ACME_LOG_WINDOW")"
 
   # Ordered most specific first. Each arm names a cause the operator can act
   # on, rather than a category they still have to interpret.
-  if printf '%s' "$recent" | grep -q 'cannot have public IP certificate'; then
+  #
+  # Every arm goes through acme_evidence, which additionally requires the match
+  # to be more recent than the last success. An arm that matched a line Caddy
+  # has since superseded is describing a moment that has passed.
+  if acme_evidence 'cannot have public IP certificate'; then
     HTTPS_FAIL_REASON="This Caddy's certificate library refuses public IP certificates; it predates Let's Encrypt's IP support."
     HTTPS_FAIL_HINT="Install the current Caddy from https://caddyserver.com/docs/install and re-run with --https."
     return 0
   fi
-  if printf '%s' "$recent" | grep -qi 'acme:error:rateLimited\|too many certificates\|rate limit'; then
+
+  # Only the CA's own structured rate-limit error counts.
+  #
+  # This used to also match the bare words "rate limit", and Caddy says them
+  # constantly during a perfectly healthy issuance: CertMagic paces its own
+  # requests and logs "waiting on internal rate limiter" / "done waiting on
+  # internal rate limiter" while doing so. On a real VPS the installer read one
+  # of those lines, announced "Let's Encrypt rate-limited this request", and
+  # began rolling HTTPS back — seconds before the same attempt logged
+  # "certificate obtained successfully". The substring was never evidence of
+  # anything; it was Caddy narrating its own politeness.
+  #
+  # urn:ietf:params:acme:error:rateLimited is unambiguous: it appears only in a
+  # problem document the CA sent. The phrase form is kept alongside it because
+  # Let's Encrypt's own detail text is distinctive enough to be safe, and it
+  # tells the operator which limit they hit.
+  if acme_evidence 'acme:error:rateLimited|too many certificates.*already issued|too many (new orders|failed authorizations)'; then
     HTTPS_FAIL_REASON="Let's Encrypt rate-limited this request."
     HTTPS_FAIL_HINT="Wait before retrying — repeating now makes it worse. https://letsencrypt.org/docs/rate-limits/"
     return 0
   fi
-  if printf '%s' "$recent" | grep -qi 'acme:error:invalidContact\|forbidden domain'; then
+  if acme_evidence 'acme:error:invalidContact|forbidden domain'; then
     HTTPS_FAIL_REASON="Let's Encrypt rejected the ACME account contact address."
     HTTPS_FAIL_HINT="Remove or correct the email in the tls block of ${DNSDADDY_CADDYFILE:-/etc/caddy/Caddyfile}."
     return 0
   fi
-  if printf '%s' "$recent" | grep -qiE 'profile.*(unknown|not supported|malformed)|(unknown|unsupported).*profile'; then
+  if acme_evidence 'profile.*(unknown|not supported|malformed)|(unknown|unsupported).*profile'; then
     HTTPS_FAIL_REASON="Let's Encrypt did not accept the certificate profile this deployment asked for."
     HTTPS_FAIL_HINT="Your Caddy may be older than the profile it is being asked to use. https://caddyserver.com/docs/install"
     return 0
@@ -1592,9 +1977,9 @@ caddy_acme_diagnose_inner() {
   # The connection family is the common one, and the detail distinguishes two
   # very different situations: nothing listening at all, versus a packet that
   # never arrived. Both are outside this host, which is exactly the point.
-  if printf '%s' "$recent" | grep -qi 'acme:error:connection'; then
+  if acme_evidence 'acme:error:connection'; then
     local detail
-    detail="$(printf '%s' "$recent" | grep -oiE '"detail":"[^"]*"' | tail -1 | cut -d'"' -f4)"
+    detail="$(printf '%s' "$ACME_LOG_WINDOW" | grep -oiE '"detail":"[^"]*"' | tail -1 | cut -d'"' -f4)"
     if printf '%s' "$detail" | grep -qi 'timeout\|timed out'; then
       HTTPS_FAIL_REASON="Let's Encrypt could not reach ${HTTPS_TARGET} — the challenge timed out."
       HTTPS_FAIL_HINT="A firewall is dropping inbound 80/443. Open both to the internet in your cloud provider's firewall, then re-run with --https."
@@ -1605,17 +1990,17 @@ caddy_acme_diagnose_inner() {
     [[ -n "$detail" ]] && HTTPS_FAIL_DETAIL="$detail"
     return 0
   fi
-  if printf '%s' "$recent" | grep -qi 'acme:error:dns\|no such host'; then
+  if acme_evidence 'acme:error:dns|no such host'; then
     HTTPS_FAIL_REASON="Let's Encrypt could not resolve ${HTTPS_TARGET}."
     HTTPS_FAIL_HINT="The public DNS record does not exist yet, or has not propagated. Check with: dig +short ${HTTPS_TARGET}"
     return 0
   fi
-  if printf '%s' "$recent" | grep -qi 'acme:error:unauthorized'; then
+  if acme_evidence 'acme:error:unauthorized'; then
     HTTPS_FAIL_REASON="The ACME challenge reached something at ${HTTPS_TARGET}, but not this Caddy."
     HTTPS_FAIL_HINT="Another host or proxy is answering for that address on port 80/443. Confirm the address really points at this machine."
     return 0
   fi
-  if printf '%s' "$recent" | grep -qi 'dial tcp 127.0.0.1:8080\|connect: connection refused.*8080'; then
+  if acme_evidence 'dial tcp 127\.0\.0\.1:8080|connect: connection refused.*8080'; then
     HTTPS_FAIL_REASON="Caddy is running, but it cannot reach DNS Daddy on 127.0.0.1:8080."
     HTTPS_FAIL_HINT="Check the container is up: docker compose ps"
     return 0
@@ -1920,9 +2305,11 @@ restore_https_env() {
   pass "Restored the previous HTTPS settings; the working deployment is unchanged"
   if "${COMPOSE[@]}" up -d >/dev/null 2>&1; then
     pass "Restarted DNS Daddy with the settings it had before this run"
+    wait_for_rollback_health || return 1
   else
     warn "Could not restart DNS Daddy to apply the restored settings."
     note "Run: docker compose up -d"
+    return 1
   fi
   return 0
 }
@@ -1955,11 +2342,37 @@ revert_env_to_tunnel() {
   pass "Reverted the HTTPS settings in .env so the SSH tunnel works"
   if "${COMPOSE[@]}" up -d >/dev/null 2>&1; then
     pass "Restarted DNS Daddy with the tunnel configuration"
+    wait_for_rollback_health || return 1
   else
     warn "Could not restart DNS Daddy to apply the reverted settings."
     note "Run: docker compose up -d"
+    return 1
   fi
   return 0
+}
+
+# wait_for_rollback_health blocks until the container the rollback just
+# recreated is answering again.
+#
+# Without this the installer went straight from `compose up -d` into `dnsdaddy
+# doctor`, and on a real VPS doctor reported "Nothing is listening on :5353"
+# and "dashboard connection refused" about a container that was two seconds
+# into its start-up and became healthy immediately afterwards. The diagnosis
+# was not wrong about the instant it ran; it was asked at the wrong instant.
+#
+# Deliberately the same wait_for_health the install path uses, rather than a
+# sleep: a cold start rebuilding the blocklist index takes as long as it takes,
+# and any fixed number is either too short on a small VPS or wasted on a big
+# one. A rollback that cannot get back to health is reported as incomplete,
+# with the container's own log, rather than being hidden.
+wait_for_rollback_health() {
+  if wait_for_health; then
+    return 0
+  fi
+  warn "ROLLBACK INCOMPLETE: DNS Daddy did not come back up after the settings were reverted."
+  note "Its own log will say why:"
+  "${COMPOSE[@]}" logs --tail=30 dnsdaddy 2>&1 | sed 's/^/    /' || true
+  return 1
 }
 
 # --- runtime -----------------------------------------------------------------
