@@ -496,12 +496,18 @@ type Settings struct {
 	CacheMaxEntries int     `json:"cacheMaxEntries"`
 	CacheEntries    int     `json:"cacheEntries"`
 	CacheHitRate    float64 `json:"cacheHitRate"`
-	FeedRefresh     string  `json:"feedRefreshInterval"`
-	UpstreamMode    string  `json:"upstreamMode"`
-	QueryLogRows    int64   `json:"queryLogRows"`
-	MemoryMB        float64 `json:"memoryMb"`
-	Goroutines      int     `json:"goroutines"`
-	UptimeSeconds   int64   `json:"uptimeSeconds"`
+	// Lookups is what makes CacheHitRate readable. A rate of 0 means one of
+	// two very different things — the cache answered none of the lookups it
+	// saw, or it has not seen any — and without the denominator the dashboard
+	// cannot tell them apart, so it displayed an unmeasured 0% as though it
+	// had been measured.
+	CacheLookups  uint64  `json:"cacheLookups"`
+	FeedRefresh   string  `json:"feedRefreshInterval"`
+	UpstreamMode  string  `json:"upstreamMode"`
+	QueryLogRows  int64   `json:"queryLogRows"`
+	MemoryMB      float64 `json:"memoryMb"`
+	Goroutines    int     `json:"goroutines"`
+	UptimeSeconds int64   `json:"uptimeSeconds"`
 }
 
 func (a *API) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -531,6 +537,7 @@ func (a *API) handleSettings(w http.ResponseWriter, r *http.Request) {
 		CacheMaxEntries: a.Config.Cache.MaxEntries,
 		CacheEntries:    size,
 		CacheHitRate:    round2(hitRate),
+		CacheLookups:    hits + misses,
 		FeedRefresh:     a.Config.Feeds.RefreshInterval.String(),
 		UpstreamMode:    a.Config.DNS.UpstreamMode,
 		QueryLogRows:    rows,

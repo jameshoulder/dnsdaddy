@@ -1694,3 +1694,326 @@ test('no innerHTML assignment bypasses sanitize()', () => {
   assert.deepEqual(offenders, [],
     'these write markup into the document without the pass that strips on* and javascript:');
 });
+
+/* ==========================================================================
+ * Brand and V3 identity
+ *
+ * The visual language is now carrying meaning — green says protected, cyan
+ * says observed, red says dangerous, violet says detection — and meaning that
+ * lives only in a stylesheet drifts the first time somebody reaches for a
+ * colour because it looked right. These tests state the rules that the design
+ * is not allowed to lose quietly.
+ * ========================================================================== */
+
+const {
+  goDuration,
+  rate,
+  CLAIM_TIERS,
+  CATEGORY_COLOURS,
+} = require('./static/app.js');
+
+const brandFs = require('node:fs');
+const brandPath = require('node:path');
+const staticDir = brandPath.join(__dirname, 'static');
+const readStatic = (name) => brandFs.readFileSync(brandPath.join(staticDir, name), 'utf8');
+
+const appCss = readStatic('app.css');
+const appJs = readStatic('app.js');
+// Comments stripped: logo.svg's own note explains why the wordmark is not an
+// SVG <text>, and a scan for markup was matching the explanation.
+const stripComments = (src) => src.replace(/<!--[\s\S]*?-->/g, '');
+const logoSvg = stripComments(readStatic('logo.svg'));
+const faviconSvg = stripComments(readStatic('favicon.svg'));
+const indexSrc = readStatic('index.html');
+
+test('the brand assets exist and are real SVG, not an embedded bitmap', () => {
+  for (const [name, src] of [['logo.svg', logoSvg], ['favicon.svg', faviconSvg]]) {
+    assert.match(src, /^<svg\b/, `${name} does not start as an SVG element`);
+    assert.match(src, /<\/svg>\s*$/, `${name} is truncated`);
+    // A traced bitmap or an exported AI image arrives as a data: URI or an
+    // <image> href. Either would look right at 400px and turn to mush at 16.
+    assert.doesNotMatch(src, /<image\b/i, `${name} embeds a raster image`);
+    assert.doesNotMatch(src, /data:image\//i, `${name} embeds a data: bitmap`);
+    // A gradient is invisible at favicon scale and prints as a smudge.
+    assert.doesNotMatch(src, /<(linear|radial)Gradient\b/i, `${name} uses a gradient`);
+  }
+});
+
+test('the marks stay simple enough to survive 16px', () => {
+  // An auto-traced logo has hundreds of path commands. A drawn one has tens.
+  const commands = (src) => (src.match(/[MLHVCSQTAZ]/g) || []).length;
+  assert.ok(commands(logoSvg) < 120, 'logo.svg has the path count of a trace, not a drawing');
+  assert.ok(commands(faviconSvg) < 80, 'favicon.svg is too detailed for a tab strip');
+  // The favicon is deliberately not the full mark: no node constellation.
+  assert.ok(
+    (faviconSvg.match(/<circle/g) || []).length <= 2,
+    'the favicon carries the node constellation, which fills in at 16px'
+  );
+});
+
+test('the retired resolver-ring D mark is gone from every asset', () => {
+  // V2's mark was a lime ring with a letter D inside it, drawn as SVG <text>.
+  for (const [name, src] of [['logo.svg', logoSvg], ['favicon.svg', faviconSvg]]) {
+    assert.doesNotMatch(src, /<text\b/i, `${name} still draws a letterform`);
+  }
+  // And nothing references the old symbol id.
+  assert.doesNotMatch(indexSrc + appJs, /#logo-d\b|id="logo-d"/,
+    'the old #logo-d symbol is still referenced');
+});
+
+test('every asset the page references is one that ships', () => {
+  const referenced = new Set();
+  for (const m of indexSrc.matchAll(/(?:href|src)="\/([^"#?]+)"/g)) referenced.add(m[1]);
+  for (const m of appJs.matchAll(/(?:href|src)="\/((?:static\/)?[\w.-]+\.(?:svg|css|js|png|woff2?))"/g)) {
+    referenced.add(m[1]);
+  }
+  assert.ok(referenced.size > 0, 'the reference scan found nothing, so it proves nothing');
+  for (const ref of referenced) {
+    assert.ok(
+      brandFs.existsSync(brandPath.join(staticDir, ref)),
+      `${ref} is referenced but not present in static/`
+    );
+  }
+});
+
+test('nothing is loaded from off the box', () => {
+  // The dashboard has to work on a resolver with no route to the internet, and
+  // a remote font or CDN script would also hand a third party a request per
+  // page view from inside somebody's network.
+  const sources = { 'index.html': indexSrc, 'app.css': appCss, 'app.js': appJs };
+  for (const [name, src] of Object.entries(sources)) {
+    // Documentation links in app.js point at the repository on purpose; those
+    // are anchors a person clicks, not resources the page fetches.
+    const fetched = [
+      ...src.matchAll(/(?:src|@import\s+url\(|url\(\s*)["']?(https?:)?\/\/[^"')\s]+/gi),
+    ];
+    assert.deepEqual(fetched.map((m) => m[0]), [], `${name} fetches a remote resource`);
+    assert.doesNotMatch(src, /fonts\.googleapis\.com|fonts\.gstatic\.com/,
+      `${name} loads a remote font`);
+    assert.doesNotMatch(src, /cdn\.|unpkg\.com|jsdelivr\.net/, `${name} loads from a CDN`);
+  }
+});
+
+test('no threat category is drawn in the brand green', () => {
+  // Green means protected. A malware chip in the colour that means "safe" is
+  // the single worst thing this palette could do, and it is exactly what the
+  // category map used to do: malware was #bfed6d, the brand lime.
+  const green = ['#bfed6d', '#a8d644'];
+  for (const [category, colour] of Object.entries(CATEGORY_COLOURS)) {
+    assert.ok(
+      !green.includes(String(colour).toLowerCase()),
+      `${category} is drawn in the brand green, which means protected`
+    );
+  }
+});
+
+test('the category colours are all distinct, so two threats never look alike', () => {
+  const seen = new Map();
+  for (const [category, colour] of Object.entries(CATEGORY_COLOURS)) {
+    const key = String(colour).toLowerCase();
+    assert.ok(!seen.has(key), `${category} and ${seen.get(key)} share ${key}`);
+    seen.set(key, category);
+  }
+});
+
+test('every colour the stylesheet uses comes from the palette', () => {
+  // Three rules kept V2's blue and V2's red long after the tokens moved, so a
+  // badge that called itself cyan drew itself in the old sky blue. Any literal
+  // rgb() triple has to be one the token block actually defines.
+  const declared = new Set();
+  for (const m of appCss.matchAll(/#([0-9a-fA-F]{6})\b/g)) {
+    const hex = m[1].toLowerCase();
+    declared.add(
+      [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(' ')
+    );
+  }
+  const strays = [];
+  for (const m of appCss.matchAll(/rgb\((\d+) (\d+) (\d+)\s*\//g)) {
+    const triple = `${m[1]} ${m[2]} ${m[3]}`;
+    // Pure black and pure white are shadow and hairline, not brand colours.
+    if (triple === '0 0 0' || triple === '255 255 255') continue;
+    if (!declared.has(triple)) strays.push(triple);
+  }
+  assert.deepEqual(strays, [], 'these rgb() literals match no hex colour declared in the sheet');
+});
+
+test('a colour is never the only way a state is stated', () => {
+  // Every semantic badge class carries a word; the classes only tint it.
+  for (const cls of ['ok', 'bad', 'warn', 'info', 'tier']) {
+    assert.match(appCss, new RegExp(`\\.badge\\.${cls}\\s*\\{`), `.badge.${cls} is not styled`);
+  }
+  // And the query log's accent rail is explicitly documented as decorative.
+  assert.match(appCss, /\.qrow\.is-blocked \.qmark/);
+  assert.match(appJs, /class="badge bad qact">Blocked</);
+});
+
+test('motion respects a reduced-motion preference', () => {
+  // Read the reduce blocks properly rather than searching the rest of the file
+  // for the animation's name: the @keyframes rule mentions it too, so a
+  // name-anywhere check passes even with the reduce block deleted. That is how
+  // the first version of this test managed to prove nothing.
+  // Comments out of the way first: a selector scan otherwise reads the prose
+  // above a rule as part of its selector list.
+  const css = appCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  const reduceBodies = [];
+  for (const m of css.matchAll(/@media \(prefers-reduced-motion: reduce\)\s*\{/g)) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    const start = i;
+    while (i < css.length && depth > 0) {
+      if (css[i] === '{') depth++;
+      else if (css[i] === '}') depth--;
+      i++;
+    }
+    reduceBodies.push(css.slice(start, i - 1));
+  }
+  assert.ok(reduceBodies.length > 0, 'nothing honours prefers-reduced-motion');
+
+  // The blanket rule shortens every duration, which is not enough on its own:
+  // an infinite loop at 0.001ms still loops. Each one has to be named and
+  // switched off, so collect the selector that declares it.
+  const stopped = reduceBodies
+    .filter((body) => /animation:\s*none/.test(body))
+    .join('\n');
+
+  const looping = [];
+  for (const m of css.matchAll(/([^{}]+)\{[^{}]*animation:\s*[\w-]+[^;}]*\binfinite\b/g)) {
+    for (const sel of m[1].split(',')) {
+      const clean = sel.trim().split('\n').pop().trim();
+      if (clean && !clean.startsWith('@')) looping.push(clean);
+    }
+  }
+  assert.ok(looping.length > 0, 'no infinite animation found, so this checks nothing');
+
+  for (const selector of looping) {
+    assert.ok(
+      stopped.includes(selector),
+      `${selector} loops forever and no reduced-motion rule turns it off`
+    );
+  }
+});
+
+test('the sign-in page states nothing about the system behind it', () => {
+  // Before authentication the page may say what the product is and ask for a
+  // password. It may not say what version is running, whether it is healthy,
+  // what it is called, or what it can reach: each of those is a free fact for
+  // somebody who has not proved they are allowed any.
+  // Comments stripped, again: the login markup carries a comment stating this
+  // very rule ("no version, no health, no hostname"), and a scan for the words
+  // would otherwise be failed by the note that forbids them.
+  const login = stripComments(
+    indexSrc.slice(indexSrc.indexOf('id="login'), indexSrc.indexOf('id="app'))
+  );
+  for (const leak of [
+    /\bv?\d+\.\d+\.\d+/,          // a version string
+    /hostname/i,
+    /uptime/i,
+    /\bhealthy\b/i,
+    /\bdegraded\b/i,
+    /goroutine/i,
+    /\bfeeds? (?:loaded|indexed)/i,
+  ]) {
+    assert.doesNotMatch(login, leak, `the login markup discloses ${leak}`);
+  }
+  // It also must not call anything but the login endpoint before sign-in.
+  assert.doesNotMatch(login, /api\/v1\/(?!auth\/login)/);
+});
+
+test('a Go duration is tidied for display, and an unknown one is left alone', () => {
+  assert.equal(goDuration('5m0s'), '5m');
+  assert.equal(goDuration('30m0s'), '30m');
+  assert.equal(goDuration('12h0m0s'), '12h');
+  assert.equal(goDuration('1h30m0s'), '1h 30m');
+  assert.equal(goDuration('0s'), '0s', 'a genuine zero still has to be shown');
+  // Not a duration the format knows: pass it through rather than guess.
+  assert.equal(goDuration('every fortnight'), 'every fortnight');
+  assert.equal(goDuration(undefined), '');
+});
+
+test('a headline rate is rounded, but a small real one is not rounded away', () => {
+  assert.equal(rate(28.46), '28');
+  assert.equal(rate(99.5), '100');
+  assert.equal(rate(0.25), '0.25', 'a quarter of a per cent is not zero');
+  assert.equal(rate(0), '0');
+  assert.equal(rate('nonsense'), '—');
+});
+
+test('an unmeasured rate is an em dash, never a zero', () => {
+  const out = statusHero(
+    overview({ queries24h: 0, threatsBlocked24h: 0, blockRate24h: 0 }),
+    healthyFeeds,
+    { enabled: true, total: 0 }
+  );
+  assert.doesNotMatch(out, /<span class="n">0%<\/span>/,
+    'a period with no queries reports a measured 0% block rate');
+  assert.match(out, /<span class="n">—<\/span>\s*<span class="k">Of all queries/);
+});
+
+test('the claim vocabulary defines every word it uses, and none of them says audited', () => {
+  for (const [tier, entry] of Object.entries(CLAIM_TIERS)) {
+    const [cls, label, meaning] = entry;
+    assert.ok(cls !== undefined, `${tier} has no badge class`);
+    assert.ok(label && label.length > 0, `${tier} has no label`);
+    assert.ok(meaning && meaning.length > 30, `${tier} is a word with no definition`);
+    assert.doesNotMatch(meaning, /\baudit(ed|or)?\b|\bcertifi/i,
+      `the definition of "${label}" implies an audit or a certification`);
+  }
+  // The strongest word available means CI, and says so.
+  assert.match(CLAIM_TIERS.verified[2], /\bCI\b/);
+});
+
+test('the Assurance page keeps saying what has not been done', () => {
+  const src = appJs.slice(appJs.indexOf('pages.assurance'));
+  assert.match(src, /No independent professional security review/);
+  assert.match(src, /Scanners are not proof/);
+  assert.match(src, /no independent professional security review has taken place/i);
+  // And never claims the opposite.
+  assert.doesNotMatch(src, /enterprise-grade|penetration tested|Tenable certified/i);
+});
+
+test('every text colour in the palette clears AA on the surface it sits on', () => {
+  // Reading the tokens out of the sheet rather than restating them here: a
+  // hardcoded copy passes forever after somebody darkens --faint.
+  const token = (name) => {
+    const m = appCss.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`));
+    assert.ok(m, `--${name} is not declared as a hex colour`);
+    return m[1];
+  };
+  const lum = (hex) => {
+    const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const ratio = (a, b) => {
+    const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  const surfaces = ['background', 'surface', 'surface-2', 'surface-3'].map(token);
+  // Text colours. --brand-cyan-dim is deliberately absent: it is a rule and a
+  // border weight, never type, and the assertion below keeps it that way.
+  const text = [
+    'foreground', 'muted-foreground', 'faint',
+    'brand-cyan', 'brand-cyan-soft', 'primary', 'primary-dim',
+    'danger', 'warn', 'violet',
+  ];
+  for (const name of text) {
+    for (const surface of surfaces) {
+      const r = ratio(token(name), surface);
+      assert.ok(r >= 4.5, `--${name} on ${surface} is ${r.toFixed(2)}:1, below AA for body text`);
+    }
+  }
+
+  // Filled controls carry dark type on a light ground; check both.
+  assert.ok(ratio(token('primary-foreground'), token('primary')) >= 4.5,
+    'the primary button label does not clear AA on its own fill');
+  assert.ok(ratio('#FFECEF', token('danger-solid')) >= 4.5,
+    'the Blocked chip label does not clear AA on its fill');
+
+  // The one sub-AA token must never become type.
+  const dimUses = [...appCss.matchAll(/([a-z-]+):\s*var\(--brand-cyan-dim\)/g)].map((m) => m[1]);
+  for (const property of dimUses) {
+    assert.ok(!/^color$/.test(property),
+      '--brand-cyan-dim is used as a text colour but only clears AA-large');
+  }
+});
