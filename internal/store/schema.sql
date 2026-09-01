@@ -196,3 +196,90 @@ CREATE INDEX IF NOT EXISTS findings_ts_idx       ON findings (ts DESC);
 CREATE INDEX IF NOT EXISTS findings_severity_idx ON findings (severity, ts DESC);
 CREATE INDEX IF NOT EXISTS findings_type_idx     ON findings (event_type, ts DESC);
 CREATE INDEX IF NOT EXISTS findings_client_idx   ON findings (client_ip, ts DESC);
+
+-- ---------------------------------------------------------------------------
+-- External API providers: "bring your own intelligence".
+--
+-- Configuration and credentials are deliberately two tables. A SELECT * on
+-- api_providers — in a debug handler, a backup script, an ad-hoc sqlite3
+-- session — cannot pick up a credential by accident, because there is no
+-- credential in it to pick up. See docs/external-apis.md.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS api_providers (
+    id                TEXT PRIMARY KEY,
+    name              TEXT    NOT NULL,
+    -- Registry key naming the adapter: safebrowsing, virustotal, customhttp.
+    kind              TEXT    NOT NULL,
+    enabled           INTEGER NOT NULL DEFAULT 0,
+    -- JSON array of the capabilities the operator switched on, which is a
+    -- subset of what the adapter can do. Enabling a provider is not the same
+    -- decision as letting it influence resolution.
+    capabilities      TEXT    NOT NULL DEFAULT '[]',
+    -- JSON object of adapter-specific NON-SECRET settings: endpoint, field
+    -- paths, header names. Anything secret belongs in api_provider_secrets.
+    config            TEXT    NOT NULL DEFAULT '{}',
+    timeout_ms        INTEGER NOT NULL DEFAULT 2000,
+    rate_per_minute   INTEGER NOT NULL DEFAULT 60,
+    cache_ttl_seconds INTEGER NOT NULL DEFAULT 21600,
+    -- JSON array of policy IDs this provider applies to. Empty means every
+    -- policy, which is the common case; naming policies is how a guest VLAN
+    -- gets live reputation while a finance VLAN does not.
+    policy_scope      TEXT    NOT NULL DEFAULT '[]',
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);
+
+-- The credential, sealed with AES-256-GCM by internal/secrets.
+--
+-- ciphertext is nonce ‖ sealed, and the provider id is the additional
+-- authenticated data, so a row moved between providers fails to open rather
+-- than silently authenticating one service with another's key.
+--
+-- hint is the last four characters of the plaintext. It exists so the
+-- dashboard can say WHICH credential is stored without showing it, which is
+-- what every vendor console does and is far too little to narrow a search.
+CREATE TABLE IF NOT EXISTS api_provider_secrets (
+    provider_id TEXT PRIMARY KEY REFERENCES api_providers(id) ON DELETE CASCADE,
+    ciphertext  BLOB    NOT NULL,
+    key_id      TEXT    NOT NULL DEFAULT '',
+    hint        TEXT    NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL,
+    rotated_at  INTEGER
+);
+
+-- Reputation answers, cached across restarts.
+--
+-- Persisted because a restart on a small VPS should not re-ask a metered API
+-- about every domain the network resolves in its first ten minutes. Pruned on
+-- the same schedule as the query log.
+CREATE TABLE IF NOT EXISTS intel_verdicts (
+    subject     TEXT    NOT NULL,
+    provider_id TEXT    NOT NULL REFERENCES api_providers(id) ON DELETE CASCADE,
+    score       REAL    NOT NULL DEFAULT 0,
+    -- malicious | suspicious | benign | unknown
+    disposition TEXT    NOT NULL DEFAULT 'unknown',
+    categories  TEXT    NOT NULL DEFAULT '[]',
+    -- A bounded excerpt of the provider's own answer, so an operator can see
+    -- what a verdict was actually based on rather than trusting our
+    -- normalisation of it.
+    raw         TEXT    NOT NULL DEFAULT '',
+    fetched_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL,
+    PRIMARY KEY (subject, provider_id)
+);
+
+CREATE INDEX IF NOT EXISTS intel_verdicts_expiry_idx ON intel_verdicts (expires_at);
+
+-- Context added to query-log rows and findings. Never a judgement, and never
+-- consulted by the resolution path.
+CREATE TABLE IF NOT EXISTS intel_enrichment (
+    subject     TEXT    NOT NULL,
+    provider_id TEXT    NOT NULL REFERENCES api_providers(id) ON DELETE CASCADE,
+    data        TEXT    NOT NULL DEFAULT '{}',
+    fetched_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL,
+    PRIMARY KEY (subject, provider_id)
+);
+
+CREATE INDEX IF NOT EXISTS intel_enrichment_expiry_idx ON intel_enrichment (expires_at);
