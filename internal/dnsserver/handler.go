@@ -253,7 +253,12 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		match = h.engine.MatchClient(meta.clientAddr)
 	}
 
-	decision := h.engine.Evaluate(match.PolicyID, normalized)
+	// EvaluateContext rather than Evaluate: the only step inside that can wait
+	// on anything is an external reputation lookup in blocking mode, and a
+	// client that has already given up should cancel it rather than leave it
+	// to run out its budget. With no provider configured — the default — the
+	// two are the same function.
+	decision := h.engine.EvaluateContext(ctx, match.PolicyID, normalized)
 	// The instance-wide switch and the per-policy switch both have to agree to
 	// persist a row; either one saying no is enough to keep this query out of
 	// the query_log table. Statistics are unaffected either way — see
