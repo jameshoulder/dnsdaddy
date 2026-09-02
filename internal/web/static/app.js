@@ -2811,6 +2811,580 @@ pages.feeds = {
   },
 };
 
+/* ---------- Integrations: external APIs ---------------------------------- */
+
+/*
+ * The one page in this product where an operator hands a third party a
+ * credential and lets it influence resolution. Everything on it is written to
+ * make that trade explicit rather than convenient: what leaves the network,
+ * what evidence exists that the adapter works, and what a mode actually costs.
+ *
+ * Two things are deliberately absent. There is no "recommended providers"
+ * list, because a recommendation is a claim about somebody else's service that
+ * this project cannot support. And blocking mode is not offered here unless
+ * dnsdaddy.yaml already permits it — see reputationCard.
+ */
+
+// What each mode means, in the terms that matter: what it costs a query.
+const REPUTATION_MODES = {
+  off: [
+    'Off',
+    'Providers are never consulted from the resolution path. Configure them, test them, ' +
+      'and nothing reaches DNS until you change this.',
+  ],
+  cache_only: [
+    'Cache only',
+    'A query reads what is already cached and never waits. A miss answers immediately ' +
+      'and queues a lookup, so the verdict is there next time. Cannot slow a query down.',
+  ],
+  blocking: [
+    'Blocking',
+    'A cache miss waits, up to the configured budget, for a provider to answer. ' +
+      'The only mode that puts somebody else’s latency in front of a DNS answer.',
+  ],
+};
+
+function providerStatusBadge(p) {
+  if (p.status === 'ok') return html`<span class="badge ok"><span class="dot"></span>working</span>`;
+  if (p.status === 'disabled') return html`<span class="badge info">switched off</span>`;
+  return html`<span class="badge warn"><span class="dot"></span>not working</span>`;
+}
+
+// The verification chip, in the Assurance page's vocabulary. Every adapter
+// shipped so far is "not verified live", and saying so on the card is the
+// whole point: an operator trusting a provider needs to know the adapter
+// itself has only been exercised against captured responses.
+function verificationChip(tpl) {
+  if (!tpl || !tpl.verification) return '';
+  if (tpl.liveVerified) {
+    return html`<span class="badge ok claim">Verified live</span>`;
+  }
+  return html`<span class="badge tier claim">Not verified live</span>`;
+}
+
+function providerStats(s) {
+  if (!s || !s.calls) {
+    return html`<div class="rec-meta"><span>no calls yet</span></div>`;
+  }
+  const breaker = s.breaker === 'closed' ? '' : html`<span class="badge warn">circuit ${s.breaker}</span>`;
+  return html`
+    <div class="rec-meta">
+      <span>${num(s.calls)} calls</span>
+      <span>${num(s.meanLatencyMs)} ms mean</span>
+      <span>${rate(s.errorRate)} errors</span>
+      ${raw(s.rateWaits ? html`<span>${num(s.rateWaits)} rate-limited waits</span>` : '')}
+      ${raw(breaker)}
+    </div>
+    ${raw(s.lastError ? html`<p class="rec-note is-warn">Last error: ${s.lastError}</p>` : '')}
+  `;
+}
+
+// The credential line. It shows that a key exists and which one, and offers no
+// way to read it — there is no endpoint that would answer.
+function credentialLine(p) {
+  if (!p.secretSet) {
+    return html`
+      <div class="rec-meta">
+        <span>no credential stored</span>
+        ${raw(p.rotatedAt ? html`<span>removed ${relTime(p.rotatedAt)}</span>` : '')}
+      </div>`;
+  }
+  return html`
+    <div class="rec-meta">
+      <span>credential ending <span class="mono">…${p.secretHint}</span></span>
+      ${raw(p.rotatedAt ? html`<span>set ${relTime(p.rotatedAt)}</span>` : '')}
+    </div>`;
+}
+
+function policyScopeControls(p, policies) {
+  const all = !p.policyScope || p.policyScope.length === 0;
+  const rows = policies
+    .map(
+      (pol) => html`
+        <label class="checkline">
+          <input type="checkbox" data-scope="${p.id}" data-policy-id="${pol.id}"
+                 ${raw(all || p.policyScope.includes(pol.id) ? 'checked' : '')}>
+          <span>${pol.name}</span>
+        </label>`
+    )
+    .join('');
+  return html`
+    <details class="provider-scope">
+      <summary>Applies to ${all ? 'every policy' : `${p.policyScope.length} of ${policies.length} policies`}</summary>
+      <p class="small muted">Untick a policy to stop sending its clients’ queries to this provider.
+         Unticking every policy is the same as ticking them all, so at least one stays on.</p>
+      ${raw(rows)}
+    </details>`;
+}
+
+function providerCard(p, policies, templates) {
+  const tpl = templates.find((t) => t.kind === p.kind);
+  return html`
+    <div class="rec" data-provider="${p.id}">
+      <div class="rec-main">
+        <div class="rec-title">
+          <strong>${p.name || p.displayName || p.kind}</strong>
+          ${raw(providerStatusBadge(p))}
+          ${raw(verificationChip(tpl))}
+        </div>
+        <div class="rec-meta">
+          <span>${p.displayName || p.kind}</span>
+          <span>${(p.capabilities || []).join(' · ') || 'no capabilities enabled'}</span>
+          <span>${num(p.ratePerMinute)}/min · ${num(p.timeoutMs)} ms timeout</span>
+        </div>
+        ${raw(p.detail ? html`<p class="rec-note is-warn">${p.detail}</p>` : '')}
+        ${raw(p.privacyNote ? html`<p class="rec-note">${p.privacyNote}</p>` : '')}
+        ${raw(tpl && tpl.verification ? html`<p class="small muted">${tpl.verification}</p>` : '')}
+        ${raw(credentialLine(p))}
+        ${raw(providerStats(p.stats))}
+        ${raw(policyScopeControls(p, policies))}
+        <div class="row provider-actions">
+          <button class="btn btn-ghost btn-sm" data-test="${p.id}">Test connection</button>
+          <button class="btn btn-ghost btn-sm" data-rotate="${p.id}">
+            ${p.secretSet ? 'Rotate credential' : 'Set credential'}
+          </button>
+          ${raw(p.secretSet ? html`<button class="btn btn-ghost btn-sm" data-clear-secret="${p.id}">Remove credential</button>` : '')}
+          <button class="btn btn-danger btn-sm" data-delete="${p.id}">Delete</button>
+        </div>
+        <p class="rec-note" data-result="${p.id}" hidden></p>
+      </div>
+      <div class="rec-actions">
+        <label class="checkline">
+          <input type="checkbox" data-enable="${p.id}" ${raw(p.enabled ? 'checked' : '')}
+                 aria-label="Enable ${p.name}">
+          <span>Enabled</span>
+        </label>
+      </div>
+    </div>`;
+}
+
+function reputationCard(rep, engine) {
+  const selectable = rep.selectable || ['off'];
+  const options = selectable
+    .map((m) => {
+      const [label, why] = REPUTATION_MODES[m] || [m, ''];
+      return html`
+        <label class="checkline">
+          <input type="radio" name="reputation-mode" value="${m}" ${raw(rep.mode === m ? 'checked' : '')}>
+          <span>
+            ${label}
+            <span class="cat-desc">${why}</span>
+          </span>
+        </label>`;
+    })
+    .join('');
+
+  // Blocking is missing from the list unless the configuration file already
+  // allows it. Saying so, rather than showing a disabled radio, keeps the
+  // decision where it belongs: in a file somebody edited deliberately.
+  const blockingNote = selectable.includes('blocking')
+    ? html`<p class="small muted">Blocking mode is permitted by this deployment’s configuration.
+             Read <span class="mono">docs/external-apis.md</span> before relying on it.</p>`
+    : html`<p class="small muted">Blocking mode is not offered here. It is the only mode that puts a
+             third party’s latency in front of a DNS answer, so it is set in
+             <span class="mono">dnsdaddy.yaml</span> — see
+             <span class="mono">integrations.reputation_mode</span> and
+             <span class="mono">docs/external-apis.md</span> — and this page can only lower it.</p>`;
+
+  const counters = engine
+    ? html`
+        <div class="rec-meta">
+          <span>${num(engine.cacheSize)} cached verdicts</span>
+          <span>${num(engine.cacheHits)} hits · ${num(engine.cacheMisses)} misses</span>
+          <span>${num(engine.completed)} lookups completed</span>
+          ${raw(engine.dropped ? html`<span>${num(engine.dropped)} dropped</span>` : '')}
+          <span>${num(engine.queueDepth)}/${num(engine.queueSize)} queued</span>
+        </div>`
+    : '';
+
+  return html`
+    <div class="card section">
+      <div class="card-head">
+        <div>
+          <h2>How much say providers have</h2>
+          <p>Adding a provider does not change what gets blocked. This does.</p>
+        </div>
+      </div>
+      <div class="stack">${raw(options)}</div>
+      ${raw(blockingNote)}
+      ${raw(counters)}
+    </div>`;
+}
+
+// The add-provider form. The field list comes from the chosen template, so a
+// provider's settings are whatever the compiled-in adapter says they are and
+// there is no second copy of that knowledge here to drift.
+function templateFields(tpl) {
+  if (!tpl) return '';
+  const fields = (tpl.fields || [])
+    .map(
+      (f) => html`
+        <label class="field">
+          <span>${f.label}${f.required ? ' *' : ''}</span>
+          <input name="cfg:${f.key}" value="${f.default || ''}" placeholder="${f.placeholder || ''}"
+                 ${raw(f.required ? 'required' : '')}>
+          ${raw(f.help ? html`<span class="small muted">${f.help}</span>` : '')}
+        </label>`
+    )
+    .join('');
+
+  const secret = html`
+    <label class="field">
+      <span>${tpl.secretLabel || 'Credential'}${tpl.secretRequired ? ' *' : ''}</span>
+      <input name="secret" type="password" autocomplete="off" spellcheck="false"
+             ${raw(tpl.secretRequired ? 'required' : '')}>
+      <span class="small muted">Encrypted before it reaches disk. There is no endpoint that
+        returns it afterwards — if you lose it, set a new one.</span>
+    </label>`;
+
+  return html`
+    <p class="rec-note">${tpl.privacyNote}</p>
+    <p class="small muted">${tpl.verification}</p>
+    <div class="grid grid-2">${raw(fields)}${raw(secret)}</div>
+    <div class="grid grid-3">
+      <label class="field"><span>Requests per minute</span>
+        <input name="ratePerMinute" type="number" min="1" value="${tpl.defaultRatePerMinute || 60}"></label>
+      <label class="field"><span>Timeout (ms)</span>
+        <input name="timeoutMs" type="number" min="100" value="${tpl.defaultTimeoutMs || 2000}"></label>
+      <label class="field"><span>Cache verdicts for (seconds)</span>
+        <input name="cacheTtlSeconds" type="number" min="60" value="${tpl.defaultCacheTtlSeconds || 21600}"></label>
+    </div>`;
+}
+
+pages.integrations = {
+  title: 'External APIs',
+  subtitle: 'Threat intelligence you have chosen to consult.',
+
+  async render() {
+    // The template catalogue answers even when the feature is switched off,
+    // because it describes the build rather than the configuration, and it is
+    // how an operator decides whether to switch it on.
+    const templates = await apiGet('/integrations/templates');
+
+    let data;
+    try {
+      data = await apiGet('/integrations/providers');
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 503) {
+        return html`
+          <div class="card section">
+            ${raw(
+              emptyState(
+                'External APIs are switched off',
+                err.message,
+                { icon: '○' }
+              )
+            )}
+            <p class="small muted">Nothing on this page can send a query anywhere until
+               <span class="mono">integrations.enabled</span> is set in
+               <span class="mono">dnsdaddy.yaml</span> and the resolver restarted. That is the
+               default, and a deployment that never touches this feature pays one atomic load
+               per query for it.</p>
+          </div>
+          ${raw(availableAdaptersCard(templates.templates || []))}`;
+      }
+      throw err;
+    }
+
+    const policies = await apiGet('/policies');
+    const tpls = templates.templates || [];
+    const providers = data.providers || [];
+
+    const cards = providers.length
+      ? providers.map((p) => providerCard(p, policies.policies || [], tpls)).join('')
+      : emptyState(
+          'No providers configured',
+          'Nothing is being sent anywhere. Add one below to start consulting an external service.',
+          { icon: '○' }
+        );
+
+    return html`
+      ${raw(reputationCard(data.reputation || {}, data.engine))}
+
+      <div class="card section">
+        <div class="card-head">
+          <div>
+            <h2>Providers</h2>
+            <p>Each one sends the domain being resolved to somebody else. The note on every
+               card says what that means for this network.</p>
+          </div>
+        </div>
+        ${raw(cards)}
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Add a provider</h2>
+            <p>Choose an adapter, fill in what it needs, and test it before you save.</p>
+          </div>
+        </div>
+        <form id="provider-form">
+          <div class="grid grid-2">
+            <label class="field"><span>Service</span>
+              <select name="kind" id="provider-kind">
+                ${raw(tpls.map((t) => html`<option value="${t.kind}">${t.displayName}</option>`).join(''))}
+              </select>
+            </label>
+            <label class="field"><span>Name on this dashboard</span>
+              <input name="name" placeholder="VirusTotal"></label>
+          </div>
+          <div id="provider-fields"></div>
+          <div class="row">
+            <button class="btn btn-ghost" type="button" id="provider-test">Test connection</button>
+            <button class="btn btn-primary" type="submit">Add provider</button>
+          </div>
+          <p class="rec-note" id="provider-test-result" hidden></p>
+        </form>
+      </div>`;
+  },
+
+  async mounted() {
+    const templates = ((await apiGet('/integrations/templates')).templates) || [];
+    const byKind = Object.fromEntries(templates.map((t) => [t.kind, t]));
+
+    const fieldsHost = $('#provider-fields');
+    const kindSelect = $('#provider-kind');
+    if (fieldsHost && kindSelect) {
+      const paintFields = () => {
+        fieldsHost.innerHTML = sanitize(templateFields(byKind[kindSelect.value]));
+        paintDynamic(fieldsHost);
+      };
+      kindSelect.addEventListener('change', paintFields);
+      paintFields();
+    }
+
+    const showResult = (el, ok, message) => {
+      if (!el) return;
+      el.hidden = false;
+      el.className = `rec-note ${ok ? 'is-ok' : 'is-warn'}`;
+      el.textContent = message;
+    };
+
+    // The wizard's candidate body: whatever the chosen template asked for.
+    const candidateFromForm = () => {
+      const form = new FormData($('#provider-form'));
+      const config = {};
+      for (const [key, value] of form.entries()) {
+        if (key.startsWith('cfg:') && String(value).trim() !== '') {
+          config[key.slice(4)] = String(value);
+        }
+      }
+      return {
+        kind: form.get('kind'),
+        name: String(form.get('name') || '').trim() || (byKind[form.get('kind')] || {}).displayName || form.get('kind'),
+        config,
+        secret: String(form.get('secret') || ''),
+        timeoutMs: Number(form.get('timeoutMs')) || undefined,
+        ratePerMinute: Number(form.get('ratePerMinute')) || undefined,
+        cacheTtlSeconds: Number(form.get('cacheTtlSeconds')) || undefined,
+      };
+    };
+
+    const testButton = $('#provider-test');
+    if (testButton) {
+      testButton.addEventListener('click', async () => {
+        const c = candidateFromForm();
+        testButton.disabled = true;
+        testButton.textContent = 'Testing…';
+        try {
+          const res = await apiSend('POST', '/integrations/providers/test', {
+            kind: c.kind,
+            config: c.config,
+            secret: c.secret,
+            timeoutMs: c.timeoutMs,
+            ratePerMinute: c.ratePerMinute,
+          });
+          showResult(
+            $('#provider-test-result'),
+            res.ok,
+            res.ok ? `${res.detail} (${res.latencyMs} ms)` : res.error
+          );
+        } catch (err) {
+          reportError(err);
+        } finally {
+          testButton.disabled = false;
+          testButton.textContent = 'Test connection';
+        }
+      });
+    }
+
+    const form = $('#provider-form');
+    if (form) {
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const c = candidateFromForm();
+        const tpl = byKind[c.kind] || {};
+        try {
+          await apiSend('POST', '/integrations/providers', {
+            name: c.name,
+            kind: c.kind,
+            enabled: true,
+            capabilities: tpl.capabilities || ['reputation'],
+            config: c.config,
+            secret: c.secret || undefined,
+            timeoutMs: c.timeoutMs,
+            ratePerMinute: c.ratePerMinute,
+            cacheTtlSeconds: c.cacheTtlSeconds,
+          });
+          toast('Provider added — it will not affect resolution until the mode above allows it');
+          router.reload();
+        } catch (err) {
+          reportError(err);
+        }
+      });
+    }
+
+    $$('input[name="reputation-mode"]').forEach((radio) =>
+      radio.addEventListener('change', async () => {
+        if (!radio.checked) return;
+        try {
+          await apiSend('PUT', '/integrations/reputation', { mode: radio.value });
+          toast(
+            radio.value === 'off'
+              ? 'Providers will no longer be consulted during resolution'
+              : `Reputation set to ${(REPUTATION_MODES[radio.value] || [radio.value])[0].toLowerCase()}`
+          );
+        } catch (err) {
+          reportError(err);
+          router.reload();
+        }
+      })
+    );
+
+    $$('[data-enable]').forEach((cb) =>
+      cb.addEventListener('change', async () => {
+        try {
+          await apiSend('PATCH', `/integrations/providers/${cb.dataset.enable}`, { enabled: cb.checked });
+          toast(cb.checked ? 'Provider enabled' : 'Provider switched off — nothing more is sent to it');
+          router.reload();
+        } catch (err) {
+          reportError(err);
+          cb.checked = !cb.checked;
+        }
+      })
+    );
+
+    $$('[data-test]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.test;
+        btn.disabled = true;
+        btn.textContent = 'Testing…';
+        try {
+          const res = await apiSend('POST', `/integrations/providers/${id}/test`);
+          showResult($(`[data-result="${id}"]`), res.ok, res.ok ? `${res.detail} (${res.latencyMs} ms)` : res.error);
+        } catch (err) {
+          reportError(err);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Test connection';
+        }
+      })
+    );
+
+    $$('[data-rotate]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        // A prompt rather than an inline field, so a credential is never
+        // sitting in a form somebody walked away from.
+        const secret = window.prompt('New credential for this provider. It is encrypted immediately and cannot be read back.');
+        if (secret === null || secret.trim() === '') return;
+        try {
+          await apiSend('POST', `/integrations/providers/${btn.dataset.rotate}/secret`, { secret });
+          toast('Credential stored');
+          router.reload();
+        } catch (err) {
+          reportError(err);
+        }
+      })
+    );
+
+    $$('[data-clear-secret]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        if (!window.confirm('Remove this provider’s credential? It will stay configured but stop authenticating.')) return;
+        try {
+          await apiSend('DELETE', `/integrations/providers/${btn.dataset.clearSecret}/secret`);
+          toast('Credential removed');
+          router.reload();
+        } catch (err) {
+          reportError(err);
+        }
+      })
+    );
+
+    $$('[data-delete]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        if (!window.confirm('Delete this provider, its credential and its cached verdicts?')) return;
+        try {
+          await apiSend('DELETE', `/integrations/providers/${btn.dataset.delete}`);
+          toast('Provider deleted');
+          router.reload();
+        } catch (err) {
+          reportError(err);
+        }
+      })
+    );
+
+    // Policy scope. Sent as a whole list rather than per-checkbox, because the
+    // server stores a list and a per-checkbox PATCH would race itself.
+    $$('[data-scope]').forEach((cb) =>
+      cb.addEventListener('change', async () => {
+        const id = cb.dataset.scope;
+        const boxes = $$(`[data-scope="${id}"]`);
+        const chosen = boxes.filter((b) => b.checked).map((b) => b.dataset.policyId);
+        // Every policy ticked means "all", which the server stores as an empty
+        // list. Zero ticked would mean the same thing to the server, which is
+        // the opposite of what the operator just asked for, so it is refused.
+        if (chosen.length === 0) {
+          cb.checked = true;
+          toast('A provider must apply to at least one policy — switch it off instead', 'error');
+          return;
+        }
+        try {
+          await apiSend('PATCH', `/integrations/providers/${id}`, {
+            policyScope: chosen.length === boxes.length ? [] : chosen,
+          });
+          toast('Policy scope saved');
+        } catch (err) {
+          reportError(err);
+          cb.checked = !cb.checked;
+        }
+      })
+    );
+  },
+};
+
+// availableAdaptersCard is what the page shows when the feature is off: what
+// this build could talk to, and what each would disclose.
+function availableAdaptersCard(templates) {
+  if (!templates.length) return '';
+  const rows = templates
+    .map(
+      (t) => html`
+        <div class="rec">
+          <div class="rec-main">
+            <div class="rec-title">
+              <strong>${t.displayName}</strong>
+              ${raw(verificationChip(t))}
+            </div>
+            <div class="rec-meta"><span>${(t.capabilities || []).join(' · ')}</span></div>
+            <p class="rec-note">${t.privacyNote}</p>
+            <p class="small muted">${t.verification}</p>
+          </div>
+        </div>`
+    )
+    .join('');
+  return html`
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>What this build can talk to</h2>
+          <p>Compiled-in adapters. Nothing here is configured or contacted.</p>
+        </div>
+      </div>
+      ${raw(rows)}
+    </div>`;
+}
+
 pages.setup = {
   title: 'Setup',
   subtitle: 'Point your network here.',
@@ -3606,5 +4180,13 @@ if (typeof module !== 'undefined' && module.exports) {
     claimChip,
     CLAIM_TIERS,
     CATEGORY_COLOURS,
+    providerCard,
+    providerStatusBadge,
+    verificationChip,
+    credentialLine,
+    reputationCard,
+    templateFields,
+    availableAdaptersCard,
+    REPUTATION_MODES,
   };
 }

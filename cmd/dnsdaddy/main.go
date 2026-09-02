@@ -22,6 +22,13 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/api"
+	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
+
+	// Registers the built-in provider adapters. Blank because nothing here
+	// names them: the registry is what the API, the wizard and the engine all
+	// read, so an adapter is added by writing one file and removing one by
+	// deleting it.
+	_ "github.com/jameshoulder/dnsdaddy/internal/apiprovider/adapters"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -29,9 +36,11 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
+	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
+	"github.com/jameshoulder/dnsdaddy/internal/secrets"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
@@ -284,6 +293,20 @@ func run() error {
 		AllowUntokenized: cfg.HTTP.AllowUntokenizedDoH,
 	})
 
+	// --- external intelligence ---------------------------------------------
+	//
+	// Nil unless the operator switched it on, and every handler that touches
+	// it tolerates nil. That is the whole shape of the feature's cost to a
+	// deployment that does not use it: one nil pointer, and one atomic load
+	// per query inside the policy engine.
+	intelSource, providers, err := startIntel(ctx, cfg, st, engine, log)
+	if err != nil {
+		return err
+	}
+	if providers != nil {
+		defer providers.Stop()
+	}
+
 	restAPI := api.New(api.Deps{
 		Config:         cfg,
 		Store:          st,
@@ -300,6 +323,8 @@ func run() error {
 		ClientACL:      acl,
 		StartedAt:      time.Now(),
 		TrustedProxies: trustedProxies,
+		Providers:      providers,
+		Intel:          intelSource,
 	})
 
 	httpSrv := &http.Server{
@@ -551,6 +576,81 @@ func buildDetector(cfg config.Config, st *store.Store, log *slog.Logger) (*detec
 	return engine, fileSink, nil
 }
 
+// startIntel brings up the external-intelligence engine, or returns nils.
+//
+// The order here is the whole of the feature's safety story, so it is worth
+// stating: the engine is constructed with the effective mode already resolved
+// (the operator's stored choice, bounded by the configuration file's ceiling),
+// providers are loaded and their credentials opened once, the workers start,
+// and only then is the consultant attached to the policy engine. Attaching it
+// first would give the resolution path a consultant with no providers behind
+// it — harmless, but it would mean the first queries after a restart behave
+// differently from every query after that, which is the kind of difference
+// nobody ever reproduces.
+func startIntel(
+	ctx context.Context,
+	cfg config.Config,
+	st *store.Store,
+	policyEngine *policy.Engine,
+	log *slog.Logger,
+) (*intel.Source, *apiprovider.Engine, error) {
+	if !cfg.Integrations.Enabled {
+		return nil, nil, nil
+	}
+
+	// The keyring is opened rather than required. A deployment can legitimately
+	// have integrations switched on with no credential stored yet, and a
+	// resolver that refuses to start because a key file is missing would be
+	// down for a feature that is not answering any queries.
+	keyring, err := secrets.Open(cfg.DataDir)
+	if err != nil {
+		log.Warn("could not open the secrets keyring; providers that need a credential will not work",
+			"error", err.Error())
+	}
+
+	mode := api.EffectiveReputationMode(ctx, st, cfg.Integrations.ReputationMode)
+	source := &intel.Source{Store: st, Keyring: keyring, Log: log}
+
+	engine := apiprovider.NewEngine(apiprovider.Options{
+		Mode:         mode,
+		Budget:       cfg.Integrations.ReputationBudget.D(),
+		Workers:      cfg.Integrations.Workers,
+		QueueSize:    cfg.Integrations.QueueSize,
+		CacheEntries: cfg.Integrations.CacheEntries,
+		Enrichment:   cfg.Integrations.Enrichment,
+		DefaultTTL:   cfg.Integrations.DefaultCacheTTL.D(),
+		Log:          log,
+		Store:        &intel.VerdictStore{Store: st},
+	})
+
+	if err := engine.Reload(ctx, source); err != nil {
+		// Not fatal. The providers table being unreadable at boot is a database
+		// problem the rest of the resolver will report far more usefully, and
+		// the next write through the API reloads.
+		log.Error("could not load external providers", "error", err.Error())
+	}
+	engine.Start(ctx)
+
+	// Verdicts a previous run already paid for. Reading them back is what
+	// makes intel_verdicts a cache rather than a log: without it every restart
+	// re-asks every provider for answers that are sitting on disk.
+	if _, err := engine.WarmCache(ctx); err != nil {
+		log.Warn("could not warm the external verdict cache", "error", err.Error())
+	}
+
+	if mode != apiprovider.ModeOff {
+		policyEngine.SetReputation(&intel.Consultant{Engine: engine})
+	}
+
+	log.Info("external intelligence enabled",
+		"reputation_mode", string(mode),
+		"ceiling", cfg.Integrations.ReputationMode,
+		"providers", len(engine.Instances()),
+		"enrichment", cfg.Integrations.Enrichment)
+
+	return source, engine, nil
+}
+
 // runRetention prunes the query log on a timer, honouring the configured
 // retention window.
 func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) {
@@ -578,6 +678,17 @@ func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *
 		if findings > 0 {
 			log.Info("pruned expired findings",
 				"rows", findings, "retention_days", cfg.Detection.RetentionDays)
+		}
+
+		// Cached verdicts and enrichment from external providers. Pruned on
+		// their own expiry rather than on a retention window: they are a cache
+		// with a per-row TTL the provider chose, and a stale verdict is worse
+		// than no verdict — it would block a name on evidence nobody would
+		// stand behind today.
+		if intelRows, err := st.PruneIntel(pctx, time.Now()); err != nil {
+			log.Error("external intelligence prune failed", "error", err)
+		} else if intelRows > 0 {
+			log.Debug("pruned expired external intelligence", "rows", intelRows)
 		}
 
 		// Expired sessions are already refused by the lookup, which enforces

@@ -22,6 +22,69 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Bring your own intelligence: external reputation and enrichment APIs
+
+Operators can now add external threat intelligence, reputation and enrichment
+services from the dashboard, under **Protect → External APIs**. Adapters ship
+for VirusTotal, Google Safe Browsing, and any HTTP endpoint returning JSON.
+Full design, threat-model delta and a guide to writing an adapter are in
+[docs/external-apis.md](docs/external-apis.md).
+
+**Off by default, and the default costs nothing.** With
+`integrations.enabled` unset — which it is unless you change it — no workers
+start, no table is read, and the resolution path pays one atomic load per
+query. Nothing about a deployment that never opens the page changes.
+
+**Enabling it changes what leaves your network.** On a cache miss the domain a
+client is resolving is sent to a third party. That is the whole point of the
+feature and it is stated on every provider card, in the API's template
+catalogue, and in §5 of the design document, which is a threat-model delta
+rather than a feature list.
+
+**Credentials are encrypted at rest** with AES-256-GCM, bound to their
+provider's ID as additional authenticated data, in a key file (`secrets.key`,
+mode 0600) beside the database. A credential goes in and never comes out:
+there is no endpoint, no field and no error on the management API that returns
+one, the OpenAPI document marks every credential field `writeOnly`, and a
+contract test fails if a readable schema ever grows one. What an operator sees
+afterwards is that a credential is set and its last four characters.
+
+**Three reputation modes, and the configuration file sets a ceiling.**
+`off` never consults a provider from the resolution path. `cache_only` reads
+the local cache and never waits. `blocking` waits up to a hard budget on a
+cache miss, and is the only mode that puts a third party's latency in front of
+a DNS answer — so it is set in `dnsdaddy.yaml` and is deliberately not offered
+in the dashboard. The dashboard can lower the mode at any time and can never
+raise it above the file, which means an operator can turn reputation off during
+an incident without editing anything, and a stolen session cannot turn it on.
+
+**The DNS path stays free of blocking calls unless you ask for them.**
+Reputation is consulted last, after the allow-list, the block-list and the
+category index, so a name the operator permitted or a local feed already
+condemned is never disclosed to a third party at all. Lookups run on a bounded
+worker queue that drops and counts rather than exerting back-pressure. Every
+provider gets its own rate limiter, circuit breaker, strict timeout and
+bounded response reader.
+
+**Nothing here is verified against a vendor's live service.** Every adapter is
+exercised in CI against captured responses and local test servers, and every
+provider card says so. Use *Test connection*.
+
+**The one SSRF control, and why it is narrow.** Fetching an operator-supplied
+URL is what this feature does, so private and loopback addresses stay
+reachable — an internal reputation service is a stated use case, and somebody
+who can add a provider is already an administrator here. Link-local is
+refused, because `169.254.169.254` issues cloud IAM credentials for the host,
+which is strictly more authority than this dashboard grants. Enforced twice:
+in the dialer, which sees the resolved address on every attempt, and on the
+URL before any dial, which is what catches it when `HTTP_PROXY` is set and
+the dialer would otherwise only ever see the proxy.
+
+New metrics: `dnsdaddy_intel_*`, including a `reputation_mode` gauge and
+per-provider call, latency, failure and circuit-breaker series. None of them
+exist when the feature is off, because a series reading zero and a feature that
+is not running are different things.
+
 **Nine defects found by deploying to a real VPS.** Debian 13 (trixie), Docker
 26.1.5, Caddy 2.11.4, dashboard published on host loopback with Caddy
 terminating TLS in front of it. The architecture works — Let's Encrypt issued a

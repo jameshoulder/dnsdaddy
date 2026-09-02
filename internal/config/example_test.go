@@ -44,6 +44,36 @@ func TestShippedExampleConfigParses(t *testing.T) {
 		t.Errorf("log.retention_days = %d, want 7", cfg.Log.RetentionDays)
 	}
 
+	// The integrations block. Every value here is inert by design, and the
+	// example shipping anything else would enable, on a copy-and-paste, a
+	// feature that sends this network's query names to a third party.
+	if cfg.Integrations.Enabled {
+		t.Error("the shipped example config enables external API integrations")
+	}
+	if cfg.Integrations.ReputationMode != "off" {
+		t.Errorf("integrations.reputation_mode = %q, want off", cfg.Integrations.ReputationMode)
+	}
+	if cfg.Integrations.Enrichment {
+		t.Error("the shipped example config enables enrichment")
+	}
+	// And the tuning keys parse, so a rename in Go without one in the YAML is
+	// caught rather than silently ignored.
+	if cfg.Integrations.Workers != 2 {
+		t.Errorf("integrations.workers = %d, want 2", cfg.Integrations.Workers)
+	}
+	if cfg.Integrations.QueueSize != 1024 {
+		t.Errorf("integrations.queue_size = %d, want 1024", cfg.Integrations.QueueSize)
+	}
+	if cfg.Integrations.CacheEntries != 4096 {
+		t.Errorf("integrations.cache_entries = %d, want 4096", cfg.Integrations.CacheEntries)
+	}
+	if cfg.Integrations.ReputationBudget.D().String() != "50ms" {
+		t.Errorf("integrations.reputation_budget = %v, want 50ms", cfg.Integrations.ReputationBudget)
+	}
+	if cfg.Integrations.DefaultCacheTTL.D().String() != "6h0m0s" {
+		t.Errorf("integrations.default_cache_ttl = %v, want 6h", cfg.Integrations.DefaultCacheTTL)
+	}
+
 	// The example must never ship a configuration that would refuse to start.
 	if err := cfg.validate(); err != nil {
 		t.Errorf("the shipped example config would fail validation: %v", err)

@@ -70,11 +70,58 @@ type snapshot struct {
 	defaultPolicy *compiledPolicy
 }
 
+// Reputation is the external-intelligence consultant, when one is configured.
+//
+// An interface rather than a concrete type so this package does not import
+// internal/apiprovider: policy is the thing DNS resolution depends on, and it
+// should not grow a dependency on HTTP clients, circuit breakers and provider
+// registries to ask one question.
+//
+// Consult returns (verdict, true) only when a provider actually answered.
+// Anything else — no providers, a cache miss, a failure, a timeout — is
+// (unknown, false) and changes nothing.
+type Reputation interface {
+	Consult(ctx context.Context, policyID, domain string) (ReputationVerdict, bool)
+}
+
+// ReputationVerdict is what a provider concluded, in the terms this package
+// needs. Deliberately smaller than apiprovider.Verdict: the policy engine has
+// no use for a raw excerpt or a TTL, and a narrower type is a narrower
+// coupling.
+type ReputationVerdict struct {
+	// Malicious is the only field that can change a decision. A score without
+	// it is telemetry.
+	Malicious bool
+	Score     float64
+	Category  string
+	// ProviderName is written into the block reason, because an operator
+	// looking at a blocked query needs to know which third party decided it.
+	ProviderName string
+}
+
 // Engine evaluates questions against the current configuration.
 type Engine struct {
 	snap  atomic.Pointer[snapshot]
 	lists *blocklist.Holder
 	store *store.Store
+
+	// reputation is nil unless an operator has configured external providers
+	// AND set a mode other than off. Nil is the overwhelmingly common case and
+	// is checked with one nil comparison per query.
+	reputation atomic.Pointer[Reputation]
+}
+
+// SetReputation installs or removes the external-intelligence consultant.
+//
+// Atomic, so it can be changed while the resolver is serving: an operator
+// switching modes in the dashboard takes effect on the next query. Passing nil
+// removes it, which is what happens when the mode goes back to off.
+func (e *Engine) SetReputation(r Reputation) {
+	if r == nil {
+		e.reputation.Store(nil)
+		return
+	}
+	e.reputation.Store(&r)
 }
 
 // NewEngine returns an engine reading blocklists from holder. Reload must be
@@ -228,6 +275,17 @@ func (e *Engine) ClientName(ip string) string {
 //  3. the shared threat-intelligence index, filtered to the categories this
 //     policy actually enables.
 func (e *Engine) Evaluate(policyID, domain string) Decision {
+	return e.EvaluateContext(context.Background(), policyID, domain)
+}
+
+// EvaluateContext is Evaluate with a context, for the one step that can have
+// one: an external reputation lookup in blocking mode.
+//
+// Evaluate keeps its signature because every other caller — tests, the
+// dashboard's policy preview — has no context to give and needs none. The DNS
+// handler has one and passes it, so a client that gave up cancels the wait
+// rather than leaving it to run out its budget.
+func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) Decision {
 	snap := e.snap.Load()
 	p := snap.policies[policyID]
 	if p == nil {
@@ -264,6 +322,33 @@ func (e *Engine) Evaluate(policyID, domain string) Decision {
 			d.Source = entry.FeedName
 			d.Reason = catalog.CategoryReason(entry.Category)
 			return d
+		}
+	}
+
+	// External intelligence, last and only if configured.
+	//
+	// Last on purpose. Everything above is local: a map lookup against an
+	// index already in memory, which is microseconds and cannot fail. Asking a
+	// third party is the most expensive and least reliable thing this function
+	// can do, so it happens only for names nothing local had an opinion about
+	// — and a domain the operator explicitly allowed never reaches it at all,
+	// which also means it is never disclosed.
+	//
+	// The nil check is the whole cost when no provider is configured, which is
+	// the default and the overwhelmingly common case.
+	if rep := e.reputation.Load(); rep != nil {
+		if v, ok := (*rep).Consult(ctx, policyID, domain); ok && v.Malicious {
+			d.Blocked = true
+			d.Category = v.Category
+			if d.Category == "" {
+				d.Category = "malware"
+			}
+			d.Source = v.ProviderName
+			// Named rather than generic. An operator looking at a blocked
+			// query has to be able to tell a curated-feed block from a
+			// third-party API's opinion, because only one of those is
+			// something they can inspect offline.
+			d.Reason = "Blocked by external threat intelligence (" + v.ProviderName + ")"
 		}
 	}
 

@@ -316,3 +316,61 @@ detection:
   # silence. Shortening the window on a real deployment makes rate-based
   # signals noisier without making anything more sensitive.
   window_scale: 1.0
+
+# --- External API integrations ----------------------------------------------
+#
+# "Bring your own intelligence": reputation and enrichment services you have
+# chosen to consult, configured from Integrations → External APIs.
+#
+# OFF BY DEFAULT, and worth understanding before switching on. Enabling this
+# changes what leaves your network: on a cache miss, the domain a client is
+# resolving is sent to a third party. Read docs/external-apis.md §5 — it is the
+# threat-model delta, not marketing.
+#
+# Nothing here is verified against any vendor's live service. Every adapter is
+# exercised in CI against captured responses. Use Test connection.
+integrations:
+  # The whole subsystem. Off means no workers start, no table is read, and the
+  # resolution path costs one atomic load per query.
+  enabled: false
+
+  # Workers draining the lookup queue.
+  workers: 2
+
+  # Bounded queue. When it is full, lookups are dropped and counted
+  # (dnsdaddy_intel_lookups_dropped_total) rather than making a query wait.
+  # Alert on that metric: a rising count means providers are slower than your
+  # query rate, so verdicts are not reaching the cache.
+  queue_size: 1024
+
+  # In-memory verdict cache entries. Verdicts also persist to SQLite, so this
+  # bounds memory rather than deciding what is remembered.
+  cache_entries: 4096
+
+  # The CEILING on how much say providers have over resolution — not a default.
+  # The dashboard can lower this at any time; nothing reachable over the
+  # network can raise it above what is written here.
+  #
+  #   off         never consulted from the resolution path
+  #   cache_only  read the local cache, never wait; a miss queues a lookup and
+  #               answers immediately, so the verdict is there next time
+  #   blocking    on a cache miss, wait up to reputation_budget for an answer
+  #
+  # blocking IS DELIBERATELY NOT OFFERED IN THE DASHBOARD. It is the only mode
+  # that puts somebody else's latency in front of a DNS answer, and it belongs
+  # to a person who read docs/external-apis.md rather than to a radio button.
+  # Setting it here is that decision.
+  reputation_mode: "off"
+
+  # The hard ceiling on how long a query may wait in blocking mode. On expiry
+  # the answer is "unknown" — never a block — and the lookup continues in the
+  # background to warm the cache. A ceiling, not a target.
+  reputation_budget: 50ms
+
+  # Asynchronous enrichment: registrar, categories and similar context attached
+  # to query-log rows. Never on the resolution path, at any setting.
+  enrichment: false
+
+  # How long a cached verdict stays fresh when a provider gives no TTL of its
+  # own. Reputation moves in hours, not seconds.
+  default_cache_ttl: 6h

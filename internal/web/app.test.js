@@ -43,6 +43,14 @@ const {
   protectionBreakdown,
   pages,
   routeName,
+  providerCard,
+  providerStatusBadge,
+  verificationChip,
+  credentialLine,
+  reputationCard,
+  templateFields,
+  availableAdaptersCard,
+  REPUTATION_MODES,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -2016,4 +2024,218 @@ test('every text colour in the palette clears AA on the surface it sits on', () 
     assert.ok(!/^color$/.test(property),
       '--brand-cyan-dim is used as a text colour but only clears AA-large');
   }
+});
+
+/* ---------- external API providers --------------------------------------- */
+
+/*
+ * The page where an operator hands a third party a credential and lets it
+ * influence resolution. Two things must be true of everything it renders, and
+ * they are what these tests are for: a credential never appears, and the page
+ * never claims more about an adapter than the project can support.
+ */
+
+const PROVIDER_SECRET = 'sk-live-DO-NOT-RENDER-93f1c8a4e7b20d65';
+
+function template(overrides = {}) {
+  return {
+    kind: 'virustotal',
+    displayName: 'VirusTotal',
+    summary: 'Engine-consensus reputation.',
+    privacyNote: 'Sends every looked-up domain to VirusTotal.',
+    capabilities: ['reputation', 'enrichment'],
+    liveVerified: false,
+    verification: 'Exercised in CI against captured responses. Not verified against the live service.',
+    secretLabel: 'API key',
+    secretRequired: true,
+    fields: [{ key: 'base_url', label: 'API base URL', default: 'https://example.test/api' }],
+    defaultTimeoutMs: 3000,
+    defaultRatePerMinute: 4,
+    defaultCacheTtlSeconds: 86400,
+    ...overrides,
+  };
+}
+
+function provider(overrides = {}) {
+  return {
+    id: 'apr_1',
+    name: 'VirusTotal',
+    kind: 'virustotal',
+    displayName: 'VirusTotal',
+    enabled: true,
+    capabilities: ['reputation'],
+    config: { base_url: 'https://example.test/api' },
+    timeoutMs: 3000,
+    ratePerMinute: 4,
+    cacheTtlSeconds: 86400,
+    policyScope: [],
+    secretSet: true,
+    secretHint: '0d65',
+    rotatedAt: hoursAgo(2),
+    status: 'ok',
+    detail: '',
+    privacyNote: 'Sends every looked-up domain to VirusTotal.',
+    liveVerified: false,
+    verification: 'Not verified against the live service.',
+    stats: {
+      calls: 40, failures: 1, meanLatencyMs: 210, errorRate: 0.025,
+      breaker: 'closed', breakerTrips: 0, rateWaits: 0,
+    },
+    ...overrides,
+  };
+}
+
+const POLICIES = [
+  { id: 'p_standard', name: 'Standard' },
+  { id: 'p_strict', name: 'Strict' },
+];
+
+// The card is built from an API response that has no credential in it, so the
+// only way one could appear is if somebody added a field. This is the cheap
+// check that would catch that the moment it happened.
+//
+// The settings map is the interesting half. It is non-secret by definition and
+// the API returns it, but an operator can still have pasted a key into a URL
+// despite the warning on that field — so the card renders none of it. A
+// provider's identity here is its name and its adapter, which is what an
+// operator acts on; the settings belong to the form that edits them.
+test('a provider card never renders a credential', () => {
+  const withSecret = provider({
+    // Planted in every place a future change might plausibly put one.
+    secret: PROVIDER_SECRET,
+    config: { base_url: `https://example.test/api?key=${PROVIDER_SECRET}`, api_key: PROVIDER_SECRET },
+  });
+  const out = providerCard(withSecret, POLICIES, [template()]);
+  assert.ok(!out.includes(PROVIDER_SECRET), 'the credential appears in the rendered card');
+  assert.ok(!out.includes('example.test/api'), 'the settings map is rendered on the card');
+  // The hint is what the operator is meant to see.
+  assert.ok(out.includes('…0d65'), 'the card does not show which credential is installed');
+});
+
+test('the credential line distinguishes stored from absent', () => {
+  assert.ok(credentialLine(provider()).includes('0d65'));
+  const none = credentialLine(provider({ secretSet: false, secretHint: '' }));
+  assert.ok(none.includes('no credential stored'), none);
+  assert.ok(!none.includes('0d65'), 'a removed credential still shows a hint');
+});
+
+// An adapter that has not been exercised against its vendor must say so on the
+// card. This is the claim the whole feature rests on being honest about: the
+// operator is trusting our reading of somebody else's API.
+test('an unverified adapter is labelled on the card', () => {
+  const out = providerCard(provider(), POLICIES, [template()]);
+  assert.ok(out.includes('Not verified live'), out);
+  assert.ok(out.includes('Not verified against the live service'), 'the evidence sentence is missing');
+});
+
+test('a live-verified adapter would be labelled differently', () => {
+  const chip = verificationChip(template({ liveVerified: true, verification: 'Exercised against the live API.' }));
+  assert.ok(chip.includes('Verified live'), chip);
+  assert.ok(!chip.includes('Not verified'), chip);
+});
+
+test('an adapter with no verification statement gets no chip at all', () => {
+  assert.equal(verificationChip(template({ verification: '' })), '');
+  assert.equal(verificationChip(null), '');
+});
+
+test('provider status reads as three distinct states', () => {
+  assert.ok(providerStatusBadge(provider({ status: 'ok' })).includes('working'));
+  assert.ok(providerStatusBadge(provider({ status: 'disabled' })).includes('switched off'));
+  const broken = providerStatusBadge(provider({ status: 'error' }));
+  assert.ok(broken.includes('not working'), broken);
+  // Amber, not red. A provider that cannot be reached is a degraded
+  // integration, not a threat, and red is reserved for real danger.
+  assert.ok(broken.includes('badge warn'), broken);
+  assert.ok(!broken.includes('badge bad'), 'a broken provider is painted as danger');
+});
+
+test('a broken provider shows the reason rather than just a badge', () => {
+  const out = providerCard(
+    provider({ status: 'error', detail: 'the provider rejected the credential' }),
+    POLICIES,
+    [template()]
+  );
+  assert.ok(out.includes('the provider rejected the credential'), out);
+});
+
+test('every card states what the provider discloses', () => {
+  const out = providerCard(provider(), POLICIES, [template()]);
+  assert.ok(out.includes('Sends every looked-up domain to VirusTotal'), out);
+});
+
+/* ---------- reputation mode --------------------------------------------- */
+
+// The decision the operator was asked about: blocking mode is not offered in
+// the dashboard unless the configuration file already permits it.
+test('blocking is not offered when the configuration does not allow it', () => {
+  const out = reputationCard({ mode: 'cache_only', ceiling: 'cache_only', selectable: ['off', 'cache_only'] }, null);
+  assert.ok(out.includes('value="off"'), out);
+  assert.ok(out.includes('value="cache_only"'), out);
+  assert.ok(!out.includes('value="blocking"'), 'blocking was offered on a cache_only deployment');
+  // And the page says where it lives, rather than leaving the operator to
+  // conclude the feature does not exist.
+  assert.ok(out.includes('dnsdaddy.yaml'), out);
+  assert.ok(out.includes('integrations.reputation_mode'), out);
+});
+
+test('blocking is offered when the configuration allows it', () => {
+  const out = reputationCard(
+    { mode: 'blocking', ceiling: 'blocking', selectable: ['off', 'cache_only', 'blocking'] },
+    null
+  );
+  assert.ok(out.includes('value="blocking"'), out);
+  assert.ok(out.includes('permitted by this deployment'), out);
+});
+
+test('the selected mode is the one checked', () => {
+  const out = reputationCard({ mode: 'off', selectable: ['off', 'cache_only'] }, null);
+  const offIndex = out.indexOf('value="off"');
+  assert.ok(out.slice(offIndex, offIndex + 60).includes('checked'), out);
+});
+
+test('every mode explains what it costs a query', () => {
+  for (const [mode, [label, why]] of Object.entries(REPUTATION_MODES)) {
+    assert.ok(label, `${mode} has no label`);
+    assert.ok(why && why.length > 40, `${mode} does not explain itself: ${why}`);
+  }
+  // The one that matters: blocking must say that it puts latency in the path.
+  assert.match(REPUTATION_MODES.blocking[1], /latency in front of a DNS answer/);
+});
+
+/* ---------- the add form ------------------------------------------------- */
+
+test('the add form asks for exactly the fields the adapter declares', () => {
+  const out = templateFields(template());
+  assert.ok(out.includes('name="cfg:base_url"'), out);
+  assert.ok(out.includes('name="secret"'), out);
+  assert.ok(out.includes('type="password"'), 'the credential field is not masked');
+  assert.ok(out.includes('API key'), 'the form does not use the vendor’s own word for the credential');
+  // A field the adapter did not declare must not appear.
+  assert.ok(!out.includes('cfg:username'), out);
+});
+
+test('the add form says a credential cannot be read back', () => {
+  const out = templateFields(template());
+  assert.match(out, /no endpoint that\s+returns it/);
+});
+
+test('the add form carries the adapter’s privacy note before anything is typed', () => {
+  const out = templateFields(template());
+  assert.ok(out.includes('Sends every looked-up domain to VirusTotal'), out);
+});
+
+/* ---------- feature switched off ----------------------------------------- */
+
+test('with the feature off the page still says what the build could talk to', () => {
+  const out = availableAdaptersCard([template(), template({ kind: 'safebrowsing', displayName: 'Google Safe Browsing' })]);
+  assert.ok(out.includes('VirusTotal'), out);
+  assert.ok(out.includes('Google Safe Browsing'), out);
+  assert.ok(out.includes('Nothing here is configured or contacted'), out);
+  assert.ok(out.includes('Not verified live'), 'the catalogue drops the verification labelling');
+});
+
+test('the integrations route resolves', () => {
+  assert.equal(routeName('#/integrations'), 'integrations');
+  assert.equal(pages.integrations.title, 'External APIs');
 });

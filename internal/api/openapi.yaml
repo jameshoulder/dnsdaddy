@@ -143,7 +143,7 @@ paths:
               type: object
               required: [password]
               properties:
-                password: { type: string, format: password }
+                password: { type: string, format: password, writeOnly: true }
       responses:
         "200":
           description: Signed in; a `dnsdaddy_session` cookie is set
@@ -193,8 +193,8 @@ paths:
               type: object
               required: [currentPassword, newPassword]
               properties:
-                currentPassword: { type: string, format: password }
-                newPassword: { type: string, format: password, minLength: 12 }
+                currentPassword: { type: string, format: password, writeOnly: true }
+                newPassword: { type: string, format: password, minLength: 12, writeOnly: true }
       responses:
         "200": { description: Password updated }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -674,6 +674,289 @@ paths:
         "409":
           description: The feed is disabled, or a refresh is already running
 
+  /api/v1/integrations/providers:
+    get:
+      tags: [Integrations]
+      summary: List external intelligence providers
+      description: |
+        Every configured provider with its live state: the resilient client's
+        counters, its circuit-breaker position, and why it is not working when
+        it is not.
+
+        No credential is returned. `secretSet` says whether one is stored and
+        `secretHint` is its last four characters, which is what a vendor
+        console shows and far too little to narrow a search for the rest.
+      responses:
+        "200":
+          description: Providers, engine counters, and the reputation mode
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items: { $ref: "#/components/schemas/APIProvider" }
+                  engine: { $ref: "#/components/schemas/IntelEngineStats" }
+                  reputation: { $ref: "#/components/schemas/ReputationSetting" }
+        "503":
+          description: Integrations are switched off in dnsdaddy.yaml
+    post:
+      tags: [Integrations]
+      summary: Add an external intelligence provider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIProviderInput" }
+      responses:
+        "201":
+          description: The provider, without its credential
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIProvider" }
+        "400":
+          description: No adapter for this kind in this build, or invalid input
+        "503":
+          description: Integrations are off, or the encryption key is unavailable
+
+  /api/v1/integrations/providers/test:
+    post:
+      tags: [Integrations]
+      summary: Test a provider that has not been saved
+      description: |
+        One live call to the candidate, so an operator finds out a credential
+        is wrong while the wizard is still open. The credential is used for
+        that call and is not written to the database, the log, or the response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: { type: string, example: customhttp }
+                config:
+                  type: object
+                  additionalProperties: { type: string }
+                secret:
+                  type: string
+                  writeOnly: true
+                  description: Used for this one call and discarded.
+                timeoutMs: { type: integer }
+                ratePerMinute: { type: integer }
+      responses:
+        "200":
+          description: What happened
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderTestResult" }
+        "400":
+          description: No adapter for this kind in this build
+        "503":
+          description: Integrations are switched off in dnsdaddy.yaml
+
+  /api/v1/integrations/providers/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [Integrations]
+      summary: Read one provider
+      responses:
+        "200":
+          description: The provider, without its credential
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIProvider" }
+        "404": { description: No such provider }
+        "503": { description: Integrations are switched off in dnsdaddy.yaml }
+    patch:
+      tags: [Integrations]
+      summary: Change a provider
+      description: |
+        `kind` and `secret` are refused here rather than ignored. Changing the
+        adapter under a row would reinterpret its settings as a different
+        provider's, and an operator who believes they rotated a credential they
+        did not is worse off than one who got an error — use
+        `POST /api/v1/integrations/providers/{id}/secret`.
+
+        Cached verdicts for this provider are discarded, because they were
+        produced under the settings being replaced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIProviderPatch" }
+      responses:
+        "200":
+          description: The updated provider
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIProvider" }
+        "400": { description: kind or secret was sent, or the input is invalid }
+        "404": { description: No such provider }
+        "503": { description: Integrations are switched off in dnsdaddy.yaml }
+    delete:
+      tags: [Integrations]
+      summary: Remove a provider
+      description: Deletes the provider, its sealed credential, and its cached verdicts.
+      responses:
+        "204": { description: Removed }
+        "404": { description: No such provider }
+        "503": { description: Integrations are switched off in dnsdaddy.yaml }
+
+  /api/v1/integrations/providers/{id}/secret:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [Integrations]
+      summary: Set or rotate a provider's credential
+      description: |
+        The credential is encrypted with AES-256-GCM, bound to this provider's
+        ID as additional authenticated data, and written to a table this API
+        cannot read back. There is no endpoint anywhere that returns it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [secret]
+              properties:
+                secret:
+                  type: string
+                  writeOnly: true
+                  description: The credential. Never returned by any endpoint.
+      responses:
+        "200":
+          description: The provider, with secretSet and the new hint
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIProvider" }
+        "400": { description: An empty secret; use DELETE to remove one }
+        "404": { description: No such provider }
+        "503": { description: Integrations are off, or the encryption key is unavailable }
+    delete:
+      tags: [Integrations]
+      summary: Remove a provider's credential
+      description: The provider stays configured and becomes unauthenticated.
+      responses:
+        "204": { description: Removed }
+        "404": { description: No such provider }
+        "503": { description: Integrations are switched off in dnsdaddy.yaml }
+
+  /api/v1/integrations/providers/{id}/test:
+    post:
+      tags: [Integrations]
+      summary: Test a saved provider
+      description: |
+        One live call, using the stored credential. A disabled provider is
+        still testable, because an operator configures, tests, and only then
+        switches it on.
+
+        The test does not touch the engine's verdict cache. A button meant to
+        check a credential must not also be a way to seed a verdict for a name
+        of somebody's choosing.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: What happened
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderTestResult" }
+        "404": { description: No such provider }
+        "503": { description: Integrations are switched off in dnsdaddy.yaml }
+
+  /api/v1/integrations/providers/{id}/health:
+    get:
+      tags: [Integrations]
+      summary: A provider's live state
+      description: |
+        Safe to poll: it reads counters the resilient client already keeps and
+        makes no upstream request. A polled endpoint that called the provider
+        would spend an operator's quota for as long as a dashboard tab is open.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Status and counters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providerId: { type: string }
+                  status: { type: string, enum: [ok, disabled, error] }
+                  detail: { type: string }
+                  stats: { $ref: "#/components/schemas/ProviderStats" }
+        "404": { description: No such provider }
+        "503": { description: Integrations are switched off in dnsdaddy.yaml }
+
+  /api/v1/integrations/templates:
+    get:
+      tags: [Integrations]
+      summary: The adapters this build offers
+      description: |
+        Generated from the compiled-in adapter registry, so what the wizard
+        offers is exactly what this binary can talk to.
+
+        Every template states what leaves the network (`privacyNote`) and what
+        evidence exists that the adapter works (`verification`,
+        `liveVerified`). No adapter shipped so far has been exercised against
+        its vendor's live service, and the dashboard says so on the card.
+
+        Answers even when integrations are switched off: it describes the
+        build, touches no credential, and is how an operator decides whether
+        to switch them on.
+      responses:
+        "200":
+          description: Catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items: { $ref: "#/components/schemas/ProviderTemplate" }
+                  reputation: { $ref: "#/components/schemas/ReputationSetting" }
+
+  /api/v1/integrations/reputation:
+    put:
+      tags: [Integrations]
+      summary: Change how much reach providers have over resolution
+      description: |
+        `off` never consults a provider from the resolution path. `cache_only`
+        reads the local cache and never waits. `blocking` waits up to the
+        configured budget on a cache miss, and is the only mode that puts a
+        third party's latency in front of a DNS answer.
+
+        `integrations.reputation_mode` in `dnsdaddy.yaml` is a ceiling, not a
+        default. This endpoint can lower the mode but never raise it above the
+        file — so a deployment configured for `cache_only` cannot be talked
+        into `blocking` by anything reachable over the network, including a
+        stolen session. Read `docs/external-apis.md` before raising it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { type: string, enum: ["off", cache_only, blocking] }
+      responses:
+        "200":
+          description: The new mode
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReputationSetting" }
+        "400": { description: Not a mode this build understands }
+        "403": { description: Above the ceiling set in dnsdaddy.yaml }
+        "503": { description: Integrations are switched off in dnsdaddy.yaml }
+
   /api/v1/clients:
     get:
       tags: [Administration]
@@ -737,7 +1020,7 @@ paths:
           description: The token, including its secret. This is the only time the secret is returned.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/APIToken" }
+              schema: { $ref: "#/components/schemas/APITokenCreated" }
 
   /api/v1/tokens/{id}:
     delete:
@@ -1409,9 +1692,20 @@ components:
         prefix: { type: string }
         createdAt: { type: string, format: date-time }
         lastUsedAt: { type: [string, "null"], format: date-time }
-        secret:
-          type: string
-          description: Present only in the response to token creation.
+
+    APITokenCreated:
+      description: |
+        A newly created token. This is the only schema in this API that carries
+        a credential, and the only response that ever returns one: the secret
+        is shown once, at creation, and is not recoverable afterwards.
+      allOf:
+        - $ref: "#/components/schemas/APIToken"
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: Shown once. Store it now; it cannot be read back.
 
     ResolverInfo:
       type: object
@@ -1632,6 +1926,204 @@ components:
             `experimental` means the logic is tested but its thresholds have
             not been validated against enough real-world traffic to promise a
             false-positive rate. Every detector is currently experimental.
+
+    APIProvider:
+      type: object
+      description: |
+        A configured external intelligence provider. This schema carries no
+        credential and there is no variant of it that does.
+      properties:
+        id: { type: string, example: apr_3f9c1a8b2d40 }
+        name: { type: string, example: VirusTotal }
+        kind:
+          type: string
+          description: Which compiled-in adapter this row uses. Immutable once created.
+          example: virustotal
+        enabled: { type: boolean }
+        capabilities:
+          type: array
+          items: { type: string, enum: [reputation, enrichment, feed] }
+          description: The subset the operator switched on, which may be narrower than the adapter supports.
+        config:
+          type: object
+          additionalProperties: { type: string }
+          description: |
+            Adapter-specific settings. Stored unencrypted and returned here, so
+            a credential must never be put in one — every adapter that needs a
+            credential has a field for it.
+        timeoutMs: { type: integer, example: 2000 }
+        ratePerMinute: { type: integer, example: 4 }
+        cacheTtlSeconds: { type: integer, example: 21600 }
+        policyScope:
+          type: array
+          items: { type: string }
+          description: Policy IDs this provider applies to. Empty means all of them.
+        secretSet:
+          type: boolean
+          description: Whether a credential is stored. The credential itself is never returned.
+        secretHint:
+          type: string
+          description: The credential's last four characters, or empty when none is stored.
+          example: 0d65
+        rotatedAt: { type: string, format: date-time }
+        status: { type: string, enum: [ok, disabled, error] }
+        detail:
+          type: string
+          description: Why a non-ok provider is not working, in terms the operator can act on.
+        displayName: { type: string }
+        privacyNote:
+          type: string
+          description: What this provider sends to the third party.
+        docsUrl: { type: string }
+        liveVerified:
+          type: boolean
+          description: Whether this adapter has been exercised against the vendor's live service.
+        verification:
+          type: string
+          description: The evidence that exists that this adapter works.
+        stats: { $ref: "#/components/schemas/ProviderStats" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    APIProviderInput:
+      type: object
+      required: [kind]
+      properties:
+        name: { type: string, example: VirusTotal }
+        kind: { type: string, example: virustotal }
+        enabled: { type: boolean }
+        capabilities:
+          type: array
+          items: { type: string, enum: [reputation, enrichment, feed] }
+        config:
+          type: object
+          additionalProperties: { type: string }
+        timeoutMs: { type: integer }
+        ratePerMinute: { type: integer }
+        cacheTtlSeconds: { type: integer }
+        policyScope:
+          type: array
+          items: { type: string }
+        secret:
+          type: string
+          writeOnly: true
+          description: |
+            The credential. Encrypted with AES-256-GCM before it reaches disk
+            and never returned by any endpoint — not here, not on read, not in
+            an error.
+
+    APIProviderPatch:
+      type: object
+      description: |
+        Every field optional. `kind` and `secret` are deliberately absent: both
+        are refused by this route, with the error naming what to do instead.
+      properties:
+        name: { type: string }
+        enabled: { type: boolean }
+        capabilities:
+          type: array
+          items: { type: string, enum: [reputation, enrichment, feed] }
+        config:
+          type: object
+          additionalProperties: { type: string }
+        timeoutMs: { type: integer }
+        ratePerMinute: { type: integer }
+        cacheTtlSeconds: { type: integer }
+        policyScope:
+          type: array
+          items: { type: string }
+
+    ProviderStats:
+      type: object
+      description: The resilient HTTP client's counters for one provider.
+      properties:
+        calls: { type: integer }
+        failures: { type: integer }
+        meanLatencyMs: { type: integer }
+        errorRate: { type: number, format: double }
+        lastError: { type: string }
+        lastCallAt: { type: string, format: date-time }
+        breaker:
+          type: string
+          enum: [closed, open, half-open]
+          description: Open means the provider is being skipped until its cooldown expires.
+        breakerTrips: { type: integer }
+        rateWaits: { type: integer }
+
+    ProviderTestResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        latencyMs: { type: integer }
+        error:
+          type: string
+          description: Why the test failed. Never contains the credential.
+        detail: { type: string }
+        providerId: { type: string }
+
+    ProviderTemplate:
+      type: object
+      description: One adapter, as the add-provider wizard renders it.
+      properties:
+        kind: { type: string }
+        displayName: { type: string }
+        summary: { type: string }
+        docsUrl: { type: string }
+        privacyNote: { type: string }
+        capabilities:
+          type: array
+          items: { type: string, enum: [reputation, enrichment, feed] }
+        liveVerified: { type: boolean }
+        verification: { type: string }
+        secretLabel:
+          type: string
+          description: What this vendor calls its credential, so the form asks for the thing the operator is looking at.
+        secretRequired: { type: boolean }
+        fields:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              label: { type: string }
+              placeholder: { type: string }
+              help: { type: string }
+              required: { type: boolean }
+              default: { type: string }
+        defaultTimeoutMs: { type: integer }
+        defaultRatePerMinute: { type: integer }
+        defaultCacheTtlSeconds: { type: integer }
+
+    ReputationSetting:
+      type: object
+      properties:
+        mode: { type: string, enum: ["off", cache_only, blocking] }
+        ceiling:
+          type: string
+          enum: ["off", cache_only, blocking]
+          description: The highest mode dnsdaddy.yaml permits. Cannot be raised over this API.
+        selectable:
+          type: array
+          items: { type: string, enum: ["off", cache_only, blocking] }
+          description: The modes this deployment will accept. A dashboard offers exactly these.
+
+    IntelEngineStats:
+      type: object
+      description: The asynchronous lookup engine's counters.
+      properties:
+        reputationMode: { type: string, enum: ["off", cache_only, blocking] }
+        workers: { type: integer }
+        queueSize: { type: integer }
+        queueDepth: { type: integer }
+        enqueued: { type: integer }
+        dropped:
+          type: integer
+          description: Lookups discarded because the queue was full. Dropping is deliberate — a full queue must never put back-pressure on the DNS path.
+        completed: { type: integer }
+        cacheHits: { type: integer }
+        cacheMisses: { type: integer }
+        cacheSize: { type: integer }
+        enrichment: { type: boolean }
 
     DetectorInfo:
       type: object
