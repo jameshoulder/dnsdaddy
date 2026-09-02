@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	// math/rand is used only for retry jitter, not secrets or security decisions.
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"math/rand"
 	"net"
 	"net/http"
