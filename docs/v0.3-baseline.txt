@@ -1,0 +1,32 @@
+# v0.3 baseline — 2026-09-02T13:51:27Z — 883f77b
+
+## gofmt
+  (empty = clean)
+## go vet
+  (empty = clean)
+## go build
+  (empty = clean)
+## go test ./...
+  ok  	github.com/jameshoulder/dnsdaddy/cmd/dnsdaddy	1.527s
+  ok  	github.com/jameshoulder/dnsdaddy/cmd/dnsdaddy-lab	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/deploy	267.624s
+  ok  	github.com/jameshoulder/dnsdaddy/internal/api	23.375s
+  ok  	github.com/jameshoulder/dnsdaddy/internal/apiprovider	1.328s
+  ok  	github.com/jameshoulder/dnsdaddy/internal/apiprovider/adapters	0.647s
+  ok  	github.com/jameshoulder/dnsdaddy/internal/blocklist	3.317s
+  ok  	github.com/jameshoulder/dnsdaddy/internal/catalog	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/clientacl	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/config	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/detect	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/diag	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/dnsserver	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/domainutil	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/httpx	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/intel	0.194s
+  ok  	github.com/jameshoulder/dnsdaddy/internal/policy	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/querylog	0.260s
+  ok  	github.com/jameshoulder/dnsdaddy/internal/resolver	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/secrets	(cached)
+  ok  	github.com/jameshoulder/dnsdaddy/internal/store	(cached)
+  ?   	github.com/jameshoulder/dnsdaddy/internal/version	[no test files]
+  ?   	github.com/jameshoulder/dnsdaddy/internal/web	[no test files]
