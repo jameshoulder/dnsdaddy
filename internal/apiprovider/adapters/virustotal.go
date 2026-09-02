@@ -261,6 +261,8 @@ func init() {
 			apiprovider.CapReputation,
 			apiprovider.CapEnrichment,
 		},
+		Verification: "Exercised in CI against captured VirusTotal responses. " +
+			"Not verified against the live service.",
 		SecretLabel:    "API key",
 		SecretRequired: true,
 		Fields: []apiprovider.TemplateField{

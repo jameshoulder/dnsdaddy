@@ -50,6 +50,26 @@ func (m ReputationMode) Valid() bool {
 // An unrecognised value becomes off rather than an error. Configuration
 // outlives code, and a typo must not be the thing that puts a network call in
 // the resolution path — nor the thing that refuses to start the resolver.
+// Rank orders the modes by how much reach a third party has over resolution:
+// none, then the cache, then the DNS path itself.
+//
+// It exists so the mode can be a ceiling rather than a switch. The
+// configuration file names the highest mode a deployment will ever use, and
+// nothing reachable over the network can raise it — an operator can turn
+// reputation down or off from the dashboard during an incident, but putting a
+// provider's latency in front of DNS answers stays a decision somebody made
+// while reading dnsdaddy.yaml.
+func (m ReputationMode) Rank() int {
+	switch m {
+	case ModeCacheOnly:
+		return 1
+	case ModeBlocking:
+		return 2
+	default:
+		return 0
+	}
+}
+
 func ParseReputationMode(s string) ReputationMode {
 	m := ReputationMode(s)
 	if m.Valid() {

@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -153,5 +155,133 @@ func TestResponseMapsContainOnlyStatusCodes(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// notInTheSpec are the patterns openapi.yaml deliberately does not describe as
+// paths, each for a reason that is not "somebody forgot".
+//
+// The dashboard is not an API. The two mount points are prefixes that exist so
+// requireAuth wraps a sub-tree, and have no operation of their own. The DoH
+// endpoints are resolver endpoints rather than management ones and are
+// described in the specification's prose, where their credential model can be
+// explained; putting them in paths would offer them to generated management
+// clients that have no business calling them.
+var notInTheSpec = map[string]bool{
+	"/":             true,
+	"/api/v1/":      true,
+	"/metrics":      true,
+	"/dns-query":    true,
+	"/dns-query/":   true,
+	"/openapi.yaml": true,
+}
+
+// A route the specification does not describe is a route no generated client
+// can call and no reader of the documentation knows exists.
+//
+// This reads the router rather than a list, so a route added tomorrow is
+// covered without anybody remembering to add it here — which is the failure
+// this replaces. Both halves matter: the path must be described, and so must
+// the method, because an endpoint that gains a DELETE nobody documented is
+// exactly as invisible as one that was never added.
+func TestEveryRouteIsInTheSpecification(t *testing.T) {
+	var spec map[string]any
+	if err := yaml.Unmarshal(openAPISpec, &spec); err != nil {
+		t.Fatalf("parse openapi.yaml: %v", err)
+	}
+	paths, ok := spec["paths"].(map[string]any)
+	if !ok {
+		t.Fatal("openapi.yaml has no paths mapping")
+	}
+
+	public, managed := routeTable(t)
+	all := append(append([]string{}, public...), managed...)
+	if len(all) < 40 {
+		t.Fatalf("only found %d routes in server.go; the parser is not reading the router", len(all))
+	}
+
+	for _, pattern := range all {
+		method, path, hasMethod := strings.Cut(pattern, " ")
+		if !hasMethod {
+			path = pattern
+		}
+		if notInTheSpec[path] {
+			continue
+		}
+
+		item, ok := paths[path].(map[string]any)
+		if !ok {
+			t.Errorf("openapi.yaml does not describe %s, which server.go serves", path)
+			continue
+		}
+		if !hasMethod {
+			continue
+		}
+		if _, ok := item[strings.ToLower(method)]; !ok {
+			t.Errorf("openapi.yaml describes %s but not its %s operation", path, method)
+		}
+	}
+}
+
+// A credential must never be readable through this API, and the specification
+// is where a client author finds out what to expect. A `secret` property that
+// is not marked writeOnly tells every generated client that reading one back
+// is a thing it can do — and would be a promise the code is not keeping.
+func TestCredentialFieldsInTheSpecAreWriteOnly(t *testing.T) {
+	var spec map[string]any
+	if err := yaml.Unmarshal(openAPISpec, &spec); err != nil {
+		t.Fatalf("parse openapi.yaml: %v", err)
+	}
+
+	// Names that mean "a credential" in this API. Matched exactly, and
+	// deliberately not by substring: secretSet and secretHint describe a stored
+	// credential without being one, and must stay readable.
+	//
+	// APIToken's secret is the single exception in the whole surface and is
+	// handled by modelling rather than by an exemption here: it lives in
+	// APITokenCreated, which is referenced only by the 201 that returns it
+	// once. If it ever reappears on a readable schema, this test fails, which
+	// is the point.
+	credentialNames := map[string]bool{
+		"secret": true, "apikey": true, "api_key": true,
+		"password": true, "currentpassword": true, "newpassword": true,
+	}
+
+	var checked int
+	var walk func(node any, path string)
+	walk = func(node any, path string) {
+		switch n := node.(type) {
+		case map[string]any:
+			props, _ := n["properties"].(map[string]any)
+			for name, raw := range props {
+				if !credentialNames[strings.ToLower(name)] {
+					continue
+				}
+				field, _ := raw.(map[string]any)
+				checked++
+				if strings.HasSuffix(path, "/APITokenCreated/allOf[1]") {
+					// Returned exactly once, at creation, and nowhere else.
+					// Named by its schema so the exception cannot silently
+					// widen to another one.
+					continue
+				}
+				if field["writeOnly"] != true {
+					t.Errorf("%s.%s is a credential and is not marked writeOnly, so generated "+
+						"clients will expect to read it back", path, name)
+				}
+			}
+			for k, v := range n {
+				walk(v, path+"/"+k)
+			}
+		case []any:
+			for i, v := range n {
+				walk(v, fmt.Sprintf("%s[%d]", path, i))
+			}
+		}
+	}
+	walk(spec, "")
+
+	if checked == 0 {
+		t.Fatal("the walk found no credential fields at all, so it is checking nothing")
 	}
 }

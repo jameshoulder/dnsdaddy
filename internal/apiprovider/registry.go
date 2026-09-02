@@ -25,6 +25,16 @@ type Template struct {
 	DocsURL      string       `json:"docsUrl,omitempty"`
 	PrivacyNote  string       `json:"privacyNote"`
 	Capabilities []Capability `json:"capabilities"`
+	// LiveVerified reports whether this adapter has been exercised against the
+	// vendor's real service, as opposed to against captured responses in CI.
+	//
+	// It is false for every adapter shipped so far, and the dashboard says so
+	// on the card. Claiming otherwise would be the one lie an operator cannot
+	// check: they would find out when a provider they trusted silently
+	// answered "unknown" to everything because the response shape moved.
+	LiveVerified bool `json:"liveVerified"`
+	// Verification is the one-line evidence statement shown next to the badge.
+	Verification string `json:"verification"`
 	// SecretLabel is what the credential is called by this vendor — "API key",
 	// "Personal access token" — so the form asks for the thing the operator is
 	// looking at in their console.

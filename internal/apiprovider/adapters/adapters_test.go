@@ -359,6 +359,43 @@ func TestCustomHTTPEscapesTheSubjectIntoTheURL(t *testing.T) {
 	}
 }
 
+// Query-string authentication exists so an operator never has to put a key in
+// the url setting, which is stored unencrypted and returned by the management
+// API. If the credential does not actually travel in the query, they would put
+// it back in the URL and the encryption would be for nothing.
+func TestCustomHTTPSendsTheCredentialInTheConfiguredQueryParameter(t *testing.T) {
+	var (
+		gotQuery  string
+		gotHeader string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("apikey")
+		gotHeader = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"score":0.1}`))
+	}))
+	defer srv.Close()
+
+	p, err := newCustomHTTP(instance(t, srv, map[string]string{
+		"url":        srv.URL + "/lookup?domain={subject}",
+		"auth_query": "apikey",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.(apiprovider.ReputationProvider).Reputation(
+		context.Background(), apiprovider.DomainSubject("evil.example")); err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery != theSecret {
+		t.Errorf("query parameter apikey = %q, want the credential", gotQuery)
+	}
+	// And not in both places: a credential sent twice is a credential in one
+	// more log than the operator agreed to.
+	if gotHeader != "" {
+		t.Errorf("the credential was also sent in the Authorization header: %q", gotHeader)
+	}
+}
+
 func TestCustomHTTPVerdictFieldBeatsScore(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// A low score and an explicit malicious verdict. The word wins: the
@@ -415,7 +452,8 @@ func TestNoAdapterDisclosesTheCredential(t *testing.T) {
 	echoErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, `{"error":"bad request to %s","auth":%q}`,
-			r.URL.String(), r.Header.Get("x-apikey")+r.Header.Get("Authorization"))
+			r.URL.String(), r.Header.Get("x-apikey")+r.Header.Get("Authorization")+
+				r.URL.Query().Get("apikey"))
 	}))
 	defer echoErr.Close()
 
@@ -425,7 +463,8 @@ func TestNoAdapterDisclosesTheCredential(t *testing.T) {
 		fmt.Fprintf(w, `{"data":{"attributes":{"last_analysis_stats":`+
 			`{"harmless":70,"malicious":0,"suspicious":0,"undetected":0,"timeout":0}}}`+
 			`,"echo":{"url":%q,"key":%q}}`,
-			r.URL.String(), r.Header.Get("x-apikey")+r.Header.Get("Authorization"))
+			r.URL.String(), r.Header.Get("x-apikey")+r.Header.Get("Authorization")+
+				r.URL.Query().Get("apikey"))
 	}))
 	defer echoOK.Close()
 
@@ -449,6 +488,12 @@ func TestNoAdapterDisclosesTheCredential(t *testing.T) {
 			}},
 			{"customhttp", newCustomHTTP, func(b string) map[string]string {
 				return map[string]string{"url": b + "?d={subject}"}
+			}},
+			// Query-string authentication puts the credential somewhere every
+			// intermediary logs, so an endpoint that echoes its request URL
+			// back is the shape most likely to land it in a stored verdict.
+			{"customhttp (query auth)", newCustomHTTP, func(b string) map[string]string {
+				return map[string]string{"url": b + "?d={subject}", "auth_query": "apikey"}
 			}},
 		} {
 			t.Run(srvCase.name+"/"+tc.kind, func(t *testing.T) {

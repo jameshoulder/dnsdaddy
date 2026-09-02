@@ -210,7 +210,9 @@ func init() {
 		PrivacyNote: "Uses the Lookup API, which sends the full domain to Google on " +
 			"every cache miss. The hash-prefix Update API would not; this adapter " +
 			"does not implement it yet.",
-		Capabilities:   []apiprovider.Capability{apiprovider.CapReputation},
+		Capabilities: []apiprovider.Capability{apiprovider.CapReputation},
+		Verification: "Exercised in CI against captured Safe Browsing responses. " +
+			"Not verified against the live service.",
 		SecretLabel:    "Google API key",
 		SecretRequired: true,
 		Fields: []apiprovider.TemplateField{

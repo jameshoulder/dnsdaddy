@@ -47,6 +47,7 @@ type customHTTP struct {
 	method          string
 	authHeader      string
 	authPrefix      string
+	authQuery       string
 	scoreField      string
 	verdictField    string
 	maliciousValues []string
@@ -76,6 +77,7 @@ func newCustomHTTP(cfg apiprovider.InstanceConfig) (apiprovider.Provider, error)
 		method:       method,
 		authHeader:   cfg.Setting("auth_header", "Authorization"),
 		authPrefix:   cfg.Setting("auth_prefix", "Bearer "),
+		authQuery:    strings.TrimSpace(cfg.Setting("auth_query", "")),
 		scoreField:   cfg.Setting("score_field", "score"),
 		verdictField: cfg.Setting("verdict_field", ""),
 	}
@@ -85,6 +87,30 @@ func newCustomHTTP(cfg apiprovider.InstanceConfig) (apiprovider.Provider, error)
 		}
 	}
 	return c, nil
+}
+
+// authenticate attaches the credential to a request.
+//
+// Two shapes, because services use both: a header, and a query parameter. The
+// query form exists specifically so an operator never has to paste a key into
+// the url setting. Everything in a provider's settings map is stored
+// unencrypted and returned by the management API — that is what makes it
+// settings rather than a credential — so a key living there would defeat the
+// encryption on the one field that has it.
+func (c *customHTTP) authenticate(req *http.Request) error {
+	if c.cfg.Secret == "" {
+		return nil
+	}
+	if c.authQuery != "" {
+		q := req.URL.Query()
+		q.Set(c.authQuery, c.cfg.Secret)
+		req.URL.RawQuery = q.Encode()
+		return nil
+	}
+	if c.authHeader != "" {
+		req.Header.Set(c.authHeader, c.authPrefix+c.cfg.Secret)
+	}
+	return nil
 }
 
 func (c *customHTTP) Descriptor() apiprovider.Descriptor {
@@ -110,8 +136,8 @@ func (c *customHTTP) Reputation(ctx context.Context, s apiprovider.Subject) (api
 		return apiprovider.Verdict{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	if c.cfg.Secret != "" && c.authHeader != "" {
-		req.Header.Set(c.authHeader, c.authPrefix+c.cfg.Secret)
+	if err := c.authenticate(req); err != nil {
+		return apiprovider.Verdict{}, err
 	}
 
 	resp, err := c.cfg.Client.Do(ctx, req)
@@ -238,19 +264,27 @@ func init() {
 			"Use this for an internal reputation service, or a vendor with no adapter here yet.",
 		PrivacyNote: "Sends the domain being resolved to the URL you configure. " +
 			"What that service does with it is between you and them.",
-		Capabilities:   []apiprovider.Capability{apiprovider.CapReputation},
+		Capabilities: []apiprovider.Capability{apiprovider.CapReputation},
+		Verification: "Exercised in CI against a local test server. Whatever endpoint " +
+			"you point it at is yours to verify — use Test connection.",
 		SecretLabel:    "API key or token",
 		SecretRequired: false,
 		Fields: []apiprovider.TemplateField{
 			{Key: "url", Label: "URL", Required: true,
 				Placeholder: "https://intel.example.internal/lookup?domain={subject}",
-				Help:        "{subject} is replaced with the domain, URL-escaped."},
+				Help: "{subject} is replaced with the domain, URL-escaped. " +
+					"Never put a credential in here — this value is stored unencrypted " +
+					"and shown in the dashboard. Use the credential fields below."},
 			{Key: "method", Label: "Method", Default: "GET",
 				Help: "GET or POST."},
 			{Key: "auth_header", Label: "Credential header", Default: "Authorization",
 				Help: "Which header carries the credential. Leave the prefix empty for a bare key."},
 			{Key: "auth_prefix", Label: "Credential prefix", Default: "Bearer ",
 				Help: `Put in front of the credential. Often "Bearer " — mind the trailing space.`},
+			{Key: "auth_query", Label: "Credential query parameter",
+				Help: "For services that authenticate by query string. Set this to the " +
+					"parameter name — for example apikey — and the encrypted credential " +
+					"is appended for you. Takes precedence over the header."},
 			{Key: "score_field", Label: "Score field", Default: "score",
 				Help: "Dotted path to a 0–1 score, e.g. result.risk.score"},
 			{Key: "verdict_field", Label: "Verdict field",

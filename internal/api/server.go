@@ -12,12 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
+	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
@@ -41,6 +43,13 @@ type Deps struct {
 	Detector *detect.Engine
 	Auth     *Auth
 	Log      *slog.Logger
+
+	// Providers and Intel are the external-intelligence feature. Both are nil
+	// unless integrations.enabled is set, and every handler that touches them
+	// must tolerate that: the default deployment has no external providers and
+	// must not acquire a code path that assumes one.
+	Providers *apiprovider.Engine
+	Intel     *intel.Source
 
 	// ClientACL is the live effective client ACL. Writes that change which
 	// networks may resolve reload it, so a permission granted or revoked in
@@ -157,6 +166,26 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("DELETE /api/v1/feeds/{id}", a.handleDeleteFeed)
 	api.HandleFunc("POST /api/v1/feeds/refresh", a.handleRefreshFeeds)
 	api.HandleFunc("POST /api/v1/feeds/{id}/refresh", a.handleRefreshFeed)
+
+	// External intelligence providers. Every route answers 503 when the
+	// feature is switched off, so a dashboard can tell "not configured" from
+	// "not in this build".
+	//
+	// The credential is write-only across this whole group: it goes in through
+	// POST providers and POST providers/{id}/secret, and there is no route
+	// here that returns one. See handlers_integrations.go.
+	api.HandleFunc("GET /api/v1/integrations/providers", a.handleListProviders)
+	api.HandleFunc("POST /api/v1/integrations/providers", a.handleCreateProvider)
+	api.HandleFunc("POST /api/v1/integrations/providers/test", a.handleTestCandidate)
+	api.HandleFunc("GET /api/v1/integrations/providers/{id}", a.handleGetProvider)
+	api.HandleFunc("PATCH /api/v1/integrations/providers/{id}", a.handleUpdateProvider)
+	api.HandleFunc("DELETE /api/v1/integrations/providers/{id}", a.handleDeleteProvider)
+	api.HandleFunc("POST /api/v1/integrations/providers/{id}/secret", a.handleSetProviderSecret)
+	api.HandleFunc("DELETE /api/v1/integrations/providers/{id}/secret", a.handleDeleteProviderSecret)
+	api.HandleFunc("POST /api/v1/integrations/providers/{id}/test", a.handleTestProvider)
+	api.HandleFunc("GET /api/v1/integrations/providers/{id}/health", a.handleProviderHealth)
+	api.HandleFunc("GET /api/v1/integrations/templates", a.handleProviderTemplates)
+	api.HandleFunc("PUT /api/v1/integrations/reputation", a.handleSetReputationMode)
 
 	api.HandleFunc("GET /api/v1/clients", a.handleListClients)
 	api.HandleFunc("PUT /api/v1/clients", a.handleSetClient)
