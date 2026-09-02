@@ -13,6 +13,7 @@
 package deploy
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1036,6 +1037,153 @@ func TestUpgradeProceedsWhenDockerProxyHoldsPortFiftyThree(t *testing.T) {
 
 // The exemption is for upgrades of a running stack, and nothing else. A fresh
 // install with something on port 53 must still stop.
+// ssPerProto builds an `ss` stub that answers differently for -u and -t, so a
+// scenario can put one protocol's port 53 in use and leave the other free.
+//
+// port_owner invokes `ss -lnp -u` or `ss -lnp -t`, so the flag is in "$@".
+func ssPerProto(udpOwner, tcpOwner string) string {
+	line := func(owner string) string {
+		if owner == "" {
+			return "exit 0"
+		}
+		return `echo 'LISTEN 0 4096 0.0.0.0:53 0.0.0.0:* users:(("` + owner + `",pid=800,fd=4))'`
+	}
+	return `
+for a in "$@"; do
+  case "$a" in
+    -u) ` + line(udpOwner) + `; exit 0 ;;
+    -t) ` + line(tcpOwner) + `; exit 0 ;;
+  esac
+done
+exit 0`
+}
+
+// Each protocol is decided on its own evidence. A deployment that publishes
+// only one of them must have that one accepted and the other judged on its
+// own merits — the two are separate facts and a single "is our stack up?"
+// answer for both would be the conflation this ownership check exists to
+// avoid.
+func TestUpgradeAcceptsWhicheverProtocolThisDeploymentPublishes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		published string
+		udpOwner  string
+		tcpOwner  string
+		wantPass  string
+	}{
+		{
+			name:      "UDP 53 is ours and TCP 53 is free",
+			published: "5353/udp:53 8080/tcp:8080",
+			udpOwner:  "docker-proxy",
+			wantPass:  "UDP port 53 is published by this DNS Daddy deployment",
+		},
+		{
+			name:      "TCP 53 is ours and UDP 53 is free",
+			published: "5353/tcp:53 8080/tcp:8080",
+			tcpOwner:  "docker-proxy",
+			wantPass:  "TCP port 53 is published by this DNS Daddy deployment",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := newInstall(t)
+			in.setenv("STUB_STACK_RUNNING=1", "STUB_ADMIN_PASSWORD=test-password-1234")
+			in.setenv("STUB_DOCKER_PUBLISHED=" + tc.published)
+			in.stub("ss", ssPerProto(tc.udpOwner, tc.tcpOwner))
+			in.writeEnv("TZ=UTC\n")
+
+			out, code := in.run("--upgrade", "--yes")
+			if code != 0 {
+				t.Fatalf("--upgrade refused to run: exit %d\n%s", code, out)
+			}
+			contains(t, out, tc.wantPass)
+			notContains(t, out, "Port 53 is not available")
+		})
+	}
+}
+
+// A regression test for a defect that only appeared under load, which is the
+// hardest kind to keep fixed.
+//
+// project_publishes_port used to pipe `docker port` into `grep -q`. grep exits
+// the instant it matches; the writer then takes SIGPIPE for whatever it had
+// left to say; and because this script runs under `set -o pipefail`, the
+// pipeline reported 141 despite the match succeeding. The installer concluded
+// that its own published port belonged to a stranger and refused the upgrade.
+//
+// The size of the port map is the whole mechanism: the more the writer still
+// has to say when grep exits, the wider the window. A hundred published ports
+// is not a typical deployment — it is the size at which the old code failed
+// 150 times out of 150 on the machine this was diagnosed on, which is what
+// turns a load-dependent flake into a test that either passes or does not.
+func TestOwnershipSurvivesALargePortMap(t *testing.T) {
+	published := []string{"5353/tcp:53", "5353/udp:53"}
+	for i := 0; i < 100; i++ {
+		published = append(published, fmt.Sprintf("9%03d/tcp:8%03d", i, i))
+	}
+
+	in := newInstall(t)
+	in.setenv("STUB_STACK_RUNNING=1", "STUB_ADMIN_PASSWORD=test-password-1234")
+	in.setenv("STUB_DOCKER_PUBLISHED=" + strings.Join(published, " "))
+	in.stub("ss", ssPerProto("docker-proxy", "docker-proxy"))
+	in.writeEnv("TZ=UTC\n")
+
+	out, code := in.run("--upgrade", "--yes")
+	if code != 0 {
+		t.Fatalf("a large port map broke ownership detection: exit %d\n%s", code, out)
+	}
+	for _, want := range []string{
+		"UDP port 53 is published by this DNS Daddy deployment",
+		"TCP port 53 is published by this DNS Daddy deployment",
+	} {
+		contains(t, out, want)
+	}
+	notContains(t, out, "Port 53 is not available")
+}
+
+// The security property the fix must not cost: ownership is proven through
+// Docker, so a stranger's container is a conflict however many of our own
+// ports appear alongside it. "It is docker-proxy, and our stack is up" is not
+// evidence, and this is the test that says so for each protocol separately.
+func TestAForeignContainerIsAConflictPerProtocol(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		published string
+		udpOwner  string
+		tcpOwner  string
+		wantFail  string
+	}{
+		{
+			name:      "we publish TCP 53 but a stranger has UDP 53",
+			published: "5353/tcp:53 8080/tcp:8080",
+			udpOwner:  "docker-proxy",
+			tcpOwner:  "docker-proxy",
+			wantFail:  "UDP port 53 is already in use by",
+		},
+		{
+			name:      "we publish UDP 53 but a stranger has TCP 53",
+			published: "5353/udp:53 8080/tcp:8080",
+			udpOwner:  "docker-proxy",
+			tcpOwner:  "docker-proxy",
+			wantFail:  "TCP port 53 is already in use by",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := newInstall(t)
+			in.setenv("STUB_STACK_RUNNING=1", "STUB_ADMIN_PASSWORD=test-password-1234")
+			in.setenv("STUB_DOCKER_PUBLISHED=" + tc.published)
+			in.stub("ss", ssPerProto(tc.udpOwner, tc.tcpOwner))
+			in.writeEnv("TZ=UTC\n")
+
+			out, code := in.run("--upgrade", "--yes")
+			if code == 0 {
+				t.Fatalf("--upgrade continued past a foreign container on port 53:\n%s", out)
+			}
+			contains(t, out, tc.wantFail)
+			contains(t, out, "Port 53 is not available")
+		})
+	}
+}
+
 func TestFreshInstallStillStopsWhenDockerHoldsPortFiftyThree(t *testing.T) {
 	in := newInstall(t)
 	in.setenv("STUB_STACK_RUNNING=1")

@@ -283,3 +283,39 @@ CREATE TABLE IF NOT EXISTS intel_enrichment (
 );
 
 CREATE INDEX IF NOT EXISTS intel_enrichment_expiry_idx ON intel_enrichment (expires_at);
+
+-- Evidence: everything DNS Daddy thinks it knows about a subject, in one
+-- shape, whatever produced it. See internal/evidence.
+--
+-- source_name is denormalised deliberately. A feed renamed or deleted next
+-- month must not change the explanation of a block that happened today; an
+-- audit trail that rewrites itself is not one.
+CREATE TABLE IF NOT EXISTS evidence (
+    id           TEXT PRIMARY KEY,
+    subject_type TEXT    NOT NULL,
+    subject      TEXT    NOT NULL,
+    kind         TEXT    NOT NULL,
+    source       TEXT    NOT NULL,
+    source_name  TEXT    NOT NULL DEFAULT '',
+    claim        TEXT    NOT NULL,
+    category     TEXT    NOT NULL DEFAULT '',
+    confidence   TEXT    NOT NULL DEFAULT 'low',
+    observed_at  INTEGER NOT NULL,
+    -- NULL means this claim does not expire on its own: an operator decision,
+    -- or a local observation of something that did happen.
+    expires_at   INTEGER,
+    detail       TEXT    NOT NULL DEFAULT '{}'
+);
+
+-- The lookup the investigation view and the decision path both make: give me
+-- everything known about this subject, newest first.
+CREATE INDEX IF NOT EXISTS evidence_subject_idx
+    ON evidence (subject_type, subject, observed_at DESC);
+
+-- One row per (subject, source, claim): a feed that lists the same domain at
+-- every refresh updates its observation rather than accumulating a row an hour.
+CREATE UNIQUE INDEX IF NOT EXISTS evidence_dedupe_idx
+    ON evidence (subject_type, subject, source, claim);
+
+-- Retention sweeps by expiry.
+CREATE INDEX IF NOT EXISTS evidence_expiry_idx ON evidence (expires_at);
