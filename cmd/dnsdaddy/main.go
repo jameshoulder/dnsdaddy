@@ -680,6 +680,16 @@ func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *
 				"rows", findings, "retention_days", cfg.Detection.RetentionDays)
 		}
 
+		// Evidence past its own stated expiry. Not "old evidence" — evidence
+		// its own source no longer stands behind. Claims with no expiry
+		// (operator decisions, local first-seen observations) are facts about
+		// the past and are kept.
+		if ev, err := st.PruneEvidence(pctx, time.Now()); err != nil {
+			log.Error("evidence prune failed", "error", err)
+		} else if ev > 0 {
+			log.Debug("pruned expired evidence", "rows", ev)
+		}
+
 		// Cached verdicts and enrichment from external providers. Pruned on
 		// their own expiry rather than on a retention window: they are a cache
 		// with a per-row TTL the provider chose, and a stale verdict is worse
