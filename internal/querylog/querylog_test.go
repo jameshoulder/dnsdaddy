@@ -95,10 +95,10 @@ func TestRollupOnlyDoesNotStoreRows(t *testing.T) {
 		t.Errorf("got %d stored rows, want 0 when persistence is off", len(rows))
 	}
 
-	_, rollups, _ := l.Stats()
-	if rollups != 1 {
-		t.Errorf("rollup counter = %d, want 1", rollups)
-	}
+	waitFor(t, func() bool {
+		_, rollups, _ := l.Stats()
+		return rollups == 1
+	}, "the rollup counter was never updated")
 }
 
 func TestBatchesLargeBursts(t *testing.T) {
