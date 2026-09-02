@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
 
@@ -48,6 +49,11 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// it was. A label per client IP would be an unbounded cardinality
 	// explosion and a copy of the network's addressing in every scrape.
 	a.writeAccessMetrics(r.Context(), &b)
+
+	// External providers. Emitted only when the feature is on: a series that
+	// exists and reads zero would tell an operator their providers answered
+	// nothing, when in fact they have none.
+	a.writeIntelMetrics(&b)
 
 	metric(&b, "dnsdaddy_cache_entries", "Answers currently cached", "gauge",
 		fmt.Sprintf("dnsdaddy_cache_entries %d", cacheSize))
@@ -198,4 +204,91 @@ func boolGauge(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// writeIntelMetrics exports the external-intelligence engine's counters.
+//
+// Labelled by provider, which is the one place in this file where a label is
+// worth its cardinality: providers are configured by hand in a dashboard,
+// there are a handful of them, and the question an alert wants to ask —
+// "which provider's circuit is open" — cannot be asked without the name.
+// The label is the provider's ID rather than its name: an operator renaming a
+// provider must not break a series, and a name is free text that would need
+// escaping.
+func (a *API) writeIntelMetrics(b *strings.Builder) {
+	if a.Providers == nil {
+		return
+	}
+	stats := a.Providers.Stats()
+
+	// The mode as a gauge, because it is the single most important thing about
+	// this feature and "did somebody change it" is the alert worth having.
+	metric(b, "dnsdaddy_intel_reputation_mode", "How much say external providers have over resolution: 0 off, 1 cache only, 2 blocking", "gauge",
+		fmt.Sprintf("dnsdaddy_intel_reputation_mode %d", stats.Mode.Rank()))
+
+	metric(b, "dnsdaddy_intel_cache_entries", "Cached external verdicts held in memory", "gauge",
+		fmt.Sprintf("dnsdaddy_intel_cache_entries %d", stats.CacheSize))
+	metric(b, "dnsdaddy_intel_cache_hits_total", "Verdict lookups answered from the cache", "counter",
+		fmt.Sprintf("dnsdaddy_intel_cache_hits_total %d", stats.CacheHits))
+	metric(b, "dnsdaddy_intel_cache_misses_total", "Verdict lookups the cache could not answer", "counter",
+		fmt.Sprintf("dnsdaddy_intel_cache_misses_total %d", stats.CacheMisses))
+
+	metric(b, "dnsdaddy_intel_queue_depth", "Provider lookups waiting for a worker", "gauge",
+		fmt.Sprintf("dnsdaddy_intel_queue_depth %d", stats.QueueDepth))
+	metric(b, "dnsdaddy_intel_lookups_completed_total", "Provider lookups finished", "counter",
+		fmt.Sprintf("dnsdaddy_intel_lookups_completed_total %d", stats.Completed))
+	// The number worth alerting on. Dropping is deliberate — a full queue must
+	// never put back-pressure on the DNS path — but a rising count means
+	// providers are slower than the query rate and verdicts are not being
+	// cached, so the feature is costing more than it returns.
+	metric(b, "dnsdaddy_intel_lookups_dropped_total", "Provider lookups discarded because the queue was full", "counter",
+		fmt.Sprintf("dnsdaddy_intel_lookups_dropped_total %d", stats.Dropped))
+
+	instances := a.Providers.Instances()
+	var (
+		calls    []string
+		failures []string
+		latency  []string
+		breaker  []string
+		usable   []string
+	)
+	for _, inst := range instances {
+		id := escapeLabel(inst.ID)
+		usable = append(usable, fmt.Sprintf("dnsdaddy_intel_provider_usable{provider_id=%q} %d",
+			id, boolGauge(inst.Usable())))
+		if inst.Client == nil {
+			continue
+		}
+		s := inst.Client.Stats()
+		calls = append(calls, fmt.Sprintf("dnsdaddy_intel_provider_calls_total{provider_id=%q} %d", id, s.Calls))
+		failures = append(failures, fmt.Sprintf("dnsdaddy_intel_provider_failures_total{provider_id=%q} %d", id, s.Failures))
+		latency = append(latency, fmt.Sprintf("dnsdaddy_intel_provider_mean_latency_ms{provider_id=%q} %d", id, s.MeanLatencyMS))
+		breaker = append(breaker, fmt.Sprintf("dnsdaddy_intel_provider_circuit_open{provider_id=%q} %d",
+			id, boolGauge(s.Breaker != apiprovider.BreakerClosed)))
+	}
+
+	metric(b, "dnsdaddy_intel_providers_total", "External providers configured", "gauge",
+		fmt.Sprintf("dnsdaddy_intel_providers_total %d", len(instances)))
+	if len(usable) > 0 {
+		metric(b, "dnsdaddy_intel_provider_usable", "1 when a provider is enabled, built and callable", "gauge", usable...)
+	}
+	if len(calls) > 0 {
+		metric(b, "dnsdaddy_intel_provider_calls_total", "Requests sent to a provider", "counter", calls...)
+		metric(b, "dnsdaddy_intel_provider_failures_total", "Requests to a provider that failed", "counter", failures...)
+		metric(b, "dnsdaddy_intel_provider_mean_latency_ms", "Mean round-trip time to a provider", "gauge", latency...)
+		metric(b, "dnsdaddy_intel_provider_circuit_open", "1 when a provider is being skipped because its circuit breaker is open", "gauge", breaker...)
+	}
+}
+
+// escapeLabel makes a value safe inside a Prometheus label.
+//
+// Provider IDs are generated and contain neither of these, so this never fires
+// today. It is here because the alternative is an exposition format that a
+// scraper rejects with a parse error nobody traces back to a database row.
+func escapeLabel(v string) string {
+	if !strings.ContainsAny(v, `\"`+"\n") {
+		return v
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+	return r.Replace(v)
 }

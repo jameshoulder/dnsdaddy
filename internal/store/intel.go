@@ -136,6 +136,55 @@ func (s *Store) IntelVerdicts(ctx context.Context, subject string) ([]IntelVerdi
 	return out, rows.Err()
 }
 
+// FreshIntelVerdicts returns unexpired verdicts, soonest-expiring last, up to
+// limit.
+//
+// This is what makes intel_verdicts a cache rather than a log. The engine
+// loads it into memory once at startup and never touches the database from the
+// resolution path again, so a restart does not throw away answers a provider
+// was paid for — and, for a metered API, does not spend the operator's quota
+// re-learning what was already on disk.
+//
+// Ordered by expiry descending so that a deployment holding more verdicts than
+// the memory cache can take keeps the ones that will stay useful longest.
+func (s *Store) FreshIntelVerdicts(ctx context.Context, now time.Time, limit int) ([]IntelVerdict, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	const q = `
+		SELECT subject, provider_id, score, disposition, categories, raw, fetched_at, expires_at
+		  FROM intel_verdicts WHERE expires_at > ?
+		 ORDER BY expires_at DESC
+		 LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, q, now.UTC().UnixMilli(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]IntelVerdict, 0, 64)
+	for rows.Next() {
+		var (
+			v                IntelVerdict
+			disp, cats       string
+			fetched, expires int64
+		)
+		if err := rows.Scan(&v.Subject, &v.ProviderID, &v.Score, &disp, &cats,
+			&v.Raw, &fetched, &expires); err != nil {
+			return nil, err
+		}
+		v.Disposition = Disposition(disp)
+		if !v.Disposition.Valid() {
+			v.Disposition = DispositionUnknown
+		}
+		v.Categories = decodeStrings(cats)
+		v.FetchedAt = fromUnixMilli(fetched)
+		v.ExpiresAt = fromUnixMilli(expires)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // IntelVerdict returns one provider's cached answer, or ErrNotFound.
 func (s *Store) IntelVerdict(ctx context.Context, subject, providerID string) (IntelVerdict, error) {
 	const q = `
@@ -246,10 +295,18 @@ func (s *Store) IntelEnrichments(ctx context.Context, subject string) ([]IntelEn
 // tables are the only unbounded growth in the database, because every new
 // domain the network resolves adds a row that nothing else removes.
 func (s *Store) PruneIntel(ctx context.Context, cutoff time.Time) (int64, error) {
+	// Written out rather than looped over a slice of table names. The names
+	// were never attacker-controlled either way, but a constant query string
+	// is something a reader — and a static analyser — can check at a glance,
+	// and the loop saved four lines at the cost of that.
+	const (
+		pruneVerdicts   = `DELETE FROM intel_verdicts WHERE expires_at < ?`
+		pruneEnrichment = `DELETE FROM intel_enrichment WHERE expires_at < ?`
+	)
+
 	var total int64
-	for _, table := range []string{"intel_verdicts", "intel_enrichment"} {
-		res, err := s.db.ExecContext(ctx,
-			"DELETE FROM "+table+" WHERE expires_at < ?", unixMilli(cutoff))
+	for _, q := range []string{pruneVerdicts, pruneEnrichment} {
+		res, err := s.db.ExecContext(ctx, q, unixMilli(cutoff))
 		if err != nil {
 			return total, err
 		}

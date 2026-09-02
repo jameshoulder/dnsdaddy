@@ -133,18 +133,27 @@ func (v *VerdictStore) SaveVerdict(ctx context.Context, subject, providerID stri
 	})
 }
 
-// LoadVerdict implements apiprovider.VerdictStore.
-func (v *VerdictStore) LoadVerdict(ctx context.Context, subject, providerID string) (apiprovider.Verdict, time.Time, error) {
-	row, err := v.Store.IntelVerdict(ctx, subject, providerID)
+// FreshVerdicts implements apiprovider.VerdictStore.
+func (v *VerdictStore) FreshVerdicts(ctx context.Context, limit int) ([]apiprovider.StoredVerdict, error) {
+	rows, err := v.Store.FreshIntelVerdicts(ctx, time.Now(), limit)
 	if err != nil {
-		return apiprovider.Verdict{}, time.Time{}, err
+		return nil, err
 	}
-	return apiprovider.Verdict{
-		Score:       row.Score,
-		Disposition: apiprovider.Disposition(row.Disposition),
-		Categories:  row.Categories,
-		Raw:         row.Raw,
-	}, row.ExpiresAt, nil
+	out := make([]apiprovider.StoredVerdict, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, apiprovider.StoredVerdict{
+			Subject:    row.Subject,
+			ProviderID: row.ProviderID,
+			ExpiresAt:  row.ExpiresAt,
+			Verdict: apiprovider.Verdict{
+				Score:       row.Score,
+				Disposition: apiprovider.Disposition(row.Disposition),
+				Categories:  row.Categories,
+				Raw:         row.Raw,
+			},
+		})
+	}
+	return out, nil
 }
 
 // SaveEnrichment implements apiprovider.VerdictStore.

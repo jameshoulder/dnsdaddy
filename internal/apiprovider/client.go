@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -39,6 +40,9 @@ var sharedTransport = sync.OnceValue(func() *http.Transport {
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
+			// Refuses link-local, which is where every cloud keeps its
+			// instance metadata service. See dial.go.
+			Control: dialControl,
 		}).DialContext,
 		MaxIdleConns:          32,
 		MaxIdleConnsPerHost:   4,
@@ -172,6 +176,14 @@ func (r *Response) Excerpt(limit int) string {
 // bounded — is true because it is true here, rather than because ten adapters
 // each remembered.
 func (c *Client) Do(ctx context.Context, req *http.Request) (*Response, error) {
+	// Before the breaker, the limiter and any dial: a request to a blocked
+	// address must not consume a breaker slot or a rate-limit token, and it
+	// must be refused even when a proxy would otherwise carry it past the
+	// dialer's control. See checkURLHost.
+	if err := checkURLHost(req.URL.Hostname()); err != nil {
+		return nil, err
+	}
+
 	if !c.breaker.Allow() {
 		c.failures.Add(1)
 		return nil, ErrCircuitOpen
@@ -193,7 +205,14 @@ func (c *Client) Do(ctx context.Context, req *http.Request) (*Response, error) {
 	started := time.Now()
 	resp, err := c.attempt(ctx, req)
 	c.calls.Add(1)
-	c.totalNS.Add(uint64(time.Since(started)))
+	// Guarded rather than converted blindly. A monotonic clock cannot go
+	// backwards, so this is defence against a future change rather than a real
+	// case — but an unchecked negative here would wrap to eighteen quintillion
+	// nanoseconds and make the mean latency permanently meaningless, which is
+	// the kind of bug that gets diagnosed as "the metrics are broken".
+	if elapsed := time.Since(started); elapsed > 0 {
+		c.totalNS.Add(uint64(elapsed))
+	}
 	c.lastCall.Store(time.Now().UnixMilli())
 
 	if err != nil {
@@ -255,6 +274,12 @@ func (c *Client) once(ctx context.Context, req *http.Request) (*Response, bool, 
 		r.Body = body
 	}
 
+	// #nosec G704 -- the URL is operator-supplied by design: this whole package
+	// exists to fetch an endpoint somebody typed into an authenticated
+	// management API. What bounds it is not the absence of a URL but four
+	// controls: the dialer refuses link-local addresses (dial.go), redirects
+	// are never followed, the response body is read through a hard cap, and
+	// every call is under a per-provider timeout, rate limit and breaker.
 	resp, err := c.http.Do(r)
 	if err != nil {
 		// Transport errors are worth one retry: a connection reset on a reused
@@ -326,7 +351,10 @@ func backoff(n int) time.Duration {
 	// Full jitter: uniform in [0, base). Cheaper than it looks and the only
 	// form that actually de-synchronises callers, rather than merely blurring
 	// them around a common centre.
-	//nolint:gosec // not a security decision; a predictable retry delay leaks nothing
+	// #nosec G404 -- math/rand is the right choice, not a compromise. This
+	// de-synchronises retries; it protects nothing and reveals nothing, and a
+	// cryptographic source would cost entropy on every failed request to make
+	// a delay marginally harder to guess, which buys an attacker nothing.
 	return time.Duration(rand.Int63n(int64(base) + 1))
 }
 
@@ -368,7 +396,14 @@ func (c *Client) Stats() Stats {
 		RateWaits:    c.limiter.Waited(),
 	}
 	if calls > 0 {
-		s.MeanLatency = time.Duration(c.totalNS.Load() / calls)
+		// The accumulator only ever takes positive durations (see Do), so the
+		// mean is bounded by the largest single call and cannot overflow a
+		// Duration in any run this process would survive.
+		mean := c.totalNS.Load() / calls
+		if mean > uint64(math.MaxInt64) {
+			mean = uint64(math.MaxInt64)
+		}
+		s.MeanLatency = time.Duration(mean) // #nosec G115 -- clamped on the line above
 		s.MeanLatencyMS = s.MeanLatency.Milliseconds()
 		s.ErrorRate = float64(failures) / float64(calls)
 	}

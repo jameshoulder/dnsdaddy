@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -674,5 +675,170 @@ func TestNormaliseDomainMatchesWhatTheCacheIsKeyedOn(t *testing.T) {
 		if got := NormaliseDomain(tc.in); got != tc.want {
 			t.Errorf("NormaliseDomain(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+/* ---------- link-local dial control -------------------------------------- */
+
+// The one SSRF control in this package. It exists for a single escalation:
+// somebody who can add a provider is already an administrator of this
+// dashboard, but the cloud metadata service would make them an administrator
+// of the account the machine runs in, which is strictly more.
+func TestLinkLocalAddressesAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		addr    string
+		refused bool
+	}{
+		{"AWS, GCP and Azure metadata", "169.254.169.254", true},
+		{"anywhere else in link-local", "169.254.1.1", true},
+		{"IPv6 link-local", "fe80::1", true},
+		{"IPv4-mapped metadata, the same endpoint spelled differently",
+			"::ffff:169.254.169.254", true},
+		{"another IPv6 link-local address", "fe80::a9fe:a9fe", true},
+		{"AWS IPv6 metadata, which is unique-local rather than link-local",
+			"fd00:ec2::254", true},
+
+		// Everything an operator would legitimately point a provider at stays
+		// reachable. Blocking these would break the stated use case — an
+		// internal reputation service, or a self-hosted vendor appliance —
+		// and would not protect anybody from an administrator who already has
+		// the dashboard.
+		{"a public address", "93.184.216.34", false},
+		{"an RFC 1918 internal service", "10.1.2.3", false},
+		{"a home network", "192.168.1.10", false},
+		{"a carrier-grade NAT range", "100.64.0.1", false},
+		{"loopback, which is where a test server lives", "127.0.0.1", false},
+		{"IPv6 loopback", "::1", false},
+		{"a public IPv6 address", "2606:2800:220:1:248:1893:25c8:1946", false},
+		// The rest of unique-local space stays reachable: it is where an
+		// operator's own internal services live, and taking fc00::/7 away
+		// would break the use case this adapter exists for.
+		{"an ordinary unique-local address", "fd00:1234::5", false},
+		{"the neighbour of the AWS endpoint", "fd00:ec2::253", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, err := netip.ParseAddr(tc.addr)
+			if err != nil {
+				t.Fatalf("parse %s: %v", tc.addr, err)
+			}
+			err = checkAddr(addr)
+			if tc.refused && err == nil {
+				t.Errorf("%s was allowed", tc.addr)
+			}
+			if !tc.refused && err != nil {
+				t.Errorf("%s was refused: %v", tc.addr, err)
+			}
+			if tc.refused && !errors.Is(err, ErrBlockedAddress) {
+				t.Errorf("%s was refused with the wrong error: %v", tc.addr, err)
+			}
+		})
+	}
+}
+
+// An unparseable address must be refused, not allowed. A check whose job is to
+// say no has exactly one safe direction to fail in.
+func TestTheDialControlFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, address string }{
+		{"empty", ""},
+		{"no port", "not-an-address"},
+		{"a bare address with no port", "169.254.169.254"},
+		{"a bracketed address with no port", "[::1]"},
+		// This one reaches the second branch: SplitHostPort succeeds and
+		// ParseAddr does not. Control is documented to receive a resolved
+		// address, so a name arriving here means an assumption broke, and the
+		// only safe response to that is to refuse.
+		{"a hostname where an address was promised", "example.com:80"},
+	} {
+		if err := dialControl("tcp", tc.address, nil); err == nil {
+			t.Errorf("dialControl allowed %q (%s), which it could not parse", tc.address, tc.name)
+		}
+	}
+	// And a well-formed permitted address still gets through, so the test
+	// above is not passing because everything is refused.
+	if err := dialControl("tcp", "127.0.0.1:8080", nil); err != nil {
+		t.Errorf("dialControl refused an ordinary address: %v", err)
+	}
+}
+
+// The control has to be wired into the transport the clients actually use,
+// not merely exist. A correct function nothing calls is the failure this
+// catches.
+//
+// The transport's dialer is exercised directly rather than through a request,
+// because Client.Do refuses a blocked literal before any dial happens — so a
+// request-level test would pass with the transport's Control removed and would
+// be proving the wrong thing. This is the layer that catches a hostname
+// resolving to the metadata service, which the URL check cannot see.
+func TestTheSharedTransportRefusesLinkLocal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := sharedTransport().DialContext(ctx, "tcp", "169.254.169.254:80")
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("the shared transport dialled the cloud metadata service")
+	}
+	if !strings.Contains(err.Error(), "link-local") {
+		t.Errorf("the dial failed for some other reason, so the control may not be wired in: %v", err)
+	}
+
+	// And an ordinary address still dials, so the check above is not passing
+	// because the transport refuses everything.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	conn, err = sharedTransport().DialContext(ctx, "tcp", host)
+	if err != nil {
+		t.Fatalf("the shared transport refused an ordinary address: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// The dialer's control is not enough on its own. With HTTP_PROXY set the
+// transport dials the proxy, so Control sees the proxy's address and the
+// request to the metadata service is forwarded by somebody else. A URL check
+// that runs before any dial is what closes that.
+func TestABlockedLiteralIsRefusedBeforeAnythingIsDialled(t *testing.T) {
+	c := NewClient(ClientOptions{ProviderID: "p", Timeout: 2 * time.Second, RatePerMinute: 60})
+
+	for _, raw := range []string{
+		"http://169.254.169.254/latest/meta-data/",
+		"https://[fd00:ec2::254]/latest/meta-data/",
+		"http://[::ffff:169.254.169.254]/",
+	} {
+		req, err := http.NewRequest(http.MethodGet, raw, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		if _, err := c.Do(context.Background(), req); !errors.Is(err, ErrBlockedAddress) {
+			t.Errorf("%s was not refused as a blocked address: %v", raw, err)
+		}
+	}
+
+	// And the refusal costs nothing: no breaker slot, no rate-limit token, no
+	// call counted. Otherwise a misconfigured provider would trip its own
+	// circuit and the operator would see "circuit open" rather than "that
+	// address is refused".
+	s := c.Stats()
+	if s.Calls != 0 {
+		t.Errorf("a refused request counted %d calls", s.Calls)
+	}
+	if s.Breaker != BreakerClosed {
+		t.Errorf("a refused request moved the breaker to %s", s.Breaker)
+	}
+
+	// An ordinary host still gets through, so the check above is not simply
+	// refusing everything.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Do(context.Background(), req); err != nil {
+		t.Errorf("an ordinary request was refused: %v", err)
 	}
 }

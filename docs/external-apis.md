@@ -295,6 +295,44 @@ configuration. Now it may also give them ciphertext of your VirusTotal key —
 useless without `secrets.key`, which is why they are separate files and why the
 key is never in the database.
 
+### 5.5 The resolver becomes an HTTP client pointed wherever an operator says
+
+This feature is, mechanically, "fetch a URL somebody typed into the dashboard".
+That is server-side request forgery by construction, and most of what an SSRF
+check would normally block is the point: private ranges have to stay reachable
+because "an internal reputation service" is a stated use case, and a
+self-hosted vendor appliance on `10.0.0.0/8` is the ordinary one.
+
+Someone who can add a provider is already an administrator of this dashboard,
+so reaching another service on the same network gains them nothing they did not
+already have. **Link-local is the exception**, and it is the one case that is
+blocked:
+
+* Every major cloud serves instance metadata on `169.254.169.254`, and that
+  endpoint issues IAM credentials for the host. AWS's IPv6 equivalent,
+  `fd00:ec2::254`, is blocked by exact match — the surrounding unique-local
+  range is not, because that is where an operator's own services live.
+* Reaching it would turn "administrator of this dashboard" into "administrator
+  of the cloud account this VM runs in", which is strictly more authority.
+
+Two checks enforce it, because one is not enough:
+
+| Check | Where | Catches |
+|---|---|---|
+| `Dialer.Control` | `internal/apiprovider/dial.go` | The address actually being connected to, after DNS, on every attempt — so a *hostname* resolving to metadata is caught, and so is one that resolves harmlessly once and to metadata the next time. |
+| URL literal check | `Client.Do`, before the breaker or the dialer | A blocked IP written directly into the URL, **including when `HTTP_PROXY` is set** — in which case the transport dials the proxy, `Control` sees the proxy's address, and the metadata request is forwarded by somebody else. |
+
+The proxy case is worth naming because it is invisible: the development sandbox
+this was written in happened to carry `169.254.0.0/16` in `NO_PROXY`, so the
+dialer's control appeared to be doing the work when a proxied deployment would
+have gone straight past it.
+
+Beyond that, four things bound what a request can do regardless of where it
+points: redirects are never followed (an operator's credential goes to the
+endpoint they typed and nowhere else), the response body is read through a hard
+1 MiB cap, and every call is under a per-provider timeout, rate limit and
+circuit breaker.
+
 ---
 
 ## 6. The provider interface
@@ -458,7 +496,11 @@ integrations:
   # Bounded queue. Full means drop-and-count, never block.
   queue_size: 1024
 
-  # How the policy engine may use reputation:
+  # In-memory verdict cache entries.
+  cache_entries: 4096
+
+  # The CEILING on how much say providers have over resolution. Not a default:
+  # see "The mode is a ceiling" below.
   #   off        never consulted (default)
   #   cache_only consult the local cache only; never waits on a network call
   #   blocking   cache first, then wait up to reputation_budget, then fail open
@@ -476,3 +518,103 @@ integrations:
 
 Every value has a safe default and the feature is off. An operator who never
 opens the Integrations page gets the resolver they have today, byte for byte.
+
+### The mode is a ceiling, not a default
+
+`reputation_mode` names the **highest** mode this deployment will ever use. The
+dashboard and the API can lower it — to `cache_only`, or to `off` — but neither
+can raise it above the file.
+
+Two consequences, and both are the point:
+
+* **`blocking` is not offered in the dashboard** unless the file already
+  permits it. It is the only mode that puts a third party's latency in front of
+  a DNS answer, and that should be a decision somebody made while reading this
+  document rather than a radio button they clicked past. The Integrations page
+  says where it lives instead of showing a control that would not work.
+* **Turning it down is always available.** An operator whose provider has
+  started returning nonsense at three in the morning can switch reputation off
+  from the dashboard without editing a file or restarting anything, and the
+  next query is unaffected.
+
+The operator's choice is stored in the `settings` table under
+`integrations.reputation_mode` and re-checked against the file at every boot. A
+stored value above a ceiling that has since been lowered is discarded; the file
+wins.
+
+### Where a credential can be
+
+Exactly one place: `api_provider_secrets.ciphertext`, sealed with AES-256-GCM
+and bound to its provider's ID. Everything else that could plausibly hold one
+is enumerated here so the list can be checked:
+
+| Place | Holds a credential? |
+|---|---|
+| `api_providers.config` | **No.** Non-secret settings, returned by `GET`. The dashboard warns on the URL field for exactly this reason, and every adapter that needs a credential has a field for it — including `auth_query` on `custom_http`, for services that authenticate by query string. |
+| `intel_verdicts.raw` | No. Adapters store `InstanceConfig.SafeExcerpt`, which redacts the credential in both plain and percent-encoded form before anything is persisted. |
+| Log records | No. Adapter errors are documented never to carry it and tested for it. |
+| API responses | No. `secretSet` and a four-character `secretHint`, and nothing else. Marked `writeOnly` in the OpenAPI document, which a contract test enforces. |
+| Metrics | No. Provider series are labelled by ID, never by name or setting. |
+
+### Metrics
+
+With the feature on, `/metrics` gains:
+
+```
+dnsdaddy_intel_reputation_mode              0 off, 1 cache only, 2 blocking
+dnsdaddy_intel_cache_entries                cached verdicts in memory
+dnsdaddy_intel_cache_hits_total
+dnsdaddy_intel_cache_misses_total
+dnsdaddy_intel_queue_depth
+dnsdaddy_intel_lookups_completed_total
+dnsdaddy_intel_lookups_dropped_total        the one worth alerting on
+dnsdaddy_intel_providers_total
+dnsdaddy_intel_provider_usable{provider_id}
+dnsdaddy_intel_provider_calls_total{provider_id}
+dnsdaddy_intel_provider_failures_total{provider_id}
+dnsdaddy_intel_provider_mean_latency_ms{provider_id}
+dnsdaddy_intel_provider_circuit_open{provider_id}
+```
+
+With the feature off, none of these exist. A series reading zero would say
+"your providers answered nothing" when the truth is "you have no providers",
+and those are different graphs.
+
+`dnsdaddy_intel_lookups_dropped_total` rising means providers are slower than
+the query rate, so verdicts are not reaching the cache and the feature is
+costing more than it returns. Dropping is deliberate — a full queue must never
+put back-pressure on the DNS path — but a rising count is the signal to lower
+the rate limits or turn a provider off.
+
+## 11. What is and is not verified
+
+Every adapter here is exercised in CI against captured responses and local test
+servers. **None has been verified against its vendor's live service.** The
+Integrations page says so on every card, and the template catalogue carries the
+statement in `verification` so it cannot be true in the code and absent from
+the interface.
+
+That distinction matters more here than anywhere else in this product. An
+adapter reads somebody else's JSON, and a vendor who reshapes a response gets
+"unknown" out of this code rather than an error — which is the safe direction,
+and also the silent one. Use **Test connection** after configuring a provider,
+and again after any vendor announcement, because it is the only thing in the
+product that proves the adapter and the live service still agree.
+
+What *is* verified, in CI, on every change:
+
+* Credentials round-trip through AES-256-GCM and cannot be opened under another
+  provider's identity.
+* No adapter discloses its credential through a verdict, an error, a
+  descriptor, or an enrichment — checked against an upstream that echoes the
+  request back.
+* No API response on the integrations surface contains the credential, on any
+  route.
+* The circuit breaker opens, the rate limiter waits, the response body is
+  bounded, and redirects are not followed.
+* Link-local addresses and AWS's IPv6 metadata endpoint are refused, at the
+  dialer and at the URL, while private and loopback addresses stay reachable.
+* `off` mode touches nothing, `cache_only` never waits, and `blocking` never
+  waits longer than its budget.
+* A domain an allow-list or a local feed already decided is never sent to a
+  provider at all.

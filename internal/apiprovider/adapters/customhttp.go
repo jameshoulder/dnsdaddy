@@ -258,6 +258,10 @@ func toFloat(v any) (float64, bool) {
 }
 
 func init() {
+	// #nosec G101 -- these are field labels and help text describing WHERE an
+	// operator should put their credential. There is no credential here, and
+	// there is nowhere in this package one could be: adapters receive theirs
+	// through InstanceConfig, sealed on disk until the moment it is used.
 	apiprovider.Register("customhttp", newCustomHTTP, apiprovider.Template{
 		DisplayName: "Custom HTTP endpoint",
 		Summary: "Any service that answers a GET or POST with JSON. " +

@@ -16,6 +16,7 @@ import (
 	_ "github.com/jameshoulder/dnsdaddy/internal/apiprovider/adapters"
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/secrets"
+	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
 // theCredential is deliberately long, distinctive and unlike anything else in
@@ -661,5 +662,442 @@ func TestABrokenProviderIsListedWithItsReason(t *testing.T) {
 	}
 	if out.Providers[0].Detail == "" {
 		t.Error("a broken provider gives the operator no reason")
+	}
+}
+
+/* ---------- metrics ------------------------------------------------------ */
+
+// A deployment with the feature off must not export intel series. A series
+// that exists and reads zero tells an operator their providers answered
+// nothing, when the truth is they have none — and that is a graph somebody
+// would act on.
+func TestNoIntelMetricsWhenTheFeatureIsOff(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	resp, raw := h.do("GET", "/metrics", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("metrics: status %d", resp.StatusCode)
+	}
+	if strings.Contains(string(raw), "dnsdaddy_intel_") {
+		t.Error("a deployment with no external providers exports intel metrics")
+	}
+	// And the rest of the metrics surface is unaffected.
+	if !strings.Contains(string(raw), "dnsdaddy_queries_total") {
+		t.Error("the ordinary metrics stopped being exported")
+	}
+}
+
+func TestIntelMetricsAreExportedAndCarryNoSecret(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"score":0.2}`))
+	}))
+	defer upstream.Close()
+
+	id := createProvider(t, h, map[string]any{
+		"name": "Local intel", "kind": "customhttp", "enabled": true,
+		"config": map[string]string{
+			"url": upstream.URL + "/lookup?domain={subject}", "auth_query": "apikey",
+		},
+		"capabilities": []string{"reputation"},
+		"secret":       theCredential,
+	})
+
+	resp, raw := h.do("GET", "/metrics", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("metrics: status %d", resp.StatusCode)
+	}
+	body := string(raw)
+
+	for _, want := range []string{
+		"dnsdaddy_intel_reputation_mode 1",
+		"dnsdaddy_intel_providers_total 1",
+		"dnsdaddy_intel_lookups_dropped_total",
+		"dnsdaddy_intel_provider_circuit_open{provider_id=\"" + id + "\"}",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output is missing %q", want)
+		}
+	}
+
+	// The label is the provider's ID, not its free-text name, and no
+	// credential is anywhere near a scrape.
+	if strings.Contains(body, theCredential) {
+		t.Error("the credential appeared in /metrics")
+	}
+	if strings.Contains(body, "Local intel") {
+		t.Error("an operator-supplied provider name is used as a metric label")
+	}
+}
+
+// The mode gauge is the alert worth having, so it must actually track the
+// mode rather than being a constant.
+func TestTheReputationModeGaugeTracksTheMode(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
+
+	_, raw := h.do("GET", "/metrics", nil)
+	if !strings.Contains(string(raw), "dnsdaddy_intel_reputation_mode 1") {
+		t.Fatalf("cache_only did not report 1:\n%s", raw)
+	}
+
+	if resp, body := h.do("PUT", "/api/v1/integrations/reputation",
+		map[string]any{"mode": "off"}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("set mode: %d %s", resp.StatusCode, body)
+	}
+	_, raw = h.do("GET", "/metrics", nil)
+	if !strings.Contains(string(raw), "dnsdaddy_intel_reputation_mode 0") {
+		t.Errorf("off did not report 0:\n%s", raw)
+	}
+}
+
+/* ---------- end to end --------------------------------------------------- */
+
+// The whole stack, in the order the daemon assembles it: a provider is
+// configured through the API, its credential is sealed, the engine loads it,
+// a verdict is fetched and cached, and the policy engine acts on it.
+//
+// Every layer below has its own tests. This one exists because they all pass
+// against a system where two of them are not actually connected — which is the
+// failure a feature spread across six packages actually has.
+func TestAProviderConfiguredThroughTheAPIBlocksADomain(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
+
+	var sawCredential string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawCredential = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.RawQuery, "evil.example") {
+			_, _ = w.Write([]byte(`{"score":0.98,"category":"malware"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"score":0.0}`))
+	}))
+	defer upstream.Close()
+
+	createProvider(t, h, map[string]any{
+		"name": "House intel", "kind": "customhttp", "enabled": true,
+		"config": map[string]string{
+			"url":         upstream.URL + "/lookup?domain={subject}",
+			"score_field": "score",
+		},
+		"capabilities": []string{"reputation"},
+		"secret":       theCredential,
+	})
+
+	// The policy engine has no consultant until one is attached — which is what
+	// cmd/dnsdaddy does at boot, and what this stands in for.
+	h.api.Engine.SetReputation(&intel.Consultant{Engine: h.api.Providers})
+	t.Cleanup(func() { h.api.Engine.SetReputation(nil) })
+
+	ctx := context.Background()
+
+	// First evaluation: nothing cached, so cache_only answers immediately and
+	// queues the lookup. It must NOT block — an unknown verdict never blocks.
+	if d := h.api.Engine.Evaluate("p_standard", "evil.example"); d.Blocked {
+		t.Fatalf("a cold cache blocked a domain: %+v", d)
+	}
+	drainEngine(t, h)
+
+	// Second: the verdict is cached now.
+	d := h.api.Engine.Evaluate("p_standard", "evil.example")
+	if !d.Blocked {
+		t.Fatalf("a cached malicious verdict did not block: %+v", d)
+	}
+	if d.Source == "" {
+		t.Error("the block names no provider, so nobody can tell who decided")
+	}
+	if d.Category == "" {
+		t.Error("the block has no category")
+	}
+
+	// A domain the provider says nothing about stays resolvable.
+	h.api.Engine.Evaluate("p_standard", "ordinary.example")
+	drainEngine(t, h)
+	if d := h.api.Engine.Evaluate("p_standard", "ordinary.example"); d.Blocked {
+		t.Errorf("a benign verdict blocked a domain: %+v", d)
+	}
+
+	// And the credential the API sealed is the one the provider presented.
+	if !strings.Contains(sawCredential, theCredential) {
+		t.Errorf("the provider authenticated with %q, not the stored credential", sawCredential)
+	}
+
+	// The verdict persisted, so a restart does not start from cold.
+	verdicts, err := h.store.IntelVerdicts(ctx, "evil.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("got %d persisted verdicts, want 1", len(verdicts))
+	}
+	if verdicts[0].Disposition != store.DispositionMalicious {
+		t.Errorf("persisted disposition = %q", verdicts[0].Disposition)
+	}
+	if strings.Contains(verdicts[0].Raw, theCredential) {
+		t.Error("the credential was persisted inside the stored verdict")
+	}
+}
+
+// Switching the mode off must stop the consultation on the next query, not the
+// next restart — that is the affordance the ceiling exists to preserve.
+func TestSwitchingReputationOffStopsBlockingImmediately(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"score":1.0}`))
+	}))
+	defer upstream.Close()
+
+	createProvider(t, h, map[string]any{
+		"name": "Always malicious", "kind": "customhttp", "enabled": true,
+		"config":       map[string]string{"url": upstream.URL + "/lookup?domain={subject}"},
+		"capabilities": []string{"reputation"},
+	})
+	h.api.Engine.SetReputation(&intel.Consultant{Engine: h.api.Providers})
+	t.Cleanup(func() { h.api.Engine.SetReputation(nil) })
+
+	h.api.Engine.Evaluate("p_standard", "bad.example")
+	drainEngine(t, h)
+	if d := h.api.Engine.Evaluate("p_standard", "bad.example"); !d.Blocked {
+		t.Fatal("the provider is not blocking, so switching it off proves nothing")
+	}
+
+	resp, raw := h.do("PUT", "/api/v1/integrations/reputation", map[string]any{"mode": "off"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set mode off: %d %s", resp.StatusCode, raw)
+	}
+
+	if d := h.api.Engine.Evaluate("p_standard", "bad.example"); d.Blocked {
+		t.Errorf("a cached verdict still blocked after reputation was switched off: %+v", d)
+	}
+}
+
+// Deleting a provider must take its cached verdicts with it. Otherwise a
+// domain goes on being blocked by a service the operator has removed, with no
+// row anywhere explaining why.
+func TestDeletingAProviderStopsItsVerdictsBlocking(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"score":1.0}`))
+	}))
+	defer upstream.Close()
+
+	id := createProvider(t, h, map[string]any{
+		"name": "Doomed", "kind": "customhttp", "enabled": true,
+		"config":       map[string]string{"url": upstream.URL + "/lookup?domain={subject}"},
+		"capabilities": []string{"reputation"},
+	})
+	h.api.Engine.SetReputation(&intel.Consultant{Engine: h.api.Providers})
+	t.Cleanup(func() { h.api.Engine.SetReputation(nil) })
+
+	h.api.Engine.Evaluate("p_standard", "bad.example")
+	drainEngine(t, h)
+	if d := h.api.Engine.Evaluate("p_standard", "bad.example"); !d.Blocked {
+		t.Fatal("the provider is not blocking, so deleting it proves nothing")
+	}
+
+	if resp, raw := h.do("DELETE", "/api/v1/integrations/providers/"+id, nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", resp.StatusCode, raw)
+	}
+
+	if d := h.api.Engine.Evaluate("p_standard", "bad.example"); d.Blocked {
+		t.Errorf("a deleted provider's verdict still blocks: %+v", d)
+	}
+	rows, err := h.store.IntelVerdicts(context.Background(), "bad.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("%d persisted verdicts survived the provider they came from", len(rows))
+	}
+}
+
+// Verdicts must survive a restart. Without this intel_verdicts is a log rather
+// than a cache: every restart begins cold and re-asks every provider for
+// answers already sitting on disk — which on a metered API spends the
+// operator's quota to learn nothing.
+func TestVerdictsSurviveARestart(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
+
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"score":1.0}`))
+	}))
+	defer upstream.Close()
+
+	createProvider(t, h, map[string]any{
+		"name": "Always malicious", "kind": "customhttp", "enabled": true,
+		"config":       map[string]string{"url": upstream.URL + "/lookup?domain={subject}"},
+		"capabilities": []string{"reputation"},
+	})
+
+	ctx := context.Background()
+	h.api.Providers.Consult(ctx, "p_standard", "bad.example")
+	drainEngine(t, h)
+	if _, ok := h.api.Providers.Consult(ctx, "p_standard", "bad.example"); !ok {
+		t.Fatal("the verdict was never cached, so there is nothing to survive")
+	}
+	after := calls
+
+	// A restart: a brand-new engine over the same database, assembled the way
+	// cmd/dnsdaddy assembles it.
+	source := h.api.Intel
+	restarted := apiprovider.NewEngine(apiprovider.Options{
+		Mode:  apiprovider.ModeCacheOnly,
+		Store: &intel.VerdictStore{Store: h.store},
+	})
+	if err := restarted.Reload(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	restarted.Start(ctx)
+	t.Cleanup(restarted.Stop)
+
+	loaded, err := restarted.WarmCache(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded == 0 {
+		t.Fatal("the restarted engine loaded no verdicts from disk")
+	}
+
+	// The verdict is there, from the cache, without another upstream call.
+	v, ok := restarted.Consult(ctx, "p_standard", "bad.example")
+	if !ok {
+		t.Fatal("the restarted engine did not have the verdict")
+	}
+	if v.Disposition != apiprovider.DispositionMalicious {
+		t.Errorf("restored disposition = %q", v.Disposition)
+	}
+	if calls != after {
+		t.Errorf("the restarted engine made %d fresh upstream calls for a cached name", calls-after)
+	}
+}
+
+// A verdict from a provider the operator has deleted must not come back at the
+// next restart. The row is gone with the provider, but a warm-up that trusted
+// its input rather than the instance list would be a second way for a removed
+// service to go on influencing resolution.
+func TestWarmingIgnoresVerdictsFromProvidersThatNoLongerExist(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
+
+	ctx := context.Background()
+	// A verdict attributed to a provider that was never configured, written
+	// straight to the store so the foreign key is the only thing that could
+	// have stopped it — and it is a cache warm-up's job not to trust it.
+	p := mustStoreProvider(t, h)
+	if err := (&intel.VerdictStore{Store: h.store}).SaveVerdict(ctx, "ghost.example", p.ID,
+		apiprovider.Verdict{Score: 1, Disposition: apiprovider.DispositionMalicious},
+		time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// An engine that has never heard of that provider.
+	engine := apiprovider.NewEngine(apiprovider.Options{
+		Mode:  apiprovider.ModeCacheOnly,
+		Store: &intel.VerdictStore{Store: h.store},
+	})
+	engine.Start(ctx)
+	t.Cleanup(engine.Stop)
+
+	loaded, err := engine.WarmCache(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded != 0 {
+		t.Errorf("warmed %d verdicts from a provider the engine does not have", loaded)
+	}
+	if _, ok := engine.Consult(ctx, "p_standard", "ghost.example"); ok {
+		t.Error("a verdict from an unknown provider reached the resolution path")
+	}
+}
+
+// mustStoreProvider writes a provider row directly, bypassing the API.
+func mustStoreProvider(t *testing.T, h *harness) store.APIProvider {
+	t.Helper()
+	p, err := h.store.CreateAPIProvider(context.Background(), store.APIProvider{
+		Name: "Written directly", Kind: "customhttp", Enabled: true,
+		Config: map[string]string{"url": "https://example.test/lookup?d={subject}"},
+	})
+	if err != nil {
+		t.Fatalf("create provider row: %v", err)
+	}
+	return p
+}
+
+// Editing a provider must discard its cached verdicts. They were produced
+// under the settings being replaced — a different endpoint, a different
+// scoring field, a narrower scope — and keeping them would let a provider the
+// operator has just reconfigured go on blocking names from its old one.
+//
+// This is the case where cache invalidation is actually observable: on delete
+// the instance disappears and the outcome would be right either way, so only
+// an edit isolates it.
+func TestEditingAProviderDiscardsItsCachedVerdicts(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
+
+	var score = "1.0"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"score":` + score + `}`))
+	}))
+	defer upstream.Close()
+
+	id := createProvider(t, h, map[string]any{
+		"name": "Reconfigured", "kind": "customhttp", "enabled": true,
+		"config":       map[string]string{"url": upstream.URL + "/lookup?domain={subject}"},
+		"capabilities": []string{"reputation"},
+	})
+
+	ctx := context.Background()
+	h.api.Providers.Consult(ctx, "p_standard", "bad.example")
+	drainEngine(t, h)
+	if v, ok := h.api.Providers.Consult(ctx, "p_standard", "bad.example"); !ok ||
+		v.Disposition != apiprovider.DispositionMalicious {
+		t.Fatal("the malicious verdict was never cached, so discarding it proves nothing")
+	}
+
+	// The operator points the provider somewhere that answers differently.
+	score = "0.0"
+	if resp, raw := h.do("PATCH", "/api/v1/integrations/providers/"+id,
+		map[string]any{"name": "Reconfigured again"}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("patch: %d %s", resp.StatusCode, raw)
+	}
+
+	// Immediately after the edit the cache is empty, so cache_only answers
+	// "unknown" rather than serving the verdict from the old configuration.
+	if v, ok := h.api.Providers.Consult(ctx, "p_standard", "bad.example"); ok &&
+		v.Disposition == apiprovider.DispositionMalicious {
+		t.Fatal("a verdict from the pre-edit configuration survived the edit")
+	}
+
+	// And the re-fetch under the new configuration lands.
+	drainEngine(t, h)
+	if v, ok := h.api.Providers.Consult(ctx, "p_standard", "bad.example"); ok &&
+		v.Disposition == apiprovider.DispositionMalicious {
+		t.Errorf("the provider still reports malicious after answering 0.0: %+v", v)
 	}
 }

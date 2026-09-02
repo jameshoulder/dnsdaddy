@@ -249,21 +249,60 @@ func TestVerdictRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, gotExpiry, err := vs.LoadVerdict(ctx, "bad.example", p.ID)
+	fresh, err := vs.FreshVerdicts(ctx, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Disposition != apiprovider.DispositionMalicious {
-		t.Errorf("disposition = %q", out.Disposition)
+	if len(fresh) != 1 {
+		t.Fatalf("got %d fresh verdicts, want 1", len(fresh))
 	}
-	if out.Score != 0.9 {
-		t.Errorf("score = %v", out.Score)
+	out := fresh[0]
+	if out.Subject != "bad.example" || out.ProviderID != p.ID {
+		t.Errorf("verdict came back for the wrong subject or provider: %+v", out)
 	}
-	if len(out.Categories) != 2 || out.Categories[0] != "malware" {
-		t.Errorf("categories = %v", out.Categories)
+	if out.Verdict.Disposition != apiprovider.DispositionMalicious {
+		t.Errorf("disposition = %q", out.Verdict.Disposition)
 	}
-	if !gotExpiry.Equal(expires) {
-		t.Errorf("expiry = %s, want %s", gotExpiry, expires)
+	if out.Verdict.Score != 0.9 {
+		t.Errorf("score = %v", out.Verdict.Score)
+	}
+	if len(out.Verdict.Categories) != 2 || out.Verdict.Categories[0] != "malware" {
+		t.Errorf("categories = %v", out.Verdict.Categories)
+	}
+	if !out.ExpiresAt.Equal(expires) {
+		t.Errorf("expiry = %s, want %s", out.ExpiresAt, expires)
+	}
+}
+
+// An expired verdict must not be warmed back into memory. It is the whole
+// reason the row carries an expiry: a stale verdict blocking a name is worse
+// than no verdict, because nobody would stand behind the evidence today.
+func TestExpiredVerdictsAreNotReturnedForWarming(t *testing.T) {
+	ctx := context.Background()
+	s := newSource(t)
+	vs := &VerdictStore{Store: s.Store}
+	p := mustProvider(t, s)
+
+	if err := vs.SaveVerdict(ctx, "stale.example", p.ID,
+		apiprovider.Verdict{Score: 1, Disposition: apiprovider.DispositionMalicious},
+		time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := vs.SaveVerdict(ctx, "fresh.example", p.ID,
+		apiprovider.Verdict{Score: 1, Disposition: apiprovider.DispositionMalicious},
+		time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := vs.FreshVerdicts(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 {
+		t.Fatalf("got %d verdicts, want only the unexpired one: %+v", len(fresh), fresh)
+	}
+	if fresh[0].Subject != "fresh.example" {
+		t.Errorf("warming offered %q, want only the unexpired verdict", fresh[0].Subject)
 	}
 }
 

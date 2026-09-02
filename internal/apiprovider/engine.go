@@ -109,8 +109,20 @@ type Options struct {
 // — is the one that makes packages hard to move.
 type VerdictStore interface {
 	SaveVerdict(ctx context.Context, subject, providerID string, v Verdict, expires time.Time) error
-	LoadVerdict(ctx context.Context, subject, providerID string) (Verdict, time.Time, error)
+	// FreshVerdicts returns unexpired verdicts, soonest-expiring last, at most
+	// limit of them. Read once at startup to warm the memory cache — never
+	// from the resolution path, which touches memory and nothing else.
+	FreshVerdicts(ctx context.Context, limit int) ([]StoredVerdict, error)
 	SaveEnrichment(ctx context.Context, subject, providerID string, e Enrichment, expires time.Time) error
+}
+
+// StoredVerdict is a persisted verdict with the two things the cache needs
+// that a Verdict does not carry: what it was about, and who said it.
+type StoredVerdict struct {
+	Subject    string
+	ProviderID string
+	Verdict    Verdict
+	ExpiresAt  time.Time
 }
 
 // Instance is one configured provider, ready to be called.
@@ -326,6 +338,53 @@ func (e *Engine) Instance(id string) (*Instance, bool) {
 
 // InvalidateProvider drops a provider's cached answers.
 func (e *Engine) InvalidateProvider(id string) { e.cache.Forget(id) }
+
+// WarmCache loads unexpired verdicts from the persistent store into memory.
+//
+// Called once, at startup, after the instances are built. Without it
+// intel_verdicts would be write-only: every restart would begin with a cold
+// cache and re-ask every provider for answers already sitting on disk, which
+// on a metered API is the operator's quota spent to learn nothing.
+//
+// It is not on any hot path and never becomes one. The resolution path reads
+// the memory cache and nothing else, which is the property that lets
+// cache_only mode promise it cannot slow a query down.
+//
+// Verdicts for providers that no longer exist are skipped rather than loaded:
+// a provider the operator deleted must not go on influencing resolution from
+// a row the cascade has not reached yet.
+func (e *Engine) WarmCache(ctx context.Context) (int, error) {
+	if e.opts.Store == nil {
+		return 0, nil
+	}
+	rows, err := e.opts.Store.FreshVerdicts(ctx, e.opts.CacheEntries)
+	if err != nil {
+		return 0, err
+	}
+
+	known := make(map[string]bool)
+	for _, inst := range e.Instances() {
+		known[inst.ID] = true
+	}
+
+	now := time.Now()
+	loaded := 0
+	for _, row := range rows {
+		if !known[row.ProviderID] || !row.ExpiresAt.After(now) {
+			continue
+		}
+		e.cache.Put(row.Subject, CachedVerdict{
+			Verdict:    row.Verdict,
+			ProviderID: row.ProviderID,
+			ExpiresAt:  row.ExpiresAt,
+		})
+		loaded++
+	}
+	if loaded > 0 {
+		e.log.Info("warmed the external verdict cache from disk", "verdicts", loaded)
+	}
+	return loaded, nil
+}
 
 // Consult is what the policy engine calls. It is the whole hot-path surface.
 //
