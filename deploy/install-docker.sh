@@ -612,12 +612,35 @@ stack_is_running() {
 #   5353/tcp -> 0.0.0.0:53
 #   5353/udp -> 0.0.0.0:53
 #   8080/tcp -> 127.0.0.1:8080
+#
+# The map is captured before it is matched, and that is load-bearing rather
+# than stylistic. This function used to read:
+#
+#   docker port "$cid" | grep -qE "..."
+#
+# `grep -q` exits the instant it matches. The writer on the other side of the
+# pipe then takes SIGPIPE for whatever it had left to say, and because this
+# script runs under `set -o pipefail` (line 36) the pipeline reports 141 — even
+# though the match succeeded. The busier the machine, the wider the window
+# between grep exiting and the writer's next write, so the failure appears
+# under load and vanishes when anybody tries to reproduce it.
+#
+# Measured on the four-core sandbox this was diagnosed on, against the test
+# fixture's three-line port map: 0 in 400 runs idle, 18 in 200 for TCP and 51
+# in 200 for UDP under CPU contention. Both protocols; whichever loses the race
+# that run is the one that reports a phantom conflict. What that cost in
+# production was an --upgrade that intermittently told an operator their own
+# resolver was a foreign process holding port 53.
+#
+# A here-string has no writer process and no pipeline for pipefail to poison.
 project_publishes_port() { # proto host_port
-  local proto="$1" port="$2" cid
+  local proto="$1" port="$2" cid map
   cid="$("${COMPOSE[@]}" ps -q dnsdaddy 2>/dev/null | head -1)"
   [[ -n "$cid" ]] || return 1
-  docker port "$cid" 2>/dev/null \
-    | grep -qE "^[0-9]+/${proto}[[:space:]]+->[[:space:]].*:${port}\$"
+  # A docker that fails outright is not evidence of ownership.
+  map="$(docker port "$cid" 2>/dev/null)" || return 1
+  [[ -n "$map" ]] || return 1
+  grep -qE "^[0-9]+/${proto}[[:space:]]+->[[:space:]].*:${port}\$" <<<"$map"
 }
 
 check_ports() {
@@ -1125,7 +1148,7 @@ check_hostname_points_here() { # hostname
 
   while read -r addr; do
     [[ -n "$addr" ]] || continue
-    if printf '%s\n' "$mine4" | grep -qxF "$addr"; then
+    if grep -qxF "$addr" <<<"$mine4"; then
       pass "${name} resolves to ${addr}, which is an address on this machine"
       matched=1
     else
@@ -1135,7 +1158,7 @@ check_hostname_points_here() { # hostname
 
   while read -r addr; do
     [[ -n "$addr" ]] || continue
-    if printf '%s\n' "$mine6" | grep -qxF "$addr"; then
+    if grep -qxF "$addr" <<<"$mine6"; then
       pass "${name} resolves to ${addr} (IPv6), which is an address on this machine"
       matched=1
     elif [[ -n "$mine6" ]]; then
@@ -1186,7 +1209,7 @@ report_reachability() {
     [[ "$p" == "80" ]] && owner="$WEB_80_OWNER" || owner="$WEB_443_OWNER"
     if [[ -z "$owner" ]]; then
       pass "Port ${p} available for Caddy"
-    elif printf '%s' "$owner" | grep -qi 'caddy'; then
+    elif grep -qi 'caddy' <<<"$owner"; then
       # Re-running --https over a working deployment: Caddy holding its own
       # ports is the expected state, not a conflict.
       pass "Port ${p} already held by Caddy (expected)"
@@ -1391,7 +1414,7 @@ configure_https() {
   local validate_out
   if ! validate_out="$(caddy validate --config "$caddyfile" 2>&1)"; then
     HTTPS_STATE="failed"
-    if [[ "$HTTPS_TARGET_KIND" != "hostname" ]] && printf '%s' "$validate_out" | grep -qi 'profile'; then
+    if [[ "$HTTPS_TARGET_KIND" != "hostname" ]] && grep -qi 'profile' <<<"$validate_out"; then
       HTTPS_FAIL_REASON="This Caddy does not understand the ACME 'profile' setting, which public IP certificates require."
     else
       HTTPS_FAIL_REASON="The generated Caddyfile did not validate."
@@ -1980,7 +2003,7 @@ caddy_acme_diagnose_inner() {
   if acme_evidence 'acme:error:connection'; then
     local detail
     detail="$(printf '%s' "$ACME_LOG_WINDOW" | grep -oiE '"detail":"[^"]*"' | tail -1 | cut -d'"' -f4)"
-    if printf '%s' "$detail" | grep -qi 'timeout\|timed out'; then
+    if grep -qi 'timeout\|timed out' <<<"$detail"; then
       HTTPS_FAIL_REASON="Let's Encrypt could not reach ${HTTPS_TARGET} — the challenge timed out."
       HTTPS_FAIL_HINT="A firewall is dropping inbound 80/443. Open both to the internet in your cloud provider's firewall, then re-run with --https."
     else
@@ -2097,7 +2120,13 @@ verify_https_posture() {
 
   # The proxy really is reaching the backend, rather than serving an error page
   # of its own that happens to be over TLS.
-  if curl -fsS --max-time 8 "${url}/api/v1/health" 2>/dev/null | grep -q '"status"'; then
+  # Captured rather than piped into grep -q, for the reason given on
+  # project_publishes_port: grep exiting early kills curl with SIGPIPE and
+  # pipefail turns a successful match into a failure. Here that would have
+  # reported a healthy deployment as unreachable through Caddy.
+  local health_body
+  if health_body="$(curl -fsS --max-time 8 "${url}/api/v1/health" 2>/dev/null)" \
+     && grep -q '"status"' <<<"$health_body"; then
     pass "Caddy is reaching DNS Daddy on 127.0.0.1:8080"
   else
     warn "TLS is up, but the dashboard API did not answer through Caddy."
