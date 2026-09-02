@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,12 @@ type ProviderConfig struct {
 // see "VirusTotal — credential rejected" in the dashboard, and a provider that
 // silently disappears from the list is a configuration screen that lies about
 // what is configured.
+func sanitizeLogValue(v string) string {
+	v = strings.ReplaceAll(v, "\n", "")
+	v = strings.ReplaceAll(v, "\r", "")
+	return v
+}
+
 func BuildInstances(configs []ProviderConfig, log *slog.Logger) []*Instance {
 	if log == nil {
 		log = slog.Default()
@@ -102,10 +109,12 @@ func BuildInstances(configs []ProviderConfig, log *slog.Logger) []*Instance {
 			// operator's half-finished work, not an incident. It is already
 			// visible in the dashboard, which is where they are looking.
 			log.Info("external provider could not be built",
-				"provider", cfg.Name, "provider_id", cfg.ID, "kind", cfg.Kind,
+				"provider", sanitizeLogValue(cfg.Name),
+				"provider_id", sanitizeLogValue(cfg.ID),
+				"kind", sanitizeLogValue(cfg.Kind),
 				// err comes from an adapter constructor, which is documented
 				// never to carry the credential and tested for it.
-				"error", err.Error())
+				"error", sanitizeLogValue(err.Error()))
 			out = append(out, inst)
 			continue
 		}
