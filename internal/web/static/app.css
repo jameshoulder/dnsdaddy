@@ -1857,3 +1857,50 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .rec { flex-wrap: wrap; }
   .rec-actions { flex: 1 1 100%; padding-left: 0; }
 }
+
+/* ---------- external API providers -------------------------------------- */
+
+/* A test result that went well. The green here is the same affirmative green
+   as a working provider's badge, so "it answered" and "it is working" say the
+   same thing in the same colour rather than two shades of approval. */
+.rec-note.is-ok { color: var(--primary); }
+
+/* The per-policy scope, folded away. A provider applies to every policy by
+   default and most operators never change that, so the control is one line
+   until somebody wants it — the same treatment a policy's category editor
+   gets, for the same reason. */
+.provider-scope { margin-top: var(--s3); }
+.provider-scope > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  list-style: none;
+  padding: 4px 0;
+}
+.provider-scope > summary::-webkit-details-marker { display: none; }
+.provider-scope > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  transition: transform 120ms ease;
+}
+.provider-scope[open] > summary::before { transform: rotate(90deg); }
+.provider-scope > summary:hover { color: var(--foreground); }
+.provider-scope .checkline { margin-top: 2px; }
+
+/* Destructive and non-destructive actions on one row. The gap is wider than a
+   button row elsewhere because Delete sits next to Test connection, and a
+   mis-click there costs an operator their configuration. */
+.provider-actions {
+  margin-top: var(--s3);
+  gap: var(--s3);
+  flex-wrap: wrap;
+}
+.provider-actions .btn-danger { margin-left: auto; }
+
+@media (max-width: 620px) {
+  /* Stacked, Delete no longer pushed to an edge it would share with a thumb
+     reaching for Test connection. */
+  .provider-actions .btn-danger { margin-left: 0; }
+}
