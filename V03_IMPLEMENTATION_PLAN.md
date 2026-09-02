@@ -1,9 +1,39 @@
 # DNS Daddy v0.3 — "Assurance": implementation plan
 
-**Status:** proposed, awaiting maintainer sign-off on scope.
+**Status:** scope agreed with the maintainer, 2026-09-02. Decisions in §0.1.
 **Branch:** `claude/v0.3-assurance`, from `main` at `883f77b`.
 **Baseline:** `gofmt`, `go vet`, `go build` and `go test ./...` all clean at that
 commit — 21 packages, plus 161 dashboard tests. Recorded before any change.
+
+---
+
+## 0.1 Decisions taken
+
+Three scope questions were put to the maintainer after the audit, because each
+one overrules part of the brief and changes weeks of work.
+
+| Question | Decision |
+|---|---|
+| How much of Asset Intelligence (§25A–Z) is in v0.3.0? | **Identity only.** Persistent device identity with stated source and confidence, a device profile, `Unknown` as a first-class state — using signals already available and requiring no new privileges. Active discovery, MAC-OUI, mDNS, classification, the network map and controller integrations move to v0.4. |
+| Behavioural `block` action (§22)? | **Keep the published position.** Behaviour categories carry `allow` and `alert` only. v0.3 ships §44 — the false-positive testing methodology and harness — which is what `docs/roadmap.md` names as the precondition for enforcement. |
+| How many of the ten phases in v0.3.0? | **Core first, then reassess.** Build the irreducible core, demonstrate "why was this blocked" end to end, then decide how much of the rest v0.3.0 carries. |
+
+### What "core first" means concretely
+
+The plan's §8 named P1, P3 and P9 as the core. Building them in that order
+alone would leave P3 with no evidence to record, so the first three PRs are:
+
+1. **P1 — evidence.** The model, the store, retention. No behaviour change.
+2. **P3 — decisions.** Capture the evidence that existed at block time from the
+   three sources that already produce it (blocklist entry, provider verdict,
+   detector findings), persist the decision and what contributed to it, and
+   expose "why" through the API and the dashboard. This includes the minimum
+   slice of P2 needed to make feeds evidence producers at decision time; the
+   full indicator lifecycle stays in P2.
+3. **P9 — assurance.** `docs/assurance/`, `SECURITY-ASSURANCE.md` with accurate
+   statuses, and the false-positive testing methodology and harness.
+
+Then reassess.
 
 ---
 
