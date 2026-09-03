@@ -31,8 +31,15 @@ type Decision struct {
 	LogQuery  bool
 
 	// Basis is the machine-readable form of why, for the decision record.
-	// Zero for an ordinary allowed query.
-	Basis Basis
+	// Nil for an ordinary allowed query.
+	//
+	// A pointer, not a value, and the benchmark is the reason. Decision is
+	// returned by value on every query; carrying seven inline strings made it
+	// 112 bytes larger to zero and copy, which measured as roughly 80ns → 90ns
+	// on the miss path — a 12% regression on the one function every lookup
+	// runs. As a pointer the miss path is unchanged and a decided query pays
+	// one small allocation, on a path that already allocates a response.
+	Basis *Basis
 }
 
 // Rule names which step of Evaluate reached the verdict.
@@ -87,7 +94,10 @@ type Basis struct {
 
 // Decided reports whether any rule fired. An ordinary allowed query has no
 // basis and nothing to record.
-func (b Basis) Decided() bool { return b.Rule != RuleNone }
+//
+// A nil receiver is the common case and answers false, so callers do not need
+// their own nil check before asking.
+func (b *Basis) Decided() bool { return b != nil && b.Rule != RuleNone }
 
 // Match identifies the network and policy a client resolved to.
 type Match struct {
@@ -355,12 +365,10 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 
 	d := Decision{BlockMode: p.blockMode, LogQuery: p.logQueries}
 
-	d.Basis.PolicyID, d.Basis.PolicyName = p.id, p.name
-
 	if len(p.allow) > 0 && matchSuffix(p.allow, domain) {
 		d.Reason = "Allowed by policy allow-list"
 		d.Source = "allow-list"
-		d.Basis.Rule = RuleAllowList
+		d.Basis = &Basis{Rule: RuleAllowList, PolicyID: p.id, PolicyName: p.name}
 		return d
 	}
 
@@ -369,8 +377,10 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 		d.Reason = "Blocked by your custom block-list"
 		d.Category = "custom"
 		d.Source = "block-list"
-		d.Basis.Rule = RuleBlockList
-		d.Basis.Category = "custom"
+		d.Basis = &Basis{
+			Rule: RuleBlockList, Category: "custom",
+			PolicyID: p.id, PolicyName: p.name,
+		}
 		return d
 	}
 
@@ -384,9 +394,11 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 			d.Category = entry.Category
 			d.Source = entry.FeedName
 			d.Reason = catalog.CategoryReason(entry.Category)
-			d.Basis.Rule = RuleCategory
-			d.Basis.FeedID, d.Basis.FeedName = entry.FeedID, entry.FeedName
-			d.Basis.Category = entry.Category
+			d.Basis = &Basis{
+				Rule: RuleCategory, Category: entry.Category,
+				FeedID: entry.FeedID, FeedName: entry.FeedName,
+				PolicyID: p.id, PolicyName: p.name,
+			}
 			return d
 		}
 	}
@@ -410,9 +422,11 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 				d.Category = "malware"
 			}
 			d.Source = v.ProviderName
-			d.Basis.Rule = RuleReputation
-			d.Basis.ProviderName = v.ProviderName
-			d.Basis.Category = d.Category
+			d.Basis = &Basis{
+				Rule: RuleReputation, Category: d.Category,
+				ProviderName: v.ProviderName,
+				PolicyID:     p.id, PolicyName: p.name,
+			}
 			// Named rather than generic. An operator looking at a blocked
 			// query has to be able to tell a curated-feed block from a
 			// third-party API's opinion, because only one of those is

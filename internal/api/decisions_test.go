@@ -32,7 +32,7 @@ func blockEvent(domain string) decisions.Event {
 		ClientIP: "192.0.2.10", ClientName: "workstation-14",
 		NetworkID: "n_1", NetworkName: "Office",
 		Action: store.ActionBlocked, Blocked: true,
-		Basis: policy.Basis{
+		Basis: &policy.Basis{
 			Rule: policy.RuleCategory, PolicyID: "p_std", PolicyName: "Standard",
 			FeedID: "f_urlhaus", FeedName: "URLhaus", Category: "malware",
 		},

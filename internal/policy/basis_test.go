@@ -100,18 +100,24 @@ func TestEvaluateAllocatesNothingForAnOrdinaryQuery(t *testing.T) {
 	}
 }
 
-// And a blocked query — which does populate the basis — must not allocate
-// either, since every field is a string already held by the snapshot or the
-// blocklist entry.
-func TestEvaluateAllocatesNothingForABlockedQuery(t *testing.T) {
+// A blocked query allocates the basis, and exactly once.
+//
+// This is the deliberate half of the trade. Carrying the basis inline made
+// Decision 112 bytes larger to zero and copy on every query, which measured as
+// roughly 80ns → 90ns on the miss path — a regression on the one function
+// every lookup runs, to populate a field only a decided query reads. As a
+// pointer the miss path is untouched and the cost lands here, on a path that
+// already allocates a response message.
+//
+// Pinned at one so that a future field cannot quietly turn it into several.
+func TestABlockedQueryAllocatesTheBasisExactlyOnce(t *testing.T) {
 	e, _, _ := newEngine(t, map[string]string{"evil.com": "malware"})
 	_ = e.Evaluate("p_standard", "evil.com")
 
 	allocs := testing.AllocsPerRun(200, func() {
 		_ = e.Evaluate("p_standard", "evil.com")
 	})
-	if allocs > 0 {
-		t.Errorf("a blocked query allocated %.1f times; populating the basis was "+
-			"supposed to be free", allocs)
+	if allocs != 1 {
+		t.Errorf("a blocked query allocated %.1f times, want exactly 1 (the basis)", allocs)
 	}
 }

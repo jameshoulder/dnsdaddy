@@ -82,11 +82,16 @@ with how much you resolve.
 
 Nothing happens on the resolution path:
 
-1. The policy engine returns a `Basis` alongside its decision. Every field is
-   a string already held by the compiled policy snapshot or the blocklist
-   entry, so populating it copies pointers and lengths. **Measured at zero
-   allocations per query**, for allowed and blocked alike, and asserted by
-   `TestEvaluateAllocatesNothingFor{AnOrdinary,ABlocked}Query`.
+1. The policy engine returns a `Basis` alongside its decision, as a pointer
+   that is nil unless a rule fired. **The miss path — almost every query —
+   allocates nothing and is unchanged**, asserted by
+   `TestEvaluateAllocatesNothingForAnOrdinaryQuery`.
+
+   The pointer is not an accident. Carrying the basis inline made `Decision`
+   112 bytes larger to zero and copy on every query, measured at roughly
+   80ns → 90ns on the miss path. A blocked query now allocates the basis once
+   — pinned at exactly one by test — on a path that already allocates a
+   response message.
 2. The handler offers the decision to a buffered channel and returns. The send
    is non-blocking: a full queue **drops and counts** rather than waiting,
    which is the same discipline the query log already uses. Recording must

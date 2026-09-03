@@ -52,7 +52,7 @@ type Event struct {
 	Action      string
 	Blocked     bool
 	Reason      string
-	Basis       policy.Basis
+	Basis       *policy.Basis
 }
 
 // Recorder queues decisions and writes them off the resolution path.
@@ -148,7 +148,7 @@ func (r *Recorder) write(ctx context.Context, e Event) {
 		// nothing new, and without it the operator cannot tell which decision
 		// went unrecorded.
 		r.log.Warn("could not record the evidence behind a decision",
-			"domain", e.Domain, "rule", string(e.Basis.Rule), "error", err.Error())
+			"domain", e.Domain, "rule", string(basisRule(e.Basis)), "error", err.Error())
 		return
 	}
 
@@ -156,10 +156,10 @@ func (r *Recorder) write(ctx context.Context, e Event) {
 		Time:       e.Time,
 		Subject:    evidence.Domain(e.Domain),
 		Action:     e.Action,
-		Category:   e.Basis.Category,
-		Rule:       string(e.Basis.Rule),
+		Category:   basisCategory(e.Basis),
+		Rule:       string(basisRule(e.Basis)),
 		PolicyPath: PolicyPath(e),
-		PolicyID:   e.Basis.PolicyID,
+		PolicyID:   basisPolicyID(e.Basis),
 		NetworkID:  e.NetworkID,
 		ClientIP:   e.ClientIP,
 		ClientName: e.ClientName,
@@ -170,7 +170,7 @@ func (r *Recorder) write(ctx context.Context, e Event) {
 	if _, err := r.store.RecordDecision(wctx, d, cited); err != nil {
 		r.failed.Add(1)
 		r.log.Warn("could not record a decision",
-			"domain", e.Domain, "rule", string(e.Basis.Rule), "error", err.Error())
+			"domain", e.Domain, "rule", string(basisRule(e.Basis)), "error", err.Error())
 		return
 	}
 	r.written.Add(1)
@@ -205,6 +205,9 @@ func evidenceFor(e Event) (evidence.Evidence, bool) {
 		Subject:    evidence.Domain(e.Domain),
 		ObservedAt: e.Time,
 		Category:   e.Basis.Category,
+	}
+	if e.Basis == nil {
+		return evidence.Evidence{}, false
 	}
 	switch e.Basis.Rule {
 	case policy.RuleAllowList:
@@ -267,12 +270,12 @@ func PolicyPath(e Event) string {
 	if e.NetworkName != "" {
 		parts = append(parts, "network:"+e.NetworkName)
 	}
-	if e.Basis.PolicyName != "" {
+	if e.Basis != nil && e.Basis.PolicyName != "" {
 		parts = append(parts, "policy:"+e.Basis.PolicyName)
 	}
-	switch e.Basis.Rule {
+	switch basisRule(e.Basis) {
 	case policy.RuleCategory:
-		parts = append(parts, "category:"+categoryOr(e.Basis.Category, "unknown"))
+		parts = append(parts, "category:"+categoryOr(basisCategory(e.Basis), "unknown"))
 	case policy.RuleAllowList:
 		parts = append(parts, "allow-list")
 	case policy.RuleBlockList:
@@ -356,4 +359,28 @@ func (r *Recorder) Stats() Stats {
 		Failed:  r.failed.Load(),
 		Depth:   len(r.ch),
 	}
+}
+
+// basisRule and basisCategory read a possibly-nil basis. An event with no
+// basis still renders a path — network, policy, action — and simply names no
+// rule, which is more useful than an empty string.
+func basisRule(b *policy.Basis) policy.Rule {
+	if b == nil {
+		return policy.RuleNone
+	}
+	return b.Rule
+}
+
+func basisCategory(b *policy.Basis) string {
+	if b == nil {
+		return ""
+	}
+	return b.Category
+}
+
+func basisPolicyID(b *policy.Basis) string {
+	if b == nil {
+		return ""
+	}
+	return b.PolicyID
 }

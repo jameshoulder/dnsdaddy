@@ -51,7 +51,7 @@ func feedBlock(domain string) Event {
 		NetworkID: "n_1", NetworkName: "Office",
 		Action: store.ActionBlocked, Blocked: true,
 		Reason: "Blocked because it is known to host malware",
-		Basis: policy.Basis{
+		Basis: &policy.Basis{
 			Rule: policy.RuleCategory, PolicyID: "p_std", PolicyName: "Standard",
 			FeedID: "f_urlhaus", FeedName: "URLhaus", Category: "malware",
 		},
@@ -211,7 +211,7 @@ func TestNothingIsRecordedWithoutABasis(t *testing.T) {
 	r, st := newRecorder(t)
 
 	e := feedBlock("ordinary.example")
-	e.Basis = policy.Basis{} // an allowed query: no rule fired
+	e.Basis = nil // an allowed query: no rule fired
 	r.Record(e)
 
 	// Also a basis whose rule this build does not understand.
@@ -286,8 +286,8 @@ func TestEachRuleProducesItsOwnKindOfEvidence(t *testing.T) {
 	} {
 		t.Run(string(tc.rule), func(t *testing.T) {
 			e := feedBlock("subject.example")
-			e.Basis = policy.Basis{Rule: tc.rule, Category: "malware"}
-			tc.setBasis(&e.Basis)
+			e.Basis = &policy.Basis{Rule: tc.rule, Category: "malware"}
+			tc.setBasis(e.Basis)
 
 			got, ok := evidenceFor(e)
 			if !ok {

@@ -100,7 +100,7 @@ func TestABlockedDecisionWithNoBasisIsNotOffered(t *testing.T) {
 	h.handler.recordDecision(
 		storeEventFor("evil.com"),
 		policy.Match{NetworkID: "n_1", NetworkName: "Office"},
-		policy.Decision{Blocked: true, Basis: policy.Basis{
+		policy.Decision{Blocked: true, Basis: &policy.Basis{
 			Rule: policy.RuleCategory, FeedID: "f_x", FeedName: "Feed X", Category: "malware",
 		}},
 	)
