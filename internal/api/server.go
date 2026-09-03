@@ -16,6 +16,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/decisions"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
@@ -50,6 +51,11 @@ type Deps struct {
 	// must not acquire a code path that assumes one.
 	Providers *apiprovider.Engine
 	Intel     *intel.Source
+
+	// Decisions is the decision recorder, or nil when decision records are
+	// switched off. Read-only here: the API never records a decision, it only
+	// reports what the resolver already decided.
+	Decisions *decisions.Recorder
 
 	// ClientACL is the live effective client ACL. Writes that change which
 	// networks may resolve reload it, so a permission granted or revoked in
@@ -186,6 +192,13 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/integrations/providers/{id}/health", a.handleProviderHealth)
 	api.HandleFunc("GET /api/v1/integrations/templates", a.handleProviderTemplates)
 	api.HandleFunc("PUT /api/v1/integrations/reputation", a.handleSetReputationMode)
+
+	// Decision records: why the resolver did what it did. Read-only by
+	// design — a management API that could rewrite a decision would make the
+	// record worthless as evidence.
+	api.HandleFunc("GET /api/v1/decisions", a.handleListDecisions)
+	api.HandleFunc("GET /api/v1/decisions/{id}", a.handleGetDecision)
+	api.HandleFunc("GET /api/v1/evidence/domain/{domain}", a.handleDomainEvidence)
 
 	api.HandleFunc("GET /api/v1/clients", a.handleListClients)
 	api.HandleFunc("PUT /api/v1/clients", a.handleSetClient)

@@ -14,6 +14,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/decisions"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
@@ -57,6 +58,18 @@ type Handler struct {
 	blocked atomic.Uint64
 	errors  atomic.Uint64
 	refused atomic.Uint64
+	// decisions records why, off the resolution path. Nil is the default and
+	// costs one nil comparison per blocked query.
+	decisions DecisionRecorder
+}
+
+// DecisionRecorder receives what was decided, so it can be explained later.
+//
+// An interface rather than a concrete type so this package does not import
+// internal/decisions, and nil unless the operator switched decision records
+// on. Record must never block: see decisions.Recorder.Record.
+type DecisionRecorder interface {
+	Record(decisions.Event)
 }
 
 // HandlerOptions configures a Handler.
@@ -78,6 +91,9 @@ type HandlerOptions struct {
 	// Detector, when set, receives an observation per query. Alert-only: see
 	// Handler.observe.
 	Detector *detect.Engine
+	// Decisions, when set, receives every enforced or alerted decision so it
+	// can be explained later. Nil unless the operator switched it on.
+	Decisions DecisionRecorder
 }
 
 // NewHandler wires the resolution path together.
@@ -104,6 +120,7 @@ func NewHandler(
 		refuseANY:       o.RefuseANY,
 		acl:             o.ClientACL,
 		detector:        o.Detector,
+		decisions:       o.Decisions,
 		timeout:         timeout,
 	}
 }
@@ -285,6 +302,10 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		event.Action = store.ActionBlocked
 		event.ElapsedMS = int(time.Since(start).Milliseconds())
 		h.qlog.Record(event, persist)
+		// After the query log and before the response is built: the recorder's
+		// send is non-blocking and drops rather than waiting, so this cannot
+		// delay an answer. See decisions.Recorder.Record.
+		h.recordDecision(event, match, decision)
 		resp := blockResponse(req, decision.BlockMode)
 		h.observe(event, meta, resp.Rcode, 0, false, true)
 		return resp
@@ -472,4 +493,29 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// recordDecision hands a decision to the recorder, if one is configured.
+//
+// Everything it needs is already computed — the event, the match and the
+// decision's basis — so this allocates one struct and offers it to a buffered
+// channel. With no recorder configured it is a nil comparison, which is the
+// cost a deployment that never turns this on pays per blocked query.
+func (h *Handler) recordDecision(event store.QueryEvent, match policy.Match, d policy.Decision) {
+	if h.decisions == nil || !d.Basis.Decided() {
+		return
+	}
+	h.decisions.Record(decisions.Event{
+		Time:        event.Time,
+		Domain:      event.Domain,
+		QType:       event.QType,
+		ClientIP:    event.ClientIP,
+		ClientName:  event.ClientName,
+		NetworkID:   match.NetworkID,
+		NetworkName: match.NetworkName,
+		Action:      event.Action,
+		Blocked:     d.Blocked,
+		Reason:      d.Reason,
+		Basis:       d.Basis,
+	})
 }

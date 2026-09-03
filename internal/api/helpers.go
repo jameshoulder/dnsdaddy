@@ -7,6 +7,10 @@ import (
 
 func timeNowMinus24h() time.Time { return time.Now().Add(-24 * time.Hour) }
 
+// timeNow is the clock the evidence read path uses, named so that assessment
+// expiry has one place to come from rather than scattered time.Now calls.
+func timeNow() time.Time { return time.Now() }
+
 // detachedWork bounds background work started by a request. Refreshing every
 // feed is the long pole and finishes in minutes; the ceiling exists so a hung
 // upstream cannot pin a goroutine and a refresh slot forever.

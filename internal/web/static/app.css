@@ -1904,3 +1904,54 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
      reaching for Test connection. */
   .provider-actions .btn-danger { margin-left: 0; }
 }
+
+/* ---------- decision records -------------------------------------------- */
+
+/* Folded away by default, like a policy's editor and for the same reason: the
+   list is scanned, and the evidence is read only for the one row that raised a
+   question. */
+.decision { border-top: 1px solid var(--border); }
+.decision:first-of-type { border-top: none; }
+.decision > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) 0;
+  list-style: none;
+}
+.decision > summary::-webkit-details-marker { display: none; }
+.decision[open] > summary .policy-caret { transform: rotate(90deg); }
+.decision-title { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.decision-title strong { overflow-wrap: anywhere; }
+/* Pushed to the trailing edge so the timestamps line up down the column and
+   can be compared without reading each row. */
+.decision-when { margin-left: auto; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.decision-body { padding: 0 0 var(--s4) calc(1em + var(--s3)); }
+
+/* The stored sentence. Given the weight of body text rather than a caption,
+   because it is the answer to the question the page is named after. */
+.decision-why { margin: 0 0 var(--s2); font-size: 13.5px; line-height: 1.55; max-width: 78ch; }
+
+.decision-path {
+  margin-top: var(--s2);
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.decision-evidence { margin-top: var(--s3); display: grid; gap: var(--s2); }
+.ev-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--s3);
+  background: var(--surface-2);
+}
+.ev-title { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.ev-claim { margin-top: 4px; font-size: 13px; overflow-wrap: anywhere; }
+
+@media (max-width: 620px) {
+  .decision-when { margin-left: 0; }
+  .decision > summary { flex-wrap: wrap; }
+  .decision-body { padding-left: 0; }
+}

@@ -32,6 +32,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/decisions"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
@@ -247,6 +248,17 @@ func run() error {
 		reportClientAccess(context.Background(), st, acl.Current(), log)
 	}
 
+	// Decision records: why each blocked query was blocked. Nil unless the
+	// operator switched it on, and every path that touches it tolerates nil.
+	var decisionRecorder *decisions.Recorder
+	if cfg.Log.DecisionRecords {
+		decisionRecorder = decisions.New(st, decisions.Options{Log: log})
+		go decisionRecorder.Run(ctx)
+		defer decisionRecorder.Wait()
+		log.Info("decision records enabled",
+			"retention_days", cfg.Log.DecisionRetentionDays)
+	}
+
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
@@ -254,6 +266,7 @@ func run() error {
 		ClientACL:       acl,
 		RefuseANY:       cfg.DNS.RefuseANY,
 		Detector:        detector,
+		Decisions:       recorderOrNil(decisionRecorder),
 	})
 
 	dnsSrv, err := dnsserver.NewServer(cfg.DNS, handler, log)
@@ -325,6 +338,7 @@ func run() error {
 		TrustedProxies: trustedProxies,
 		Providers:      providers,
 		Intel:          intelSource,
+		Decisions:      decisionRecorder,
 	})
 
 	httpSrv := &http.Server{
@@ -680,6 +694,17 @@ func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *
 				"rows", findings, "retention_days", cfg.Detection.RetentionDays)
 		}
 
+		// Decision records, on their own window. Longer than the query log by
+		// default: the log answers "what happened", and this answers "why",
+		// which is the question asked weeks later.
+		if days := cfg.Log.DecisionRetentionDays; days > 0 {
+			if n, err := st.PruneDecisions(pctx, time.Now().AddDate(0, 0, -days)); err != nil {
+				log.Error("decision prune failed", "error", err)
+			} else if n > 0 {
+				log.Info("pruned expired decision records", "rows", n, "retention_days", days)
+			}
+		}
+
 		// Evidence past its own stated expiry. Not "old evidence" — evidence
 		// its own source no longer stands behind. Claims with no expiry
 		// (operator decisions, local first-seen observations) are facts about
@@ -758,4 +783,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// recorderOrNil keeps a nil *decisions.Recorder out of the handler's
+// interface field.
+//
+// Assigning a typed nil pointer to an interface produces a non-nil interface,
+// so the handler's `h.decisions == nil` guard would be false and every blocked
+// query would call through a nil pointer. This is the classic Go footgun and
+// it is worth a named function rather than a clever inline conditional.
+func recorderOrNil(r *decisions.Recorder) dnsserver.DecisionRecorder {
+	if r == nil {
+		return nil
+	}
+	return r
 }

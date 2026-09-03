@@ -51,6 +51,9 @@ const {
   templateFields,
   availableAdaptersCard,
   REPUTATION_MODES,
+  decisionRow,
+  decisionsCard,
+  decisionEvidenceRow,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -2238,4 +2241,92 @@ test('with the feature off the page still says what the build could talk to', ()
 test('the integrations route resolves', () => {
   assert.equal(routeName('#/integrations'), 'integrations');
   assert.equal(pages.integrations.title, 'External APIs');
+});
+
+/* ---------- decision records --------------------------------------------- */
+
+/*
+ * The dashboard's half of "why was this blocked?". The rule under test
+ * throughout: nothing here composes a reason. The explanation is a stored
+ * sentence and the page renders it or says there wasn't one.
+ */
+
+function decision(overrides = {}) {
+  return {
+    id: 'dec_1',
+    time: now(),
+    subject: { type: 'domain', value: 'evil.example' },
+    action: 'blocked',
+    category: 'malware',
+    rule: 'category',
+    policyPath: 'network:Office → policy:Standard → category:malware → BLOCK',
+    clientIp: '192.0.2.10',
+    clientName: 'workstation-14',
+    qtype: 'A',
+    explanation: 'Blocked because URLhaus listed as malware.',
+    explanationVersion: '1.0',
+    ...overrides,
+  };
+}
+
+test('a decision renders the stored explanation, not a composed one', () => {
+  const out = decisionRow(decision());
+  assert.ok(out.includes('Blocked because URLhaus listed as malware.'), out);
+  assert.ok(out.includes('evil.example'), out);
+  assert.ok(out.includes('workstation-14'), out);
+  assert.ok(out.includes('category:malware'), 'the policy path is missing');
+});
+
+// The fabrication guard, on the rendering side. A decision with no recorded
+// explanation must say so rather than have the page invent one.
+test('a decision with no explanation says so rather than inventing one', () => {
+  const out = decisionRow(decision({ explanation: '' }));
+  assert.ok(out.includes('No explanation was recorded'), out);
+  assert.ok(!out.includes('Blocked because'), 'the page composed a reason of its own');
+});
+
+test('evidence shows the source, its claim and whether it decided', () => {
+  const out = decisionEvidenceRow({
+    contributed: true,
+    evidence: {
+      sourceName: 'URLhaus', source: 'f_urlhaus', kind: 'feed',
+      claim: 'listed as malware', category: 'malware',
+      confidence: 'high', observedAt: hoursAgo(2),
+    },
+  });
+  assert.ok(out.includes('URLhaus'), out);
+  assert.ok(out.includes('listed as malware'), out);
+  assert.ok(out.includes('feed'), 'the kind of claim is not shown');
+  assert.ok(out.includes('High confidence'), out);
+  assert.ok(out.includes('decided this'), 'contributing evidence is not marked');
+});
+
+// Evidence that was merely on file must not be shown as having decided.
+test('non-contributing evidence is not marked as deciding', () => {
+  const out = decisionEvidenceRow({
+    contributed: false,
+    evidence: {
+      sourceName: 'Some feed', kind: 'feed', claim: 'listed', confidence: 'low',
+      observedAt: hoursAgo(1),
+    },
+  });
+  assert.ok(!out.includes('decided this'), out);
+});
+
+// An empty list with recording off and one with recording on mean opposite
+// things, and the card has to say which.
+test('the card distinguishes nothing blocked from nothing recorded', () => {
+  const off = decisionsCard({ recording: false, decisions: [] });
+  assert.ok(off.includes('Not recording decisions'), off);
+  assert.ok(off.includes('decision_records'), 'the card does not say how to turn it on');
+
+  const on = decisionsCard({ recording: true, decisions: [] });
+  assert.ok(on.includes('Nothing decided yet'), on);
+  assert.ok(!on.includes('Not recording'), on);
+});
+
+test('the card lists decisions when there are some', () => {
+  const out = decisionsCard({ recording: true, decisions: [decision(), decision({ id: 'dec_2' })] });
+  assert.ok(out.includes('data-decision="dec_1"'), out);
+  assert.ok(out.includes('data-decision="dec_2"'), out);
 });

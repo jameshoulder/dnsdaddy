@@ -957,6 +957,96 @@ paths:
         "403": { description: Above the ceiling set in dnsdaddy.yaml }
         "503": { description: Integrations are switched off in dnsdaddy.yaml }
 
+  /api/v1/decisions:
+    get:
+      tags: [Decisions]
+      summary: Recent enforcement decisions
+      description: |
+        One record per enforced or alerted decision, newest first — not one per
+        query. Each carries the policy path that produced it and the
+        explanation that was written at the time.
+
+        `recording` reports whether decision records are switched on at all, so
+        a caller can tell "nothing has been blocked" from "nothing is being
+        recorded". Those look identical in an empty list and mean opposite
+        things.
+      parameters:
+        - { name: domain, in: query, schema: { type: string } }
+        - { name: client, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string, enum: [blocked, allowed] } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+      responses:
+        "200":
+          description: Decisions, without their evidence
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  decisions:
+                    type: array
+                    items: { $ref: "#/components/schemas/Decision" }
+                  recording:
+                    type: boolean
+                    description: Whether decision records are enabled on this deployment.
+                  stats: { $ref: "#/components/schemas/DecisionRecorderStats" }
+
+  /api/v1/decisions/{id}:
+    get:
+      tags: [Decisions]
+      summary: One decision, with the evidence it cited
+      description: |
+        The evidence comes back by the IDs this decision recorded, not by
+        re-reading what is currently known about the domain. A feed that has
+        since dropped the name cannot change why it was blocked last week.
+
+        `contributed` distinguishes evidence that changed the outcome from
+        evidence that was merely on file at the time.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The decision and its evidence
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Decision" }
+        "404": { description: No such decision }
+
+  /api/v1/evidence/domain/{domain}:
+    get:
+      tags: [Decisions]
+      summary: What is known about a domain now
+      description: |
+        Everything on file about a domain, the assessment it currently
+        supports, and the recent decisions about it.
+
+        Deliberately separate from the decision detail: a decision says what
+        was true when it was made, and this says what is true now. Merging them
+        would let the answer to "why was this blocked" drift as feeds refresh.
+
+        Expired evidence is included, because "this was listed until Tuesday"
+        is useful to an investigator — the assessment has already excluded it
+        from the verdict.
+      parameters:
+        - { name: domain, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Evidence and assessment
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subject: { $ref: "#/components/schemas/EvidenceSubject" }
+                  assessment: { $ref: "#/components/schemas/Assessment" }
+                  evidence:
+                    type: array
+                    items: { $ref: "#/components/schemas/Evidence" }
+                  decisions:
+                    type: array
+                    items: { $ref: "#/components/schemas/Decision" }
+        "400": { description: A domain is required }
+
   /api/v1/clients:
     get:
       tags: [Administration]
@@ -2124,6 +2214,146 @@ components:
         cacheMisses: { type: integer }
         cacheSize: { type: integer }
         enrichment: { type: boolean }
+
+    EvidenceSubject:
+      type: object
+      properties:
+        type: { type: string, enum: [domain, ip, device] }
+        value: { type: string, example: evil.example }
+
+    Evidence:
+      type: object
+      description: |
+        One source's claim about one subject at one time. The common shape for
+        feed matches, provider answers, detector findings, local observations
+        and operator decisions.
+      properties:
+        id: { type: string, example: ev_3f9c1a8b2d40 }
+        subject: { $ref: "#/components/schemas/EvidenceSubject" }
+        kind:
+          type: string
+          enum: [feed, provider, detector, local, operator]
+          description: |
+            How much this claim is worth differs by kind in a way it does not
+            differ within one. A feed match means a human curated an indicator;
+            a detector result means a heuristic inferred intent from traffic.
+        source: { type: string, description: Feed ID, provider ID, detector name, or "operator". }
+        sourceName:
+          type: string
+          description: |
+            The display name as it was when this was recorded. Denormalised so
+            that renaming a feed cannot change the explanation of a block that
+            already happened.
+        claim: { type: string, example: listed as malware }
+        category: { type: string, example: malware }
+        confidence:
+          type: string
+          enum: [low, medium, high]
+          description: |
+            Three values, not a number, so that claims from sources with no
+            common scale cannot be averaged into a figure nobody can reproduce.
+        observedAt: { type: string, format: date-time }
+        expiresAt:
+          type: string
+          format: date-time
+          description: Absent when the claim does not expire on its own.
+        detail:
+          type: object
+          additionalProperties: true
+          description: The source's own supporting data, in the source's terms. Untrusted input.
+
+    Assessment:
+      type: object
+      description: |
+        What the evidence supports. Everything here can be re-derived by hand
+        from the evidence list: there is no score and no weighting between
+        sources.
+      properties:
+        subject: { $ref: "#/components/schemas/EvidenceSubject" }
+        verdict: { type: string, enum: [unknown, benign, suspicious, malicious] }
+        confidence:
+          type: string
+          enum: [low, medium, high]
+          description: |
+            The highest confidence among supporting evidence — not an average,
+            and not raised by corroboration.
+        summary: { type: string }
+        categories: { type: array, items: { type: string } }
+        sources:
+          type: array
+          items: { type: string }
+          description: The distinct sources supporting the verdict, so corroboration can be shown as the specific sources that corroborate.
+        corroborated:
+          type: boolean
+          description: Whether more than one independent source supports the verdict.
+        inferenceOnly:
+          type: boolean
+          description: |
+            True when nothing but behavioural inference supports this, so the
+            interface can word it differently. "A heuristic thinks so" and "a
+            curator listed it" are not the same claim.
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/Evidence" }
+
+    Decision:
+      type: object
+      description: One recorded enforcement or alert, and what decided it.
+      properties:
+        id: { type: string, example: dec_7b1e04c9a2f3 }
+        time: { type: string, format: date-time }
+        queryLogId:
+          type: integer
+          description: The query-log row, when one was kept. Absent when query logging is off.
+        subject: { $ref: "#/components/schemas/EvidenceSubject" }
+        action: { type: string, enum: [blocked, allowed] }
+        category: { type: string }
+        rule:
+          type: string
+          enum: [allow_list, block_list, category, reputation]
+          description: Which step of the policy evaluation reached the verdict.
+        policyPath:
+          type: string
+          example: "network:Office → policy:Standard → category:malware → BLOCK"
+        policyId: { type: string }
+        networkId: { type: string }
+        clientIp: { type: string }
+        clientName: { type: string }
+        qtype: { type: string }
+        explanation:
+          type: string
+          description: |
+            The sentence written when the decision was made. Stored rather than
+            regenerated, so it cannot change after the fact.
+          example: Blocked because URLhaus listed as malware.
+        explanationVersion:
+          type: string
+          example: "1.0"
+          description: Moves when the wording rules change, so two explanations can be told apart.
+        evidence:
+          type: array
+          description: Present on the detail endpoint only.
+          items:
+            type: object
+            properties:
+              evidence: { $ref: "#/components/schemas/Evidence" }
+              contributed:
+                type: boolean
+                description: Whether this changed the outcome, as opposed to being on file at the time.
+
+    DecisionRecorderStats:
+      type: object
+      properties:
+        queued: { type: integer }
+        dropped:
+          type: integer
+          description: |
+            Decisions discarded because the queue was full. Dropping is
+            deliberate — recording must never put back-pressure on the DNS
+            path — but a rising count means records are incomplete.
+        written: { type: integer }
+        failed: { type: integer }
+        queueDepth: { type: integer }
 
     DetectorInfo:
       type: object

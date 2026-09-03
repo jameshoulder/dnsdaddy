@@ -40,6 +40,14 @@ func TestShippedExampleConfigParses(t *testing.T) {
 	if cfg.Detection.EvalInterval.D().String() != "30s" {
 		t.Errorf("detection.eval_interval = %v, want 30s", cfg.Detection.EvalInterval)
 	}
+	// Decision records are off in the shipped example. A copy-and-paste must
+	// not start writing a second row per block on somebody's resolver.
+	if cfg.Log.DecisionRecords {
+		t.Error("the shipped example config enables decision records")
+	}
+	if cfg.Log.DecisionRetentionDays != 30 {
+		t.Errorf("log.decision_retention_days = %d, want 30", cfg.Log.DecisionRetentionDays)
+	}
 	if cfg.Log.RetentionDays != 7 {
 		t.Errorf("log.retention_days = %d, want 7", cfg.Log.RetentionDays)
 	}
