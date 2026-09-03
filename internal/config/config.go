@@ -263,12 +263,19 @@ type HTTP struct {
 
 // Logging controls query logging and retention.
 type Logging struct {
-	QueryLog        bool `yaml:"query_log"`
-	LogClientIP     bool `yaml:"log_client_ip"`
-	RetentionDays   int  `yaml:"retention_days"`
-	RollupDays      int  `yaml:"rollup_days"`
-	BufferSize      int  `yaml:"buffer_size"`
-	FlushIntervalMS int  `yaml:"flush_interval_ms"`
+	// DecisionRecords stores why each blocked query was blocked, with the
+	// evidence that was true at the time. Off by default: it is a second
+	// write per blocked query, and a deployment that never opens the
+	// explanation should not pay for one.
+	DecisionRecords bool `yaml:"decision_records"`
+	// DecisionRetentionDays bounds how long those records are kept.
+	DecisionRetentionDays int  `yaml:"decision_retention_days"`
+	QueryLog              bool `yaml:"query_log"`
+	LogClientIP           bool `yaml:"log_client_ip"`
+	RetentionDays         int  `yaml:"retention_days"`
+	RollupDays            int  `yaml:"rollup_days"`
+	BufferSize            int  `yaml:"buffer_size"`
+	FlushIntervalMS       int  `yaml:"flush_interval_ms"`
 }
 
 // Cache controls the answer cache.
@@ -379,12 +386,14 @@ func Default() Config {
 			SecureCookies: "auto",
 		},
 		Log: Logging{
-			QueryLog:        true,
-			LogClientIP:     true,
-			RetentionDays:   7,
-			RollupDays:      90,
-			BufferSize:      8192,
-			FlushIntervalMS: 500,
+			QueryLog:              true,
+			LogClientIP:           true,
+			DecisionRecords:       false,
+			DecisionRetentionDays: 30,
+			RetentionDays:         7,
+			RollupDays:            90,
+			BufferSize:            8192,
+			FlushIntervalMS:       500,
 		},
 		Cache: Cache{
 			Enabled:     true,

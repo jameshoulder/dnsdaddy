@@ -178,6 +178,25 @@ log:
   # 1,000,000 queries a day for 7 days is about 700 MB.
   retention_days: 7
 
+  # Keep a record of WHY each blocked query was blocked: which rule fired,
+  # which feed or provider was behind it, which policy was in force, and the
+  # explanation as it stood at that moment.
+  #
+  # OFF BY DEFAULT. It is one extra write per BLOCKED query — not per query —
+  # so the cost scales with how much you block rather than with your traffic.
+  # Nothing is written on the resolution path: the record is queued and
+  # written by a separate worker, and a full queue drops and counts rather
+  # than making a lookup wait.
+  #
+  # The point of storing it rather than reconstructing it later is that a feed
+  # refreshing must not be able to change why something was blocked last week.
+  decision_records: false
+
+  # How long those records are kept. Longer than the query log by default: the
+  # log answers "what happened", and this answers "why", which is the question
+  # asked weeks after the fact.
+  decision_retention_days: 30
+
   # How long the hourly statistics used by the dashboard and reports are kept.
   # These survive the query-log prune, so charts keep their history.
   rollup_days: 90

@@ -319,3 +319,50 @@ CREATE UNIQUE INDEX IF NOT EXISTS evidence_dedupe_idx
 
 -- Retention sweeps by expiry.
 CREATE INDEX IF NOT EXISTS evidence_expiry_idx ON evidence (expires_at);
+
+-- Decision records: what was decided, and what decided it.
+--
+-- One row per enforced or alerted decision, not per query. Blocks are a small
+-- fraction of traffic, which is what keeps this bounded on a resolver doing
+-- millions of lookups a day.
+--
+-- The client and domain are stored here rather than joined from query_log,
+-- because query logging can be switched off for privacy while an operator
+-- still wants to know why something was blocked. query_log_id is a
+-- convenience when a row does exist, and NULL when it does not.
+CREATE TABLE IF NOT EXISTS decisions (
+    id            TEXT PRIMARY KEY,
+    ts            INTEGER NOT NULL,
+    query_log_id  INTEGER,
+    subject_type  TEXT    NOT NULL DEFAULT 'domain',
+    subject       TEXT    NOT NULL,
+    action        TEXT    NOT NULL,
+    category      TEXT    NOT NULL DEFAULT '',
+    rule          TEXT    NOT NULL DEFAULT '',
+    -- The readable trace: "Office -> Standard -> malware -> BLOCK".
+    policy_path   TEXT    NOT NULL DEFAULT '',
+    policy_id     TEXT    NOT NULL DEFAULT '',
+    network_id    TEXT    NOT NULL DEFAULT '',
+    client_ip     TEXT    NOT NULL DEFAULT '',
+    client_name   TEXT    NOT NULL DEFAULT '',
+    qtype         TEXT    NOT NULL DEFAULT '',
+    -- The sentence shown to a person. Stored rather than regenerated so that
+    -- an explanation cannot change after the fact.
+    explanation   TEXT    NOT NULL DEFAULT '',
+    -- Schema version of the explanation, so a later wording change is visible
+    -- as a version rather than silently rewriting history.
+    explanation_version TEXT NOT NULL DEFAULT '1.0'
+);
+
+CREATE INDEX IF NOT EXISTS decisions_ts_idx ON decisions (ts DESC);
+CREATE INDEX IF NOT EXISTS decisions_subject_idx ON decisions (subject_type, subject, ts DESC);
+
+-- Which evidence a decision cited, and which of it actually changed the
+-- outcome. "Present" and "load-bearing" are different facts and an explanation
+-- that conflates them overstates its own case.
+CREATE TABLE IF NOT EXISTS decision_evidence (
+    decision_id TEXT    NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+    evidence_id TEXT    NOT NULL,
+    contributed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (decision_id, evidence_id)
+);

@@ -1555,16 +1555,155 @@ pages.dashboard = {
   },
 };
 
+/* ---------- decision records: "why was this blocked?" -------------------- */
+
+/*
+ * The read path for a decision record. Everything rendered here came from
+ * storage as it was when the decision was made — the explanation is a stored
+ * sentence, not one this file composes. That is deliberate: a dashboard that
+ * rewrote explanations from current data would quietly change why something
+ * was blocked whenever a feed refreshed.
+ *
+ * Nothing here invents a reason. A decision with no evidence renders as a
+ * decision with no evidence, which is information rather than an embarrassment
+ * to be papered over.
+ */
+
+const CONFIDENCE_LABEL = { low: 'Low', medium: 'Medium', high: 'High' };
+
+// A source's claim, as that source made it. The kind is shown because "a feed
+// listed this" and "a heuristic inferred this" are different claims and an
+// operator has to be able to tell them apart at a glance.
+//
+// Named decisionEvidenceRow rather than evidenceRow because the assurance page
+// already has an evidenceRow with a different signature. Two functions of the
+// same name in one file is not an error in JavaScript — the later definition
+// simply wins — so this collided silently and the decision evidence rendered
+// through the assurance page's renderer. Caught by a dashboard test.
+function decisionEvidenceRow(cited) {
+  const e = cited.evidence || cited;
+  const kind = e.kind || 'unknown';
+  const conf = CONFIDENCE_LABEL[e.confidence] || e.confidence || '';
+  return html`
+    <div class="ev-row">
+      <div class="ev-main">
+        <div class="ev-title">
+          <strong>${e.sourceName || e.source}</strong>
+          <span class="badge">${kind}</span>
+          ${raw(conf ? html`<span class="badge">${conf} confidence</span>` : '')}
+          ${raw(cited.contributed ? html`<span class="badge ok">decided this</span>` : '')}
+        </div>
+        <div class="ev-claim">${e.claim}</div>
+        <div class="rec-meta">
+          ${raw(e.category ? html`<span>${e.category}</span>` : '')}
+          <span>observed ${relTime(e.observedAt)}</span>
+          ${raw(e.expiresAt ? html`<span>expires ${relTime(e.expiresAt)}</span>` : '')}
+        </div>
+      </div>
+    </div>`;
+}
+
+// One decision, collapsed. The evidence is fetched when it is opened rather
+// than with the list: fifty decisions each carrying six evidence rows is a
+// payload nobody reads.
+function decisionRow(d) {
+  return html`
+    <details class="decision" data-decision="${d.id}">
+      <summary class="decision-head">
+        <span class="policy-caret" aria-hidden="true"></span>
+        <span class="decision-title">
+          <strong class="mono">${d.subject && d.subject.value}</strong>
+          <span class="badge ${d.action === 'blocked' ? 'bad' : 'ok'}">${d.action}</span>
+        </span>
+        <span class="decision-when">${relTime(d.time)}</span>
+      </summary>
+      <div class="decision-body">
+        <p class="decision-why">${d.explanation || 'No explanation was recorded for this decision.'}</p>
+        <div class="rec-meta">
+          ${raw(d.clientName || d.clientIp ? html`<span>asked by ${d.clientName || d.clientIp}</span>` : '')}
+          ${raw(d.qtype ? html`<span>${d.qtype}</span>` : '')}
+        </div>
+        ${raw(d.policyPath ? html`<div class="decision-path mono">${d.policyPath}</div>` : '')}
+        <div class="decision-evidence" data-evidence-for="${d.id}">
+          <p class="small muted">Loading the evidence…</p>
+        </div>
+      </div>
+    </details>`;
+}
+
+function decisionsCard(data) {
+  const rows = data.decisions || [];
+  if (!data.recording) {
+    return html`
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Why was this blocked?</h2>
+            <p>Decision records are switched off.</p>
+          </div>
+        </div>
+        ${raw(
+          emptyState(
+            'Not recording decisions',
+            'Set log.decision_records in dnsdaddy.yaml and restart to keep a record of what ' +
+              'decided each block, with the evidence that was true at the time.',
+            { icon: '○' }
+          )
+        )}
+      </div>`;
+  }
+  return html`
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Why was this blocked?</h2>
+          <p>What decided each block, and the evidence behind it as it stood at the time.</p>
+        </div>
+      </div>
+      ${raw(
+        rows.length
+          ? rows.map(decisionRow).join('')
+          : emptyState('Nothing decided yet', 'Blocks will appear here as they happen.', { icon: '○' })
+      )}
+    </div>`;
+}
+
+// mountDecisionCards fetches a decision's evidence the first time it is opened.
+function mountDecisionCards() {
+  $$('[data-decision]').forEach((el) => {
+    el.addEventListener('toggle', async () => {
+      if (!el.open || el.dataset.loaded) return;
+      el.dataset.loaded = '1';
+      const host = $(`[data-evidence-for="${el.dataset.decision}"]`, el);
+      try {
+        const full = await apiGet(`/decisions/${el.dataset.decision}`);
+        const cited = full.evidence || [];
+        host.innerHTML = sanitize(
+          cited.length
+            ? cited.map(decisionEvidenceRow).join('')
+            : html`<p class="small muted">The evidence behind this decision is no longer on file.
+                 The explanation above is what was recorded at the time.</p>`
+        );
+        paintDynamic(host);
+      } catch (err) {
+        host.innerHTML = sanitize(html`<p class="rec-note is-warn">${err.message}</p>`);
+      }
+    });
+  });
+}
+
+
 pages.threats = {
   title: 'Threats',
   subtitle: 'Everything blocked, and why.',
   async render() {
-    const [categories, top, recent, feeds, policies] = await Promise.all([
+    const [categories, top, recent, feeds, policies, decisions] = await Promise.all([
       apiGet('/threats/categories?hours=168'),
       apiGet('/threats/top-domains?days=7&limit=25'),
       apiGet('/queries?action=blocked&limit=50'),
       apiGet('/feeds'),
       apiGet('/policies'),
+      apiGet('/decisions?limit=25'),
     ]);
     this.feeds = feeds;
 
@@ -1591,6 +1730,8 @@ pages.threats = {
         </div>
       </div>
 
+      <div class="section">${raw(decisionsCard(decisions))}</div>
+
       <div class="card">
         <div class="card-head"><div><h2>Recent blocks</h2><p>The last 50 blocked queries, newest first.</p></div></div>
         ${raw(queryTable(recent.queries))}
@@ -1598,6 +1739,7 @@ pages.threats = {
     `;
   },
   async mounted() {
+    mountDecisionCards();
     mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
 
     // Investigate goes to the query log filtered by that domain. That is what
@@ -4180,6 +4322,9 @@ if (typeof module !== 'undefined' && module.exports) {
     claimChip,
     CLAIM_TIERS,
     CATEGORY_COLOURS,
+    decisionRow,
+    decisionsCard,
+    decisionEvidenceRow,
     providerCard,
     providerStatusBadge,
     verificationChip,

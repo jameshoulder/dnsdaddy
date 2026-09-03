@@ -45,6 +45,7 @@ intention, and everything else here is expected to agree with it.
 | [detection/dns-tunnelling.md](detection/dns-tunnelling.md) | The tunnelling detector in depth |
 | [detection/mitre.md](detection/mitre.md) | ATT&CK mapping policy, every mapping, and the ones deliberately left off |
 | [threat-hunting/README.md](threat-hunting/README.md) | Six hunts you can run against telemetry this produces |
+| [decision-records.md](decision-records.md) | Why a domain was blocked: the evidence behind each decision, stored as it stood at the time |
 | [external-apis.md](external-apis.md) | Bring your own intelligence: external reputation and enrichment APIs, and exactly what enabling them changes about your threat model |
 
 ## DNS security concepts
