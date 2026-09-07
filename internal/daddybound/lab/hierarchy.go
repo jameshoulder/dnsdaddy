@@ -76,6 +76,7 @@ type Hierarchy struct {
 
 	byName map[string]*Zone
 	sets   map[setKey][]dns.RR
+	spec   Spec
 }
 
 // Build constructs and signs a hierarchy.
@@ -90,6 +91,7 @@ func Build(spec Spec) (*Hierarchy, error) {
 	h := &Hierarchy{
 		byName: make(map[string]*Zone),
 		sets:   make(map[setKey][]dns.RR),
+		spec:   spec,
 	}
 
 	for i := range spec.Zones {

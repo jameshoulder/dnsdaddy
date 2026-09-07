@@ -101,13 +101,6 @@ type walk struct {
 	rec     *recorder
 	now     time.Time
 	lookups int
-
-	// unprovenGap records that the walk descended past a name where no DS
-	// was returned. Without NSEC or NSEC3 there is no way to tell "this is
-	// not a zone cut" from "this is an insecure delegation", and that
-	// ambiguity has to survive to the end of the walk rather than being
-	// resolved by assumption.
-	unprovenGap bool
 }
 
 // Validate walks the chain of trust for one RRset and returns the verdict
@@ -253,24 +246,40 @@ func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationRes
 
 	dsRecords := dsOf(records)
 	if len(dsRecords) == 0 {
-		// No DS was returned. Two very different situations produce this,
-		// and telling them apart needs a signed proof of non-existence:
+		// No DS was returned, and two different situations produce that:
 		//
-		//   - child is not a zone cut at all, so there is nothing to
-		//     delegate and the walk should simply carry on in the same zone;
-		//   - child is a zone cut with no DS, an insecure delegation, and
-		//     everything below it is unsigned.
+		//   - child is not a zone cut at all, which is true of nearly every
+		//     name a query is ever asked about;
+		//   - child is a zone cut with no DS — an insecure delegation — and
+		//     everything below it is legitimately unsigned.
 		//
-		// v0.1 implements neither NSEC nor NSEC3, so it cannot obtain that
-		// proof and must not pretend either reading. The walk continues, and
-		// the ambiguity is remembered: if the answer later fails to
-		// authenticate, having descended past an unproven gap is the
-		// difference between "this data is broken" and "this validator
-		// cannot say".
-		w.unprovenGap = true
+		// Telling them apart needs a signed proof that no DS exists, which
+		// is NSEC or NSEC3, and v0.1 implements neither. So the walk assumes
+		// the first reading and continues in the same zone, recording where
+		// it did so.
+		//
+		// That assumption is deliberately biased. If it is wrong — if this
+		// really was an insecure delegation — the data below it is unsigned,
+		// the walk finds no signature from a zone it trusts, and the answer
+		// is reported Bogus where a complete validator would report Insecure.
+		// That is a false Bogus: it refuses data that was genuinely fine.
+		//
+		// The bias cannot run the other way. Concluding Secure would require
+		// a signature over the answer made by a key in an apex DNSKEY RRset
+		// this walk has already authenticated, and no attacker below an
+		// insecure delegation has that key. So the cost of the assumption is
+		// paid in refusals, never in false Secures, which is the direction
+		// this engine is willing to be wrong in.
+		//
+		// The earlier design carried this ambiguity to the end of the walk
+		// and downgraded any final failure to Indeterminate. That was worse
+		// in exactly the way that matters: because almost no answer name is
+		// a zone cut, it turned every genuinely tampered answer into "cannot
+		// tell", and an enforcing resolver reading Indeterminate as "allow"
+		// would have accepted forged data.
 		w.rec.skip(ValidationStep{
 			Kind: StepDS, Zone: child,
-			Note: "no DS returned; a proof of non-existence would be needed to tell a zone cut from an insecure delegation",
+			Note: "no DS; treated as not a zone cut, which v0.1 cannot prove without NSEC or NSEC3",
 		}, ReasonDenialNotImplemented)
 		return nil, ValidationResult{}, false
 	}
@@ -382,23 +391,16 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) Vali
 	}
 
 	if reason := w.authenticate(set, sigs, zone.name, zone.keys); reason != ReasonNone {
-		// The one place where the unproven gap changes the verdict.
-		//
-		// Bogus is an accusation, and RFC 4033 §5 only licenses it when
+		// Bogus is an accusation, and RFC 4033 §5 licenses it only where
 		// there is "a trust anchor and a secure delegation indicating that
-		// subsidiary data is signed". If the walk descended past a name
-		// where no DS was returned, that indication is exactly what is
-		// missing: the data may legitimately belong to an unsigned zone
-		// below an insecure delegation, and Daddybound has no proof either
-		// way. Indeterminate is the honest answer, and the reason names the
-		// missing capability rather than blaming the zone.
-		if w.unprovenGap {
-			w.rec.skip(ValidationStep{
-				Kind: StepLimit, Zone: zone.name, Name: qname, RRType: rrtype,
-				Note: "authentication failed below an unproven delegation, so this is not reported as bogus",
-			}, ReasonDenialNotImplemented)
-			return w.rec.indeterminate(ReasonDenialNotImplemented)
-		}
+		// subsidiary data is signed". Reaching this line means both hold:
+		// the walk started at a configured anchor and every delegation it
+		// crossed was authenticated by a DS, so this zone's apex DNSKEY
+		// RRset is trusted and its data is supposed to be signed by it.
+		//
+		// verdict still declines to say Bogus for reasons that describe this
+		// validator rather than the data — an unsupported algorithm, a
+		// digest policy refuses, a limit reached.
 		return w.rec.verdict(reason)
 	}
 

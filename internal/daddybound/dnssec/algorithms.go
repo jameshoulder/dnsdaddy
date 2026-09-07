@@ -159,14 +159,19 @@ func (d DigestType) hash() (crypto.Hash, bool) {
 	return info.Hash, true
 }
 
-// itoa formats a small unsigned number without pulling in strconv for one
-// call site, and without the allocation fmt.Sprintf would make on a path that
-// runs inside trace rendering.
+// itoa formats an unsigned number without the allocation fmt.Sprintf would
+// make on a path that runs inside trace rendering.
+//
+// The buffer is sized for the largest uint rather than for the two callers
+// here, which only ever pass a registry number below 256. A buffer sized to
+// the current callers is correct until someone reuses the helper, and then it
+// is an out-of-range panic in trace rendering — which is to say, in the code
+// that runs while something else is already going wrong.
 func itoa(v uint) string {
 	if v == 0 {
 		return "0"
 	}
-	var buf [3]byte
+	var buf [20]byte
 	i := len(buf)
 	for v > 0 {
 		i--

@@ -330,6 +330,42 @@ RFC 9905 §2 also says of DS records:
 Same shape, same v0.1 limitation as §5.3: Daddybound reports Indeterminate with
 a specific reason where a complete validator would report Insecure.
 
+## 5.5 Delegations v0.1 cannot prove, and the direction it errs in
+
+A chain walk descends from the trust anchor towards the answer, asking at each
+name whether a DS exists there. When none comes back, two situations are
+indistinguishable without a signed proof of non-existence:
+
+- the name is not a zone cut at all — true of nearly every name ever queried;
+- the name *is* a zone cut with no DS, an insecure delegation, and everything
+  below it is legitimately unsigned.
+
+v0.1 implements no denial proofs, so it cannot obtain the evidence that
+separates them. It assumes the first reading, continues in the same zone, and
+records a step in the trace at every point where the assumption was made.
+
+The choice of which way to be wrong is the whole decision, and it is one-sided:
+
+- If the assumption is wrong, the data below is genuinely unsigned, the walk
+  finds no signature from a zone it trusts, and the answer is reported **Bogus
+  where a complete validator would report Insecure**. A false Bogus. It refuses
+  data that was fine.
+- The converse cannot happen. Concluding Secure requires a signature over the
+  answer made by a key in an apex DNSKEY RRset the walk has already
+  authenticated. An attacker operating below an insecure delegation does not
+  have that key, so no assumption made here can manufacture a Secure verdict.
+
+So the cost of the gap is paid in refusals and never in false Secures, which is
+the only direction this engine is willing to be wrong in.
+
+An earlier design carried the ambiguity to the end of the walk and downgraded
+*any* final failure to Indeterminate. That was worse in the way that matters:
+because almost no answer name is a zone cut, it turned every tampered answer
+into "cannot tell", and an enforcing resolver reading Indeterminate as "allow"
+would have accepted forged data. The scenario suite caught it — the tampered
+and corrupt-signature cases both went Indeterminate — which is the argument for
+having written the negative scenarios before trusting the positive one.
+
 ## 6. IANA registries
 
 Reproduced as read on 7 September 2026. Daddybound's tables are checked against
