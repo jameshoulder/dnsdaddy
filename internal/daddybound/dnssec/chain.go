@@ -83,7 +83,9 @@ func New(src Source, cfg Config) *Validator {
 	if cfg.Verifier == nil {
 		cfg.Verifier = StdVerifier()
 	}
-	if len(cfg.Policy.algorithms) == 0 && len(cfg.Policy.digests) == 0 {
+	// Only an unconfigured policy takes the defaults. An explicitly empty
+	// one means "permit nothing" and is honoured — see Policy.Configured.
+	if !cfg.Policy.Configured() {
 		cfg.Policy = DefaultPolicy()
 	}
 	if cfg.Limits.MaxZones == 0 {

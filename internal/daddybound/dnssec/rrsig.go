@@ -66,28 +66,20 @@ func rrsigAdmissible(set RRset, sig *dns.RRSIG, now time.Time) Reason {
 	// the opposite direction, and a signature is valid on both boundary
 	// seconds.
 	//
-	// The RRSIG timestamps are 32-bit seconds since the epoch with the
-	// serial-number arithmetic of RFC 4034 §3.1.5. This uses the same
-	// wrapping comparison as the wire format rather than widening to int64,
-	// because the wrap is the specified behaviour and not an overflow to be
-	// avoided.
-	if !timeGE(uint32(now.Unix()), sig.Inception) {
+	// The RRSIG timestamps are 32-bit seconds since the epoch, compared with
+	// the serial-number arithmetic of RFC 4034 §3.1.5 and RFC 1982. See
+	// serialtime.go: the wrap is the specified behaviour, not an overflow to
+	// be avoided, and widening to int64 would misjudge signatures near the
+	// wrap point.
+	nowSerial := DNSSECTime(now)
+	if !serialGE(nowSerial, sig.Inception) {
 		return ReasonSignatureNotYetValid
 	}
-	if !timeGE(sig.Expiration, uint32(now.Unix())) {
+	if !serialGE(sig.Expiration, nowSerial) {
 		return ReasonSignatureExpired
 	}
 
 	return ReasonNone
-}
-
-// timeGE reports whether a is at or after b under RFC 4034 §3.1.5 serial
-// arithmetic: "the RRSIG RR can be used ... using the modulo 2^32 arithmetic
-// discussed below". Values within 2^31 seconds of each other compare in the
-// intuitive direction; the wrap is what lets timestamps past 2106 keep
-// working.
-func timeGE(a, b uint32) bool {
-	return int32(a-b) >= 0
 }
 
 // verifyRRset verifies an RRset against one signature and one key.

@@ -25,6 +25,7 @@ package refunbound
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/differential"
 )
@@ -50,6 +51,9 @@ type Config struct {
 	Forward string
 	// TrustAnchor is a DS record in presentation form.
 	TrustAnchor string
+	// ValidationTime is the instant the oracle must judge signature validity
+	// against. See the note on the same field in the cgo build.
+	ValidationTime time.Time
 }
 
 var _ = context.Background

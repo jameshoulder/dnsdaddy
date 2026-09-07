@@ -36,19 +36,44 @@ func encodePublicKey(pub crypto.PublicKey) (string, error) {
 // zero octet followed by two more when the exponent needs 256 octets or
 // more, then the exponent, then the modulus.
 func encodeRSA(k *rsa.PublicKey) (string, error) {
-	exponent := big.NewInt(int64(k.E)).Bytes()
+	return encodeRSAWithExponent(k, big.NewInt(int64(k.E)).Bytes())
+}
+
+// encodeRSAWithExponent is encodeRSA with the exponent octets supplied, so a
+// test can drive the length-encoding boundaries that a real key never
+// reaches — RSA public exponents in practice are three octets or fewer, and
+// the two-octet length form would otherwise be written but never exercised.
+func encodeRSAWithExponent(k *rsa.PublicKey, exponent []byte) (string, error) {
 	modulus := k.N.Bytes()
 
-	var out []byte
-	switch {
-	case len(exponent) == 0:
+	// The length is narrowed to its own bounded type before any octet is
+	// written, so the conversions below are provably in range at the point
+	// they happen rather than by reading back up to a switch arm.
+	if len(exponent) == 0 {
 		return "", fmt.Errorf("RSA exponent is zero")
-	case len(exponent) < 256:
-		out = append(out, byte(len(exponent)))
-	case len(exponent) < 65536:
-		out = append(out, 0, byte(len(exponent)>>8), byte(len(exponent)))
-	default:
+	}
+	if len(exponent) > 0xFFFF {
 		return "", fmt.Errorf("RSA exponent is too long for the DNSKEY encoding")
+	}
+	// #nosec G115 -- bounded by the two checks immediately above: the length
+	// is at least 1 and at most 0xFFFF, which is the range RFC 3110 §2's
+	// exponent-length field can express.
+	expLen := uint16(len(exponent))
+
+	var out []byte
+	if expLen < 256 {
+		// #nosec G115 -- the branch condition bounds this below 256.
+		out = append(out, uint8(expLen))
+	} else {
+		// RFC 3110 §2: a leading zero octet introduces the two-octet form,
+		// most significant octet first.
+		//
+		// #nosec G115 -- these two conversions are the big-endian split of a
+		// 16-bit field into its octets. Truncation to eight bits is what
+		// writing a wire format means here, not an overflow: together they
+		// reproduce expLen exactly, which TestRSAExponentLengthRoundTrips
+		// pins at the boundaries.
+		out = append(out, 0, uint8(expLen>>8), uint8(expLen))
 	}
 	out = append(out, exponent...)
 	out = append(out, modulus...)

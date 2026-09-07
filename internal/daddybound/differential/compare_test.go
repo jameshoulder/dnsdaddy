@@ -165,11 +165,10 @@ func TestReportSummaryNamesFailuresAndHidesMatches(t *testing.T) {
 	}
 }
 
-// stubOracle is a Reference that answers from a table, so the runner can be
-// exercised without a C toolchain.
-type stubOracle struct {
-	byScenario map[string]dnssec.ValidationStatus
-}
+// stubOracle is a Reference that answers from the question alone — which is
+// all a real oracle ever sees — so the runner can be exercised without a C
+// toolchain.
+type stubOracle struct{}
 
 func (s stubOracle) Name() string { return "stub oracle" }
 

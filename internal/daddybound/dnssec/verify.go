@@ -14,6 +14,29 @@ import (
 	// through the registry, and an unregistered hash reports Available()
 	// false, which would silently turn a supported algorithm into an
 	// unsupported one.
+	// #nosec G505 -- SHA-1 is retained deliberately, on current standards
+	// evidence, and is never used to create new security material.
+	//
+	// Two obligations require the capability. The IANA "Digest Algorithms"
+	// registry marks digest type 1 (SHA-1) "Implement for DNSSEC
+	// Validation: MUST" and "Use for DNSSEC Validation: RECOMMENDED" — the
+	// MUST NOT beside it applies to *creating* delegations, not to checking
+	// existing ones. And RFC 9905 §2 says of RSASHA1 and
+	// RSASHA1-NSEC3-SHA1: "Validating resolver implementations ... MUST
+	// continue to support validation using these algorithms as they are
+	// diminishing in use but still actively in use for some domains".
+	//
+	// Removing this import would therefore break validation of zones the
+	// standards still require a validator to handle, in exchange for
+	// nothing: Daddybound signs nothing and issues nothing.
+	//
+	// The separate question — whether an operator should *rely* on a SHA-1
+	// signature — is answered elsewhere and answered no. The same RFC 9905
+	// paragraph continues: "Operators of validating resolvers MUST treat
+	// DNSSEC signing algorithms RSASHA1 and RSASHA1-NSEC3-SHA1 as
+	// unsupported", and DefaultPolicy does exactly that. Capability and
+	// permission are different questions here precisely because the
+	// standards impose both at once; see policy.go.
 	_ "crypto/sha1"
 	_ "crypto/sha256"
 	_ "crypto/sha512"

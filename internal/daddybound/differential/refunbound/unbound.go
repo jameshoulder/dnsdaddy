@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/differential"
@@ -33,6 +34,31 @@ type Config struct {
 	Forward string
 	// TrustAnchor is a DS record in presentation form.
 	TrustAnchor string
+
+	// ValidationTime is the instant the oracle judges signature validity
+	// against, and it is required.
+	//
+	// Without it the two validators do not evaluate the same question.
+	// Daddybound takes its notion of the current time from an injected clock
+	// — RFC 4035 §5.3.1 phrases both validity checks against "the
+	// validator's notion of the current time" — while libunbound would use
+	// the wall clock. Signature validity is the one property where that
+	// difference is not academic: a fixture with a fixed validity window is
+	// inside it for one validator and outside it for the other as soon as
+	// the calendar moves past the window, and the comparison then reports a
+	// disagreement about time as a disagreement about correctness.
+	//
+	// That is not hypothetical. Review caught it before it happened: these
+	// fixtures expire on 2027-01-01, and from that date the oracle would
+	// have called the valid scenario expired while Daddybound validated it
+	// at its June 2026 clock — a permanent FALSE_SECURE in CI, caused by
+	// nothing but the date the job ran.
+	//
+	// Moving the expiry further out would have deferred the problem rather
+	// than fixed it. Pinning the oracle removes the wall clock from the
+	// comparison entirely, so the suite means the same thing on any future
+	// date.
+	ValidationTime time.Time
 }
 
 // oracle wraps a libunbound context.
@@ -51,6 +77,13 @@ type oracle struct {
 func New(cfg Config) (differential.Reference, error) {
 	if cfg.Forward == "" {
 		return nil, errors.New("refunbound: no forwarder address")
+	}
+	if cfg.ValidationTime.IsZero() {
+		// Refused rather than defaulted to time.Now(). Defaulting would
+		// silently reintroduce the wall-clock dependence this field exists
+		// to remove, and it would do so in a way that only shows up as a
+		// mysterious CI failure months later.
+		return nil, errors.New("refunbound: no validation time; the oracle must judge signatures at the scenario's instant, not the wall clock")
 	}
 	if cfg.TrustAnchor == "" {
 		// Refused rather than defaulted. libunbound with no anchor validates
@@ -94,6 +127,10 @@ func New(cfg Config) (differential.Reference, error) {
 		// behaviour is asserted directly by a test rather than left to
 		// whether this option happens to be on.
 		{"use-caps-for-id:", "no"},
+		// The clock. YYYYMMDDHHMMSS in UTC, which is what unbound's
+		// val-override-date expects, and the reason it is here rather than
+		// left to the wall clock is set out on Config.ValidationTime.
+		{"val-override-date:", cfg.ValidationTime.UTC().Format("20060102150405")},
 	} {
 		if err := o.setOption(opt[0], opt[1]); err != nil {
 			o.Close()

@@ -214,8 +214,12 @@ func (h *Hierarchy) PermuteRRset(zoneName, owner string, rrtype uint16, perm []i
 // boundaries separately.
 func (h *Hierarchy) ShiftValidity(zoneName, owner string, rrtype uint16, seconds int64) error {
 	return h.mapSignatures(zoneName, owner, rrtype, func(sig *dns.RRSIG) error {
-		sig.Inception = uint32(int64(sig.Inception) + seconds)
-		sig.Expiration = uint32(int64(sig.Expiration) + seconds)
+		// Shifted in the 32-bit space the fields live in, wrapping as
+		// RFC 4034 §3.1.5 specifies, rather than in int64 and truncated
+		// afterwards. A shift that crosses the 2106 rollover is a legal
+		// signature and one worth being able to construct.
+		sig.Inception = shiftSerial(sig.Inception, seconds)
+		sig.Expiration = shiftSerial(sig.Expiration, seconds)
 		return nil
 	})
 }
@@ -602,4 +606,21 @@ func (h *Hierarchy) parentOf(name string) *Zone {
 		}
 	}
 	return nil
+}
+
+// shiftSerial moves a 32-bit DNSSEC timestamp by a number of seconds,
+// wrapping in the field's own arithmetic.
+//
+// The addition is done in uint32 so that the wrap is the specified behaviour
+// rather than a truncation applied to a wider result. A negative shift is
+// added as its two's-complement counterpart, which is the same operation
+// modulo 2^32.
+func shiftSerial(base uint32, seconds int64) uint32 {
+	// #nosec G115 -- deliberate modular arithmetic on a 32-bit protocol
+	// field. RFC 4034 §3.1.5 defines RRSIG inception and expiration as a
+	// wrapping 32-bit seconds count compared with RFC 1982 serial
+	// arithmetic, so a shift that crosses the 2106 rollover produces a legal
+	// signature rather than a corrupt one. Reducing modulo 2^32 first keeps
+	// the addition inside the field's own arithmetic.
+	return base + uint32(seconds%(1<<32))
 }

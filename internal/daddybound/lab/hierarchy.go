@@ -58,6 +58,11 @@ type Zone struct {
 	sets map[setKey][]dns.RR
 }
 
+// maxDNSLabels is the most labels a encodable DNS name can have: RFC 1035
+// §2.3.4 caps a name at 255 octets and each label costs at least two (a
+// length octet and a character), leaving 127 plus the root.
+const maxDNSLabels = 127
+
 type setKey struct {
 	name   string
 	rrtype uint16
@@ -208,6 +213,20 @@ func (z *Zone) addSigned(spec Spec, rrset []dns.RR) error {
 		return nil
 	}
 	h := rrset[0].Header()
+
+	// RFC 4034 §3.1.3 gives the Labels field one octet. A DNS name cannot
+	// carry more than 127 labels — RFC 1035 §2.3.4 caps a name at 255 octets
+	// and every label costs at least two — so the conversion below cannot
+	// overflow for any name that could be encoded at all. The bound is
+	// checked rather than asserted in a comment, because this signs the
+	// fixtures every other test depends on and a silently truncated Labels
+	// field would produce signatures that fail for a reason pointing
+	// somewhere else entirely.
+	labels := dns.CountLabel(h.Name)
+	if labels < 0 || labels > maxDNSLabels {
+		return fmt.Errorf("lab: %s has %d labels, which cannot be expressed in an RRSIG Labels field", h.Name, labels)
+	}
+
 	sig := &dns.RRSIG{
 		Hdr: dns.RR_Header{
 			Name: dns.CanonicalName(h.Name), Rrtype: dns.TypeRRSIG,
@@ -215,12 +234,15 @@ func (z *Zone) addSigned(spec Spec, rrset []dns.RR) error {
 		},
 		TypeCovered: h.Rrtype,
 		Algorithm:   uint8(z.Algorithm),
-		Labels:      uint8(dns.CountLabel(h.Name)),
+		Labels:      uint8(labels),
 		OrigTtl:     h.Ttl,
-		Inception:   uint32(spec.Inception.Unix()),
-		Expiration:  uint32(spec.Expiration.Unix()),
-		KeyTag:      z.Key.KeyTag(),
-		SignerName:  z.Name,
+		// The 32-bit wrapping conversion RFC 4034 §3.1.5 specifies, shared
+		// with the validator so the lab and the engine cannot disagree about
+		// what a timestamp means.
+		Inception:  dnssec.DNSSECTime(spec.Inception),
+		Expiration: dnssec.DNSSECTime(spec.Expiration),
+		KeyTag:     z.Key.KeyTag(),
+		SignerName: z.Name,
 	}
 	if err := sig.Sign(z.Signer, rrset); err != nil {
 		return fmt.Errorf("lab: signing %s %s: %w", h.Name, dns.TypeToString[h.Rrtype], err)

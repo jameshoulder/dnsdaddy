@@ -47,8 +47,9 @@ func runScenario(t *testing.T, sc lab.Scenario) {
 	defer srv.Close() //nolint:errcheck // the assertions below are the outcome
 
 	oracle, err := refunbound.New(refunbound.Config{
-		Forward:     srv.Addr(),
-		TrustAnchor: h.AnchorDS(),
+		Forward:        srv.Addr(),
+		TrustAnchor:    h.AnchorDS(),
+		ValidationTime: sc.At,
 	})
 	if err != nil {
 		t.Fatalf("oracle: %v", err)

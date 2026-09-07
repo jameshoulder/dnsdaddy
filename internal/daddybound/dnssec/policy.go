@@ -25,6 +25,23 @@ import "sort"
 type Policy struct {
 	algorithms map[Algorithm]bool
 	digests    map[DigestType]bool
+
+	// configured records that this policy came from a constructor rather
+	// than from a struct literal, so that "nobody configured a policy" and
+	// "somebody configured a policy that permits nothing" stay
+	// distinguishable.
+	//
+	// An explicit flag rather than inferring it from the maps. Both a zero
+	// value and a deliberate deny-all have length zero, so length cannot
+	// tell them apart — and a caller who has disabled every algorithm and
+	// silently receives the defaults instead believes they have turned
+	// something off when they have not. That is the wrong direction for a
+	// security control to fail in.
+	//
+	// A nil-versus-empty map check would also work and is a landmine: it
+	// reads as an accident, and the first person to "tidy" it by allocating
+	// the maps eagerly reintroduces the bug.
+	configured bool
 }
 
 // DefaultPolicy is what Daddybound relies on unless told otherwise.
@@ -46,6 +63,7 @@ type Policy struct {
 // the algorithm policy above already refuses.
 func DefaultPolicy() Policy {
 	return Policy{
+		configured: true,
 		algorithms: map[Algorithm]bool{
 			AlgRSASHA256:       true,
 			AlgRSASHA512:       true,
@@ -71,6 +89,7 @@ func DefaultPolicy() Policy {
 // is where they are combined, and it names which of the two failed.
 func NewPolicy(algs []Algorithm, digestTypes []DigestType) Policy {
 	p := Policy{
+		configured: true,
 		algorithms: make(map[Algorithm]bool, len(algs)),
 		digests:    make(map[DigestType]bool, len(digestTypes)),
 	}
@@ -82,6 +101,13 @@ func NewPolicy(algs []Algorithm, digestTypes []DigestType) Policy {
 	}
 	return p
 }
+
+// Configured reports whether this policy was built by a constructor.
+//
+// The zero value is not a deny-all policy; it is the absence of one, and a
+// Validator given it applies the defaults. NewPolicy(nil, nil) *is* a
+// deny-all policy and is honoured as written.
+func (p Policy) Configured() bool { return p.configured }
 
 // AllowsAlgorithm reports whether policy permits relying on a.
 func (p Policy) AllowsAlgorithm(a Algorithm) bool { return p.algorithms[a] }
