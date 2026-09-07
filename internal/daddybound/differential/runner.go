@@ -19,6 +19,12 @@ func Run(ctx context.Context, oracle Reference, scenarios []lab.Scenario) (Repor
 	report := Report{Oracle: oracle.Name()}
 
 	for _, sc := range scenarios {
+		if sc.NoOracle != "" {
+			// Not comparable at all — see lab.Scenario.NoOracle. Recording a
+			// comparison here would mean recording a reference error and
+			// then excusing it.
+			continue
+		}
 		c, err := runOne(ctx, oracle, sc)
 		if err != nil {
 			return report, fmt.Errorf("scenario %s: %w", sc.Name, err)
@@ -29,7 +35,7 @@ func Run(ctx context.Context, oracle Reference, scenarios []lab.Scenario) (Repor
 }
 
 func runOne(ctx context.Context, oracle Reference, sc lab.Scenario) (Comparison, error) {
-	h, err := sc.Build()
+	h, err := sc.Build(lab.StandardSpec())
 	if err != nil {
 		return Comparison{}, fmt.Errorf("build: %w", err)
 	}

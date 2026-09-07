@@ -281,8 +281,8 @@ It implements the DNS and DNSSEC protocol and trust logic itself, from the
 standards, using established cryptographic primitives from Go's standard
 library for the mathematics and `github.com/miekg/dns` for wire format. No
 validating resolver implementation produces a Daddybound verdict; libunbound
-appears only as a differential test oracle, behind a build tag no shipped
-build sets.
+and BIND's `delv` appear only as differential test oracles, neither reachable
+from a shipped build.
 
 See **[docs/daddybound/](docs/daddybound/README.md)**.
 

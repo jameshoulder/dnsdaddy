@@ -191,8 +191,24 @@ func TestRunClassifiesEveryScenario(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if len(report.Comparisons) != len(scenarios) {
-		t.Fatalf("compared %d scenarios, want %d", len(report.Comparisons), len(scenarios))
+
+	// Every scenario that can be put to an external validator is compared.
+	// The ones that cannot — see lab.Scenario.NoOracle — are skipped rather
+	// than compared and then excused, and there must be at least one of
+	// each or this assertion is measuring nothing.
+	comparable, skipped := 0, 0
+	for _, sc := range scenarios {
+		if sc.NoOracle != "" {
+			skipped++
+			continue
+		}
+		comparable++
+	}
+	if comparable == 0 || skipped == 0 {
+		t.Fatalf("expected both comparable and non-comparable scenarios, got %d and %d", comparable, skipped)
+	}
+	if len(report.Comparisons) != comparable {
+		t.Fatalf("compared %d scenarios, want %d", len(report.Comparisons), comparable)
 	}
 	if report.Oracle != "stub oracle" {
 		t.Errorf("oracle = %q", report.Oracle)

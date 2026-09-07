@@ -26,8 +26,9 @@ implement wire serialisation itself.
 | What each outcome means, and what it is entitled to claim | |
 
 No validating resolver implementation produces a Daddybound verdict.
-libunbound appears in this repository only as a differential test oracle,
-compiled behind a build tag that no shipped build sets. See
+libunbound and BIND's `delv` appear in this repository only as differential
+test oracles — the first behind a build tag no shipped build sets, the second
+invoked as a subprocess from a test and never linked. See
 [validation-lab.md](validation-lab.md).
 
 Every rule Daddybound enforces is traced to a sentence in a standard.
@@ -46,7 +47,8 @@ with no identifier is either a bug or an invention.
 - Produces a deterministic, structured trace of every step, with typed
   reasons rather than English strings.
 - Runs a deterministic signed laboratory offline, and compares its verdicts
-  against libunbound over the same served records.
+  against two independent reference validators — libunbound and BIND's
+  `delv` — over the same served records.
 
 ## What v0.1 does not do
 

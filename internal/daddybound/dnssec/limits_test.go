@@ -117,7 +117,7 @@ func TestTraceIsDeterministic(t *testing.T) {
 
 func traceOnce(t *testing.T, sc lab.Scenario) string {
 	t.Helper()
-	h, err := sc.Build()
+	h, err := sc.Build(lab.StandardSpec())
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

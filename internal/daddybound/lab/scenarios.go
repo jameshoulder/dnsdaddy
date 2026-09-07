@@ -41,8 +41,38 @@ type Scenario struct {
 	// cannot quiet the one failure that matters.
 	KnownGap string
 
-	// Build produces the hierarchy for this scenario.
-	Build func() (*Hierarchy, error)
+	// NoOracle, when non-empty, says why this scenario cannot be posed to an
+	// external validator at all, and is not the same thing as a KnownGap.
+	//
+	// A known gap is a disagreement with a reason. This is the absence of a
+	// question: some scenarios test a property of Daddybound's own
+	// configuration rather than of any data — what it does when no trust
+	// anchor covers a name, for instance — and there is nothing for another
+	// validator to agree or disagree with. Comparing anyway produces a
+	// reference error, which would then have to be excused, and excusing
+	// reference errors is how a comparison suite stops meaning anything.
+	NoOracle string
+
+	// Build produces the hierarchy for this scenario from a base
+	// specification, so the same logical scenario can be built against fixed
+	// instants or around a wall-clock moment. Pass StandardSpec() for the
+	// former.
+	Build func(Spec) (*Hierarchy, error)
+}
+
+// Shifted returns the same scenario moved by d: every signature window and
+// the instant it is validated at.
+//
+// A reference validator that cannot be told what time it is has to be given
+// fixtures that are current when it runs. Shifting rather than regenerating
+// keeps the scenario identical in every other respect, so a disagreement
+// remains a disagreement about validation and not about the fixtures.
+func (s Scenario) Shifted(d time.Duration) Scenario {
+	out := s
+	out.At = s.At.Add(d)
+	inner := s.Build
+	out.Build = func(spec Spec) (*Hierarchy, error) { return inner(spec.Shifted(d)) }
+	return out
 }
 
 // Scenarios returns the full set.
@@ -61,7 +91,7 @@ func Scenarios() []Scenario {
 			At:     Now(),
 			Expect: dnssec.StatusSecure,
 			Reason: dnssec.ReasonVerified,
-			Build:  Standard,
+			Build:  Build,
 		},
 		{
 			Name:   "multi-record-rrset",
@@ -71,7 +101,7 @@ func Scenarios() []Scenario {
 			At:     Now(),
 			Expect: dnssec.StatusSecure,
 			Reason: dnssec.ReasonVerified,
-			Build:  Standard,
+			Build:  Build,
 		},
 		{
 			Name:   "tampered-answer",
@@ -221,8 +251,7 @@ func Scenarios() []Scenario {
 			At:       Now(),
 			Expect:   dnssec.StatusBogus,
 			Reason:   dnssec.ReasonSignerNotZone,
-			KnownGap: "libunbound in forwarding mode accepts this and Daddybound does not. RFC 4035 section 5.3.1 is unambiguous -- the signer's name MUST be the zone that contains the RRset -- and example.dnsdaddylab. is a zone here, delegated with a DS. A forwarder cannot establish that cut for itself: it takes the zone from the answer's own signer name, which is the field under attack. Daddybound's chain walk crosses the delegation and so knows better. This is a limitation of the oracle's configuration, not a defect in either validator.",
-			Build: mutated(func(h *Hierarchy) error {
+			KnownGap: "UNRESOLVED, and deliberately recorded as such rather than as a Daddybound win. Two independent validators accept this answer and Daddybound refuses it: libunbound 1.19.2 and BIND delv 9.18.39. The first was initially dismissed as a forwarder that cannot see zone cuts. That explanation does not survive the second: delv performs its own chain walk and does fetch example.dnsdaddylab/DS in the valid scenario, yet still accepts an ancestor-signed answer here, because both take the containing zone from the RRSIG signer name rather than re-deriving the cut for every RRset. RFC 4035 section 5.3.1 says the signer's name MUST be the zone that contains the RRset, which is the letter Daddybound follows. Against that reading: the ancestor already publishes the child's DS and can take the child over by replacing the delegation, so accepting its signature grants no authority it lacks -- a plausible reason two mature implementations do not spend a query checking. Daddybound keeps the strict behaviour because it errs towards refusal and cannot produce a false Secure, and the question stays open.", Build: mutated(func(h *Hierarchy) error {
 				return h.SignWithForeignZone(LeafZone, AnswerName, dns.TypeA, MiddleZone)
 			}),
 		},
@@ -277,9 +306,9 @@ func Scenarios() []Scenario {
 			At:       Now(),
 			Expect:   dnssec.StatusIndeterminate,
 			Reason:   dnssec.ReasonNoTrustAnchor,
-			KnownGap: "the anchor set is narrowed for Daddybound only; a reference validator configured with the lab anchor still has one for this name.",
-			Build: func() (*Hierarchy, error) {
-				h, err := Standard()
+			NoOracle: "this narrows Daddybound's own anchor set and asks about a name the hierarchy does not serve. An external validator is configured from the same hierarchy, so it still holds an anchor, and it has no records to reason about either way. The property under test belongs to Daddybound's configuration rather than to any data, so there is no question to put to a second validator.",
+			Build: func(spec Spec) (*Hierarchy, error) {
+				h, err := Build(spec)
 				if err != nil {
 					return nil, err
 				}
@@ -294,9 +323,9 @@ func Scenarios() []Scenario {
 }
 
 // mutated adapts a mutation into a Scenario's Build function.
-func mutated(apply func(*Hierarchy) error) func() (*Hierarchy, error) {
-	return func() (*Hierarchy, error) {
-		h, err := Standard()
+func mutated(apply func(*Hierarchy) error) func(Spec) (*Hierarchy, error) {
+	return func(spec Spec) (*Hierarchy, error) {
+		h, err := Build(spec)
 		if err != nil {
 			return nil, err
 		}

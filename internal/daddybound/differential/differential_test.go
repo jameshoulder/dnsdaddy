@@ -28,6 +28,9 @@ func TestAgainstLibunbound(t *testing.T) {
 	// built per scenario too.
 	for _, sc := range lab.Scenarios() {
 		t.Run(sc.Name, func(t *testing.T) {
+			if sc.NoOracle != "" {
+				t.Skip(sc.NoOracle)
+			}
 			runScenario(t, sc)
 		})
 	}
@@ -36,7 +39,7 @@ func TestAgainstLibunbound(t *testing.T) {
 func runScenario(t *testing.T, sc lab.Scenario) {
 	t.Helper()
 
-	h, err := sc.Build()
+	h, err := sc.Build(lab.StandardSpec())
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

@@ -52,10 +52,12 @@ appears only as a differential test oracle behind a build tag that no shipped
 build sets, so `CGO_ENABLED=0` and the static cross-compiled binaries are
 unaffected.
 
-Verdicts are compared against libunbound across fifteen laboratory scenarios:
-twelve match, three are documented gaps, and there are no false secures — the
-failure class where a reference validator says data is forged and Daddybound
-says it is fine.
+Verdicts are compared against two independent reference validators —
+libunbound and BIND's `delv` — across eighteen laboratory scenarios, with no
+false secures against either. That is the failure class where a reference
+validator says data is forged and Daddybound says it is fine. Three
+disagreements are documented gaps, and one is recorded as an open question
+rather than resolved in Daddybound's favour.
 
 What it deliberately does not do: no NSEC or NSEC3, so no authenticated
 NXDOMAIN or NODATA and no wildcard denial; no recursive resolution; no

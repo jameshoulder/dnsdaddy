@@ -200,7 +200,7 @@ func daddyboundValidate(args []string) error {
 	failures := 0
 
 	for _, sc := range scenarios {
-		h, err := sc.Build()
+		h, err := sc.Build(lab.StandardSpec())
 		if err != nil {
 			return fmt.Errorf("scenario %s: %w", sc.Name, err)
 		}

@@ -22,6 +22,31 @@ type Server struct {
 	addr string
 
 	closeOnce sync.Once
+
+	// mu guards queries, which records what a validator actually asked for.
+	//
+	// It is here because "what does this validator know about zone cuts" is
+	// otherwise a matter of opinion. A DNSSEC disagreement between two
+	// implementations usually turns on what each one looked up, and the only
+	// way to settle that is to look at the queries rather than to reason
+	// about what they ought to have sent.
+	mu      sync.Mutex
+	queries []Query
+}
+
+// Query is one question a validator asked.
+type Query struct {
+	Name   string
+	Type   uint16
+	DOBit  bool
+	Rcode  int
+	Answer int
+}
+
+// String renders a query for a test log.
+func (q Query) String() string {
+	return fmt.Sprintf("%-34s %-7s -> %s (%d records)",
+		q.Name, dns.TypeToString[q.Type], dns.RcodeToString[q.Rcode], q.Answer)
 }
 
 // StartServer binds UDP and TCP on an ephemeral loopback port and serves h.
@@ -42,12 +67,12 @@ func (h *Hierarchy) StartServer() (*Server, error) {
 		return nil, fmt.Errorf("lab: listen tcp on %s: %w", addr, err)
 	}
 
-	handler := dns.HandlerFunc(h.answer)
-	s := &Server{
-		udp:  &dns.Server{PacketConn: pc, Handler: handler},
-		tcp:  &dns.Server{Listener: ln, Handler: handler},
-		addr: addr,
-	}
+	s := &Server{addr: addr}
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		h.answer(s, w, req)
+	})
+	s.udp = &dns.Server{PacketConn: pc, Handler: handler}
+	s.tcp = &dns.Server{Listener: ln, Handler: handler}
 
 	if err := s.startBoth(); err != nil {
 		_ = s.Close()
@@ -73,6 +98,30 @@ func (s *Server) startBoth() error {
 // Addr is the host:port both listeners share.
 func (s *Server) Addr() string { return s.addr }
 
+// Queries returns everything asked of this server so far, in order.
+func (s *Server) Queries() []Query {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Query(nil), s.queries...)
+}
+
+// Asked reports whether a validator looked up one specific (name, type).
+func (s *Server) Asked(name string, rrtype uint16) bool {
+	want := dns.CanonicalName(name)
+	for _, q := range s.Queries() {
+		if q.Name == want && q.Type == rrtype {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) record(q Query) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queries = append(s.queries, q)
+}
+
 // Close shuts both listeners down. Safe to call more than once.
 func (s *Server) Close() error {
 	var err error
@@ -91,8 +140,8 @@ func (s *Server) Close() error {
 	return err
 }
 
-// answer serves one query from the hierarchy.
-func (h *Hierarchy) answer(w dns.ResponseWriter, req *dns.Msg) {
+// answer serves one query from the hierarchy, recording what was asked.
+func (h *Hierarchy) answer(s *Server, w dns.ResponseWriter, req *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(req)
 	m.Authoritative = true
@@ -131,6 +180,7 @@ func (h *Hierarchy) answer(w dns.ResponseWriter, req *dns.Msg) {
 
 	if len(records) > 0 {
 		m.Answer = filterSignatures(records, wantDNSSEC)
+		s.record(Query{Name: name, Type: q.Qtype, DOBit: wantDNSSEC, Rcode: m.Rcode, Answer: len(m.Answer)})
 		writeOrServfail(w, m)
 		return
 	}
@@ -148,6 +198,7 @@ func (h *Hierarchy) answer(w dns.ResponseWriter, req *dns.Msg) {
 	if !h.nameExists(name) {
 		m.Rcode = dns.RcodeNameError
 	}
+	s.record(Query{Name: name, Type: q.Qtype, DOBit: wantDNSSEC, Rcode: m.Rcode, Answer: 0})
 	writeOrServfail(w, m)
 }
 

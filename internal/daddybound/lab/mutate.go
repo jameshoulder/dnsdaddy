@@ -92,6 +92,41 @@ func (h *Hierarchy) CorruptSignature(zoneName, owner string, rrtype uint16) erro
 	})
 }
 
+// CorruptSignatureAt corrupts the nth signature over an RRset, leaving any
+// others intact.
+//
+// Needed to build the rollover shape: several signatures over one RRset where
+// some are broken and at least one is good.
+func (h *Hierarchy) CorruptSignatureAt(zoneName, owner string, rrtype uint16, n int) error {
+	records := h.Set(zoneName, owner, rrtype)
+	seen := 0
+	corrupted := false
+	for i, rr := range records {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok {
+			continue
+		}
+		if seen != n {
+			seen++
+			continue
+		}
+		c := dns.Copy(sig).(*dns.RRSIG)
+		raw, err := base64.StdEncoding.DecodeString(c.Signature)
+		if err != nil || len(raw) == 0 {
+			return fmt.Errorf("lab: signature %d on %s %s is not decodable", n, owner, dns.TypeToString[rrtype])
+		}
+		raw[len(raw)/2] ^= 0x01
+		c.Signature = base64.StdEncoding.EncodeToString(raw)
+		records[i] = c
+		corrupted = true
+		break
+	}
+	if !corrupted {
+		return fmt.Errorf("lab: %s %s has no signature %d", owner, dns.TypeToString[rrtype], n)
+	}
+	return h.Replace(zoneName, owner, rrtype, records)
+}
+
 // MalformSignature empties the signature field, exercising the parsing path
 // rather than the cryptographic one.
 //
@@ -148,7 +183,33 @@ func (h *Hierarchy) AddSignature(zoneName, owner string, rrtype uint16, mutate f
 		}
 	}
 	if template == nil {
-		return fmt.Errorf("lab: %s %s carries no signature to derive from", owner, dns.TypeToString[rrtype])
+		// No signature to copy — which is the interesting case, because an
+		// RRset stripped of its signature and given an unusable one instead
+		// is exactly the downgrade attack. The template is synthesised from
+		// the zone rather than refused, so that scenario can be built.
+		z := h.Zone(zoneName)
+		if z == nil {
+			return fmt.Errorf("lab: no zone %s", zoneName)
+		}
+		hdr := records[0].Header()
+		template = &dns.RRSIG{
+			Hdr: dns.RR_Header{
+				Name: dns.CanonicalName(hdr.Name), Rrtype: dns.TypeRRSIG,
+				Class: hdr.Class, Ttl: hdr.Ttl,
+			},
+			TypeCovered: rrtype,
+			Algorithm:   uint8(z.Algorithm),
+			Labels:      uint8(dns.CountLabel(hdr.Name)), // #nosec G115 -- bounded by maxDNSLabels; see addSigned
+			OrigTtl:     hdr.Ttl,
+			Inception:   dnssec.DNSSECTime(h.spec.Inception),
+			Expiration:  dnssec.DNSSECTime(h.spec.Expiration),
+			KeyTag:      z.Key.KeyTag(),
+			SignerName:  z.Name,
+			// Well-formed base64 of the right length for the zone's
+			// algorithm, and not a valid signature. An attacker's would not
+			// be either.
+			Signature: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+		}
 	}
 
 	extra := dns.Copy(template).(*dns.RRSIG)

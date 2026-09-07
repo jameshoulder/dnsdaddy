@@ -51,7 +51,7 @@ test-ui: ## Run the dashboard's JavaScript tests (needs node; no packages to ins
 	node --test internal/web/app.test.js
 
 .PHONY: test-daddybound
-test-daddybound: ## Compare Daddybound against libunbound (needs libunbound-dev and cgo)
+test-daddybound: ## Compare Daddybound against libunbound and BIND delv (needs libunbound-dev, bind9-dnsutils, cgo)
 	CGO_ENABLED=1 go test -tags daddybound_unbound -v ./internal/daddybound/...
 
 .PHONY: fuzz-daddybound

@@ -88,6 +88,6 @@ validator. That gate is evidence, not features:
 
 The current answer is in the pull request that introduced v0.1 and in
 [validation-lab.md](validation-lab.md) under "What this evidence does not
-cover". In short: fifteen hand-built scenarios, one oracle, one configuration,
-one algorithm end to end, and no real zone ever validated. That is enough to
-justify continuing. It is nowhere near enough to enforce anything.
+cover". In short: eighteen hand-built scenarios, two oracles, one algorithm
+end to end, and no real zone ever validated. That is enough to justify
+continuing. It is nowhere near enough to enforce anything.

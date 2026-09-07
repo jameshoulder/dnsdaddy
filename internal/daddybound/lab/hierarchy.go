@@ -43,6 +43,21 @@ type Spec struct {
 	Seed string
 }
 
+// Shifted returns the same specification with every signature validity
+// window moved by d.
+//
+// It exists so one set of logical scenarios can be built either against fixed
+// instants — which keeps traces and signatures reproducible — or around a
+// wall-clock moment, which is what a reference validator with no clock
+// override needs. The zones, keys and mutations are identical either way;
+// only the timestamps move, so a scenario means the same thing in both.
+func (s Spec) Shifted(d time.Duration) Spec {
+	out := s
+	out.Inception = s.Inception.Add(d)
+	out.Expiration = s.Expiration.Add(d)
+	return out
+}
+
 // Zone is one built and signed zone.
 type Zone struct {
 	Name       string

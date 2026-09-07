@@ -14,7 +14,7 @@ import (
 func TestScenarios(t *testing.T) {
 	for _, sc := range lab.Scenarios() {
 		t.Run(sc.Name, func(t *testing.T) {
-			h, err := sc.Build()
+			h, err := sc.Build(lab.StandardSpec())
 			if err != nil {
 				t.Fatalf("build %s: %v", sc.Name, err)
 			}

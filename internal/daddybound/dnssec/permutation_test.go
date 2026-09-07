@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -306,3 +307,178 @@ func TestRRsetPermutationDoesNotChangeTheVerdict(t *testing.T) {
 		}
 	}
 }
+
+// Failure monotonicity, stated precisely because a loose version of it would
+// be wrong.
+//
+// The property is NOT "adding records can never improve a verdict". That is
+// false and must stay false: DNSSEC is deliberately multi-path, and adding a
+// valid signature, or a DS with a usable digest, is exactly how a zone in the
+// middle of a key or algorithm rollover keeps validating. RFC 6840 §5.4 says
+// so directly — "a resolver SHOULD accept any valid RRSIG as sufficient".
+//
+// The property that must hold is narrower:
+//
+//	Adding a record that this validator cannot act on must not change the
+//	verdict at all.
+//
+// "Cannot act on" means an RRSIG whose algorithm is absent from the zone's
+// DNSKEY RRset (RFC 6840 §5.12 requires it be disregarded) or a DS whose
+// digest type is unusable (RFC 6840 §5.2 requires it be set aside). Such a
+// record carries no information about the data, so it cannot make a verdict
+// better and — the direction that matters — it cannot make a definitive
+// Bogus into an allow-prone Indeterminate.
+//
+// Both defects the review found were violations of exactly this.
+func TestUnusableRecordsDoNotChangeTheVerdict(t *testing.T) {
+	baseline := func(t *testing.T, mutate func(*lab.Hierarchy) error) dnssec.ValidationResult {
+		t.Helper()
+		h, err := lab.Standard()
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		if mutate != nil {
+			if err := mutate(h); err != nil {
+				t.Fatalf("mutate: %v", err)
+			}
+		}
+		v, err := h.Validator(lab.Now())
+		if err != nil {
+			t.Fatalf("validator: %v", err)
+		}
+		return v.Validate(context.Background(), lab.AnswerName, dns.TypeA)
+	}
+
+	// The starting points: one healthy, one definitively broken.
+	starts := []struct {
+		name   string
+		mutate func(*lab.Hierarchy) error
+	}{
+		{"a correctly signed answer", nil},
+		{"a tampered answer", func(h *lab.Hierarchy) error {
+			return h.TamperData(lab.LeafZone, lab.AnswerName, dns.TypeA, func(rr dns.RR) {
+				rr.(*dns.A).A = netIPv4(198, 51, 100, 66)
+			})
+		}},
+		{"a corrupted delegation digest", func(h *lab.Hierarchy) error {
+			return h.CorruptDS(lab.LeafZone)
+		}},
+		{
+			// The start state that isolates RFC 6840 §5.12 from the reason
+			// ranking. An answer with no signature at all reports
+			// missing_rrsig, which ranks *below* an algorithm-support
+			// reason — so if an unusable RRSIG were allowed to contribute a
+			// reason, it would win, and the verdict would slide from Bogus
+			// to Indeterminate.
+			//
+			// Every other start state here is already protected by the
+			// ranking alone, which is why removing the §5.12 disregard
+			// leaves them unchanged. This one is not, and it is the exact
+			// downgrade attack the review found.
+			"an answer with its signature stripped",
+			func(h *lab.Hierarchy) error {
+				return h.RemoveSignatures(lab.LeafZone, lab.AnswerName, dns.TypeA)
+			},
+		},
+	}
+
+	// Records a validator must disregard or set aside.
+	additions := []struct {
+		name string
+		add  func(*lab.Hierarchy) error
+	}{
+		{"an RRSIG naming an algorithm absent from the DNSKEY RRset", func(h *lab.Hierarchy) error {
+			return h.AddSignature(lab.LeafZone, lab.AnswerName, dns.TypeA, func(s *dns.RRSIG) {
+				s.Algorithm = uint8(dnssec.AlgED448)
+			})
+		}},
+		{"an RRSIG naming an algorithm policy refuses and the zone does not use", func(h *lab.Hierarchy) error {
+			return h.AddSignature(lab.LeafZone, lab.AnswerName, dns.TypeA, func(s *dns.RRSIG) {
+				s.Algorithm = uint8(dnssec.AlgRSASHA1)
+			})
+		}},
+		{"a DS with a digest type this build cannot compute", func(h *lab.Hierarchy) error {
+			existing := h.Set(lab.MiddleZone, lab.LeafZone, dns.TypeDS)
+			var dsSet []*dns.DS
+			for _, rr := range existing {
+				if ds, ok := rr.(*dns.DS); ok {
+					dsSet = append(dsSet, ds)
+				}
+			}
+			extra, err := h.DSFor(lab.LeafZone, dnssec.DigestGOST94, false)
+			if err != nil {
+				return err
+			}
+			return h.SetDSRRset(lab.LeafZone, append(dsSet, extra))
+		}},
+	}
+
+	for _, start := range starts {
+		t.Run(start.name, func(t *testing.T) {
+			before := baseline(t, start.mutate)
+
+			for _, add := range additions {
+				t.Run(add.name, func(t *testing.T) {
+					after := baseline(t, func(h *lab.Hierarchy) error {
+						if start.mutate != nil {
+							if err := start.mutate(h); err != nil {
+								return err
+							}
+						}
+						return add.add(h)
+					})
+
+					// The status, and only the status.
+					//
+					// The reason may legitimately sharpen: an RRset with no
+					// signature reports missing_rrsig, and once an unusable
+					// signature is attached the more accurate statement is
+					// that no key corresponds to it. Both are Bogus, both
+					// point at the data, and insisting on reason equality
+					// would forbid a strictly better message.
+					//
+					// The status is where the security property lives,
+					// because Bogus and Indeterminate are what a caller acts
+					// on — and the downgrade this test exists to catch shows
+					// up here as bogus becoming indeterminate.
+					if after.Status != before.Status {
+						t.Errorf("adding %s changed the verdict from %s (%s) to %s (%s)\n%s",
+							add.name, before.Status, before.Reason, after.Status, after.Reason, after.Trace())
+					}
+				})
+			}
+		})
+	}
+}
+
+// The counterpart, so the property above cannot be satisfied by a validator
+// that simply ignores everything it is given. A record the validator *can*
+// act on must still be able to change the outcome, which is what multi-path
+// DNSSEC depends on.
+func TestAUsableRecordCanStillRescueAnRRset(t *testing.T) {
+	h, err := lab.Standard()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// Break the zone's own signature, then add a valid one from the same
+	// key — the shape of a rollover, where one signature is stale and
+	// another is current.
+	if err := h.AddSignature(lab.LeafZone, lab.AnswerName, dns.TypeA, func(s *dns.RRSIG) {}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := h.CorruptSignatureAt(lab.LeafZone, lab.AnswerName, dns.TypeA, 0); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+
+	v, err := h.Validator(lab.Now())
+	if err != nil {
+		t.Fatalf("validator: %v", err)
+	}
+	got := v.Validate(context.Background(), lab.AnswerName, dns.TypeA)
+	if !got.Secure() {
+		t.Errorf("one broken and one valid signature should validate (RFC 6840 §5.4); got %s\n%s",
+			got.Status, got.Trace())
+	}
+}
+
+func netIPv4(a, b, c, d byte) net.IP { return net.IPv4(a, b, c, d) }

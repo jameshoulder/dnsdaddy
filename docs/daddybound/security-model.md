@@ -40,9 +40,10 @@ chain walk, each fails the corresponding test.
 
 ### The build
 
-libunbound is compiled only when **both** `CGO_ENABLED=1` **and**
-`-tags daddybound_unbound` are set. Every build this project ships sets
-neither:
+Neither oracle can reach a shipped build. libunbound is compiled only when
+**both** `CGO_ENABLED=1` **and** `-tags daddybound_unbound` are set; BIND's
+`delv` is invoked as a subprocess from a test and is not linked at all. Every
+build this project ships sets neither flag:
 
 | | |
 | --- | --- |
@@ -113,12 +114,12 @@ justification and thereby rebut a false-Bogus classification; it can never
 rebut a false Secure, because `Classify` has already returned by then. No case
 added below that line can quiet it.
 
-Current count across the fifteen laboratory scenarios: **0 false secures, rate
-0.0000**. Sabotaging the verifier to accept a signature because one was
-present — the classic form of this bug — makes four scenarios report it, which
-is how we know the check does something.
+Current count across the laboratory scenarios, against **both** reference
+validators: **0 false secures**. Sabotaging the verifier to accept a signature
+because one was present — the classic form of this bug — makes four scenarios
+report it, which is how we know the check does something.
 
-That number is evidence about fifteen hand-built scenarios and nothing more.
+That number is evidence about eighteen hand-built scenarios and nothing more.
 See [validation-lab.md](validation-lab.md) for what it does not cover.
 
 ## Trust anchors

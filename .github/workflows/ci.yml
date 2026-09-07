@@ -81,10 +81,15 @@ jobs:
       # The job fails on a FALSE_SECURE -- reference says the data is forged,
       # Daddybound says it is fine -- which is the one failure class that
       # would make this engine dangerous rather than merely wrong.
-      - name: Install libunbound for the differential oracle
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libunbound-dev
+      # Two oracles, not one. libunbound and BIND's delv are separate
+      # codebases with separate validators, and where they agree with each
+      # other but not with Daddybound the question is about Daddybound. That
+      # distinction has already overturned one conclusion in this repository
+      # -- see docs/daddybound/validation-lab.md on ancestor signatures.
+      - name: Install the differential oracles
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libunbound-dev bind9-dnsutils
 
-      - name: Daddybound must agree with libunbound
+      - name: Daddybound must agree with libunbound and with BIND
         env:
           CGO_ENABLED: 1
         run: go test -tags daddybound_unbound -v ./internal/daddybound/...

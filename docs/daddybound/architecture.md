@@ -143,7 +143,7 @@ sentence.
 **Traces are deterministic.** Nothing in the walk iterates a map to produce a
 step. A trace that reorders between runs cannot be diffed — not against an
 earlier run and not against a reference validator's — and evidence that cannot
-be diffed is not evidence. A test runs all fifteen scenarios six times each
+be diffed is not evidence. A test runs every scenario six times over
 and compares.
 
 Construction goes through an unexported recorder whose only exits are the
