@@ -1,0 +1,498 @@
+package dnssec
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+// Source supplies the records a chain walk needs.
+//
+// It is the seam between validation and retrieval, and it exists so that
+// v0.1 can validate a complete, deterministic hierarchy offline while the
+// same validation code later runs against a real resolver. Nothing above this
+// interface knows or cares where records came from.
+//
+// A Source returns the records for one (name, type) including any covering
+// RRSIGs. Returning no records and no error means "this name has no records
+// of this type as far as I know" — which, crucially, is not the same as a
+// proof that none exist. The chain walk treats the two very differently; see
+// the discussion of unproven gaps in Validate.
+type Source interface {
+	Lookup(ctx context.Context, name string, rrtype uint16) ([]dns.RR, error)
+}
+
+// Limits bound the work one validation may do.
+//
+// Every input to a validator arrives from the network, so every loop over it
+// is a loop an adversary chooses the length of. These bounds exist so that
+// hostile input produces a refusal with a reason rather than a validator that
+// stops answering. Hitting one is never a verdict: it produces Indeterminate
+// with ReasonResourceLimit, because "I stopped early" is not evidence about
+// the data.
+type Limits struct {
+	// MaxZones bounds chain depth. A DNS name has at most 127 labels, so
+	// this is an operational bound rather than a protocol one.
+	MaxZones int
+	// MaxLookups bounds calls to the Source across one validation.
+	MaxLookups int
+	// MaxSignatures bounds RRSIGs considered for a single RRset. Each one
+	// costs a canonicalisation and possibly a public-key operation.
+	MaxSignatures int
+	// MaxKeys bounds DNSKEYs considered in one zone's apex RRset.
+	MaxKeys int
+}
+
+// DefaultLimits are generous enough that no correctly operated zone meets
+// them and small enough that meeting one is cheap.
+func DefaultLimits() Limits {
+	return Limits{MaxZones: 24, MaxLookups: 64, MaxSignatures: 16, MaxKeys: 16}
+}
+
+// Config is everything a Validator needs besides its Source.
+type Config struct {
+	Anchors  TrustAnchors
+	Policy   Policy
+	Clock    Clock
+	Verifier SignatureVerifier
+	Limits   Limits
+}
+
+// Validator walks chains of trust and reports what it found.
+//
+// A Validator is immutable after construction and safe for concurrent use, so
+// long as its Source is. It holds no cache: v0.1 deliberately has no cache,
+// because a cache is a second place for a verdict to live and the first
+// version of this engine should have exactly one.
+type Validator struct {
+	src Source
+	cfg Config
+}
+
+// New returns a Validator. Zero-valued Config fields are filled with the
+// defaults that fail safe: the standard verifier, the system clock, the
+// default policy and the default limits. Anchors are not defaulted — a
+// validator with no anchors returns Indeterminate, which is correct, and
+// inventing one would be the single worst thing this package could do.
+func New(src Source, cfg Config) *Validator {
+	if cfg.Clock == nil {
+		cfg.Clock = SystemClock{}
+	}
+	if cfg.Verifier == nil {
+		cfg.Verifier = StdVerifier()
+	}
+	if len(cfg.Policy.algorithms) == 0 && len(cfg.Policy.digests) == 0 {
+		cfg.Policy = DefaultPolicy()
+	}
+	if cfg.Limits.MaxZones == 0 {
+		cfg.Limits = DefaultLimits()
+	}
+	return &Validator{src: src, cfg: cfg}
+}
+
+// walk carries the state of one validation. It exists so the step recorder,
+// the lookup budget and the context travel together rather than being
+// threaded through every function as three more parameters.
+type walk struct {
+	v       *Validator
+	ctx     context.Context
+	rec     *recorder
+	now     time.Time
+	lookups int
+
+	// unprovenGap records that the walk descended past a name where no DS
+	// was returned. Without NSEC or NSEC3 there is no way to tell "this is
+	// not a zone cut" from "this is an insecure delegation", and that
+	// ambiguity has to survive to the end of the walk rather than being
+	// resolved by assumption.
+	unprovenGap bool
+}
+
+// Validate walks the chain of trust for one RRset and returns the verdict
+// with its full trace.
+//
+// The result's Status is the only thing a caller should act on, and
+// Indeterminate is a real answer meaning "this validator could not tell" —
+// not a soft yes and not a soft no.
+func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) ValidationResult {
+	qname := dns.CanonicalName(name)
+	now := v.cfg.Clock.Now()
+	w := &walk{v: v, ctx: ctx, rec: newRecorder(qname, rrtype, now), now: now}
+
+	anchorName, anchors := v.cfg.Anchors.deepestFor(qname)
+	if len(anchors) == 0 {
+		return w.rec.indeterminate(w.rec.skip(
+			ValidationStep{Kind: StepTrustAnchor, Zone: qname},
+			ReasonNoTrustAnchor,
+		))
+	}
+
+	// The anchor zone is established first: its apex DNSKEY RRset has to be
+	// authenticated by a configured anchor before anything it signs means
+	// anything.
+	zone, res, ok := w.establishAnchorZone(anchorName, anchors)
+	if !ok {
+		return res
+	}
+
+	// Then descend one delegation at a time.
+	for _, child := range zoneCandidates(anchorName, qname, rrtype, v.cfg.Limits.MaxZones) {
+		next, res, done := w.descend(zone, child)
+		if done {
+			return res
+		}
+		if next != nil {
+			zone = next
+		}
+	}
+
+	return w.validateAnswer(zone, qname, rrtype)
+}
+
+// establishAnchorZone authenticates a zone's apex DNSKEY RRset against
+// configured trust anchors.
+func (w *walk) establishAnchorZone(zoneName string, anchors []TrustAnchor) (*zoneState, ValidationResult, bool) {
+	records, reason := w.lookup(zoneName, dns.TypeDNSKEY)
+	if reason != ReasonNone {
+		return nil, w.rec.indeterminate(w.rec.fail(
+			ValidationStep{Kind: StepDNSKEY, Zone: zoneName}, reason,
+		)), false
+	}
+
+	keys := dnskeysOf(records)
+	if len(keys) == 0 {
+		// No apex DNSKEY where an anchor says there should be one. The
+		// anchor is a standing claim that this zone is signed, so failing to
+		// find a key is a broken chain rather than an absence of one:
+		// Bogus, not Indeterminate.
+		return nil, w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepDNSKEY, Zone: zoneName}, ReasonMissingDNSKEY,
+		)), false
+	}
+	if len(keys) > w.v.cfg.Limits.MaxKeys {
+		return nil, w.rec.indeterminate(w.rec.fail(
+			ValidationStep{Kind: StepDNSKEY, Zone: zoneName}, ReasonResourceLimit,
+		)), false
+	}
+
+	// Which keys does an anchor vouch for?
+	var trusted []*dns.DNSKEY
+	worst := ReasonTrustAnchorMismatch
+	for _, k := range keys {
+		if reason := keyUsable(k); reason != ReasonNone {
+			w.rec.fail(keyStep(StepDNSKEY, zoneName, k), reason)
+			continue
+		}
+		for _, a := range anchors {
+			reason := a.matchesKey(w.v.cfg.Policy, k)
+			if reason == ReasonNone {
+				step := keyStep(StepTrustAnchor, zoneName, k)
+				step.DigestType = uint8(a.DigestType)
+				w.rec.ok(step)
+				trusted = append(trusted, k)
+				break
+			}
+			if reason != ReasonNoDSMatchedKey {
+				worst = reason
+			}
+		}
+	}
+	if len(trusted) == 0 {
+		return nil, w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepTrustAnchor, Zone: zoneName}, worst,
+		)), false
+	}
+
+	return w.authenticateDNSKEYRRset(zoneName, records, keys, trusted)
+}
+
+// authenticateDNSKEYRRset checks that the apex DNSKEY RRset is signed by one
+// of the keys already vouched for, which is what turns a set of observed keys
+// into a set of trusted ones.
+//
+// RFC 4035 §5.2 requires exactly this and no less: a DS (or anchor)
+// authenticates one key, and that key's signature over the apex DNSKEY RRset
+// is what extends trust to the rest of the set. Skipping the signature step
+// and trusting every key in a set because one of them matched a DS is the
+// mistake that lets an attacker append their own key to a legitimate zone's
+// DNSKEY RRset and sign whatever they like with it.
+func (w *walk) authenticateDNSKEYRRset(zoneName string, records []dns.RR, all, trusted []*dns.DNSKEY) (*zoneState, ValidationResult, bool) {
+	keyRRs := make([]dns.RR, 0, len(all))
+	for _, k := range all {
+		keyRRs = append(keyRRs, k)
+	}
+	set, reason := NewRRset(keyRRs)
+	if reason != ReasonNone {
+		return nil, w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepRRset, Zone: zoneName, RRType: dns.TypeDNSKEY}, reason,
+		)), false
+	}
+
+	_, sigs := SplitSignatures(records, dns.TypeDNSKEY)
+	if reason := w.authenticate(set, sigs, zoneName, trusted); reason != ReasonNone {
+		return nil, w.rec.verdict(reason), false
+	}
+
+	w.rec.ok(ValidationStep{Kind: StepRRset, Zone: zoneName, RRType: dns.TypeDNSKEY})
+	return &zoneState{name: zoneName, keys: all}, ValidationResult{}, true
+}
+
+// descend crosses one delegation, from the established zone to child.
+//
+// It returns the new zone when a secure delegation was crossed, a terminal
+// result when the walk must stop, and done=true in that case.
+func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationResult, bool) {
+	records, reason := w.lookup(child, dns.TypeDS)
+	if reason != ReasonNone {
+		return nil, w.rec.indeterminate(w.rec.fail(
+			ValidationStep{Kind: StepDS, Zone: child}, reason,
+		)), true
+	}
+
+	dsRecords := dsOf(records)
+	if len(dsRecords) == 0 {
+		// No DS was returned. Two very different situations produce this,
+		// and telling them apart needs a signed proof of non-existence:
+		//
+		//   - child is not a zone cut at all, so there is nothing to
+		//     delegate and the walk should simply carry on in the same zone;
+		//   - child is a zone cut with no DS, an insecure delegation, and
+		//     everything below it is unsigned.
+		//
+		// v0.1 implements neither NSEC nor NSEC3, so it cannot obtain that
+		// proof and must not pretend either reading. The walk continues, and
+		// the ambiguity is remembered: if the answer later fails to
+		// authenticate, having descended past an unproven gap is the
+		// difference between "this data is broken" and "this validator
+		// cannot say".
+		w.unprovenGap = true
+		w.rec.skip(ValidationStep{
+			Kind: StepDS, Zone: child,
+			Note: "no DS returned; a proof of non-existence would be needed to tell a zone cut from an insecure delegation",
+		}, ReasonDenialNotImplemented)
+		return nil, ValidationResult{}, false
+	}
+
+	// A DS RRset exists, so it is data in the parent zone and must itself be
+	// authenticated by the parent's keys before it can authenticate anything.
+	set, reason := NewRRset(toRRs(dsRecords))
+	if reason != ReasonNone {
+		return nil, w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: child, RRType: dns.TypeDS}, reason,
+		)), true
+	}
+	_, sigs := SplitSignatures(records, dns.TypeDS)
+	if reason := w.authenticate(set, sigs, zone.name, zone.keys); reason != ReasonNone {
+		return nil, w.rec.verdict(reason), true
+	}
+	w.rec.ok(ValidationStep{Kind: StepRRset, Zone: zone.name, Name: child, RRType: dns.TypeDS})
+
+	return w.crossDelegation(child, dsRecords)
+}
+
+// crossDelegation authenticates the child zone's apex DNSKEY RRset against an
+// authenticated DS RRset.
+func (w *walk) crossDelegation(child string, dsRecords []*dns.DS) (*zoneState, ValidationResult, bool) {
+	records, reason := w.lookup(child, dns.TypeDNSKEY)
+	if reason != ReasonNone {
+		return nil, w.rec.indeterminate(w.rec.fail(
+			ValidationStep{Kind: StepDNSKEY, Zone: child}, reason,
+		)), true
+	}
+
+	keys := dnskeysOf(records)
+	if len(keys) == 0 {
+		// A DS is the parent's signed statement that this zone is signed, so
+		// an absent DNSKEY here is a broken chain and not an unsigned zone.
+		return nil, w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepDNSKEY, Zone: child}, ReasonMissingDNSKEY,
+		)), true
+	}
+	if len(keys) > w.v.cfg.Limits.MaxKeys {
+		return nil, w.rec.indeterminate(w.rec.fail(
+			ValidationStep{Kind: StepDNSKEY, Zone: child}, ReasonResourceLimit,
+		)), true
+	}
+
+	var trusted []*dns.DNSKEY
+	worst := ReasonNoDSMatchedKey
+	for _, k := range keys {
+		if reason := keyUsable(k); reason != ReasonNone {
+			w.rec.fail(keyStep(StepDNSKEY, child, k), reason)
+			continue
+		}
+		for _, ds := range dsRecords {
+			reason := dsMatchesKey(w.v.cfg.Policy, ds, k)
+			if reason == ReasonNone {
+				step := keyStep(StepDS, child, k)
+				step.DigestType = ds.DigestType
+				w.rec.ok(step)
+				trusted = append(trusted, k)
+				break
+			}
+			// A digest mismatch is more informative than "no DS referred to
+			// this key", so it wins the reported reason. The first says the
+			// parent published a digest for this exact key and it did not
+			// match; the second says the parent never mentioned it.
+			if reason != ReasonNoDSMatchedKey {
+				worst = reason
+			}
+		}
+	}
+	if len(trusted) == 0 {
+		return nil, w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepDS, Zone: child}, worst,
+		)), true
+	}
+
+	zone, res, ok := w.authenticateDNSKEYRRset(child, records, keys, trusted)
+	if !ok {
+		return nil, res, true
+	}
+	return zone, ValidationResult{}, false
+}
+
+// validateAnswer authenticates the RRset the caller actually asked about.
+func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) ValidationResult {
+	records, reason := w.lookup(qname, rrtype)
+	if reason != ReasonNone {
+		return w.rec.indeterminate(w.rec.fail(
+			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype}, reason,
+		))
+	}
+
+	data, sigs := SplitSignatures(records, rrtype)
+	if len(data) == 0 {
+		// Nothing to validate. Establishing whether that absence is
+		// legitimate is a denial-of-existence question, which v0.1 does not
+		// answer, so it says so rather than guessing NXDOMAIN or NODATA.
+		return w.rec.indeterminate(w.rec.skip(
+			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype},
+			ReasonDenialNotImplemented,
+		))
+	}
+
+	set, reason := NewRRset(data)
+	if reason != ReasonNone {
+		return w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype}, reason,
+		))
+	}
+
+	if reason := w.authenticate(set, sigs, zone.name, zone.keys); reason != ReasonNone {
+		// The one place where the unproven gap changes the verdict.
+		//
+		// Bogus is an accusation, and RFC 4033 §5 only licenses it when
+		// there is "a trust anchor and a secure delegation indicating that
+		// subsidiary data is signed". If the walk descended past a name
+		// where no DS was returned, that indication is exactly what is
+		// missing: the data may legitimately belong to an unsigned zone
+		// below an insecure delegation, and Daddybound has no proof either
+		// way. Indeterminate is the honest answer, and the reason names the
+		// missing capability rather than blaming the zone.
+		if w.unprovenGap {
+			w.rec.skip(ValidationStep{
+				Kind: StepLimit, Zone: zone.name, Name: qname, RRType: rrtype,
+				Note: "authentication failed below an unproven delegation, so this is not reported as bogus",
+			}, ReasonDenialNotImplemented)
+			return w.rec.indeterminate(ReasonDenialNotImplemented)
+		}
+		return w.rec.verdict(reason)
+	}
+
+	w.rec.ok(ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype})
+	return w.rec.secure()
+}
+
+// zoneState is a zone whose apex DNSKEY RRset has been authenticated.
+type zoneState struct {
+	name string
+	keys []*dns.DNSKEY
+}
+
+// lookup calls the Source, enforcing the lookup budget and the caller's
+// context.
+func (w *walk) lookup(name string, rrtype uint16) ([]dns.RR, Reason) {
+	if err := w.ctx.Err(); err != nil {
+		return nil, ReasonCancelled
+	}
+	if w.lookups >= w.v.cfg.Limits.MaxLookups {
+		return nil, ReasonResourceLimit
+	}
+	w.lookups++
+
+	records, err := w.v.src.Lookup(w.ctx, name, rrtype)
+	if err != nil {
+		// A cancelled context reaching us as an error is still a
+		// cancellation, not a statement about the data.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, ReasonCancelled
+		}
+		// A source that cannot answer leaves the validator unable to tell,
+		// which is Indeterminate territory and never a verdict. The
+		// underlying error text is deliberately not carried into a Reason:
+		// reasons are typed, and an error string from a network library is
+		// not a category.
+		return nil, ReasonUnknown
+	}
+	return records, ReasonNone
+}
+
+func toRRs[T dns.RR](in []T) []dns.RR {
+	out := make([]dns.RR, 0, len(in))
+	for _, rr := range in {
+		out = append(out, rr)
+	}
+	return out
+}
+
+// zoneCandidates lists the names between an anchor and a query name that
+// could be zone cuts, shallowest first.
+//
+// The DS type gets its own treatment because a DS record lives in the parent
+// zone, not the zone it delegates to: validating example.test DS means
+// authenticating data in test, and descending into example.test first would
+// look for the DS under the very keys the DS is supposed to authenticate.
+func zoneCandidates(anchor, qname string, rrtype uint16, maxZones int) []string {
+	target := qname
+	if rrtype == dns.TypeDS {
+		// The parent of qname. A DS at the anchor itself has no parent to
+		// descend from, which leaves the list empty and the walk validating
+		// the DS in the anchor zone — which is correct.
+		if idx := dns.Split(qname); len(idx) > 1 {
+			target = qname[idx[1]:]
+		} else {
+			target = "."
+		}
+	}
+
+	if !dns.IsSubDomain(anchor, target) {
+		return nil
+	}
+
+	anchorLabels := dns.CountLabel(anchor)
+	labels := dns.SplitDomainName(target)
+
+	out := make([]string, 0, len(labels))
+	for i := len(labels) - anchorLabels - 1; i >= 0; i-- {
+		name := dns.CanonicalName(joinLabels(labels[i:]))
+		out = append(out, name)
+		if len(out) >= maxZones {
+			break
+		}
+	}
+	return out
+}
+
+func joinLabels(labels []string) string {
+	out := ""
+	for _, l := range labels {
+		out += l + "."
+	}
+	if out == "" {
+		return "."
+	}
+	return out
+}
