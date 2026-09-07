@@ -58,6 +58,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "daddybound":
+			if err := runDaddybound(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case "help", "-h", "--help":
 			usage(os.Stdout)
 			return
@@ -70,14 +76,15 @@ func main() {
 	}
 }
 
-// usage describes the two things this binary does.
+// usage describes what this binary does.
 func usage(w io.Writer) {
 	fmt.Fprint(w, `dnsdaddy — a self-hosted protective DNS resolver
 
 Usage:
-  dnsdaddy [flags]          run the resolver
-  dnsdaddy doctor [flags]   diagnose a deployment and exit
-  dnsdaddy help             show this message
+  dnsdaddy [flags]           run the resolver
+  dnsdaddy doctor [flags]    diagnose a deployment and exit
+  dnsdaddy daddybound ...    the experimental DNSSEC validation engine
+  dnsdaddy help              show this message
 
 Run flags:
   -config path              config file (default /etc/dnsdaddy/config.yaml)
@@ -91,6 +98,10 @@ Doctor flags:
   -timeout duration         per-probe timeout (default 5s)
 
 Doctor exits non-zero when a check fails, so it can gate a deployment.
+
+Daddybound is experimental and enforces nothing. It runs a signed laboratory
+built in memory and reports what its validation engine concluded; it cannot be
+pointed at the Internet or at a running deployment. See docs/daddybound/.
 `)
 }
 

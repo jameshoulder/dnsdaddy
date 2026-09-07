@@ -256,7 +256,7 @@ Worth knowing before you rely on DNS Daddy:
 - **No independent professional security review.**
 - **Early software.** Interfaces, deployment behaviour and storage formats may change between releases.
 - **Forwarding, not recursive.** DNS Daddy forwards to upstream resolvers.
-- **No local DNSSEC validation.** It records the upstream's validation verdict.
+- **No local DNSSEC validation.** It records the upstream's validation verdict. Daddybound, the experimental validation engine, does not change this: it answers no queries and enforces nothing.
 - **Behavioural detection is experimental and alert-only.** There is no measured production false-positive rate yet.
 - **Browser DoH can bypass network DNS.** Mitigations require network/endpoint configuration.
 - **No clustering or anycast.** One DNS Daddy instance is one server.
@@ -265,6 +265,26 @@ Worth knowing before you rely on DNS Daddy:
 - **DNS rebinding is not currently mitigated.**
 
 **[docs/capabilities.md](docs/capabilities.md)** is the authoritative capability map: available, experimental and planned.
+
+### Daddybound
+
+Daddybound is an experimental DNS resolution and validation engine being built
+inside this repository. Its first milestone walks a DNSSEC chain of trust from
+a configured trust anchor to a signed answer.
+
+**It is experimental and must not be relied upon as a production DNSSEC
+validator.** It answers no queries, enforces no policy, and cannot be pointed
+at the Internet or at a running deployment. A test asserts that no package on
+the resolver's query path can reach it.
+
+It implements the DNS and DNSSEC protocol and trust logic itself, from the
+standards, using established cryptographic primitives from Go's standard
+library for the mathematics and `github.com/miekg/dns` for wire format. No
+validating resolver implementation produces a Daddybound verdict; libunbound
+appears only as a differential test oracle, behind a build tag no shipped
+build sets.
+
+See **[docs/daddybound/](docs/daddybound/README.md)**.
 
 ## Resource target
 
