@@ -50,6 +50,17 @@ test-race: ## Run tests with the race detector
 test-ui: ## Run the dashboard's JavaScript tests (needs node; no packages to install)
 	node --test internal/web/app.test.js
 
+.PHONY: test-daddybound
+test-daddybound: ## Compare Daddybound against libunbound and BIND delv (needs libunbound-dev, bind9-dnsutils, cgo)
+	CGO_ENABLED=1 go test -tags daddybound_unbound -v ./internal/daddybound/...
+
+.PHONY: fuzz-daddybound
+fuzz-daddybound: ## Fuzz the Daddybound input surface for 30s per target
+	@for target in FuzzCanonicalSignedData FuzzParseRSAPublicKey FuzzValidateWireResponse; do \
+		echo "--- $$target ---"; \
+		go test ./internal/daddybound/dnssec/ -run '^$$' -fuzz "^$$target$$" -fuzztime=30s || exit 1; \
+	done
+
 .PHONY: cover
 cover: ## Run tests and open a coverage report
 	go test -coverprofile=coverage.out ./...

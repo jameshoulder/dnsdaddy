@@ -72,6 +72,39 @@ jobs:
       - name: Dashboard tests
         run: node --test internal/web/app.test.js
 
+      # Daddybound reaches DNSSEC verdicts, and the only way to know whether
+      # they are right is to ask something that has been getting this right
+      # for twenty years. libunbound is an oracle here and never a backend:
+      # it is compiled only with CGO_ENABLED=1 and this build tag, which no
+      # shipped build sets, and it never produces a Daddybound verdict.
+      #
+      # The job fails on a FALSE_SECURE -- reference says the data is forged,
+      # Daddybound says it is fine -- which is the one failure class that
+      # would make this engine dangerous rather than merely wrong.
+      # Two oracles, not one. libunbound and BIND's delv are separate
+      # codebases with separate validators, and where they agree with each
+      # other but not with Daddybound the question is about Daddybound. That
+      # distinction has already overturned one conclusion in this repository
+      # -- see docs/daddybound/validation-lab.md on ancestor signatures.
+      - name: Install the differential oracles
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libunbound-dev bind9-dnsutils
+
+      - name: Daddybound must agree with libunbound and with BIND
+        env:
+          CGO_ENABLED: 1
+        run: go test -tags daddybound_unbound -v ./internal/daddybound/...
+
+      # A validator's whole input arrives from the network. A short run on
+      # every pull request will not find much on its own, but it does stop a
+      # change that makes the fuzz targets themselves stop working, which is
+      # how fuzzing quietly dies.
+      - name: Fuzz the Daddybound input surface
+        run: |
+          for target in FuzzCanonicalSignedData FuzzParseRSAPublicKey FuzzValidateWireResponse; do
+            echo "--- $target ---"
+            go test ./internal/daddybound/dnssec/ -run '^$' -fuzz "^${target}$" -fuzztime=30s
+          done
+
       # The documentation cross-references itself heavily and is the main way
       # anyone judges what this project does. A dead link is a small thing that
       # makes the whole set look unmaintained.
