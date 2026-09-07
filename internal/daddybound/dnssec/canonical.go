@@ -99,41 +99,79 @@ func canonicalRRSIGRDATA(sig *dns.RRSIG) ([]byte, error) {
 	return rdata, nil
 }
 
-// canonicalRRs returns the canonical wire form of each record in the RRset,
-// sorted per RFC 4034 §6.3 and with exact duplicates removed.
+// canonicalRecord is one record's canonical wire form together with the
+// RDATA slice inside it that ordering and deduplication are defined over.
 //
-// Duplicates are removed because a signer signs an RRset, and an RRset is a
-// set: RFC 2181 §5 defines it by (owner, class, type) membership, not by
-// arrival count. An RRset that arrives with a record repeated must produce
-// the same signed data as one that does not, or an attacker could invalidate
-// a correctly signed answer simply by duplicating a record in transit.
+// The two are carried side by side rather than recomputed because the RDATA
+// is a sub-slice of the wire form: finding it costs one domain-name unpack,
+// and doing that inside a comparison function would repeat it O(n log n)
+// times per RRset on data an attacker chooses the size of.
+type canonicalRecord struct {
+	wire  []byte
+	rdata []byte
+}
+
+// canonicalRRs returns the canonical wire form of each record in the RRset,
+// sorted per RFC 4034 §6.3 and with duplicates removed.
+//
+// The ordering is over RDATA and nothing else. RFC 4034 §6.3:
+//
+//	RRs with the same owner name, class, and type are sorted by treating the
+//	RDATA portion of the canonical form of each RR as a left-justified
+//	unsigned octet sequence in which the absence of an octet sorts before a
+//	zero octet.
+//
+// Sorting the whole packed record is *not* equivalent, and the difference is
+// a real interoperability defect rather than a technicality. A packed record
+// carries the two-octet RDLENGTH immediately before its RDATA, and owner,
+// type, class and TTL are identical across an RRset by construction — so a
+// whole-record comparison reaches RDLENGTH first and effectively sorts by
+// RDATA *length*. Whenever a shorter RDATA is lexicographically greater than
+// a longer one, the two orders differ: `MX 10 bbbbbbbb.example.` has longer
+// RDATA than `MX 20 a.example.` and must sort before it.
+//
+// The consequence is not cosmetic. The signer sorted by RDATA. A validator
+// sorting by length builds different signed bytes and reports a correctly
+// signed multi-record RRset as Bogus.
+//
+// bytes.Compare supplies the RFC's tie-break exactly: for two sequences where
+// one is a prefix of the other it orders the prefix first, which is "the
+// absence of an octet sorts before a zero octet".
+//
+// Duplicates are removed because an RRset is a set. RFC 4034 §6.3 calls a
+// duplicate a protocol error and permits the liberal handling taken here:
+// "it MUST remove all but one of the duplicate RR(s) for the purposes of
+// calculating the canonical form of the RRset." Doing so also closes an
+// attack: without it, repeating one record in transit would change the
+// signed bytes and invalidate a correctly signed answer.
 func canonicalRRs(sig *dns.RRSIG, rrset []dns.RR) ([][]byte, error) {
-	wires := make([][]byte, 0, len(rrset))
+	records := make([]canonicalRecord, 0, len(rrset))
 	for _, rr := range rrset {
 		wire, err := canonicalRR(sig, rr)
 		if err != nil {
 			return nil, err
 		}
-		wires = append(wires, wire)
+		rdata, err := rdataOf(wire, rr)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, canonicalRecord{wire: wire, rdata: rdata})
 	}
 
-	// §6.3: "RRs with identical owner, class, and type sort by treating
-	// RDATA as unsigned octet sequences." The owner, class and type are
-	// identical across the set by construction — rrsetOf enforces it — so
-	// comparing whole canonical records is equivalent to comparing RDATA and
-	// avoids having to locate the RDATA offset for every record.
-	sort.SliceStable(wires, func(i, j int) bool {
-		return bytes.Compare(wires[i], wires[j]) < 0
+	sort.SliceStable(records, func(i, j int) bool {
+		return bytes.Compare(records[i].rdata, records[j].rdata) < 0
 	})
 
-	deduped := wires[:0]
-	for i, w := range wires {
-		if i > 0 && bytes.Equal(w, wires[i-1]) {
+	out := make([][]byte, 0, len(records))
+	for i, r := range records {
+		// Equal RDATA is the definition of a duplicate here: owner name,
+		// class and type are already identical across the set.
+		if i > 0 && bytes.Equal(r.rdata, records[i-1].rdata) {
 			continue
 		}
-		deduped = append(deduped, w)
+		out = append(out, r.wire)
 	}
-	return deduped, nil
+	return out, nil
 }
 
 // canonicalRR returns one record in canonical form per RFC 4034 §6.2.

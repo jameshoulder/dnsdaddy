@@ -201,9 +201,11 @@ func (w *walk) establishAnchorZone(zoneName string, anchors []TrustAnchor) (*zon
 				trusted = append(trusted, k)
 				break
 			}
-			if reason != ReasonNoDSMatchedKey {
-				worst = reason
-			}
+			// Same reasoning as for DS records below: a configured anchor
+			// set is a set, and combining by rank rather than by position
+			// keeps the reported reason — and therefore the verdict —
+			// independent of the order anchors happen to be listed in.
+			worst = worseReason(worst, reason)
 		}
 	}
 	if len(trusted) == 0 {
@@ -339,6 +341,37 @@ func (w *walk) crossDelegation(child string, dsRecords []*dns.DS) (*zoneState, V
 		)), true
 	}
 
+	// RFC 6840 §5.2 (R-DS-04) fixes the shape of what follows: DS records
+	// with a digest type this validator cannot use are filtered out *before*
+	// anything is concluded from the RRset, and only "if none are left" is
+	// the zone treated as unsigned.
+	//
+	//	DS records using unknown or unsupported message digest algorithms
+	//	MUST be treated the same way as DS records referring to DNSKEY RRs of
+	//	unknown or unsupported public key algorithms. ... If none are left,
+	//	the zone is treated as if it were unsigned.
+	//
+	// Filtering first is what makes the outcome a property of the set rather
+	// than of the order it arrived in. Evaluating the RRset as one list and
+	// keeping the last failure seen — which is what this did before review —
+	// lets a DS with an unusable digest displace a definitive digest
+	// mismatch from a usable one, turning Bogus into Indeterminate. A DS
+	// RRset is unordered and reaches us over the network, so that handed an
+	// attacker both the ordering and the verdict.
+	usable, unusableReason := w.usableDS(child, dsRecords)
+	if len(usable) == 0 {
+		// Nothing evaluable is left. A complete validator reports Insecure
+		// here; v0.1 has no denial proofs, so it reports Indeterminate with
+		// the specific reason. unusableReason is derived from the whole set,
+		// not from whichever record came last.
+		if unusableReason == ReasonNone {
+			unusableReason = ReasonMissingDS
+		}
+		return nil, w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepDS, Zone: child}, unusableReason,
+		)), true
+	}
+
 	var trusted []*dns.DNSKEY
 	worst := ReasonNoDSMatchedKey
 	for _, k := range keys {
@@ -346,7 +379,7 @@ func (w *walk) crossDelegation(child string, dsRecords []*dns.DS) (*zoneState, V
 			w.rec.fail(keyStep(StepDNSKEY, child, k), reason)
 			continue
 		}
-		for _, ds := range dsRecords {
+		for _, ds := range usable {
 			reason := dsMatchesKey(w.v.cfg.Policy, ds, k)
 			if reason == ReasonNone {
 				step := keyStep(StepDS, child, k)
@@ -356,12 +389,12 @@ func (w *walk) crossDelegation(child string, dsRecords []*dns.DS) (*zoneState, V
 				break
 			}
 			// A digest mismatch is more informative than "no DS referred to
-			// this key", so it wins the reported reason. The first says the
-			// parent published a digest for this exact key and it did not
-			// match; the second says the parent never mentioned it.
-			if reason != ReasonNoDSMatchedKey {
-				worst = reason
-			}
+			// this key": the first says the parent published a digest for
+			// this exact key and it did not match, the second says the
+			// parent never mentioned it. worseReason picks by rank rather
+			// than by position, so which of the two is reported does not
+			// depend on the order the records were iterated in.
+			worst = worseReason(worst, reason)
 		}
 	}
 	if len(trusted) == 0 {
@@ -375,6 +408,32 @@ func (w *walk) crossDelegation(child string, dsRecords []*dns.DS) (*zoneState, V
 		return nil, res, true
 	}
 	return zone, ValidationResult{}, false
+}
+
+// usableDS partitions a DS RRset into the records this validator may act on
+// and a single reason describing why the rest were set aside.
+//
+// The reason is combined with worseReason, so it is determined by the set of
+// unusable records rather than by their order.
+func (w *walk) usableDS(child string, dsRecords []*dns.DS) ([]*dns.DS, Reason) {
+	usable := make([]*dns.DS, 0, len(dsRecords))
+	unusable := ReasonNone
+
+	for _, ds := range dsRecords {
+		reason := w.v.cfg.Policy.CheckDigest(DigestType(ds.DigestType))
+		if reason == ReasonNone {
+			usable = append(usable, ds)
+			continue
+		}
+		step := ValidationStep{
+			Kind: StepDS, Zone: child,
+			DigestType: ds.DigestType, Algorithm: ds.Algorithm, KeyTag: ds.KeyTag,
+			Note: "digest type set aside per RFC 6840 §5.2 before evaluating the RRset",
+		}
+		w.rec.skip(step, reason)
+		unusable = worseReason(unusable, reason)
+	}
+	return usable, unusable
 }
 
 // validateAnswer authenticates the RRset the caller actually asked about.

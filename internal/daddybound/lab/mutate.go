@@ -113,6 +113,101 @@ func (h *Hierarchy) MalformSignature(zoneName, owner string, rrtype uint16) erro
 	})
 }
 
+// SetSignatureAlgorithm relabels the algorithm on an RRset's signatures
+// without touching the zone's keys, which is what an attacker who has
+// stripped a valid signature and substituted their own can produce.
+//
+// The signature bytes become meaningless, which is faithful: an attacker
+// cannot make a valid one either. What matters is the algorithm field, and
+// whether a validator lets an unusable signature speak for the absence of a
+// usable one.
+func (h *Hierarchy) SetSignatureAlgorithm(zoneName, owner string, rrtype uint16, alg dnssec.Algorithm) error {
+	return h.mapSignatures(zoneName, owner, rrtype, func(sig *dns.RRSIG) error {
+		sig.Algorithm = uint8(alg)
+		return nil
+	})
+}
+
+// AddSignature appends another RRSIG over an RRset, derived from the
+// existing one and then mutated.
+//
+// Real zones carry several signatures over one RRset routinely — during a key
+// rollover, and permanently when a zone is signed with more than one
+// algorithm — so a validator must handle a mixture of good and unusable ones.
+// RFC 6840 §5.4 is explicit that any one valid signature suffices.
+func (h *Hierarchy) AddSignature(zoneName, owner string, rrtype uint16, mutate func(*dns.RRSIG)) error {
+	records := h.Set(zoneName, owner, rrtype)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no %s %s in %s", owner, dns.TypeToString[rrtype], zoneName)
+	}
+	var template *dns.RRSIG
+	for _, rr := range records {
+		if sig, ok := rr.(*dns.RRSIG); ok {
+			template = sig
+			break
+		}
+	}
+	if template == nil {
+		return fmt.Errorf("lab: %s %s carries no signature to derive from", owner, dns.TypeToString[rrtype])
+	}
+
+	extra := dns.Copy(template).(*dns.RRSIG)
+	mutate(extra)
+	return h.Replace(zoneName, owner, rrtype, append(records, extra))
+}
+
+// DropOriginalSignature removes the zone's own valid signature from an
+// RRset, keeping any that were added afterwards.
+//
+// The valid one is identified by being first: addSigned writes the data
+// records then the signature, and AddSignature appends after that.
+func (h *Hierarchy) DropOriginalSignature(zoneName, owner string, rrtype uint16) error {
+	records := h.Set(zoneName, owner, rrtype)
+	kept := make([]dns.RR, 0, len(records))
+	dropped := false
+	for _, rr := range records {
+		if _, isSig := rr.(*dns.RRSIG); isSig && !dropped {
+			dropped = true
+			continue
+		}
+		kept = append(kept, rr)
+	}
+	if !dropped {
+		return fmt.Errorf("lab: %s %s had no signature to drop", owner, dns.TypeToString[rrtype])
+	}
+	return h.Replace(zoneName, owner, rrtype, kept)
+}
+
+// PermuteRRset reorders the data records of an RRset, leaving the signatures
+// where they are.
+//
+// A DNS response may carry an RRset's members in any order, and an on-path
+// attacker can reorder them without touching a byte of signed data. If that
+// changes a verdict, the attacker chooses the verdict.
+func (h *Hierarchy) PermuteRRset(zoneName, owner string, rrtype uint16, perm []int) error {
+	records := h.Set(zoneName, owner, rrtype)
+	var data, sigs []dns.RR
+	for _, rr := range records {
+		if _, isSig := rr.(*dns.RRSIG); isSig {
+			sigs = append(sigs, rr)
+			continue
+		}
+		data = append(data, rr)
+	}
+	if len(perm) != len(data) {
+		return fmt.Errorf("lab: permutation of %d does not fit %d records", len(perm), len(data))
+	}
+
+	reordered := make([]dns.RR, 0, len(records))
+	for _, i := range perm {
+		if i < 0 || i >= len(data) {
+			return fmt.Errorf("lab: permutation index %d out of range", i)
+		}
+		reordered = append(reordered, data[i])
+	}
+	return h.Replace(zoneName, owner, rrtype, append(reordered, sigs...))
+}
+
 // ShiftValidity moves a signature's inception and expiration by a number of
 // seconds, so a test can place an answer outside its window without moving
 // the clock — which keeps the clock available for asserting the inclusive
@@ -167,6 +262,62 @@ func (h *Hierarchy) SetDSDigestType(childZone string, dt dnssec.DigestType) erro
 		ds.DigestType = uint8(dt)
 		return nil
 	})
+}
+
+// SetDSRRset replaces the DS RRset a parent publishes for a child, and
+// re-signs it so the change is about the DS records themselves rather than
+// about a broken parent signature.
+//
+// Used to build mixed DS RRsets — usable and unusable digest types side by
+// side — which is where ordering dependence hides.
+func (h *Hierarchy) SetDSRRset(childZone string, dsRecords []*dns.DS) error {
+	parent := h.parentOf(childZone)
+	if parent == nil {
+		return fmt.Errorf("lab: %s has no parent zone", childZone)
+	}
+	rrs := make([]dns.RR, 0, len(dsRecords))
+	for _, ds := range dsRecords {
+		rrs = append(rrs, ds)
+	}
+	if err := h.Replace(parent.Name, childZone, dns.TypeDS, rrs); err != nil {
+		return err
+	}
+	return h.resignInParent(childZone, dns.TypeDS)
+}
+
+// DSFor builds a DS record for a child zone's key with a chosen digest type,
+// optionally corrupting the digest.
+//
+// When the digest type is one this build cannot compute, the digest is filled
+// with fixed bytes: the point of such a record is that a validator must not
+// be able to evaluate it, so what it contains is immaterial — and generating
+// it from the key would need the very algorithm that is missing.
+func (h *Hierarchy) DSFor(childZone string, dt dnssec.DigestType, corrupt bool) (*dns.DS, error) {
+	z := h.Zone(childZone)
+	if z == nil {
+		return nil, fmt.Errorf("lab: no zone %s", childZone)
+	}
+
+	ds := z.Key.ToDS(uint8(dt))
+	if ds == nil {
+		ds = &dns.DS{
+			KeyTag:    z.Key.KeyTag(),
+			Algorithm: z.Key.Algorithm,
+			Digest:    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+		}
+	}
+	ds.Hdr = dns.RR_Header{Name: z.Name, Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600}
+	ds.DigestType = uint8(dt)
+
+	if corrupt {
+		raw, err := hex.DecodeString(ds.Digest)
+		if err != nil || len(raw) == 0 {
+			return nil, fmt.Errorf("lab: DS digest for %s is not hex", childZone)
+		}
+		raw[0] ^= 0x01
+		ds.Digest = hex.EncodeToString(raw)
+	}
+	return ds, nil
 }
 
 // AppendRogueKey adds an unauthenticated key to a zone's apex DNSKEY RRset

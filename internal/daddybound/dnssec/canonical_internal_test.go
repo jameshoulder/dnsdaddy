@@ -296,3 +296,131 @@ func TestSignedDataLeavesRDATANamesAloneForTypesOutsideTheList(t *testing.T) {
 		t.Error("SVCB RDATA was case-folded; it is not in the RFC 4034 §6.2 enumeration")
 	}
 }
+
+// R-CANON-05. RFC 4034 §6.3:
+//
+//	RRs with the same owner name, class, and type are sorted by treating the
+//	RDATA portion of the canonical form of each RR as a left-justified
+//	unsigned octet sequence in which the absence of an octet sorts before a
+//	zero octet.
+//
+// "The RDATA portion", not the whole record. The distinction only shows up
+// when two records have different RDATA lengths, because a packed record
+// carries the two-octet RDLENGTH immediately before its RDATA — so comparing
+// whole records sorts on length first and produces a different order whenever
+// a shorter RDATA is lexicographically greater than a longer one.
+//
+// The consequence is not cosmetic. The signer sorted by RDATA; a validator
+// sorting by length builds different signed bytes and declares a correctly
+// signed multi-record RRset Bogus.
+func TestSignedDataSortsByRDATANotByRecordLength(t *testing.T) {
+	tests := []struct {
+		name string
+		// first and second are given in the order RFC 4034 §6.3 requires.
+		// In each pair the RFC-correct first record has the LONGER RDATA, so
+		// an implementation sorting whole packed records reverses them.
+		first, second string
+	}{
+		{
+			// MX RDATA is preference (2 octets) then the exchange name. A
+			// low preference with a long name sorts before a high preference
+			// with a short one, whatever their lengths.
+			//   preference 10 = 0x000A ... 20 octets of RDATA
+			//   preference 20 = 0x0014 ... 13 octets of RDATA
+			name:   "MX preference dominates, longer RDATA sorts first",
+			first:  "example.test. 3600 IN MX 10 bbbbbbbb.example.test.",
+			second: "example.test. 3600 IN MX 20 a.example.test.",
+		},
+		{
+			// TXT RDATA is a sequence of length-prefixed character strings.
+			// Two short strings lead with 0x02 and occupy more octets than
+			// one longer string leading with 0x03.
+			name:   "TXT with several strings sorts before a single longer one",
+			first:  `example.test. 3600 IN TXT "aa" "aa"`,
+			second: `example.test. 3600 IN TXT "zzz"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			first, second := mustRR(tc.first), mustRR(tc.second)
+			sig := testSig("example.test.", first.Header().Rrtype, 2, 3600)
+
+			// Both source orders must produce the same bytes, and those
+			// bytes must place `first` before `second`.
+			forward, err := canonicalSignedData(sig, []dns.RR{first, second})
+			if err != nil {
+				t.Fatalf("forward: %v", err)
+			}
+			reverse, err := canonicalSignedData(sig, []dns.RR{second, first})
+			if err != nil {
+				t.Fatalf("reverse: %v", err)
+			}
+			if !bytes.Equal(forward, reverse) {
+				t.Fatalf("source order changed the signed data;\n forward=%x\n reverse=%x", forward, reverse)
+			}
+
+			firstRDATA, err := rdataOfRR(sig, first)
+			if err != nil {
+				t.Fatalf("rdata of first: %v", err)
+			}
+			secondRDATA, err := rdataOfRR(sig, second)
+			if err != nil {
+				t.Fatalf("rdata of second: %v", err)
+			}
+
+			iFirst := bytes.Index(forward, firstRDATA)
+			iSecond := bytes.Index(forward, secondRDATA)
+			if iFirst < 0 || iSecond < 0 {
+				t.Fatalf("could not locate both records in the signed data (%d, %d)", iFirst, iSecond)
+			}
+			if iFirst > iSecond {
+				t.Errorf("records are ordered by packed length, not by RDATA:\n  %s\n  should sort before\n  %s\n signed data=%x",
+					tc.first, tc.second, forward)
+			}
+		})
+	}
+}
+
+// rdataOfRR returns one record's canonical RDATA, for locating it inside
+// signed data.
+func rdataOfRR(sig *dns.RRSIG, rr dns.RR) ([]byte, error) {
+	wire, err := canonicalRR(sig, rr)
+	if err != nil {
+		return nil, err
+	}
+	return rdataOf(wire, rr)
+}
+
+// The RFC's tie-break: "the absence of an octet sorts before a zero octet".
+// bytes.Compare has exactly that semantics for a prefix, and this pins it so
+// a future hand-rolled comparator cannot quietly get it backwards.
+func TestSignedDataSortsAPrefixBeforeItsExtension(t *testing.T) {
+	// TXT "a" packs as 01 61; TXT "a\x00" as 02 61 00. The first is not a
+	// byte-prefix of the second because of the length octet, so a type whose
+	// RDATA is a bare name is used instead: NS a.test. is a prefix of
+	// NS a.test.test. up to the root label.
+	shorter := mustRR("example.test. 3600 IN TXT \"a\"")
+	longer := mustRR("example.test. 3600 IN TXT \"a\" \"\"")
+
+	sig := testSig("example.test.", dns.TypeTXT, 2, 3600)
+	out, err := canonicalSignedData(sig, []dns.RR{longer, shorter})
+	if err != nil {
+		t.Fatalf("signed data: %v", err)
+	}
+
+	shortRDATA, err := rdataOfRR(sig, shorter)
+	if err != nil {
+		t.Fatalf("rdata: %v", err)
+	}
+	longRDATA, err := rdataOfRR(sig, longer)
+	if err != nil {
+		t.Fatalf("rdata: %v", err)
+	}
+	if !bytes.HasPrefix(longRDATA, shortRDATA) {
+		t.Skipf("this fixture no longer produces a prefix pair (%x, %x)", shortRDATA, longRDATA)
+	}
+	if bytes.Index(out, shortRDATA) > bytes.Index(out, longRDATA) {
+		t.Errorf("a prefix did not sort before its extension:\n short=%x\n long =%x", shortRDATA, longRDATA)
+	}
+}

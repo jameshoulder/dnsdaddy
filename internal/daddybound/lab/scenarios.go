@@ -64,6 +64,16 @@ func Scenarios() []Scenario {
 			Build:  Standard,
 		},
 		{
+			Name:   "multi-record-rrset",
+			Why:    "RFC 4034 section 6.3 orders an RRset by RDATA, not by record length. The signer sorted one way; a validator sorting packed records sorts the other and declares this correctly signed RRset bogus. The MX preferences are chosen so the two orders genuinely differ.",
+			Query:  MailName,
+			QType:  dns.TypeMX,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Standard,
+		},
+		{
 			Name:   "tampered-answer",
 			Why:    "an on-path attacker rewriting an address. This is the attack DNSSEC exists to stop, so a false Secure here is the worst possible outcome.",
 			Query:  AnswerName,
@@ -137,6 +147,35 @@ func Scenarios() []Scenario {
 			Reason: dnssec.ReasonMalformedRecord,
 			Build: mutated(func(h *Hierarchy) error {
 				return h.MalformSignature(LeafZone, AnswerName, dns.TypeA)
+			}),
+		},
+		{
+			Name: "stripped-signature-unsupported-algorithm",
+			Why: "the downgrade attack. The zone is authenticated through a supported algorithm, so it is known to be signed with one; " +
+				"an attacker strips the valid signature and leaves one naming an algorithm this build cannot verify. " +
+				"Reporting the validator's own inability here would turn forged data into an allow-prone Indeterminate. " +
+				"RFC 6840 section 5.12 requires such a signature to be disregarded entirely, after which RFC 4035 section 5.5 applies: none validated, so BAD.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Build: mutated(func(h *Hierarchy) error {
+				// Ed448: in the IANA registry, absent from this zone's
+				// DNSKEY RRset, and unverifiable by this build.
+				return h.SetSignatureAlgorithm(LeafZone, AnswerName, dns.TypeA, dnssec.AlgED448)
+			}),
+		},
+		{
+			Name: "stripped-signature-disallowed-algorithm",
+			Why: "the same attack using an algorithm this build CAN verify but policy refuses. " +
+				"The two must not be distinguishable to an attacker: neither the validator's capability nor the operator's policy " +
+				"may be used to soften the absence of a valid signature from an algorithm the zone actually signs with.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Build: mutated(func(h *Hierarchy) error {
+				return h.SetSignatureAlgorithm(LeafZone, AnswerName, dns.TypeA, dnssec.AlgRSASHA1)
 			}),
 		},
 		{

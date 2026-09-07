@@ -23,6 +23,8 @@ const (
 	MiddleZone = "dnsdaddylab."
 	LeafZone   = "example.dnsdaddylab."
 	AnswerName = "www.example.dnsdaddylab."
+	// MailName carries the multi-record MX RRset described in StandardSpec.
+	MailName = "mail.example.dnsdaddylab."
 )
 
 // AnswerAddress is the address the leaf zone publishes for AnswerName. It is
@@ -75,6 +77,22 @@ func StandardSpec() Spec {
 					soa(LeafZone),
 					ns(LeafZone, "ns.dnsdaddylab."),
 					a(AnswerName, AnswerAddress),
+					// A multi-record RRset whose members expose RFC 4034
+					// §6.3's ordering rule, so the standard hierarchy
+					// exercises it on every run rather than only in a unit
+					// test.
+					//
+					// MX RDATA is a two-octet preference followed by the
+					// exchange name. Preference 10 with a long exchange has
+					// *longer* RDATA than preference 20 with a short one, and
+					// must still sort first because ordering is over RDATA
+					// rather than over record length. A validator that sorts
+					// packed records reverses these two, builds different
+					// signed bytes from the signer, and reports this
+					// correctly signed RRset as Bogus.
+					mx(MailName, 10, "mail-primary.example.dnsdaddylab."),
+					mx(MailName, 20, "mx.example.dnsdaddylab."),
+					mx(MailName, 30, "a.example.dnsdaddylab."),
 				},
 			},
 		},
@@ -127,6 +145,14 @@ func ns(zone, target string) dns.RR {
 	return &dns.NS{
 		Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 3600},
 		Ns:  target,
+	}
+}
+
+func mx(name string, pref uint16, target string) dns.RR {
+	return &dns.MX{
+		Hdr:        dns.RR_Header{Name: name, Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
+		Preference: pref,
+		Mx:         target,
 	}
 }
 
