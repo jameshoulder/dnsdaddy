@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,11 +106,30 @@ func (o *oracle) Name() string { return o.version }
 
 // Validate runs delv and maps its verdict.
 func (o *oracle) Validate(ctx context.Context, qname string, qtype uint16) (differential.ReferenceResult, error) {
+	// Every argument is constrained before it reaches the subprocess.
+	//
+	// There is no shell here — exec passes the arguments as a slice — so the
+	// classic injection is not available. What is available is *argument*
+	// injection: a query name beginning with "-" would be read by delv as a
+	// flag, and delv has flags that change what validation means. Nothing in
+	// this repository supplies such a name, and that is a fact about today's
+	// callers rather than a property of the code, so it is checked here.
 	typeName, ok := dns.TypeToString[qtype]
 	if !ok {
 		return differential.ReferenceResult{}, fmt.Errorf("refdelv: no mnemonic for type %d", qtype)
 	}
+	if err := safeArgument(qname); err != nil {
+		return differential.ReferenceResult{}, fmt.Errorf("refdelv: query name: %w", err)
+	}
+	if _, ok := dns.IsDomainName(qname); !ok {
+		return differential.ReferenceResult{}, fmt.Errorf("refdelv: %q is not a domain name", qname)
+	}
 
+	// #nosec G204 -- the binary is the fixed literal "delv"; the host and
+	// port were parsed by splitHostPort, the type mnemonic comes from a
+	// closed map, the anchor path is one this package constructed, and the
+	// query name is checked above. Arguments are passed as a slice, so no
+	// shell interprets any of them.
 	cmd := exec.CommandContext(ctx, "delv",
 		"@"+o.host, "-p", o.port,
 		"-a", o.anchorFile,
@@ -194,11 +214,40 @@ func splitHostPort(addr string) (string, string, error) {
 	if i < 0 {
 		return "", "", fmt.Errorf("refdelv: %q has no port", addr)
 	}
-	port := addr[i+1:]
-	if _, err := strconv.Atoi(port); err != nil {
-		return "", "", fmt.Errorf("refdelv: %q has no numeric port", addr)
+	host, port := addr[:i], addr[i+1:]
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", "", fmt.Errorf("refdelv: %q has no valid port", addr)
 	}
-	return addr[:i], port, nil
+	if err := safeArgument(host); err != nil {
+		return "", "", fmt.Errorf("refdelv: server address: %w", err)
+	}
+	if net.ParseIP(host) == nil {
+		return "", "", fmt.Errorf("refdelv: %q is not an IP address", host)
+	}
+	return host, port, nil
+}
+
+// safeArgument rejects anything that a command-line parser could read as
+// something other than a value.
+//
+// The leading-dash check is the one that matters: an argument starting with
+// "-" becomes a flag, and delv's flags include ones that change what
+// validation means. The rest keeps whitespace and control characters out of
+// an argument list that a human will read in a test failure.
+func safeArgument(s string) error {
+	if s == "" {
+		return errors.New("empty")
+	}
+	if strings.HasPrefix(s, "-") {
+		return fmt.Errorf("%q would be read as a flag", s)
+	}
+	for _, r := range s {
+		if r < 0x21 || r > 0x7E {
+			return fmt.Errorf("%q contains a character that is not printable ASCII", s)
+		}
+	}
+	return nil
 }
 
 func hexOf(b []byte) string {
