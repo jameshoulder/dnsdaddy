@@ -131,7 +131,21 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 	}
 
 	// Then descend one delegation at a time.
-	for _, child := range zoneCandidates(anchorName, qname, rrtype, v.cfg.Limits.MaxZones) {
+	candidates, truncated := zoneCandidates(anchorName, qname, rrtype, v.cfg.Limits.MaxZones)
+	if truncated {
+		// The chain is deeper than the depth budget allows. Continuing with
+		// the names that fit would validate the answer against whichever
+		// zone the walk happened to stop in, which is not the zone that
+		// contains it — and the resulting failure would be reported as
+		// Bogus, turning "this validator gave up early" into an accusation
+		// against the data. Stopping here says the true thing instead.
+		return w.rec.indeterminate(w.rec.fail(
+			ValidationStep{Kind: StepLimit, Zone: anchorName, Name: qname, RRType: rrtype,
+				Note: "the chain is deeper than the configured zone limit"},
+			ReasonResourceLimit,
+		))
+	}
+	for _, child := range candidates {
 		next, res, done := w.descend(zone, child)
 		if done {
 			return res
@@ -457,7 +471,11 @@ func toRRs[T dns.RR](in []T) []dns.RR {
 // zone, not the zone it delegates to: validating example.test DS means
 // authenticating data in test, and descending into example.test first would
 // look for the DS under the very keys the DS is supposed to authenticate.
-func zoneCandidates(anchor, qname string, rrtype uint16, maxZones int) []string {
+// The second return value reports that the chain was longer than maxZones.
+// It is a separate value rather than a short list because a truncated list is
+// indistinguishable from a complete one, and a caller that cannot tell the
+// difference will quietly validate against the wrong zone.
+func zoneCandidates(anchor, qname string, rrtype uint16, maxZones int) (names []string, truncated bool) {
 	target := qname
 	if rrtype == dns.TypeDS {
 		// The parent of qname. A DS at the anchor itself has no parent to
@@ -471,7 +489,7 @@ func zoneCandidates(anchor, qname string, rrtype uint16, maxZones int) []string 
 	}
 
 	if !dns.IsSubDomain(anchor, target) {
-		return nil
+		return nil, false
 	}
 
 	anchorLabels := dns.CountLabel(anchor)
@@ -479,13 +497,12 @@ func zoneCandidates(anchor, qname string, rrtype uint16, maxZones int) []string 
 
 	out := make([]string, 0, len(labels))
 	for i := len(labels) - anchorLabels - 1; i >= 0; i-- {
-		name := dns.CanonicalName(joinLabels(labels[i:]))
-		out = append(out, name)
 		if len(out) >= maxZones {
-			break
+			return out, true
 		}
+		out = append(out, dns.CanonicalName(joinLabels(labels[i:])))
 	}
-	return out
+	return out, false
 }
 
 func joinLabels(labels []string) string {
