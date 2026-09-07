@@ -61,17 +61,18 @@ func StandardSpec() Spec {
 			{
 				Name:      RootZone,
 				Algorithm: dnssec.AlgED25519,
-				Records:   []dns.RR{ns(RootZone, "ns.dnsdaddylab.")},
+				Records:   []dns.RR{soa(RootZone), ns(RootZone, "ns.dnsdaddylab.")},
 			},
 			{
 				Name:      MiddleZone,
 				Algorithm: dnssec.AlgED25519,
-				Records:   []dns.RR{ns(MiddleZone, "ns.dnsdaddylab.")},
+				Records:   []dns.RR{soa(MiddleZone), ns(MiddleZone, "ns.dnsdaddylab.")},
 			},
 			{
 				Name:      LeafZone,
 				Algorithm: dnssec.AlgED25519,
 				Records: []dns.RR{
+					soa(LeafZone),
 					ns(LeafZone, "ns.dnsdaddylab."),
 					a(AnswerName, AnswerAddress),
 				},
@@ -106,6 +107,20 @@ func (h *Hierarchy) Validator(at time.Time) (*dnssec.Validator, error) {
 		return nil, err
 	}
 	return dnssec.New(h, cfg), nil
+}
+
+// soa gives each zone an apex SOA. Beyond realism, it is what an
+// authoritative server puts in the authority section of a NODATA or NXDOMAIN
+// response, and a reference validator pointed at this hierarchy needs one to
+// tell "no such data" from "the server is broken".
+func soa(zone string) dns.RR {
+	return &dns.SOA{
+		Hdr:     dns.RR_Header{Name: zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600},
+		Ns:      "ns.dnsdaddylab.",
+		Mbox:    "hostmaster.dnsdaddylab.",
+		Serial:  1,
+		Refresh: 3600, Retry: 900, Expire: 604800, Minttl: 300,
+	}
 }
 
 func ns(zone, target string) dns.RR {

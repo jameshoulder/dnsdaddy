@@ -33,6 +33,14 @@ type Scenario struct {
 	// only where more than one is legitimately correct.
 	Reason dnssec.Reason
 
+	// KnownGap explains a disagreement with a reference validator that this
+	// milestone predicts, from a capability v0.1 does not claim.
+	//
+	// It never excuses a false Secure. The differential comparator checks
+	// for that class before it looks at this field, so an annotation here
+	// cannot quiet the one failure that matters.
+	KnownGap string
+
 	// Build produces the hierarchy for this scenario.
 	Build func() (*Hierarchy, error)
 }
@@ -167,25 +175,27 @@ func Scenarios() []Scenario {
 			}),
 		},
 		{
-			Name:   "foreign-zone-signature",
-			Why:    "R-SIG-02. The signature is cryptographically perfect and made by the wrong authority: an ancestor zone signing a delegated child's data.",
-			Query:  AnswerName,
-			QType:  dns.TypeA,
-			At:     Now(),
-			Expect: dnssec.StatusBogus,
-			Reason: dnssec.ReasonSignerNotZone,
+			Name:     "foreign-zone-signature",
+			Why:      "R-SIG-02. The signature is cryptographically perfect and made by the wrong authority: an ancestor zone signing a delegated child's data.",
+			Query:    AnswerName,
+			QType:    dns.TypeA,
+			At:       Now(),
+			Expect:   dnssec.StatusBogus,
+			Reason:   dnssec.ReasonSignerNotZone,
+			KnownGap: "libunbound in forwarding mode accepts this and Daddybound does not. RFC 4035 section 5.3.1 is unambiguous -- the signer's name MUST be the zone that contains the RRset -- and example.dnsdaddylab. is a zone here, delegated with a DS. A forwarder cannot establish that cut for itself: it takes the zone from the answer's own signer name, which is the field under attack. Daddybound's chain walk crosses the delegation and so knows better. This is a limitation of the oracle's configuration, not a defect in either validator.",
 			Build: mutated(func(h *Hierarchy) error {
 				return h.SignWithForeignZone(LeafZone, AnswerName, dns.TypeA, MiddleZone)
 			}),
 		},
 		{
-			Name:   "unsupported-algorithm",
-			Why:    "a zone signed with an algorithm this build cannot verify. RFC 6840 section 5.3 says such a zone is treated as unsigned, so this must not be Bogus: the data may be perfect and the validator simply cannot check it.",
-			Query:  AnswerName,
-			QType:  dns.TypeA,
-			At:     Now(),
-			Expect: dnssec.StatusIndeterminate,
-			Reason: dnssec.ReasonUnsupportedAlgorithm,
+			Name:     "unsupported-algorithm",
+			Why:      "a zone signed with an algorithm this build cannot verify. RFC 6840 section 5.3 says such a zone is treated as unsigned, so this must not be Bogus: the data may be perfect and the validator simply cannot check it.",
+			Query:    AnswerName,
+			QType:    dns.TypeA,
+			At:       Now(),
+			Expect:   dnssec.StatusIndeterminate,
+			Reason:   dnssec.ReasonUnsupportedAlgorithm,
+			KnownGap: "RFC 6840 §5.3 says such a zone is treated as unsigned. A complete validator reports Insecure; v0.1 has no denial proofs and so reports Indeterminate.",
 			Build: mutated(func(h *Hierarchy) error {
 				// Ed448: in the IANA registry, with no verifier in Go's
 				// standard library and therefore none here.
@@ -193,25 +203,27 @@ func Scenarios() []Scenario {
 			}),
 		},
 		{
-			Name:   "disallowed-algorithm",
-			Why:    "RFC 9905. This build can verify RSASHA1 and the default policy refuses to rely on it, which is both obligations at once. Reporting it as Bogus would blame the zone for the operator's policy.",
-			Query:  AnswerName,
-			QType:  dns.TypeA,
-			At:     Now(),
-			Expect: dnssec.StatusIndeterminate,
-			Reason: dnssec.ReasonDisallowedAlgorithm,
+			Name:     "disallowed-algorithm",
+			Why:      "RFC 9905. This build can verify RSASHA1 and the default policy refuses to rely on it, which is both obligations at once. Reporting it as Bogus would blame the zone for the operator's policy.",
+			Query:    AnswerName,
+			QType:    dns.TypeA,
+			At:       Now(),
+			Expect:   dnssec.StatusIndeterminate,
+			Reason:   dnssec.ReasonDisallowedAlgorithm,
+			KnownGap: "the reference has its own algorithm policy and need not share this one. Where it still validates RSASHA1, it reports Secure and Daddybound reports Indeterminate.",
 			Build: mutated(func(h *Hierarchy) error {
 				return h.RelabelAlgorithm(LeafZone, dnssec.AlgRSASHA1)
 			}),
 		},
 		{
-			Name:   "unsupported-ds-digest",
-			Why:    "RFC 6840 section 5.2: a DS with an unusable digest type is treated like a DS to an unsupported algorithm, and where none is left the zone is treated as unsigned. Not Bogus.",
-			Query:  AnswerName,
-			QType:  dns.TypeA,
-			At:     Now(),
-			Expect: dnssec.StatusIndeterminate,
-			Reason: dnssec.ReasonUnsupportedDigest,
+			Name:     "unsupported-ds-digest",
+			Why:      "RFC 6840 section 5.2: a DS with an unusable digest type is treated like a DS to an unsupported algorithm, and where none is left the zone is treated as unsigned. Not Bogus.",
+			Query:    AnswerName,
+			QType:    dns.TypeA,
+			At:       Now(),
+			Expect:   dnssec.StatusIndeterminate,
+			Reason:   dnssec.ReasonUnsupportedDigest,
+			KnownGap: "RFC 6840 §5.2 says the zone is treated as unsigned. A complete validator reports Insecure; v0.1 reports Indeterminate.",
 			Build: mutated(func(h *Hierarchy) error {
 				// GOST R 34.11-94, deprecated by RFC 9906 and not
 				// implemented here.
@@ -219,13 +231,14 @@ func Scenarios() []Scenario {
 			}),
 		},
 		{
-			Name:   "no-trust-anchor",
-			Why:    "RFC 4033 section 5 calls having no anchor the default operation mode. A validator that returns anything but Indeterminate here has invented trust.",
-			Query:  "www.somewhere-else.invalid.",
-			QType:  dns.TypeA,
-			At:     Now(),
-			Expect: dnssec.StatusIndeterminate,
-			Reason: dnssec.ReasonNoTrustAnchor,
+			Name:     "no-trust-anchor",
+			Why:      "RFC 4033 section 5 calls having no anchor the default operation mode. A validator that returns anything but Indeterminate here has invented trust.",
+			Query:    "www.somewhere-else.invalid.",
+			QType:    dns.TypeA,
+			At:       Now(),
+			Expect:   dnssec.StatusIndeterminate,
+			Reason:   dnssec.ReasonNoTrustAnchor,
+			KnownGap: "the anchor set is narrowed for Daddybound only; a reference validator configured with the lab anchor still has one for this name.",
 			Build: func() (*Hierarchy, error) {
 				h, err := Standard()
 				if err != nil {

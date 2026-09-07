@@ -92,11 +92,23 @@ func (h *Hierarchy) CorruptSignature(zoneName, owner string, rrtype uint16) erro
 	})
 }
 
-// MalformSignature replaces the signature with something that is not base64
-// at all, exercising the parsing path rather than the cryptographic one.
+// MalformSignature empties the signature field, exercising the parsing path
+// rather than the cryptographic one.
+//
+// An empty signature rather than a string of non-base64 rubbish, and the
+// difference matters for a reason that only showed up against a real
+// reference validator. Presentation text that is not base64 cannot be packed
+// into a DNS message at all, so the lab's authoritative server could not
+// answer, the oracle retried until it gave up, and the scenario compared
+// Daddybound's verdict against a seventeen-second timeout. A scenario that
+// cannot be put on the wire cannot be compared against anything that speaks
+// DNS.
+//
+// An RRSIG with a zero-length signature field packs and parses cleanly, is
+// exactly as inadmissible, and both validators can see it.
 func (h *Hierarchy) MalformSignature(zoneName, owner string, rrtype uint16) error {
 	return h.mapSignatures(zoneName, owner, rrtype, func(sig *dns.RRSIG) error {
-		sig.Signature = "!!! not base64 !!!"
+		sig.Signature = ""
 		return nil
 	})
 }
