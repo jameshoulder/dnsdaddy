@@ -1,9 +1,40 @@
 # ADR 0001 — Local DNSSEC validation
 
-**Status:** proposed. One decision needs the maintainer's sign-off before
-implementation — see §7.
+**Status:** superseded for the validation engine; retained for its measured
+findings. See the note below.
 **Date:** 2026-09-03
 **Supersedes:** the "Local DNSSEC validation" entry in `docs/roadmap.md`
+**Superseded by:** [docs/daddybound/](../daddybound/README.md) — Daddybound v0.1
+
+---
+
+> ## Note added after this ADR was written
+>
+> This ADR proposes that DNS Daddy establish DNSSEC status by embedding
+> **libunbound** as the validator. That is no longer the direction.
+>
+> Daddybound implements the DNSSEC trust logic itself, from the standards, in
+> pure Go. libunbound's role has changed from *the validator* to *a
+> differential test oracle*: it is compiled only behind a build tag that no
+> shipped build sets, it never produces a Daddybound verdict, and its job is
+> to disagree with one so the disagreement can be investigated. See
+> [docs/daddybound/validation-lab.md](../daddybound/validation-lab.md).
+>
+> Two consequences for reading what follows.
+>
+> **§7's open question is moot.** It asked the maintainer to sign off on
+> DNSSEC validation being available only in the Docker image, because cgo
+> would have broken the static cross-compiled binaries. Daddybound is pure
+> Go, so `CGO_ENABLED=0` holds across all five release platforms and there is
+> nothing to trade away.
+>
+> **The measured sections are still accurate and still used.** The verified
+> libunbound API surface, the absence of DoH forwarding, the 16.3 MB RSS
+> figure, and the two harness findings — that RFC 6761 special-use names are
+> answered NXDOMAIN without a query, and that 0x20 case randomisation breaks
+> an exact-match test server — were all measured, and the differential oracle
+> and the laboratory server were built from them. That is why this document
+> is kept rather than deleted.
 
 ---
 

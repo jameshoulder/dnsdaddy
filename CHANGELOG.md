@@ -22,6 +22,49 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Daddybound: an experimental DNSSEC validation engine
+
+A DNS resolution and validation engine built from first principles in Go. Its
+first milestone walks a DNSSEC chain of trust from a configured trust anchor
+through DS and DNSKEY records to a signed answer, and produces a deterministic
+structured trace of every step.
+
+**Nothing about how DNS Daddy answers queries has changed.** The resolver still
+records the upstream's verdict and does not validate locally. Daddybound
+answers no queries, enforces no policy, and cannot be pointed at the Internet
+or at a running deployment. A test parses the module's imports and asserts that
+no package on the query path can reach it — and that Daddybound cannot reach
+the store, config or resolver either, so a verdict can never depend on
+deployment state.
+
+New command, experimental and clearly labelled as such:
+
+```
+dnsdaddy daddybound lab          the laboratory hierarchy and its trust anchor
+dnsdaddy daddybound scenarios    every scenario and why it exists
+dnsdaddy daddybound validate     run them and report each verdict
+```
+
+The engine implements the protocol and trust logic itself, using Go's standard
+library for cryptography and `github.com/miekg/dns` for wire format. No
+validating resolver implementation produces a Daddybound verdict; libunbound
+appears only as a differential test oracle behind a build tag that no shipped
+build sets, so `CGO_ENABLED=0` and the static cross-compiled binaries are
+unaffected.
+
+Verdicts are compared against libunbound across fifteen laboratory scenarios:
+twelve match, three are documented gaps, and there are no false secures — the
+failure class where a reference validator says data is forged and Daddybound
+says it is fine.
+
+What it deliberately does not do: no NSEC or NSEC3, so no authenticated
+NXDOMAIN or NODATA and no wildcard denial; no recursive resolution; no
+RFC 5011 trust anchor rollover; no enforcement. Because RFC 4033's Insecure
+requires a signed proof that no DS exists, it is unreachable and reported
+honestly as Indeterminate with a reason.
+
+Full detail in [docs/daddybound/](docs/daddybound/README.md).
+
 ### Bring your own intelligence: external reputation and enrichment APIs
 
 Operators can now add external threat intelligence, reputation and enrichment
