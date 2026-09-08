@@ -543,6 +543,37 @@ jobs:
           echo "$entrypoint" | grep -q '/usr/local/bin/dnsdaddy"' \
             || { echo "default image entrypoint is not the resolver"; exit 1; }
 
+      # The Dockerfile says USER dnsdaddy. That is a declaration; this is the
+      # measurement. A base image change, or a stage that runs a step after
+      # the USER line, can put the process back to uid 0 without the line
+      # moving.
+      - name: The container must not run as root
+        run: |
+          uid=$(docker run --rm --entrypoint id dnsdaddy:ci -u)
+          echo "uid=$uid"
+          [ "$uid" != "0" ] || { echo "the image runs as root"; exit 1; }
+
+      # Daddybound compares itself against libunbound and BIND delv, and
+      # neither may reach a shipped build: libunbound is behind a cgo build
+      # tag no release sets, and delv is a subprocess a test invokes. If
+      # either ever became a runtime dependency it would show up here as a
+      # package in the image or a dynamic link in the binary.
+      #
+      # Asserted rather than assumed because the failure is silent: an image
+      # that quietly gained libunbound would still pass every other check in
+      # this job.
+      - name: No reference validator may be a runtime dependency
+        run: |
+          packages=$(docker run --rm --entrypoint apk dnsdaddy:ci info 2>/dev/null || true)
+          echo "$packages" | sort | tr '\n' ' '; echo
+          ! echo "$packages" | grep -qiE 'unbound|bind-tools|bind9|libunbound'
+          # CGO_ENABLED=0, so the binary must be static: nothing to link
+          # against at run time, reference validator or otherwise.
+          docker run --rm --entrypoint ldd dnsdaddy:ci /usr/local/bin/dnsdaddy 2>&1 \
+            | tee /tmp/ldd.txt || true
+          grep -qiE 'not a valid dynamic|statically linked|No such file' /tmp/ldd.txt \
+            || { echo "the shipped binary is dynamically linked"; exit 1; }
+
       - name: The lab image must build and list its scenarios
         run: |
           docker build --target lab -t dnsdaddy-lab:ci .
