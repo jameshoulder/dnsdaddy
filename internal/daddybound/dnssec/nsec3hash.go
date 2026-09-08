@@ -87,12 +87,27 @@ func nsec3Hash(name string, alg uint8, iterations uint16, salt []byte) (string, 
 
 	// #nosec G401 -- see the import comment: RFC 5155 §5 defines the NSEC3
 	// owner-name hash as SHA-1, and this is a name lookup rather than a
-	// security assertion.
+	// security assertion. SHA-1's collision weakness buys an attacker
+	// nothing here: the hash is not a commitment to anything, it is the
+	// coordinate a signed NSEC3 record is filed under, and the *record* is
+	// what authenticates. Substituting a colliding name would still need a
+	// signature over the record naming it.
+	//
+	// Changing the algorithm is not available either. Hash algorithm 1 is
+	// the only value IANA has assigned, and a validator that hashed with
+	// anything else would agree with no zone in existence.
+	//
+	// The nosemgrep must be the last line before the statement: Semgrep
+	// honours it only on the matched line or the one immediately above, so
+	// an intervening comment line silently disables it. That has already
+	// happened in this repository once, to three suppressions at a stroke.
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1
 	digest := sha1.Sum(append(append([]byte{}, wire[:n]...), salt...))
 	out := digest[:]
 
 	for i := uint16(0); i < iterations; i++ {
 		// #nosec G401 -- as above.
+		// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-sha1
 		next := sha1.Sum(append(append([]byte{}, out...), salt...))
 		out = next[:]
 	}
