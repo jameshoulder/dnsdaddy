@@ -973,6 +973,119 @@ func Scenarios() []Scenario {
 			Build:  Build,
 		},
 		{
+			Name:   "algorithm-rsasha256",
+			Family: FamilyPositive,
+			Why:    "RSASHA256 (algorithm 8) signs a large majority of the signed DNS, including the root itself. The rest of this suite runs on Ed25519 because it signs deterministically, which is what makes a regression corpus possible — and an engine tested on one algorithm has tested its plumbing, not its arithmetic. This is the same hierarchy under a different one.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  signedWith(dnssec.AlgRSASHA256),
+		},
+		{
+			Name:   "algorithm-rsasha512",
+			Family: FamilyPositive,
+			Why:    "RSASHA512 (algorithm 10). Same key, different digest, and the digest is chosen from the algorithm number rather than from anything in the signature — so an engine that hard-coded SHA-256 for every RSA algorithm passes the scenario above and fails this one.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  signedWith(dnssec.AlgRSASHA512),
+		},
+		{
+			Name:   "algorithm-ecdsap256sha256",
+			Family: FamilyPositive,
+			Why:    "ECDSA P-256 (algorithm 13), now the commonest algorithm for new signed zones. Its wire format is a bare r||s pair rather than the ASN.1 encoding Go's ecdsa package returns from Sign, so it is the algorithm where a validator most easily verifies nothing at all while appearing to work.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  signedWith(dnssec.AlgECDSAP256SHA256),
+		},
+		{
+			Name:   "algorithm-ecdsap384sha384",
+			Family: FamilyPositive,
+			Why:    "ECDSA P-384 (algorithm 14). The same wire format as P-256 at a different size, so a validator that fixed the r||s split at 32 octets rather than deriving it from the curve passes P-256 and fails here.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  signedWith(dnssec.AlgECDSAP384SHA384),
+		},
+		{
+			Name:   "algorithm-mixed-chain",
+			Family: FamilyPositive,
+			Why:    "the shape the real Internet actually has: each zone in a chain choosing its own algorithm, independently of its parent. The DS in the parent names the child's algorithm while being signed with the parent's, so a validator that carried one algorithm down the chain — or that checked the DS's algorithm field against the wrong key — fails here and passes every single-algorithm scenario above.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build: chainSignedWith(
+				dnssec.AlgED25519,         // root
+				dnssec.AlgECDSAP256SHA256, // dnsdaddylab.
+				dnssec.AlgRSASHA256,       // example.dnsdaddylab.
+			),
+		},
+		{
+			Name:     "rollover-two-signatures-one-broken",
+			Family:   FamilyPositive,
+			Why:      "a zone mid key-rollover publishes signatures from the outgoing key alongside the incoming one, and only one of them need verify. RFC 6840 §5.4: \"This document specifies that a resolver SHOULD accept any valid RRSIG as sufficient, and only determine that an RRset is Bogus if all RRSIGs fail validation.\" A validator that fails on the first signature that does not verify rejects correctly signed zones intermittently, which is close to undiagnosable in production — and which order the signatures arrive in is chosen by whoever sends the response.",
+			NoOracle: "the two oracles genuinely differ here, and RFC 4035 §5.3.3 says why they are allowed to: \"the local resolver security policy determines whether the resolver also has to test these RRSIG RRs and how to resolve conflicts if these RRSIG RRs lead to differing results.\" There is no fact about the data to disagree about — one signature is authentic and the other is not, and both validators can see that — only a policy about what to do next.\n\nRFC 6840 §5.4 makes the SHOULD, and Daddybound follows it. Measured: libunbound 1.19.2 reaches Secure and agrees; BIND delv 9.18.39 reports \"RRSIG failed to verify\" and rejects, which is the more restrictive policy the same section warns about — \"Such a resolver is also vulnerable to malicious insertion of gibberish signatures\", which is exactly this scenario. Comparing anyway would file that as a false Secure, and a false Secure is the one class this suite refuses to let anything explain away. It must therefore not be manufactured out of a policy choice, or the class stops meaning what it says.\n\nThe rule is not left untested by that. rollover-every-signature-broken is the same shape with nothing valid in it, is fully comparable, and both oracles reject it — so a validator that accepted this one because a signature was merely present still fails there.",
+			Query:    AnswerName,
+			QType:    dns.TypeA,
+			At:       Now(),
+			Expect:   dnssec.StatusSecure,
+			Reason:   dnssec.ReasonVerified,
+			Build: mutated(func(h *Hierarchy) error {
+				// Two signatures identical in every field the validator
+				// orders on — labels, key tag, algorithm — so neither can
+				// be reached first by being cheaper to reject, and one of
+				// them broken.
+				//
+				// Copying rather than inventing a key tag matters. A
+				// signature naming a key tag the zone does not publish is
+				// discarded before any arithmetic happens, so a scenario
+				// built that way would prove only that an inapplicable
+				// signature is skipped. Here the broken signature is fully
+				// admissible and fails in the verifier, which is the case
+				// RFC 6840 §5.4 is actually about.
+				if err := h.AddSignature(LeafZone, AnswerName, dns.TypeA, func(*dns.RRSIG) {}); err != nil {
+					return err
+				}
+				// Broken *and* first in the order the validator tries them,
+				// so the good signature is only reached by continuing past
+				// a failure. Without that the good one is tried first, the
+				// bad one is never touched, and the scenario passes while
+				// testing nothing — which is exactly what it did until this
+				// was checked against the trace.
+				return h.BreakSignatureFirstInOrder(LeafZone, AnswerName, dns.TypeA, 0)
+			}),
+		},
+		{
+			Name:   "rollover-every-signature-broken",
+			Family: FamilyChainFailure,
+			Why:    "the other half of RFC 6840 §5.4, and the half that keeps the scenario above from being passed by a validator that accepts an RRset because a signature was present. Two signatures, both broken: nothing verifies, so the answer is forged.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonSignatureCryptoFailed,
+			Build: mutated(func(h *Hierarchy) error {
+				if err := h.AddSignature(LeafZone, AnswerName, dns.TypeA, func(*dns.RRSIG) {}); err != nil {
+					return err
+				}
+				if err := h.CorruptSignatureAt(LeafZone, AnswerName, dns.TypeA, 0); err != nil {
+					return err
+				}
+				return h.CorruptSignatureAt(LeafZone, AnswerName, dns.TypeA, 1)
+			}),
+		},
+		{
 			Name:   "nxdomain-at-the-root",
 			Family: FamilyNSEC,
 			Why:    "a name error whose closest encloser is the root, which is what every query for a top-level domain that does not exist looks like. The wildcard half of the proof is the denial of \"*.\", and building that name by concatenating \"*.\" onto the encloser gives \"*..\" when the encloser is the root — not a name, covered by no NSEC, so the proof can never complete. Daddybound had exactly that defect and every mistyped TLD came back Bogus. No lab scenario could find it, because a lab hierarchy delegates out of the root at once and never has the root as a closest encloser; the live corpus found it on its first run. This scenario exists so the shape is reachable here from now on.",
@@ -1267,4 +1380,52 @@ func buildLongAliasChain(spec Spec) (*Hierarchy, error) {
 		return Build(out)
 	}
 	return nil, fmt.Errorf("lab: %s is not in the specification", LeafZone)
+}
+
+// signedWith builds the standard hierarchy with every zone signed by one
+// algorithm.
+//
+// The suite's default is Ed25519 because it signs deterministically, which is
+// what lets a signed message go into a regression corpus. That is a good
+// reason to default to it and no reason at all to test only it: an engine
+// exercised on one algorithm has demonstrated its plumbing rather than its
+// arithmetic, and the algorithms differ in exactly the places a validator
+// gets wrong — the digest chosen from the algorithm number, the r||s split
+// sized from the curve, the RSA exponent read from the key rather than
+// assumed.
+func signedWith(alg dnssec.Algorithm) func(Spec) (*Hierarchy, error) {
+	return func(spec Spec) (*Hierarchy, error) {
+		out := spec
+		out.Zones = append([]ZoneSpec(nil), spec.Zones...)
+		for i := range out.Zones {
+			out.Zones[i].Algorithm = alg
+		}
+		return Build(out)
+	}
+}
+
+// chainSignedWith gives each zone in the chain its own algorithm, in the
+// order the zones are specified.
+//
+// A zone's algorithm is its own choice, not its parent's, and the real DNS is
+// mixed all the way down: the root signs with RSASHA256 while a great many of
+// its children now use ECDSA P-256. The DS record is where the two meet — it
+// lives in the parent, is signed with the parent's algorithm, and names the
+// child's — so this is the scenario that separates a validator which reads
+// the algorithm from the record in front of it from one that carries a single
+// notion of "the algorithm" down the walk.
+//
+// Zones beyond the list keep whatever the specification gave them, so a
+// hierarchy can be part-mixed without every sibling having to be named.
+func chainSignedWith(algs ...dnssec.Algorithm) func(Spec) (*Hierarchy, error) {
+	return func(spec Spec) (*Hierarchy, error) {
+		out := spec
+		out.Zones = append([]ZoneSpec(nil), spec.Zones...)
+		for i := range out.Zones {
+			if i < len(algs) {
+				out.Zones[i].Algorithm = algs[i]
+			}
+		}
+		return Build(out)
+	}
 }

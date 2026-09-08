@@ -494,6 +494,9 @@ func (h *Hierarchy) respond(name string, rrtype uint16, wantDNSSEC bool) dnssec.
 		if o.set {
 			out.Authority = o.authority
 		}
+		if o.answerSet {
+			out.Answer = o.answer
+		}
 	}
 	return out
 }

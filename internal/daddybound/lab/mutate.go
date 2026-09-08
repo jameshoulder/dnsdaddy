@@ -777,6 +777,23 @@ type responseOverride struct {
 	rcode     *int
 	authority []dns.RR
 	set       bool
+	answer    []dns.RR
+	answerSet bool
+}
+
+// SubstituteAnswer replaces the answer section of the answer to one question.
+//
+// The counterpart of SubstituteAuthority, and it exists for the chain fuzzer:
+// a CNAME chain, a DNAME redirection and a positive answer are all "records
+// in the answer section", so an attacker who can write that section can offer
+// any of them. Nothing else in this hierarchy changes, so the chain of trust
+// above the substituted name stays genuine and the only unknown is what the
+// answer claims.
+func (h *Hierarchy) SubstituteAnswer(qname string, rrtype uint16, records []dns.RR) {
+	h.override(qname, rrtype, func(o *responseOverride) {
+		o.answer = records
+		o.answerSet = true
+	})
 }
 
 // SubstituteAuthority replaces the authority section of the answer to one
@@ -1140,4 +1157,57 @@ func (h *Hierarchy) CorruptDenialFor(zoneName, qname string, rrtype uint16, rcod
 		}
 	}
 	return nil
+}
+
+// BreakSignatureFirstInOrder corrupts the nth signature over an RRset and
+// makes it sort before every other signature on that RRset.
+//
+// The sorting half is what makes the scenario mean anything. A validator
+// trying several signatures over one RRset must continue past one that fails
+// — RFC 6840 §5.4: "only determine that an RRset is Bogus if all RRSIGs fail
+// validation" — and a fixture that merely adds a broken signature does not
+// test that at all if the good one happens to be tried first. Daddybound
+// orders signatures by labels, key tag, algorithm and then by the signature
+// bytes, precisely so the order is a function of the set rather than of how
+// the response arrived; that makes the order predictable, and this makes it
+// predictable in the direction the test needs.
+//
+// Zeroing the leading octets is how. Base64 of a zero octet begins with 'A',
+// which is the lowest character the alphabet produces, so the result sorts
+// first. The signature stays the right length for its algorithm and stays
+// fully admissible — same key tag, same algorithm, same validity — so it
+// reaches the verifier and fails there, which is the case the RFC is about.
+// A signature naming a key tag the zone does not publish would be discarded
+// before any arithmetic and would prove only that an inapplicable signature
+// is skipped.
+func (h *Hierarchy) BreakSignatureFirstInOrder(zoneName, owner string, rrtype uint16, n int) error {
+	records := h.Set(zoneName, owner, rrtype)
+	seen := 0
+	broken := false
+	for i, rr := range records {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok {
+			continue
+		}
+		if seen != n {
+			seen++
+			continue
+		}
+		c := dns.Copy(sig).(*dns.RRSIG)
+		raw, err := base64.StdEncoding.DecodeString(c.Signature)
+		if err != nil || len(raw) < 8 {
+			return fmt.Errorf("lab: signature %d on %s %s is not decodable", n, owner, dns.TypeToString[rrtype])
+		}
+		for j := 0; j < 8; j++ {
+			raw[j] = 0
+		}
+		c.Signature = base64.StdEncoding.EncodeToString(raw)
+		records[i] = c
+		broken = true
+		break
+	}
+	if !broken {
+		return fmt.Errorf("lab: %s %s has no signature %d", owner, dns.TypeToString[rrtype], n)
+	}
+	return h.Replace(zoneName, owner, rrtype, records)
 }
