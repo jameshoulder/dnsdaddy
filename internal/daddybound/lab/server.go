@@ -49,23 +49,55 @@ func (q Query) String() string {
 		q.Name, dns.TypeToString[q.Type], dns.RcodeToString[q.Rcode], q.Answer)
 }
 
-// StartServer binds UDP and TCP on an ephemeral loopback port and serves h.
+// StartServer binds UDP and TCP on the same ephemeral loopback port and
+// serves h.
 //
 // Both protocols, because a validator retries over TCP when an answer is
 // truncated, and DNSSEC answers carrying keys and signatures truncate
-// routinely.
+// routinely. Both on one port, because that is what a DNS server looks like
+// and what an oracle configured with a single host:port expects.
+//
+// Hence the retry, which is not defensive padding. TCP and UDP have separate
+// port spaces: asking the kernel for an ephemeral port on one says nothing
+// about whether the same number is free on the other, so binding one and then
+// the other is a race against everything else on the machine. It lost on a CI
+// runner under -race, where the extra latency widened the window — and it lost
+// as a confusing failure inside a differential scenario ("serve: bind: address
+// already in use") that read like a fault in the scenario rather than in the
+// harness.
+//
+// A loop that discards a colliding pair and asks for another port is the
+// standard remedy and terminates immediately in practice; a bound on the
+// attempts keeps a genuinely exhausted machine from spinning.
 func (h *Hierarchy) StartServer() (*Server, error) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("lab: listen udp: %w", err)
-	}
-	addr := pc.LocalAddr().String()
+	const attempts = 16
 
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		_ = pc.Close()
-		return nil, fmt.Errorf("lab: listen tcp on %s: %w", addr, err)
+	var (
+		pc  net.PacketConn
+		ln  net.Listener
+		err error
+	)
+	for i := 0; i < attempts; i++ {
+		// TCP first: it is the scarcer of the two, both because listening
+		// sockets linger in TIME_WAIT and because far more software on a
+		// shared runner wants a TCP port than a UDP one. Choosing the
+		// number from the scarcer space makes the second bind the one
+		// likely to succeed.
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, fmt.Errorf("lab: listen tcp: %w", err)
+		}
+		pc, err = net.ListenPacket("udp", ln.Addr().String())
+		if err == nil {
+			break
+		}
+		_ = ln.Close()
+		ln, pc = nil, nil
 	}
+	if pc == nil || ln == nil {
+		return nil, fmt.Errorf("lab: could not bind udp and tcp on one loopback port in %d attempts: %w", attempts, err)
+	}
+	addr := ln.Addr().String()
 
 	s := &Server{addr: addr}
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
