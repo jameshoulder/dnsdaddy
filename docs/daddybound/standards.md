@@ -11,9 +11,10 @@ be settled by argument from the standard, not by assuming the mature validator
 is right. When Daddybound and a reference validator disagree, this document is
 where the investigation starts.
 
-**Read date for every source below: 7 September 2026.** Registries change; the
-IANA tables reproduced here are snapshots, and §6 says what happens when they
-move.
+**Read date for every source below: 7 September 2026**, except RFC 5155,
+RFC 9276 and RFC 4592, added for the denial-of-existence milestone and read on
+8 September 2026. Registries change; the IANA tables reproduced here are
+snapshots, and §6 says what happens when they move.
 
 ## 1. How each source was verified
 
@@ -46,6 +47,9 @@ process working.
 | RFC 6840 — Clarifications and Implementation Notes for DNSSEC | Unsupported algorithm and digest handling, multiple RRSIGs, the SEP bit |
 | RFC 9905 — Deprecating the Use of SHA-1 in DNSSEC Signature Algorithms | Why implementation support and policy permission are different questions |
 | RFC 2181 — Clarifications to the DNS Specification | What an RRset is, and the TTL rule inside one |
+| RFC 5155 — DNS Security (DNSSEC) Hashed Authenticated Denial of Existence | NSEC3 hashing, the closest encloser proof, opt-out, and the validator rules in §8 |
+| RFC 9276 — Guidance for NSEC3 Parameter Settings | What iteration counts a validator should accept, and why treating a high count as insecure is the wrong refusal |
+| RFC 4592 — The Role of Wildcards in the Domain Name System | Closest encloser, and which names a wildcard can and cannot synthesise |
 | IANA "DNS Security Algorithm Numbers" | The algorithm registry Daddybound's tables must agree with |
 | IANA "Digest Algorithms" (DS RR) | The DS digest registry Daddybound's tables must agree with |
 
@@ -61,8 +65,12 @@ process working.
 RFC 6891 (EDNS(0)), RFC 7766 (DNS over TCP), RFC 8198 (aggressive NSEC use),
 RFC 8914 (extended DNS errors), RFC 7858 (DNS over TLS), RFC 8484 (DNS over
 HTTPS), RFC 9156 (QNAME minimisation), RFC 9250 (DNS over QUIC), RFC 9460
-(SVCB/HTTPS records), RFC 9462 (discovery of designated resolvers), RFC 5155
-(NSEC3), RFC 5011 (automated trust anchor updates).
+(SVCB/HTTPS records), RFC 9462 (discovery of designated resolvers), RFC 5011
+(automated trust anchor updates).
+
+RFC 5155 was on this list for v0.1 and has been promoted to Verified for the
+denial-of-existence milestone. It is named here as well so the move is visible
+rather than silent.
 
 These are the v0.2+ surface. They are listed so the boundary is explicit: if
 Daddybound ever appears to implement one of them, either this list is wrong or
@@ -106,7 +114,7 @@ to return:
   chain walk therefore tracks whether it is still under a secure delegation,
   and a failure above that point is Indeterminate.
 
-## 4. Rules v0.1 implements
+## 4. Rules Daddybound implements
 
 Each rule has a stable identifier. Code that enforces a rule cites the
 identifier, so the implementation and this document can be checked against each
@@ -251,6 +259,135 @@ Original TTL regardless — but it does affect grouping. Daddybound groups
 strictly by (name, class, type) and never by TTL, so a response with
 inconsistent TTLs forms one RRset and is verified as one, which is what a
 signer signed.
+
+### 4.7 Authenticated denial of existence: NSEC (RFC 4035 §5.4, RFC 6840 §4)
+
+RFC 4035 §5.4 is the base rule and RFC 6840 §4 exists because, in its own
+words, that section "under-specifies the algorithm for checking nonexistence
+proofs". Both are load-bearing here; implementing §5.4 alone produces a
+validator an attacker can walk straight through.
+
+| ID | Rule | Source text |
+| --- | --- | --- |
+| `R-DEN-01` | Every NSEC RRset used in a proof must itself be authenticated by the chain of trust before anything is concluded from it | RFC 4035 §5.4: "security-aware resolvers MUST authenticate the NSEC RRsets that comprise the non-existence proof as described in Section 5.3" |
+| `R-DEN-02` | NODATA: an authenticated NSEC whose owner *matches* the queried name proves the type is absent when the type bit is clear in its bitmap | RFC 4035 §5.4: "If the requested RR name matches the owner name of an authenticated NSEC RR, then the NSEC RR's type bit map field lists all RR types present at that owner name, and a resolver can prove that the requested RR type does not exist by checking for the RR type in the bit map" |
+| `R-DEN-03` | NODATA: the CNAME bit must also be clear in that same bitmap | RFC 6840 §4.3: "validators MUST check the CNAME bit in the matching NSEC or NSEC3 RR's type bitmap in addition to the bit for the query type" |
+| `R-DEN-04` | NXDOMAIN: an authenticated NSEC must *cover* the queried name — strictly between its owner and its Next Domain Name in canonical order | RFC 4035 §5.4: "If the requested RR name would appear after an authenticated NSEC RR's owner name and before the name listed in that NSEC RR's Next Domain Name field according to the canonical DNS name order defined in [RFC4034], then no RRsets with the requested name exist in the zone" |
+| `R-DEN-05` | NXDOMAIN: a second proof is required, that no wildcard could have answered | RFC 4035 §5.4: "it is possible that a wildcard could be used to match the requested RR owner name and type, so proving that the requested RRset does not exist also requires proving that no possible wildcard RRset exists that could have been used to generate a positive response" |
+| `R-DEN-06` | An **ancestor delegation NSEC** — NS bit set, SOA bit clear, and a signer field shorter than the owner name — must not be used to deny anything below that cut, nor any non-DS type at the owner itself | RFC 6840 §4.1: "Ancestor delegation NSEC or NSEC3 RRs MUST NOT be used to assume nonexistence of any RRs below that zone cut, which include all RRs at that (original) owner name other than DS RRs, and all RRs below that owner name regardless of type" |
+| `R-DEN-07` | An NSEC with the DNAME bit set must not be used to deny any subdomain of its owner | RFC 6840 §4.1: "An NSEC or NSEC3 RR with the DNAME bit set MUST NOT be used to assume the nonexistence of any subdomain of that NSEC/NSEC3 RR's (original) owner name" |
+| `R-DEN-08` | Insecure delegation: the matching NSEC must have DS clear, SOA clear **and NS set** | RFC 4035 §5.2 requires the absence of DS; RFC 6840 §4.4: "The validator also MUST check for the presence of the NS bit in the matching NSEC (or NSEC3) RR (proving that there is, indeed, a delegation)" |
+| `R-DEN-09` | A DS non-existence proof must come from the parent side of the cut, which is the NSEC with the SOA bit clear | RFC 4035 §5.2: "The parent NSEC RR and child NSEC RR can always be distinguished because the SOA bit will be set in the child NSEC RR and clear in the parent NSEC RR. A security-aware resolver MUST use the parent NSEC RR when attempting to prove that a DS RRset does not exist" |
+| `R-DEN-10` | The NSEC and RRSIG bits in a bitmap say nothing; a validated NSEC proves both records exist regardless | RFC 4035 §5.4: "Since a validated NSEC RR proves the existence of both itself and its corresponding RRSIG RR, a validator MUST ignore the settings of the NSEC and RRSIG bits in an NSEC RR" |
+| `R-DEN-11` | A positive answer whose owner has more labels than its RRSIG's Labels field was wildcard-expanded, and needs its own denial proof that no closer match existed | RFC 4035 §5.3.4: "If the number of labels in an RRset's owner name is greater than the Labels field of the covering RRSIG RR, then the RRset and its covering RRSIG RR were created as a result of wildcard expansion ... it must take additional steps to verify the non-existence of an exact match or closer wildcard match for the query" |
+| `R-DEN-12` | The work spent on a proof is bounded, and hitting the bound is not a verdict | RFC 4035 §5.4: "As with all DNS operations, however, the resolver MUST bound the work it puts into answering any particular query" |
+
+Two of these deserve more than a table row.
+
+**`R-DEN-06` is the rule that makes the difference between a proof and a
+coincidence.** Every zone cut has two NSEC records at the same owner name: one
+published by the parent, describing the delegation, and one published by the
+child, describing its apex. Without the ancestor-delegation restriction, a
+validator will happily accept the parent's NSEC — which it can authenticate,
+because the parent is inside the chain of trust — as proof that a name inside
+the child does not exist. The parent has no authority over that name and never
+made that claim. The signature is genuine; the conclusion is invented.
+
+**`R-DEN-05` is the rule that is easiest to leave out and hardest to notice.**
+A response that proves only that `nope.example.` is missing has not proved
+NXDOMAIN, because `*.example.` may exist and would have answered. A validator
+that stops after the first covering NSEC accepts a forged NXDOMAIN for every
+name in every wildcard-bearing zone.
+
+The closest encloser is what connects the two proofs. Given an authenticated
+NSEC covering QNAME, its owner and its Next Domain Name both exist, so every
+ancestor of each of them exists too — an ancestor of an existing name is at
+worst an empty non-terminal, which still exists. The deepest ancestor QNAME
+shares with either of them is therefore the deepest ancestor of QNAME that is
+known to exist, and the wildcard that has to be denied is the asterisk label
+prepended to it. RFC 4592 §3.3.1 defines the closest encloser, and RFC 5155
+§1.3 restates it as "the longest existing ancestor of a name".
+
+### 4.8 Authenticated denial of existence: NSEC3 (RFC 5155, RFC 9276)
+
+NSEC3 replaces *the name sorts between these two names* with *the hash of the
+name sorts between these two hashes*, and everything else follows from that
+one substitution — including the parts that do not survive it.
+
+| ID | Rule | Source text |
+| --- | --- | --- |
+| `R-N3-01` | NSEC3 RRs with an unknown hash algorithm are ignored | RFC 5155 §8.1: "A validator MUST ignore NSEC3 RRs with unknown hash types" |
+| `R-N3-02` | NSEC3 RRs with a Flags value other than 0 or 1 are ignored | RFC 5155 §8.2: "A validator MUST ignore NSEC3 RRs with a Flag fields value other than zero or one" |
+| `R-N3-03` | Closest encloser proof: the longest ancestor X of QNAME matched by an NSEC3, whose next closer name is covered by an NSEC3 | RFC 5155 §8.3, reproduced in full below |
+| `R-N3-04` | The NSEC3 matching the closest encloser must be from the right zone: DNAME clear, and NS set only if SOA is set | RFC 5155 §8.3: "The DNAME type bit must not be set and the NS type bit may only be set if the SOA type bit is set. If this is not the case, it would be an indication that an attacker is using them to falsely deny the existence of RRs for which the server is not authoritative" |
+| `R-N3-05` | NXDOMAIN: a closest encloser proof for QNAME, plus an NSEC3 covering the wildcard at that encloser | RFC 5155 §8.4: "A validator MUST verify that there is a closest encloser proof for QNAME present in the response and that there is an NSEC3 RR that covers the wildcard at the closest encloser" |
+| `R-N3-06` | NODATA, QTYPE ≠ DS: an NSEC3 matching QNAME with both QTYPE and CNAME bits clear | RFC 5155 §8.5: "The validator MUST verify that an NSEC3 RR that matches QNAME is present and that both the QTYPE and the CNAME type are not set in its Type Bit Maps field" |
+| `R-N3-07` | NODATA, QTYPE = DS: a matching NSEC3 with DS and CNAME clear; **or**, failing that, a closest provable encloser proof whose next-closer NSEC3 has Opt-Out set | RFC 5155 §8.6 |
+| `R-N3-08` | Wildcard NODATA: a closest encloser proof plus a matching NSEC3 for the wildcard, with QTYPE and CNAME clear in it | RFC 5155 §8.7 |
+| `R-N3-09` | Wildcard answer: an NSEC3 covering the next closer name to QNAME | RFC 5155 §8.8: "This proves that QNAME itself did not exist and that the correct wildcard was used to generate the response" |
+| `R-N3-10` | Insecure delegation: a matching NSEC3 with NS set, DS clear and SOA clear; or no match, plus a closest provable encloser proof whose next-closer NSEC3 has Opt-Out set | RFC 5155 §8.9 |
+| `R-N3-11` | Iteration counts are bounded, and a high count is refused rather than computed | RFC 9276 §3.1, and see below |
+
+RFC 5155 §8.3's algorithm, quoted rather than paraphrased because the flag
+handling is where implementations go wrong:
+
+> 1.  Set SNAME=QNAME.  Clear the flag.
+> 2.  Check whether SNAME exists:
+>     *  If there is no NSEC3 RR in the response that matches SNAME ... clear the flag.
+>     *  If there is an NSEC3 RR in the response that covers SNAME, set the flag.
+>     *  If there is a matching NSEC3 RR in the response and the flag was set, then the proof is complete, and SNAME is the closest encloser.
+>     *  If there is a matching NSEC3 RR in the response, but the flag is not set, then the response is bogus.
+> 3.  Truncate SNAME by one label from the left, go to step 2.
+
+**Opt-out is where NSEC3 stops proving what NSEC proves.** An NSEC3 with the
+Opt-Out bit set asserts only that the *closest provable encloser* exists; names
+between it and the next hash may or may not exist, and RFC 5155 §1.3 says so
+directly: the closest provable encloser "is only different from the closest
+encloser in an Opt-Out zone". Opt-out therefore supports exactly one kind of
+conclusion — that a delegation is insecure (`R-N3-07`, `R-N3-10`) — and must
+never be read as proving that a name does not exist. A validator that treats
+opt-out coverage as a name-error proof will accept a forged NXDOMAIN for any
+name in any opt-out zone, which is most of the TLDs.
+
+**Iterations are an attacker-chosen loop count.** The hash iteration count and
+the salt both arrive in the response, and each iteration is a hash computation
+the validator performs. RFC 9276 §3.1 is unambiguous about what a zone should
+publish:
+
+> If NSEC3 must be used, then an iterations count of 0 MUST be used to
+> alleviate computational burdens.  Note that extra iteration counts other
+> than 0 increase the impact of CPU-exhausting DoS attacks, and also increase
+> the risk of interoperability problems.
+
+§3.2 then gives validators two permissions for larger counts, both at the same
+threshold:
+
+> Validating resolvers MAY return an insecure response to their clients when
+> processing NSEC3 records with iterations larger than 0. ...
+>
+> Validating resolvers MAY also return a SERVFAIL response when processing
+> NSEC3 records with iterations larger than 0.
+
+The 100 and 500 figures that circulate as "the RFC 9276 limits" are not
+normative text; they are measurements in Appendix A ("setting an upper limit of
+100 iterations for treating a zone as insecure is interoperable ... returning
+SERVFAIL beyond 500 iterations appears to be interoperable"). Daddybound cites
+them as evidence about the deployed Internet, not as a rule.
+
+Of the two permissions, Daddybound takes the refusal and not the downgrade: a
+count above its configured ceiling produces Indeterminate with
+`ReasonResourceLimit`, never Insecure and never a verdict. The RFC gives the
+reason itself, in §3.2:
+
+> Because treating a high iterations count as insecure leaves zones subject to
+> attack, validating resolver operators and validating resolver software
+> implementers are further encouraged to lower their default limit for
+> returning SERVFAIL when processing NSEC3 parameters containing large
+> iteration count values.
+
+Reading an expensive proof as "insecure" would let an attacker downgrade a
+signed zone by publishing an expensive NSEC3, which converts a denial-of-service
+lever into a security one.
 
 ## 5. Algorithm support versus algorithm permission
 
