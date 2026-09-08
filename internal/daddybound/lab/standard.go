@@ -32,6 +32,11 @@ const (
 	UnsignedZone = "unsigned.dnsdaddylab."
 	// UnsignedName is a name inside that insecurely delegated zone.
 	UnsignedName = "host.unsigned.dnsdaddylab."
+	// InsecureAliasName is a CNAME inside that insecurely delegated zone,
+	// pointing back at a name in a signed one. Nothing authenticates the
+	// redirection itself, so the answer it leads to cannot be reported Secure
+	// however well signed the destination is.
+	InsecureAliasName = "alias.unsigned.dnsdaddylab."
 
 	// WildcardOwner is a wildcard two labels below the leaf apex rather than
 	// directly beneath it, so a validator that assumes the source of
@@ -50,6 +55,31 @@ const (
 
 	// MissingName exists in no zone, for name-error proofs.
 	MissingName = "nope.example.dnsdaddylab."
+
+	// OtherZone is a second signed zone delegated from the middle zone, so
+	// an alias can cross a zone cut without leaving the chain of trust.
+	OtherZone = "other.dnsdaddylab."
+	// OtherName is the address record that zone publishes.
+	OtherName = "target.other.dnsdaddylab."
+
+	// AliasName is a CNAME to AnswerName inside the same zone.
+	AliasName = "alias.example.dnsdaddylab."
+	// CrossZoneAlias points into OtherZone: signed, and a different chain.
+	CrossZoneAlias = "cross.example.dnsdaddylab."
+	// AliasToInsecure points into the zone delegated without a DS, so the
+	// answer stops being authenticated part-way along the chain.
+	AliasToInsecure = "downgrade.example.dnsdaddylab."
+	// Alias chain of three hops ending at AnswerName.
+	AliasHop1 = "hop1.example.dnsdaddylab."
+	AliasHop2 = "hop2.example.dnsdaddylab."
+	AliasHop3 = "hop3.example.dnsdaddylab."
+	// AliasLoopA and AliasLoopB point at each other.
+	AliasLoopA = "loopa.example.dnsdaddylab."
+	AliasLoopB = "loopb.example.dnsdaddylab."
+	// WildcardAliasOwner is a wildcard CNAME; WildcardAliasMatch is answered
+	// by expanding it, so the alias itself owes a denial proof.
+	WildcardAliasOwner = "*.aka.example.dnsdaddylab."
+	WildcardAliasMatch = "anything.aka.example.dnsdaddylab."
 )
 
 // AnswerAddress is the address the leaf zone publishes for AnswerName. It is
@@ -59,6 +89,7 @@ var (
 	WildcardAddress = net.IPv4(192, 0, 2, 2)
 	DeepAddress     = net.IPv4(192, 0, 2, 3)
 	UnsignedAddress = net.IPv4(192, 0, 2, 4)
+	OtherAddress    = net.IPv4(192, 0, 2, 5)
 )
 
 // Signature validity for the standard hierarchy. Fixed instants rather than
@@ -131,6 +162,35 @@ func StandardSpec() Spec {
 					// about, not only the runs that are about denial.
 					a(WildcardOwner, WildcardAddress),
 					a(DeepName, DeepAddress),
+
+					// Aliases. A CNAME is the answer to a query for any
+					// other type at the same name (RFC 1034 §3.6.2), so
+					// each of these is reached by asking for an address and
+					// getting a redirection instead.
+					cname(AliasName, AnswerName),
+					cname(CrossZoneAlias, OtherName),
+					cname(AliasToInsecure, UnsignedName),
+					cname(AliasHop1, AliasHop2),
+					cname(AliasHop2, AliasHop3),
+					cname(AliasHop3, AnswerName),
+					cname(AliasLoopA, AliasLoopB),
+					cname(AliasLoopB, AliasLoopA),
+					cname(WildcardAliasOwner, AnswerName),
+				},
+			},
+			{
+				// A second signed zone under the same parent, so an alias
+				// can cross a zone cut and still be authenticated. Without a
+				// sibling, "cross-zone" would only ever mean parent-to-child
+				// and the case where the target needs its own chain walk
+				// from the anchor would never be exercised.
+				Name:      OtherZone,
+				Parent:    MiddleZone,
+				Algorithm: dnssec.AlgED25519,
+				Records: []dns.RR{
+					soa(OtherZone),
+					ns(OtherZone, "ns.dnsdaddylab."),
+					a(OtherName, OtherAddress),
 				},
 			},
 			{
@@ -146,6 +206,7 @@ func StandardSpec() Spec {
 					soa(UnsignedZone),
 					ns(UnsignedZone, "ns.dnsdaddylab."),
 					a(UnsignedName, UnsignedAddress),
+					cname(InsecureAliasName, AnswerName),
 				},
 			},
 		},
@@ -206,6 +267,13 @@ func mx(name string, pref uint16, target string) dns.RR {
 		Hdr:        dns.RR_Header{Name: name, Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
 		Preference: pref,
 		Mx:         target,
+	}
+}
+
+func cname(name, target string) dns.RR {
+	return &dns.CNAME{
+		Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 3600},
+		Target: target,
 	}
 }
 

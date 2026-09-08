@@ -1054,3 +1054,48 @@ func (h *Hierarchy) AddSecondNSEC3(zoneName, owner string, apply func(*dns.NSEC3
 	return h.Replace(zoneName, owner, dns.TypeNSEC3,
 		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC3}])
 }
+
+// AddSecondCNAME publishes a second CNAME at a name that already has one and
+// signs the pair as one RRset.
+//
+// RFC 2181 §10.1 forbids it, which is exactly why it is worth building: the
+// records are genuinely signed, so a validator cannot dismiss them on the
+// cryptography, and it has to decide what to do with a name that redirects to
+// two places.
+func (h *Hierarchy) AddSecondCNAME(zoneName, owner, target string) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeCNAME)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no CNAME at %s in %s", owner, zoneName)
+	}
+
+	var pair []dns.RR
+	for _, rr := range records {
+		c, ok := rr.(*dns.CNAME)
+		if !ok {
+			continue
+		}
+		pair = append(pair, dns.Copy(c), &dns.CNAME{
+			Hdr:    dns.RR_Header{Name: c.Hdr.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: c.Hdr.Ttl},
+			Target: dns.CanonicalName(target),
+		})
+		break
+	}
+	if len(pair) != 2 {
+		return fmt.Errorf("lab: could not build a second CNAME at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, pair); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeCNAME,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeCNAME}])
+}

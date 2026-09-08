@@ -241,3 +241,50 @@ func TestPaddingADenialProofIsNotAnAccusation(t *testing.T) {
 		t.Errorf("validating a padded response took %s; the records were being verified rather than skipped", elapsed)
 	}
 }
+
+// TestAnOverLongAliasChainIsRefusedRatherThanFollowed covers the hop budget.
+//
+// A CNAME chain arrives from the network and each hop costs a full walk from
+// the trust anchor — its own DNSKEY and DS lookups, its own signature
+// verifications. The length is chosen by whoever writes the zone, so it is
+// bounded.
+//
+// Reaching the bound must be Indeterminate. A deeply aliased zone is unusual,
+// not forged, and reporting Bogus would have this validator accuse data of
+// something its own budget decided. It lives here rather than in the scenario
+// table because the limit under test is Daddybound's configuration: a
+// reference validator has its own budget and no way to be told about this one,
+// so comparing would be comparing two numbers rather than two readings of the
+// data.
+func TestAnOverLongAliasChainIsRefusedRatherThanFollowed(t *testing.T) {
+	h, err := lab.Standard()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	cfg, err := h.Config(lab.Now())
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	// The standard hierarchy's chain is three hops. Two is below it.
+	cfg.Limits.MaxAliasHops = 2
+	v := dnssec.New(h, cfg)
+
+	got := v.Validate(context.Background(), lab.AliasHop1, dns.TypeA)
+	if got.Status != dnssec.StatusIndeterminate {
+		t.Fatalf("status = %s, want indeterminate\n%s", got.Status, got.Trace())
+	}
+	if got.Reason != dnssec.ReasonResourceLimit {
+		t.Errorf("reason = %s, want %s: the verdict should say this validator stopped walking",
+			got.Reason, dnssec.ReasonResourceLimit)
+	}
+
+	// And the same chain resolves with the default budget, so the test is
+	// about the limit rather than about a chain that never worked.
+	v2, err := h.Validator(lab.Now())
+	if err != nil {
+		t.Fatalf("validator: %v", err)
+	}
+	if ok := v2.Validate(context.Background(), lab.AliasHop1, dns.TypeA); ok.Status != dnssec.StatusSecure {
+		t.Fatalf("the chain does not resolve even with the default budget: %s\n%s", ok.Status, ok.Trace())
+	}
+}

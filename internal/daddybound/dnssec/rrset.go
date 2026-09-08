@@ -78,6 +78,33 @@ func SplitSignatures(records []dns.RR, rrType uint16) (data []dns.RR, sigs []*dn
 	return data, sigs
 }
 
+// SplitSignaturesAt is SplitSignatures restricted to one owner name.
+//
+// The answer to a query for (QNAME, QTYPE) is the RRset at QNAME, or a CNAME
+// chain leading to one (RFC 1034 §4.3.2). Nothing else in the answer section
+// answers the question, and a real response routinely carries something else:
+// a server that follows a CNAME within its own zone returns the alias and the
+// records it points at together, so an answer section holding records at two
+// different owner names is the normal case rather than an odd one.
+//
+// Filtering by owner is therefore not tidiness. Without it a validator picks
+// up whichever records match the queried *type*, authenticates them — they are
+// genuinely signed, just not an answer to this question — and reports Secure.
+// An attacker needs no forgery for that: any signed RRset of the right type
+// from anywhere in the zone will do, returned in answer to a query for a name
+// it has nothing to do with. This package did exactly that until the review
+// that added this function.
+func SplitSignaturesAt(records []dns.RR, owner string, rrType uint16) (data []dns.RR, sigs []*dns.RRSIG) {
+	want := dns.CanonicalName(owner)
+	at := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		if dns.CanonicalName(rr.Header().Name) == want {
+			at = append(at, rr)
+		}
+	}
+	return SplitSignatures(at, rrType)
+}
+
 // dnskeysOf returns the DNSKEY records from a set, ignoring anything else.
 func dnskeysOf(records []dns.RR) []*dns.DNSKEY {
 	var keys []*dns.DNSKEY

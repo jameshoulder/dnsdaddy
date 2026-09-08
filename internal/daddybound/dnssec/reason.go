@@ -182,6 +182,17 @@ const (
 	// The zone's own signed records contradict the answer it was sent with.
 	ReasonDenialContradicted Reason = "denial_contradicted"
 
+	// ReasonAliasAmbiguous: more than one CNAME at a name. RFC 2181 §10.1
+	// forbids a CNAME coexisting with other data, and a fortiori with a
+	// second CNAME; following one of them would mean choosing a target out
+	// of a response an attacker ordered.
+	ReasonAliasAmbiguous Reason = "alias_ambiguous"
+
+	// ReasonAliasLoop: the alias chain returns to a name it already visited.
+	// The records may all be authentic — the zone published a loop — so this
+	// is a statement about the data's shape rather than its authenticity.
+	ReasonAliasLoop Reason = "alias_loop"
+
 	// ReasonDenialWrongZone: an NSEC was offered as proof of something it is
 	// not entitled to prove — an ancestor delegation NSEC used below its own
 	// zone cut (R-DEN-06), an NSEC with the DNAME bit used to deny a
@@ -261,6 +272,9 @@ var explanations = map[Reason]string{
 
 	ReasonNoTrustAnchor:       "no configured trust anchor covers this name",
 	ReasonTrustAnchorMismatch: "no key at the trust anchor's name matched the configured anchor",
+
+	ReasonAliasAmbiguous: "more than one CNAME exists at this name, so there is no single target to follow",
+	ReasonAliasLoop:      "the alias chain returns to a name it has already visited",
 
 	ReasonNoDenialProof:      "the response carried no authenticated proof that the name or type does not exist",
 	ReasonDenialIncomplete:   "the denial records do not prove everything the response claims; commonly the wildcard denial is missing",

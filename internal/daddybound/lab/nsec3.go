@@ -302,7 +302,7 @@ func (z *Zone) nsec3Covering(name string) []dns.RR {
 // one structural way: because a hash discards a name's ancestry, the closest
 // encloser cannot be read off a single record and has to be shipped — a
 // record matching it, and a record covering the name one label below it.
-func (h *Hierarchy) nsec3DenialFor(zone *Zone, qname string, rcode int) []dns.RR {
+func (h *Hierarchy) nsec3DenialFor(zone *Zone, qname string, rrtype uint16, rcode int) []dns.RR {
 	var out []dns.RR
 	add := func(rr []dns.RR) {
 		for _, r := range rr {
@@ -334,10 +334,19 @@ func (h *Hierarchy) nsec3DenialFor(zone *Zone, qname string, rcode int) []dns.RR
 
 	// §7.2.2 adds the wildcard denial for a name error; §7.2.5 replaces it
 	// with a matching record when the wildcard exists and has no such type.
-	if wc := zone.nsec3Matching(wildcardUnder(encloser)); wc != nil {
-		add(wc)
-	} else {
-		add(zone.nsec3Covering(wildcardUnder(encloser)))
+	//
+	// Not for a delegation, though. §7.2.7 asks a referral to carry the
+	// closest provable encloser proof and the opt-out record covering the
+	// next closer, and nothing else — the question there is whether a DS
+	// exists, and no wildcard can synthesise one. Sending it anyway would
+	// put a record in the response that no rule requires, which a validator
+	// is right to ignore and a test is right to notice.
+	if rrtype != dns.TypeDS {
+		if wc := zone.nsec3Matching(wildcardUnder(encloser)); wc != nil {
+			add(wc)
+		} else {
+			add(zone.nsec3Covering(wildcardUnder(encloser)))
+		}
 	}
 	return out
 }

@@ -78,6 +78,15 @@ type Limits struct {
 	// this validator takes the second.
 	MaxNSEC3Iterations int
 
+	// MaxAliasHops bounds how many CNAMEs one resolution may follow.
+	//
+	// A chain arrives from the network and each hop costs a full walk from
+	// the trust anchor. RFC 1034 sets no limit and real resolvers pick one;
+	// this is generous next to any legitimate chain and small enough that
+	// reaching it is cheap. Reaching it is Indeterminate, never Bogus: a
+	// deeply aliased zone is unusual, not forged.
+	MaxAliasHops int
+
 	// MaxDenialRecords bounds how many denial RRsets one response may have
 	// authenticated.
 	//
@@ -113,6 +122,7 @@ func DefaultLimits() Limits {
 		// same appendix notes that even this "still enables CPU-exhausting
 		// DoS attacks" — which is why the total-hash budget exists as well.
 		MaxNSEC3Iterations: 100,
+		MaxAliasHops:       12,
 		// Eight times what the largest correct proof in this suite needs,
 		// and small enough that reaching it is free.
 		MaxDenialRecords: 32,
@@ -179,6 +189,9 @@ func New(src Source, cfg Config) *Validator {
 	if cfg.Limits.MaxDenialRecords == 0 {
 		cfg.Limits.MaxDenialRecords = DefaultLimits().MaxDenialRecords
 	}
+	if cfg.Limits.MaxAliasHops == 0 {
+		cfg.Limits.MaxAliasHops = DefaultLimits().MaxAliasHops
+	}
 	return &Validator{src: src, cfg: cfg}
 }
 
@@ -203,13 +216,99 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 	qname := dns.CanonicalName(name)
 	now := v.cfg.Clock.Now()
 	w := &walk{v: v, ctx: ctx, rec: newRecorder(qname, rrtype, now), now: now}
+	return w.chase(qname, rrtype)
+}
 
-	anchorName, anchors := v.cfg.Anchors.deepestFor(qname)
+// chase resolves a name, following CNAMEs, and combines what it finds.
+//
+// The loop is bounded three ways, because every one of its inputs comes from
+// the network. Hops are capped; a name seen twice is a loop and stops; and the
+// lookup budget is shared with everything else this walk does rather than
+// reset per hop, so a chain cannot buy itself more work by being long.
+//
+// The verdict is the weakest of the hops — see weakest, which explains why
+// that ordering and not another. It is accumulated as the loop goes rather
+// than at the end, so a chain that later hits a limit still carries the
+// verdict of the links it did check.
+func (w *walk) chase(qname string, rrtype uint16) ValidationResult {
+	visited := map[string]bool{}
+	status := StatusSecure
+	reason := ReasonVerified
+
+	for hop := 0; ; hop++ {
+		if hop >= w.v.cfg.Limits.MaxAliasHops {
+			// Not a verdict about the data: this validator stopped walking.
+			// Reporting Bogus would accuse a zone of forgery for being
+			// deeply aliased, which plenty of real ones are.
+			return w.rec.indeterminate(w.rec.fail(
+				ValidationStep{Kind: StepLimit, Name: qname, RRType: rrtype,
+					Note: "the alias chain is longer than the configured hop limit"},
+				ReasonResourceLimit,
+			))
+		}
+		if visited[qname] {
+			// The zone signed a chain that returns to a name it already
+			// passed through. Every record in it may be authentic; it simply
+			// does not resolve, which is a statement about the data's shape
+			// rather than about its authenticity, so it is not Bogus.
+			return w.rec.indeterminate(w.rec.fail(
+				ValidationStep{Kind: StepRRset, Name: qname, RRType: dns.TypeCNAME,
+					Note: "the alias chain returns to a name it has already visited"},
+				ReasonAliasLoop,
+			))
+		}
+		visited[qname] = true
+
+		outcome := w.resolveOnce(qname, rrtype)
+		// Status and reason move together, and only when this hop is
+		// strictly weaker than what the chain has so far.
+		//
+		// Updating them separately was wrong in a way that would have shown
+		// up as an operator chasing the wrong hop: a chain whose first link
+		// was Indeterminate and whose second was Insecure came out
+		// Indeterminate — correct — carrying the *Insecure* link's reason,
+		// because the second assignment was conditioned on "not Secure"
+		// rather than on having decided anything. The verdict and the
+		// sentence explaining it have to come from the same link.
+		//
+		// Equal ranks leave both alone, so the earliest hop at the deciding
+		// rank is the one reported. That is a function of the chain's own
+		// order rather than of anything a server controls: the order is
+		// CNAME target following CNAME target, and a server that reorders
+		// its answer section does not change it.
+		if next := weakest(status, outcome.result.Status); next != status {
+			status, reason = next, outcome.result.Reason
+		}
+
+		if outcome.followTo == "" {
+			// The end of the chain, for good or ill. The accumulated status
+			// is what the whole answer is worth.
+			return w.rec.result(status, reason)
+		}
+		if status == StatusBogus {
+			// A link failed to authenticate. Following the target would only
+			// add steps to a trace whose conclusion is already fixed, and
+			// would spend lookups on a chain nobody should act on.
+			return w.rec.result(status, reason)
+		}
+		qname = outcome.followTo
+	}
+}
+
+// resolveOnce walks the chain of trust to one name and validates its answer.
+//
+// Split out of Validate so that a CNAME target can be resolved the same way
+// the original name was, from the trust anchor down. A target can sit in a
+// different zone, under a different anchor, or below a delegation the first
+// name never crossed, so reusing the first name's zone would be validating
+// the second name's data against the wrong keys.
+func (w *walk) resolveOnce(qname string, rrtype uint16) aliasOutcome {
+	anchorName, anchors := w.v.cfg.Anchors.deepestFor(qname)
 	if len(anchors) == 0 {
-		return w.rec.indeterminate(w.rec.skip(
+		return aliasOutcome{result: w.rec.indeterminate(w.rec.skip(
 			ValidationStep{Kind: StepTrustAnchor, Zone: qname},
 			ReasonNoTrustAnchor,
-		))
+		))}
 	}
 
 	// The anchor zone is established first: its apex DNSKEY RRset has to be
@@ -217,11 +316,11 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 	// anything.
 	zone, res, ok := w.establishAnchorZone(anchorName, anchors)
 	if !ok {
-		return res
+		return aliasOutcome{result: res}
 	}
 
 	// Then descend one delegation at a time.
-	candidates, truncated := zoneCandidates(anchorName, qname, rrtype, v.cfg.Limits.MaxZones)
+	candidates, truncated := zoneCandidates(anchorName, qname, rrtype, w.v.cfg.Limits.MaxZones)
 	if truncated {
 		// The chain is deeper than the depth budget allows. Continuing with
 		// the names that fit would validate the answer against whichever
@@ -229,16 +328,16 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 		// contains it — and the resulting failure would be reported as
 		// Bogus, turning "this validator gave up early" into an accusation
 		// against the data. Stopping here says the true thing instead.
-		return w.rec.indeterminate(w.rec.fail(
+		return aliasOutcome{result: w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepLimit, Zone: anchorName, Name: qname, RRType: rrtype,
 				Note: "the chain is deeper than the configured zone limit"},
 			ReasonResourceLimit,
-		))
+		))}
 	}
 	for _, child := range candidates {
 		next, res, done := w.descend(zone, child)
 		if done {
-			return res
+			return aliasOutcome{result: res}
 		}
 		if next != nil {
 			zone = next
@@ -494,28 +593,45 @@ func (w *walk) usableDS(child string, dsRecords []*dns.DS) ([]*dns.DS, Reason) {
 	return usable, unusable
 }
 
-// validateAnswer authenticates the RRset the caller actually asked about.
-func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) ValidationResult {
+// validateAnswer authenticates the RRset the caller actually asked about, or
+// reports the alias that stands where it would have been.
+func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) aliasOutcome {
 	resp, reason := w.lookup(qname, rrtype)
 	if reason != ReasonNone {
-		return w.rec.indeterminate(w.rec.fail(
+		return aliasOutcome{result: w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype}, reason,
-		))
+		))}
 	}
 
-	data, sigs := SplitSignatures(resp.Answer, rrtype)
+	// Restricted to the queried owner name. See SplitSignaturesAt: an answer
+	// section legitimately carries records for other names, and taking them
+	// as the answer is a false Secure that needs no forgery at all.
+	data, sigs := SplitSignaturesAt(resp.Answer, qname, rrtype)
 	if len(data) == 0 {
+		// No records of the queried type. Before deciding the answer is an
+		// absence, look for the alias that would explain it.
+		//
+		// The order matters: a name that has both a CNAME and the queried
+		// type violates RFC 2181 §10.1, and answering from the direct
+		// records — which the branch above already did — is what every
+		// resolver does with such a zone. Only where the type is genuinely
+		// absent does the alias become the answer.
+		if rrtype != dns.TypeCNAME {
+			if alias, _ := SplitSignaturesAt(resp.Answer, qname, dns.TypeCNAME); len(alias) > 0 {
+				return w.validateAlias(zone, qname, rrtype, resp)
+			}
+		}
 		// Nothing in the answer section. Whether that absence is legitimate
 		// is exactly the denial-of-existence question, and the response has
 		// to prove its own claim rather than be taken at its word.
-		return w.validateDenial(zone, qname, rrtype, resp)
+		return aliasOutcome{result: w.validateDenial(zone, qname, rrtype, resp)}
 	}
 
 	set, reason := NewRRset(data)
 	if reason != ReasonNone {
-		return w.rec.verdict(w.rec.fail(
+		return aliasOutcome{result: w.rec.verdict(w.rec.fail(
 			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype}, reason,
-		))
+		))}
 	}
 
 	accepted, reason := w.authenticateSigned(set, sigs, zone.name, zone.keys)
@@ -530,7 +646,7 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) Vali
 		// verdict still declines to say Bogus for reasons that describe this
 		// validator rather than the data — an unsupported algorithm, a
 		// digest policy refuses, a limit reached.
-		return w.rec.verdict(reason)
+		return aliasOutcome{result: w.rec.verdict(reason)}
 	}
 
 	w.rec.ok(ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype})
@@ -538,9 +654,9 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) Vali
 	// A verified signature is not the end of the story for an answer the
 	// server synthesised from a wildcard. See wildcardProof.
 	if res, done := w.wildcardProof(zone, qname, rrtype, accepted, resp); done {
-		return res
+		return aliasOutcome{result: res}
 	}
-	return w.rec.secure()
+	return aliasOutcome{result: w.rec.secure()}
 }
 
 // zoneState is a zone whose apex DNSKEY RRset has been authenticated.

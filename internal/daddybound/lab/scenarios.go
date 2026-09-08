@@ -94,6 +94,10 @@ const (
 	// FamilyNSEC3: the same questions asked of an NSEC3-signed hierarchy.
 	FamilyNSEC3 Family = "nsec3"
 
+	// FamilyAlias: CNAME chains, including the ones that cross a zone cut or
+	// a change in security status.
+	FamilyAlias Family = "alias"
+
 	// FamilyConfiguration: a property of Daddybound's own configuration
 	// rather than of any data — what it does with no trust anchor, for
 	// instance. These are the scenarios with nothing to ask an oracle.
@@ -871,6 +875,161 @@ func Scenarios() []Scenario {
 				return nil
 			}),
 		},
+		// CNAME chains. A CNAME answer is a sequence rather than an RRset,
+		// so the interesting cases are about what the sequence is worth: a
+		// chain is only as authenticated as its weakest link, and each of
+		// these pins one way for a link to be weak.
+		{
+			Name:   "cname-same-zone",
+			Why:    "the positive case for aliases. RFC 1034 section 3.6.2 makes a CNAME the answer to a query for any other type at the name, so this is reached by asking for an address. Both the alias and the address it points at are signed by the same zone.",
+			Family: FamilyAlias,
+			Query:  AliasName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "cname-across-a-zone-cut",
+			Why:    "the target is in a sibling zone, so it needs its own walk from the trust anchor rather than the zone the alias lived in. A validator that carried the first hop's keys forward would be authenticating the second zone's data with the wrong ones.",
+			Family: FamilyAlias,
+			Query:  CrossZoneAlias,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "cname-chain-of-three-hops",
+			Why:    "multi-hop chains are ordinary in real DNS, and each hop is a separate RRset with a separate signature. A validator that checked only the first or only the last would report the whole answer on the strength of part of it.",
+			Family: FamilyAlias,
+			Query:  AliasHop1,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "cname-answering-AAAA",
+			Why:    "the alias is the answer to a query for any type at the name, not only the type it happens to point at. Asking for AAAA reaches the same CNAME and then a name with no AAAA, so the chain ends in an authenticated NODATA rather than in records.",
+			Family: FamilyAlias,
+			Query:  AliasName,
+			QType:  dns.TypeAAAA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "cname-from-an-insecure-zone-into-a-signed-one",
+			Family: FamilyAlias,
+			Why:    "the redirection is the answer. This alias lives in a zone delegated without a DS, so nothing authenticates where it points, while the name it points at is properly signed. Whoever controls the unsigned zone therefore chooses the destination, and the signature on that destination attests that the destination is genuine — never that this query should have been sent there. Reporting Secure would be authenticating an attacker's choice.\n\nDaddybound reaches Insecure by stopping: the parent's NSEC proves no DS exists, everything below is Insecure by RFC 4033 §5, and the walk returns without following the alias at all. So this scenario pins the stop rather than the combination — the combination is what cname-into-an-insecure-zone exercises, where a Secure first hop meets an Insecure second. It stays correct either way: were the chase ever extended to follow this alias, the weakest of Insecure and Secure is still Insecure.",
+			Query:  InsecureAliasName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusInsecure,
+			Build:  Build,
+		},
+		{
+			Name:   "cname-into-an-insecure-zone",
+			Why:    "the alias is signed and the target is below a delegation with no DS. The answer cannot be Secure — anyone can rewrite the unsigned part — and it cannot be Bogus either, because nothing failed to validate. Insecure is the whole answer's status, not just the second hop's, and a validator reporting the first hop's Secure would be calling rewritable data authenticated.",
+			Family: FamilyAlias,
+			Query:  AliasToInsecure,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusInsecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "cname-from-a-wildcard",
+			Why:    "RFC 4035 section 5.3.4 applies to an alias exactly as it does to an address: one signed wildcard CNAME answers for every name under its encloser, so the expansion has to be shown legitimate. A validator that demanded the wildcard proof for addresses and not for aliases would let one captured answer redirect every sibling name.",
+			Family: FamilyAlias,
+			Query:  WildcardAliasMatch,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "cname-loop",
+			Why:    "two aliases pointing at each other. Every record is authentic — the zone signed the loop — so this is a statement about the shape of the data rather than its authenticity, and must not be Bogus. What it must be is finite.",
+			Family: FamilyAlias,
+			Query:  AliasLoopA,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusIndeterminate,
+			Reason: dnssec.ReasonAliasLoop,
+			Build:  Build,
+		},
+		{
+			Name:   "cname-with-a-broken-signature",
+			Why:    "the alias itself fails to authenticate. The target may be perfectly signed, so a validator that resolved the target and reported its verdict would report Secure for an answer reached through a forged redirection — which is the whole attack.",
+			Family: FamilyAlias,
+			Query:  AliasName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonSignatureCryptoFailed,
+			Build: mutated(func(h *Hierarchy) error {
+				return h.CorruptSignature(LeafZone, AliasName, dns.TypeCNAME)
+			}),
+		},
+		{
+			Name:   "cname-to-a-broken-terminal",
+			Why:    "the mirror image: the alias is genuine and the RRset it points at is tampered with. A validator that stopped once the alias verified would report Secure for data that failed to validate.",
+			Family: FamilyAlias,
+			Query:  AliasName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonSignatureCryptoFailed,
+			Build: mutated(func(h *Hierarchy) error {
+				return h.CorruptSignature(LeafZone, AnswerName, dns.TypeA)
+			}),
+		},
+		{
+			Name:   "cname-broken-in-the-middle-of-a-chain",
+			Why:    "three hops with the middle one tampered with. Neither end of the chain is enough to notice, so this fails a validator that samples the chain rather than checking all of it.",
+			Family: FamilyAlias,
+			Query:  AliasHop1,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonSignatureCryptoFailed,
+			Build: mutated(func(h *Hierarchy) error {
+				return h.CorruptSignature(LeafZone, AliasHop2, dns.TypeCNAME)
+			}),
+		},
+		{
+			Name:   "two-cnames-at-one-name",
+			Why:    "RFC 2181 section 10.1 forbids a CNAME coexisting with other data, and so with a second CNAME. Following one of them means choosing a target out of a response an attacker ordered, which is a verdict they would be choosing. Refusing is the only answer that does not hand them the decision.",
+			Family: FamilyAlias,
+			Query:  AliasName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonAliasAmbiguous,
+			Build: mutated(func(h *Hierarchy) error {
+				return h.AddSecondCNAME(LeafZone, AliasName, MissingName)
+			}),
+		},
+		{
+			Name:     "cname-chain-longer-than-the-hop-limit",
+			Why:      "a chain arrives from the network and each hop costs a full walk from the trust anchor. Reaching the limit must be Indeterminate rather than Bogus: a deeply aliased zone is unusual, not forged, and accusing it would be this validator blaming data for its own budget.",
+			Family:   FamilyAlias,
+			Query:    longAliasChainStart,
+			QType:    dns.TypeA,
+			At:       Now(),
+			Expect:   dnssec.StatusIndeterminate,
+			Reason:   dnssec.ReasonResourceLimit,
+			NoOracle: "the limit under test is Daddybound's shipped hop budget. Every link is correctly signed, so a reference validator either resolves the chain or stops on a budget of its own; either way the disagreement would be about two numbers rather than about the data.",
+			Build:    buildLongAliasChain,
+		},
 		{
 			Name:     "no-trust-anchor",
 			Family:   FamilyConfiguration,
@@ -968,4 +1127,46 @@ func sortRecords(records []dns.RR) {
 		}
 		return a.Rrtype < b.Rrtype
 	})
+}
+
+// longAliasChainStart is the head of a correctly signed CNAME chain built to
+// be one link longer than the validator will follow.
+const longAliasChainStart = "chain00." + LeafZone
+
+// buildLongAliasChain adds a signed CNAME chain longer than
+// dnssec.DefaultLimits().MaxAliasHops, terminating at a real address.
+//
+// The length is derived from the limit rather than written down, so the
+// scenario cannot quietly stop testing anything when the budget changes. It
+// is the *shipped* budget deliberately: a test-only limit injected into the
+// config proves the counter increments, which denial_resource_test.go already
+// does directly, whereas this proves the number an operator actually runs
+// bounds the work an attacker can ask for.
+//
+// Every link is properly signed. That is the point — the scenario has to fail
+// on length alone, so that a validator which happened to reject it for any
+// other reason would still be wrong. Reaching the cap is Indeterminate and
+// never Bogus: a long chain is unusual, not forged, and calling it forged
+// would be this validator blaming data for its own budget.
+func buildLongAliasChain(spec Spec) (*Hierarchy, error) {
+	hops := dnssec.DefaultLimits().MaxAliasHops + 1
+
+	out := spec
+	out.Zones = append([]ZoneSpec(nil), spec.Zones...)
+	for i := range out.Zones {
+		if out.Zones[i].Name != LeafZone {
+			continue
+		}
+		records := append([]dns.RR(nil), out.Zones[i].Records...)
+		for hop := 0; hop < hops; hop++ {
+			target := fmt.Sprintf("chain%02d.%s", hop+1, LeafZone)
+			if hop == hops-1 {
+				target = AnswerName
+			}
+			records = append(records, cname(fmt.Sprintf("chain%02d.%s", hop, LeafZone), target))
+		}
+		out.Zones[i].Records = records
+		return Build(out)
+	}
+	return nil, fmt.Errorf("lab: %s is not in the specification", LeafZone)
 }

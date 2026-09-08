@@ -150,14 +150,34 @@ func FuzzNSEC3ProofsNeverPanic(f *testing.F) {
 			NextDomain: nextHash,
 			TypeBitMap: []uint16{dns.TypeA, dns.TypeRRSIG},
 		}
+		second, ok := dns.Copy(rr).(*dns.NSEC3)
+		if !ok {
+			t.Skip()
+		}
+		second.NextDomain = strings.ToUpper(ownerHash)
+		second.TypeBitMap = []uint16{dns.TypeSOA}
+		second.Flags = flags ^ 0x01
+
+		records := mergeNSEC3ByHash([]authenticNSEC3{
+			{rr: rr, signer: dns.CanonicalName(zone),
+				hash: strings.ToUpper(ownerHash), zone: dns.CanonicalName(zone)},
+			{rr: second, signer: dns.CanonicalName(zone),
+				hash: strings.ToUpper(ownerHash), zone: dns.CanonicalName(zone)},
+		})
+		if len(records) != 1 {
+			t.Fatalf("two records at one hash merged into %d, want 1", len(records))
+		}
+		// Opt-out merges by conjunction: a group is opt-out only if every
+		// record in it says so, because the flag permits a conclusion.
+		if optOut(records[0].rr) && !(optOut(rr) && optOut(second)) {
+			t.Fatalf("the merged group claims opt-out that not every record carried")
+		}
+
 		set := &nsec3Set{
-			records: []authenticNSEC3{{
-				rr: rr, signer: dns.CanonicalName(zone),
-				hash: strings.ToUpper(ownerHash), zone: dns.CanonicalName(zone),
-			}},
-			zone:   dns.CanonicalName(zone),
-			alg:    NSEC3HashSHA1,
-			budget: &hashBudget{remaining: 512},
+			records: records,
+			zone:    dns.CanonicalName(zone),
+			alg:     NSEC3HashSHA1,
+			budget:  &hashBudget{remaining: 512},
 		}
 
 		// None of these may panic, and none may loop: the encloser walk is
@@ -187,7 +207,24 @@ func FuzzNSECProofsNeverPanic(f *testing.F) {
 			NextDomain: dns.CanonicalName(next),
 			TypeBitMap: []uint16{dns.TypeNS, dns.TypeRRSIG, dns.TypeNSEC},
 		}
-		proof := &denialProof{nsec: []authenticNSEC{{rr: rr, signer: dns.CanonicalName(owner)}}}
+		// Two records at the same owner, so the merge path is fuzzed too:
+		// it is new, it copies records, and it decides what "the record at
+		// this name" means for everything downstream.
+		second, ok := dns.Copy(rr).(*dns.NSEC)
+		if !ok {
+			t.Skip()
+		}
+		second.NextDomain = dns.CanonicalName(qname)
+		second.TypeBitMap = []uint16{dns.TypeA}
+
+		merged := mergeNSECByOwner([]authenticNSEC{
+			{rr: rr, signer: dns.CanonicalName(owner)},
+			{rr: second, signer: dns.CanonicalName(owner)},
+		})
+		if len(merged) != 1 {
+			t.Fatalf("two records at one owner merged into %d, want 1", len(merged))
+		}
+		proof := &denialProof{nsec: merged}
 
 		_ = proof.proveNameError(qname, rrtype)
 		_ = proof.proveNoData(qname, rrtype)

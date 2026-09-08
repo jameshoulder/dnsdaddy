@@ -482,7 +482,7 @@ func (h *Hierarchy) Lookup(ctx context.Context, name string, rrtype uint16) (dns
 // are withheld, which is what an unaware client would see.
 func (h *Hierarchy) respond(name string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
 	qname := dns.CanonicalName(name)
-	out := h.assemble(qname, rrtype, wantDNSSEC)
+	out := h.chaseAliases(qname, rrtype, wantDNSSEC)
 
 	// Applied last, to the finished response, because that is where an
 	// on-path attacker sits: after the server has decided what to send and
@@ -496,6 +496,86 @@ func (h *Hierarchy) respond(name string, rrtype uint16, wantDNSSEC bool) dnssec.
 		}
 	}
 	return out
+}
+
+// chaseAliases builds a response the way an authoritative server does, by
+// following a CNAME within the zones it serves.
+//
+// RFC 1034 §4.3.2 step 3a: when a query for (QNAME, QTYPE) finds a CNAME, the
+// server puts the CNAME in the answer section, restarts the query at the
+// target, and — where it is authoritative for the target too — appends what it
+// finds. A resolver receives the whole chain in one message.
+//
+// The lab has to do this or the oracle comparison stops being a comparison.
+// delv validates a message rather than resolving a chain, so a server that
+// returned only the alias would have delv authenticate one CNAME, call the
+// answer fully validated and never see the tampered link two hops along. It
+// would agree with nothing, and the disagreement would be about the harness.
+//
+// Bounded, because the zones it walks can contain a loop and this is a server
+// rather than a resolver: it stops and returns what it has, which is what a
+// real one does.
+func (h *Hierarchy) chaseAliases(qname string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
+	out := h.assemble(qname, rrtype, wantDNSSEC)
+	if rrtype == dns.TypeCNAME {
+		return out
+	}
+
+	seen := map[string]bool{qname: true}
+	for hop := 0; hop < maxServerAliasHops; hop++ {
+		alias := lastCNAME(out.Answer)
+		if alias == nil {
+			return out
+		}
+		target := dns.CanonicalName(alias.Target)
+		if seen[target] {
+			// A loop in the zone data. The records so far are genuine and
+			// the chain does not terminate; a server sends what it has.
+			return out
+		}
+		seen[target] = true
+
+		next := h.assemble(target, rrtype, wantDNSSEC)
+		out.Rcode = next.Rcode
+		out.Answer = append(out.Answer, next.Answer...)
+		// Every hop's authority section is kept, not just the last.
+		//
+		// This was wrong the first time and the failure was instructive. A
+		// wildcard-expanded CNAME carries its own justification — RFC 4035
+		// §3.1.3 makes the server include the NSEC or NSEC3 proving the
+		// expansion was legitimate — and that proof belongs to the hop that
+		// was expanded, not to the end of the chain. Overwriting the
+		// authority section on the next hop deleted it, and the validator
+		// then correctly refused an answer whose wildcard nobody had
+		// justified. The verdict was right; the message was not one an
+		// authoritative server would have sent.
+		//
+		// Keeping the earlier proofs is also what a real server does: BIND
+		// accumulates the DNSSEC records for each expansion it performs
+		// while following the chain, and sends them alongside whatever
+		// explains the end of it.
+		out.Authority = appendUnseen(out.Authority, next.Authority)
+		if len(next.Answer) == 0 {
+			return out
+		}
+	}
+	return out
+}
+
+// maxServerAliasHops bounds the lab server's own chase. Deliberately larger
+// than the validator's default hop budget, so a scenario testing the
+// validator's limit is testing the validator's limit.
+const maxServerAliasHops = 24
+
+// lastCNAME returns the final CNAME in an answer section, which is the one
+// whose target has not yet been followed.
+func lastCNAME(answer []dns.RR) *dns.CNAME {
+	for i := len(answer) - 1; i >= 0; i-- {
+		if c, ok := answer[i].(*dns.CNAME); ok {
+			return c
+		}
+	}
+	return nil
 }
 
 // assemble builds the response an honest authoritative server would send.
@@ -520,10 +600,26 @@ func (h *Hierarchy) assemble(qname string, rrtype uint16, wantDNSSEC bool) dnsse
 		return out
 	}
 
+	// No records of the queried type at this name. RFC 1034 §3.6.2 makes a
+	// CNAME the answer to a query for any other type at the same name, so a
+	// server checks for one before deciding the type is absent.
+	if rrtype != dns.TypeCNAME {
+		if alias := zone.sets[setKey{name: qname, rrtype: dns.TypeCNAME}]; len(alias) > 0 {
+			out.Answer = filterSignatures(alias, wantDNSSEC)
+			return out
+		}
+	}
+
 	// Nothing at the name itself. Before deciding it is missing, the server
 	// does what RFC 4592 requires and looks for a wildcard that covers it.
 	if !zone.nameExists(qname) {
-		if answer, source := zone.synthesise(qname, rrtype); len(answer) > 0 {
+		// A wildcard CNAME answers a query for any type, exactly as a
+		// non-wildcard one does, so the type tried second is CNAME.
+		answer, source := zone.synthesise(qname, rrtype)
+		if len(answer) == 0 && rrtype != dns.TypeCNAME {
+			answer, source = zone.synthesise(qname, dns.TypeCNAME)
+		}
+		if len(answer) > 0 {
 			out.Answer = filterSignatures(answer, wantDNSSEC)
 			if wantDNSSEC {
 				// The expansion has to be justified: the name the wildcard
@@ -546,7 +642,7 @@ func (h *Hierarchy) assemble(qname string, rrtype uint16, wantDNSSEC bool) dnsse
 		out.Authority = append(out.Authority, filterSignatures(soa, wantDNSSEC)...)
 	}
 	if wantDNSSEC {
-		out.Authority = append(out.Authority, h.denialFor(zone, qname, out.Rcode)...)
+		out.Authority = append(out.Authority, h.denialFor(zone, qname, rrtype, out.Rcode)...)
 	}
 	return out
 }
@@ -666,4 +762,25 @@ func (h *Hierarchy) Description() string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// appendUnseen appends records not already present, compared on their full
+// text.
+//
+// Two hops of one chain routinely need the same record — the zone's apex SOA
+// most obviously — and sending it twice would be a message no server
+// produces. The comparison is on the rendered record rather than on the owner
+// name and type, because two different NSECs can share both.
+func appendUnseen(dst, src []dns.RR) []dns.RR {
+	seen := make(map[string]bool, len(dst))
+	for _, rr := range dst {
+		seen[rr.String()] = true
+	}
+	for _, rr := range src {
+		if k := rr.String(); !seen[k] {
+			seen[k] = true
+			dst = append(dst, rr)
+		}
+	}
+	return dst
 }

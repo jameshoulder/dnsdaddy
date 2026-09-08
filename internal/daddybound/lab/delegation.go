@@ -48,7 +48,7 @@ func (h *Hierarchy) referral(zone *Zone, child string, wantDNSSEC bool) []dns.RR
 	// No DS: an insecure delegation. The parent must prove the absence
 	// rather than merely omit it, which is what the denial records do.
 	if wantDNSSEC {
-		out = append(out, h.denialFor(zone, child, dns.RcodeSuccess)...)
+		out = append(out, h.denialFor(zone, child, dns.TypeDS, dns.RcodeSuccess)...)
 	}
 	return out
 }

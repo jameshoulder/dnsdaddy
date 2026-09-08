@@ -123,9 +123,9 @@ func (z *Zone) typesAt(name string) []uint16 {
 //     second must cover the wildcard that could otherwise have synthesised
 //     an answer. Without the second, a validator has been shown that the
 //     exact name is missing while a wildcard quietly answers for it.
-func (h *Hierarchy) denialFor(zone *Zone, qname string, rcode int) []dns.RR {
+func (h *Hierarchy) denialFor(zone *Zone, qname string, rrtype uint16, rcode int) []dns.RR {
 	if zone.useNSEC3 {
-		return h.nsec3DenialFor(zone, qname, rcode)
+		return h.nsec3DenialFor(zone, qname, rrtype, rcode)
 	}
 
 	var out []dns.RR
