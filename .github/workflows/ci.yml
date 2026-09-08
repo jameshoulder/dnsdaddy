@@ -98,11 +98,29 @@ jobs:
       # every pull request will not find much on its own, but it does stop a
       # change that makes the fuzz targets themselves stop working, which is
       # how fuzzing quietly dies.
+      # The target list is derived rather than written out. A hard-coded list
+      # silently stops covering whatever was added last, which is the same way
+      # fuzzing dies as not running it at all -- and it happened here: the
+      # denial-of-existence work added seven targets and the list still named
+      # the original three.
       - name: Fuzz the Daddybound input surface
         run: |
-          for target in FuzzCanonicalSignedData FuzzParseRSAPublicKey FuzzValidateWireResponse; do
-            echo "--- $target ---"
-            go test ./internal/daddybound/dnssec/ -run '^$' -fuzz "^${target}$" -fuzztime=30s
+          # Package and target together: -fuzz refuses a pattern matching more
+          # than one package, so discovering the names alone would break the
+          # day a target is added outside internal/daddybound/dnssec.
+          pairs=$(grep -rn '^func Fuzz[A-Za-z0-9_]*(' ./internal/daddybound/ |
+            while IFS= read -r line; do
+              file=${line%%:*}
+              fn=${line##*func }
+              printf '%s %s\n' "$(dirname "$file")" "${fn%%(*}"
+            done | sort -u)
+          if [ -z "$pairs" ]; then
+            echo "no fuzz targets found; the discovery above is broken" >&2
+            exit 1
+          fi
+          echo "$pairs" | while read -r pkg target; do
+            echo "--- $pkg $target ---"
+            go test "$pkg" -run '^$' -fuzz "^${target}$" -fuzztime=20s
           done
 
       # The documentation cross-references itself heavily and is the main way
