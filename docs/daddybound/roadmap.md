@@ -3,33 +3,51 @@
 Each step lists what it unblocks, because the ordering is a dependency graph
 rather than a wish list. Nothing here is a commitment to a date.
 
-## Where v0.1 leaves off
+## Where the engine stands
 
-v0.1 walks a chain of trust to a signed answer and is honest about everything
-it cannot do. The largest single gap is denial of existence, and it is the
-gap that blocks most of the rest.
+Daddybound walks a chain of trust to a signed answer, validates authenticated
+denial of existence with NSEC and NSEC3, and reaches all four of RFC 4033's
+states. It is honest about everything it cannot do; the list below is what
+remains.
 
-## Next: denial of existence (NSEC, NSEC3)
+## Done: denial of existence (NSEC, NSEC3)
 
-**Unblocks:** the Insecure status, and with it every rule that currently
-terminates in Indeterminate because it cannot be reached honestly.
+Implemented, with the rules recorded as `R-DEN-01`..`R-DEN-12` and
+`R-N3-01`..`R-N3-11` in [standards.md](standards.md) §4.7 and §4.8. What it
+unblocked:
 
-Three things become correct rather than approximate:
+- **Insecure is reachable**, by exactly one route: an authenticated denial
+  record at a delegation showing NS present and DS absent.
+- **The zone-cut ambiguity is closed where a proof is supplied.** A walk that
+  finds no DS now reads the parent's signed record instead of assuming. One
+  case remains: a response that supplies no proof either way, where the walk
+  still assumes "not a zone cut" — an assumption that can only cost a false
+  Bogus. See standards.md §5.5.
 
-- **Insecure becomes reachable.** RFC 4033's Insecure requires signed proof
-  that no DS exists. Today Daddybound returns Indeterminate wherever a
-  complete validator would say Insecure, which is a weaker claim and a true
-  one — but it is a limitation, not a design.
-- **RFC 6840 §5.2 and §5.3 become implementable.** Both end in "the zone is
-  treated as if it were unsigned", which is Insecure. Daddybound cannot claim
-  to implement either until it can reach that status. See
-  [standards.md](standards.md) §5.3.
-- **The zone-cut ambiguity closes.** A chain walk that finds no DS at a name
-  cannot tell "not a zone cut" from "insecure delegation" without a proof.
-  v0.1 assumes the first, which can only cost a false Bogus — never a false
-  Secure — and records every place it assumed. See standards.md §5.5.
+What it did **not** unblock, contrary to the expectation recorded here before
+the work was done:
 
-Also needed for authenticated NXDOMAIN and NODATA, and for wildcard denial.
+- **RFC 6840 §5.2 and §5.3 are still not implemented as written.** Both end in
+  "the zone is treated as if it were unsigned", and reaching Insecure was
+  assumed to be the blocker. It was not. Insecure is a claim that a proof was
+  offered, and for an unsupported algorithm or an uncomputable digest no proof
+  was offered — the records are present and this build cannot read them.
+  Reporting Insecure there would say the parent asserted something it did not,
+  and would let an attacker downgrade a zone by publishing a delegation this
+  validator cannot evaluate. Daddybound reports Indeterminate with the specific
+  reason instead, and standards.md §5.3 now records that as a decision rather
+  than a gap.
+
+## Next: the denial surface that is still missing
+
+**Unblocks:** validating the response shapes a real resolver meets daily.
+
+- **CNAME chasing.** A NODATA proof checks the CNAME bit and refuses to
+  conclude when it is set (`R-DEN-03`), which is correct but is not the same as
+  following the alias and validating what it points at.
+- **DNAME (RFC 6672).** Same shape: `R-DEN-07` refuses to let an NSEC with the
+  DNAME bit deny anything beneath it, and nothing follows the redirection.
+- **ANY queries (RFC 6840 §4.2).** QTYPE=* has its own validation rules.
 
 ## Then: recursive resolution
 
@@ -64,7 +82,7 @@ interface and change nothing above it.
 
 ## Then: aggressive use of NSEC (RFC 8198), extended DNS errors (RFC 8914)
 
-Both depend on denial of existence. RFC 8914 in particular would let Daddybound
+Both depended on denial of existence, which now exists. RFC 8914 in particular would let Daddybound
 report its typed reasons over the wire rather than only in a trace.
 
 ## Then: SVCB and HTTPS records (RFC 9460, RFC 9462)

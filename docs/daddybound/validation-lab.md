@@ -211,17 +211,36 @@ inventing evidence the oracle never gave.
 
 ### The documented gaps
 
-Two are v0.1 admitting it cannot reach Insecure without denial proofs:
-`unsupported-algorithm` and `unsupported-ds-digest`, where RFC 6840 §5.3 and
-§5.2 say the zone is treated as unsigned. `disallowed-algorithm` is an oracle
-applying its own algorithm policy, which it is entitled to do.
+Two are places where RFC 6840 §5.3 and §5.2 end in "treated as if it were
+unsigned" — RFC 4033's Insecure — and Daddybound reports Indeterminate instead:
+`unsupported-algorithm` and `unsupported-ds-digest`. That is no longer a
+missing capability; denial proofs exist. It is a distinction. Insecure is a
+claim that the parent proved no DS exists, and here the DS records are present
+and this build cannot evaluate them, which is a fact about the build. Saying
+Insecure would report a proof nobody offered, and would let an attacker
+downgrade a zone by publishing a delegation this validator cannot read.
+
+`disallowed-algorithm` is an oracle applying its own algorithm policy, which it
+is entitled to do: RFC 9905 §2 tells implementations to keep validating RSASHA1
+and operators to treat it as unsupported, and the two sides of the comparison
+are built to different sentences of the same paragraph.
+
+Two more are denial divergences argued out in `standards.md` §5.6 and §5.7: an
+NXDOMAIN forged over an empty non-terminal, where libunbound repairs the
+response code and Daddybound — which returns a verdict and not an answer — can
+only refuse; and a DS query answered through NSEC3 opt-out, where delv agrees
+with Daddybound and libunbound does not.
 
 ### The disputed case, and how a second oracle changed the answer
 
 On `foreign-zone-signature` both libunbound and delv say Secure; Daddybound
-says Bogus. **This is recorded as an open question, not as a Daddybound
-correctness win.** The earlier version of this document claimed the latter,
-and was wrong.
+says Bogus. This was carried as an open question for two milestones and has
+now been settled by measurement rather than argument — see `standards.md` §5.8.
+The lab records what each validator asks, and delv never asks about the zone
+cut it is accepting across: it follows the RRSIG's signer name upwards and
+therefore never discovers that the name lies below a delegation. Daddybound
+descends the delegations instead, so it has the evidence delv does not. It is
+still not a vulnerability in delv, for the reason §5.8 gives.
 
 The scenario: `www.example.dnsdaddylab. A`, which lives in the zone
 `example.dnsdaddylab.` (apex SOA, NS and DNSKEY, delegated from
@@ -287,5 +306,12 @@ validate. A Secure verdict there is a forged chain of trust and fails the run.
 - One algorithm end to end. Ed25519 signs every laboratory zone; RSA and ECDSA
   verification paths are exercised by unit tests and by the relabelling
   scenarios, not by a full signed chain.
-- No NSEC or NSEC3, so nothing here says anything about denial of existence.
+- Denial of existence is exercised over generated NSEC and NSEC3 chains, which
+  is stronger than fixtures but is still one signer's idea of a chain. Real
+  zones are signed by BIND, Knot, OpenDNSSEC and PowerDNS, and none of them has
+  been used here.
+- One NSEC3 hash algorithm and one iteration regime per hierarchy. The
+  parameter space a real validator meets is wider than the scenarios cover.
+- No DNAME, no CNAME chasing, no ANY-query validation. Each has denial rules of
+  its own and none of them is implemented.
 - No real Internet zone has ever been validated by this engine.

@@ -23,9 +23,9 @@ promoted a level because it was "obviously" fine.
 
 | Level | Meaning |
 | --- | --- |
-| **Verified** | The RFC or registry was fetched from the authoritative publisher and the specific normative sentences that v0.1 implements were read in the original text. Quotations below are from that text. |
-| **Consulted** | Fetched and read for scope and terminology, but v0.1 implements nothing that depends on its detail, so no rule below cites it as authority. |
-| **Scoped only** | Named in the roadmap, not read for this milestone. Nothing in v0.1 may depend on it. |
+| **Verified** | The RFC or registry was fetched from the authoritative publisher and the specific normative sentences Daddybound implements were read in the original text. Quotations below are from that text. |
+| **Consulted** | Fetched and read for scope and terminology, but Daddybound implements nothing that depends on its detail, so no rule below cites it as authority. |
+| **Scoped only** | Named in the roadmap, not read for the milestone that introduced the row. Nothing in Daddybound may depend on it. |
 
 Authoritative publishers used: `rfc-editor.org` for RFC text, `iana.org` for
 registries. No mirror, no summary site, and no other implementation's
@@ -55,12 +55,12 @@ process working.
 
 ### Consulted
 
-| Document | Why it is not load-bearing in v0.1 |
+| Document | Why it is not load-bearing |
 | --- | --- |
-| RFC 1034, RFC 1035 | Daddybound uses `github.com/miekg/dns` for wire parsing and packing. v0.1 implements no message parser of its own, so the base specification informs terminology only. |
+| RFC 1034, RFC 1035 | Daddybound uses `github.com/miekg/dns` for wire parsing and packing. Daddybound implements no message parser of its own, so the base specification informs terminology only. |
 | RFC 9904 | Restructures the DNSSEC registries into the "Use for" / "Implement for" columns reproduced in §6. Daddybound reads the registries; it does not implement this document. |
 
-### Scoped only — nothing in v0.1 depends on these
+### Scoped only — nothing in Daddybound depends on these
 
 RFC 6891 (EDNS(0)), RFC 7766 (DNS over TCP), RFC 8198 (aggressive NSEC use),
 RFC 8914 (extended DNS errors), RFC 7858 (DNS over TLS), RFC 8484 (DNS over
@@ -68,7 +68,7 @@ HTTPS), RFC 9156 (QNAME minimisation), RFC 9250 (DNS over QUIC), RFC 9460
 (SVCB/HTTPS records), RFC 9462 (discovery of designated resolvers), RFC 5011
 (automated trust anchor updates).
 
-RFC 5155 was on this list for v0.1 and has been promoted to Verified for the
+RFC 5155 was on this list until the denial-of-existence milestone and has been promoted to Verified for the
 denial-of-existence milestone. It is named here as well so the move is visible
 rather than silent.
 
@@ -100,15 +100,21 @@ RFC 4033 §5:
 > **Indeterminate:** There is no trust anchor that would indicate that a
 > specific portion of the tree is secure. This is the default operation mode.
 
-Two consequences for v0.1, both of which constrain what Daddybound is allowed
-to return:
+Two consequences, both of which constrain what Daddybound is allowed to
+return:
 
 - **Insecure requires signed proof.** RFC 4033's Insecure is not "we did not
   find a signature". It is "we proved, with a signature, that no DS exists".
-  v0.1 implements no denial-of-existence proofs at all (no NSEC, no NSEC3), so
-  **v0.1 can never legitimately return Insecure from a chain walk.** Where a
-  real validator would prove Insecure, Daddybound returns Indeterminate and
-  says why. This is a scope limitation stated honestly, not an approximation.
+  Daddybound now implements those proofs (§4.7 for NSEC, §4.8 for NSEC3), and
+  exactly one code path returns Insecure: the delegation step, and only when
+  an authenticated denial record at the cut has NS set and DS clear. It is not
+  returned for a missing signature, an unsupported algorithm, a failed
+  validation, an absent DNSKEY, a timeout, malformed records, or any other
+  flavour of "we could not prove Secure". Each of those is Bogus or
+  Indeterminate. Where a delegation supplies no proof either way, the walk
+  assumes the name is not a zone cut and continues — a one-sided assumption
+  that can cost a false Bogus and cannot manufacture a false Secure. §5.5 has
+  the argument.
 - **Bogus requires a secure delegation.** Returning Bogus for a name Daddybound
   never established a secure delegation to would be a fabricated verdict. The
   chain walk therefore tracks whether it is still under a secure delegation,
@@ -413,19 +419,24 @@ and, when none of a delegation's DS records survive that filter:
 
 Again Insecure, not Bogus.
 
-### 5.3 The v0.1 honesty constraint on §5.1 and §5.2
+### 5.3 The honesty constraint on §5.1 and §5.2
 
 Both rules terminate in "treated as if it were unsigned", which is RFC 4033's
-Insecure — and §3 above establishes that v0.1 cannot legitimately reach
-Insecure, because reaching it requires signed proof that no DS exists, and v0.1
-implements no denial proofs.
+Insecure. Daddybound does **not** return Insecure for them, and now that denial
+proofs exist that is a deliberate distinction rather than a missing capability.
 
-Daddybound v0.1 therefore does **not** claim to implement these rules. It
-returns Indeterminate with a reason naming the unsupported algorithm or digest,
-which is an accurate statement of "this validator could not determine the
-status" and is not the same claim as "the zone is unsigned". Implementing §5.1
-and §5.2 properly is blocked on denial-of-existence support and is recorded as
-such in the roadmap.
+Insecure is a claim about the zone: signed proof that no DS exists. An
+unsupported algorithm or an uncomputable digest is a fact about *this build*.
+The DS records are present; Daddybound simply cannot evaluate them. Reporting
+Insecure would say the parent proved something it never asserted, and would
+hand an attacker a downgrade: publish a delegation this validator cannot
+evaluate and its protection disappears.
+
+So Daddybound returns Indeterminate with a reason naming the unsupported
+algorithm or digest — an accurate statement of "this validator could not
+determine the status", which is not the same claim as "the zone is unsigned".
+The differential suite records the resulting disagreement with reference
+validators as a known gap, with this argument attached.
 
 Stating this is the whole point of having the gate. The alternative — returning
 Insecure because the RFC's sentence ends in that word, without the proof the
@@ -464,44 +475,51 @@ RFC 9905 §2 also says of DS records:
 > algorithms are available, the DNS records below the delegation point MUST be
 > treated as insecure.
 
-Same shape, same v0.1 limitation as §5.3: Daddybound reports Indeterminate with
+Same shape, same reasoning as §5.3: Daddybound reports Indeterminate with
 a specific reason where a complete validator would report Insecure.
 
-## 5.5 Delegations v0.1 cannot prove, and the direction it errs in
+## 5.5 The delegation Daddybound still cannot prove, and the direction it errs in
 
 A chain walk descends from the trust anchor towards the answer, asking at each
-name whether a DS exists there. When none comes back, two situations are
-indistinguishable without a signed proof of non-existence:
+name whether a DS exists there. When none comes back, two situations have to be
+told apart:
 
 - the name is not a zone cut at all — true of nearly every name ever queried;
 - the name *is* a zone cut with no DS, an insecure delegation, and everything
   below it is legitimately unsigned.
 
-v0.1 implements no denial proofs, so it cannot obtain the evidence that
-separates them. It assumes the first reading, continues in the same zone, and
-records a step in the trace at every point where the assumption was made.
+Daddybound now implements the proofs that separate them (§4.7, §4.8), and where
+a response supplies one the answer is decided by evidence: NS set with DS clear
+is an insecure delegation and produces Insecure; neither bit set means the name
+is not a cut and the walk continues; a DS bit set while the DS is absent is a
+contradiction and produces Bogus.
+
+**What remains is the case where the response supplies no proof either way.**
+The walk then keeps the assumption it made before any of this existed: treat
+the name as not a zone cut, continue in the same zone, and record a step saying
+where the assumption was made.
 
 The choice of which way to be wrong is the whole decision, and it is one-sided:
 
 - If the assumption is wrong, the data below is genuinely unsigned, the walk
   finds no signature from a zone it trusts, and the answer is reported **Bogus
-  where a complete validator would report Insecure**. A false Bogus. It refuses
+  where a complete proof would have given Insecure**. A false Bogus. It refuses
   data that was fine.
 - The converse cannot happen. Concluding Secure requires a signature over the
   answer made by a key in an apex DNSKEY RRset the walk has already
   authenticated. An attacker operating below an insecure delegation does not
   have that key, so no assumption made here can manufacture a Secure verdict.
 
-So the cost of the gap is paid in refusals and never in false Secures, which is
-the only direction this engine is willing to be wrong in.
+So the cost of the remaining gap is paid in refusals and never in false
+Secures, which is the only direction this engine is willing to be wrong in.
 
-An earlier design carried the ambiguity to the end of the walk and downgraded
-*any* final failure to Indeterminate. That was worse in the way that matters:
-because almost no answer name is a zone cut, it turned every tampered answer
-into "cannot tell", and an enforcing resolver reading Indeterminate as "allow"
-would have accepted forged data. The scenario suite caught it — the tampered
-and corrupt-signature cases both went Indeterminate — which is the argument for
-having written the negative scenarios before trusting the positive one.
+Returning Indeterminate instead would be worse rather than more cautious.
+Almost no name a walk passes through is a zone cut, so it would turn ordinary
+validation into "cannot tell", and an enforcing resolver reading Indeterminate
+as "allow" would then accept forged data. An earlier design did exactly that,
+carrying the ambiguity to the end of the walk and downgrading any final failure
+to Indeterminate; the scenario suite caught it, because the tampered and
+corrupt-signature cases both went Indeterminate.
 
 ## 5.6 A denial divergence between two mature validators, and which one Daddybound follows
 
@@ -737,15 +755,22 @@ implementation. libunbound appears in this repository only as a differential
 test oracle behind a test-only build constraint, and never produces a
 Daddybound verdict.
 
-## 8. What v0.1 does not implement
+## 8. What Daddybound does not implement
 
 Stated here because the credibility of everything above depends on this list
 being complete and blunt.
 
-- **No denial of existence.** No NSEC, no NSEC3, no authenticated NXDOMAIN or
-  NODATA, no wildcard denial proofs. Consequence: Insecure is unreachable (§3,
-  §5.3).
-- **No recursive resolution.** v0.1 validates responses it is given; it does
+- **No aggressive use of NSEC/NSEC3 (RFC 8198).** Denial proofs are validated
+  when a response carries them; they are never used to synthesise an answer to
+  a question that was not asked.
+- **No DNAME handling.** An NSEC or NSEC3 with the DNAME bit is refused as
+  proof about anything beneath it (`R-DEN-07`), which is the safe half of
+  RFC 6672. Following a DNAME to its target is not implemented.
+- **No CNAME chasing.** A NODATA proof checks the CNAME bit (`R-DEN-03`) and
+  refuses to conclude when it is set, but Daddybound does not follow the alias.
+- **No ANY-query handling (RFC 6840 §4.2).** QTYPE=* has its own validation
+  rules and none of them are implemented.
+- **No recursive resolution.** Daddybound validates responses it is given; it does
   not discover them by walking the Internet.
 - **No RFC 5011 trust anchor rollover.** Trust anchors are configuration.
 - **No encrypted transports** as part of the validation engine.

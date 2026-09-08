@@ -269,8 +269,11 @@ Worth knowing before you rely on DNS Daddy:
 ### Daddybound
 
 Daddybound is an experimental DNS resolution and validation engine being built
-inside this repository. Its first milestone walks a DNSSEC chain of trust from
-a configured trust anchor to a signed answer.
+inside this repository. It walks a DNSSEC chain of trust from a configured
+trust anchor to a signed answer, and validates authenticated denial of
+existence with NSEC and NSEC3. That is a step, not a finish line: CNAME
+chasing, DNAME and ANY-query validation are not implemented, and it has never
+validated a real Internet zone.
 
 **It is experimental and must not be relied upon as a production DNSSEC
 validator.** It answers no queries, enforces no policy, and cannot be pointed

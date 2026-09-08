@@ -36,7 +36,7 @@ Every rule Daddybound enforces is traced to a sentence in a standard.
 each rule a stable identifier, and the code cites those identifiers. A rule
 with no identifier is either a bug or an invention.
 
-## What v0.1 does
+## What Daddybound does
 
 - Walks a chain of trust from a configured trust anchor through DS and DNSKEY
   records to a signed RRset.
@@ -44,21 +44,36 @@ with no identifier is either a bug or an invention.
   signatures; can verify RSASHA1 and refuses to rely on it by default, which
   is what RFC 9905 asks of an implementation and an operator respectively.
 - Matches DS records using SHA-1, SHA-256 and SHA-384 digests.
+- Validates authenticated denial of existence with NSEC and NSEC3: NXDOMAIN,
+  NODATA, empty non-terminals, wildcard expansion and insecure delegation,
+  including NSEC3 closest-encloser proofs and opt-out.
+- Reaches RFC 4033's **Insecure**, and only where an authenticated denial
+  record at a delegation shows NS present and DS absent. Never for a missing
+  signature, an unsupported algorithm, a timeout, or any other flavour of
+  "could not prove Secure".
+- Bounds the work an NSEC3 response can demand, by iteration count and by
+  total hash computations, and refuses rather than downgrades when a response
+  exceeds it.
 - Produces a deterministic, structured trace of every step, with typed
   reasons rather than English strings.
 - Runs a deterministic signed laboratory offline, and compares its verdicts
   against two independent reference validators — libunbound and BIND's
   `delv` — over the same served records.
 
-## What v0.1 does not do
+## What Daddybound does not do
 
 Stated plainly, because the credibility of the list above depends on this one
 being complete:
 
-- **No denial of existence.** No NSEC, no NSEC3, no authenticated NXDOMAIN or
-  NODATA, no wildcard denial proofs. A consequence is that Daddybound can
-  never legitimately return **Insecure**, and it does not: where a complete
-  validator would, Daddybound returns Indeterminate and names what is missing.
+- **No aggressive use of NSEC or NSEC3** (RFC 8198). Denial proofs are checked
+  when a response carries them; they are never used to answer a question that
+  was not asked.
+- **No DNAME, no CNAME chasing, no ANY-query validation.** Each has its own
+  denial rules. Daddybound refuses to conclude where those records appear —
+  the safe half — rather than following them.
+- **One remaining zone-cut assumption.** Where a delegation supplies no proof
+  either way, the walk assumes the name is not a zone cut. That can cost a
+  false Bogus and cannot produce a false Secure; see standards.md §5.5.
 - **No recursive resolution.** It validates records it is given. It does not
   discover them by querying the Internet.
 - **No trust anchor rollover** (RFC 5011). Anchors are configuration.
@@ -77,13 +92,14 @@ dnsdaddy daddybound validate -scenario tampered-answer -trace
 ```
 
 These commands build a signed hierarchy in memory. They cannot be pointed at
-the Internet or at a running deployment, because v0.1 performs no recursive
+the Internet or at a running deployment, because Daddybound performs no recursive
 resolution — there is nothing to point at a real name with.
 
 ## The documents
 
 | | |
 | --- | --- |
+| [validation-model.md](validation-model.md) | What Daddybound proves and what it assumes, separated line by line |
 | [standards.md](standards.md) | Which RFCs were read, what they say, and the identifier each rule is cited by |
 | [architecture.md](architecture.md) | The packages, the dependency direction, and why the seams are where they are |
 | [security-model.md](security-model.md) | What Daddybound is trusted with, what it is not, and how that is enforced |
