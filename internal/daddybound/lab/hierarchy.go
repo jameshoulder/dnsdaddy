@@ -125,6 +125,11 @@ type Hierarchy struct {
 	byName map[string]*Zone
 	sets   map[setKey][]dns.RR
 	spec   Spec
+
+	// overrides rewrite the response to specific questions, for scenarios
+	// where the zone is correct and the response is not. See
+	// responseOverride.
+	overrides map[setKey]*responseOverride
 }
 
 // Build constructs and signs a hierarchy.
@@ -309,6 +314,18 @@ func (z *Zone) addSigned(spec Spec, rrset []dns.RR) error {
 	// field would produce signatures that fail for a reason pointing
 	// somewhere else entirely.
 	labels := dns.CountLabel(h.Name)
+	if strings.HasPrefix(dns.CanonicalName(h.Name), "*.") {
+		// RFC 4034 §3.1.3: the Labels field is "the number of labels in the
+		// original RRSIG RR owner name ... not counting the null root label
+		// and not counting any leading asterisk label".
+		//
+		// Without the subtraction a wildcard RRset is signed claiming one
+		// label more than it has, and a validator reconstructing the signed
+		// name from the Labels field (RFC 4035 §5.3.2) rebuilds the wrong
+		// name and rejects the signature. The failure looks like a
+		// cryptographic one, which is exactly the wrong place to go looking.
+		labels--
+	}
 	if labels < 0 || labels > maxDNSLabels {
 		return fmt.Errorf("lab: %s has %d labels, which cannot be expressed in an RRSIG Labels field", h.Name, labels)
 	}
@@ -435,6 +452,24 @@ func (h *Hierarchy) Lookup(ctx context.Context, name string, rrtype uint16) (dns
 // are withheld, which is what an unaware client would see.
 func (h *Hierarchy) respond(name string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
 	qname := dns.CanonicalName(name)
+	out := h.assemble(qname, rrtype, wantDNSSEC)
+
+	// Applied last, to the finished response, because that is where an
+	// on-path attacker sits: after the server has decided what to send and
+	// before the validator sees it.
+	if o := h.overrides[setKey{name: qname, rrtype: rrtype}]; o != nil {
+		if o.rcode != nil {
+			out.Rcode = *o.rcode
+		}
+		if o.set {
+			out.Authority = o.authority
+		}
+	}
+	return out
+}
+
+// assemble builds the response an honest authoritative server would send.
+func (h *Hierarchy) assemble(qname string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
 	out := dnssec.Response{Rcode: dns.RcodeSuccess}
 
 	zone := h.authoritativeZone(qname, rrtype)
@@ -453,6 +488,22 @@ func (h *Hierarchy) respond(name string, rrtype uint16, wantDNSSEC bool) dnssec.
 	if records := zone.sets[setKey{name: qname, rrtype: rrtype}]; len(records) > 0 {
 		out.Answer = filterSignatures(records, wantDNSSEC)
 		return out
+	}
+
+	// Nothing at the name itself. Before deciding it is missing, the server
+	// does what RFC 4592 requires and looks for a wildcard that covers it.
+	if !zone.nameExists(qname) {
+		if answer, source := zone.synthesise(qname, rrtype); len(answer) > 0 {
+			out.Answer = filterSignatures(answer, wantDNSSEC)
+			if wantDNSSEC {
+				// The expansion has to be justified: the name the wildcard
+				// stood in for must be shown not to exist, or the same
+				// signed wildcard answer works for every name under the
+				// encloser.
+				out.Authority = append(out.Authority, zone.wildcardJustification(qname, source)...)
+			}
+			return out
+		}
 	}
 
 	// No data of that type. Everything from here is the server explaining
@@ -510,8 +561,30 @@ func (h *Hierarchy) authoritativeZone(qname string, rrtype uint16) *Zone {
 	return best
 }
 
-// nameExists reports whether this zone holds any record at name.
+// nameExists reports whether name is a name in this zone.
+//
+// A name exists if it owns records, and also if anything below it does: that
+// second case is an empty non-terminal (RFC 5155 §1.3, "a domain name that
+// owns no resource records, but has one or more subdomains that do"). An
+// authoritative server answers NOERROR/NODATA at such a name, not NXDOMAIN,
+// and a lab that got this wrong would be teaching a validator to accept a
+// name error for a name that exists.
 func (z *Zone) nameExists(name string) bool {
+	name = dns.CanonicalName(name)
+	for k := range z.sets {
+		if k.name == name {
+			return true
+		}
+		if k.name != name && dns.IsSubDomain(name, k.name) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownsRecords reports whether name owns records in its own right, as opposed
+// to existing only because something below it does.
+func (z *Zone) ownsRecords(name string) bool {
 	name = dns.CanonicalName(name)
 	for k := range z.sets {
 		if k.name == name {

@@ -658,12 +658,19 @@ func (h *Hierarchy) resignInParent(childZone string, rrtype uint16) error {
 	return h.Replace(parent.Name, childZone, rrtype, scratch.sets[setKey{name: dns.CanonicalName(childZone), rrtype: rrtype}])
 }
 
-// parentOf returns the zone directly above name in this hierarchy.
+// parentOf returns the zone that delegates name.
+//
+// Read from the recorded delegations rather than from position in the zone
+// list. The list is not a chain: two zones may be delegated from the same
+// parent, which is exactly the shape needed to have one secure delegation and
+// one insecure one in the same hierarchy. Taking "the zone before this one"
+// as the parent worked only while every hierarchy was a straight line, and
+// returned a sibling as soon as one was not.
 func (h *Hierarchy) parentOf(name string) *Zone {
 	name = dns.CanonicalName(name)
-	for i, z := range h.Zones {
-		if z.Name == name && i > 0 {
-			return h.Zones[i-1]
+	for _, z := range h.Zones {
+		if z.delegations[name] {
+			return z
 		}
 	}
 	return nil
@@ -684,4 +691,120 @@ func shiftSerial(base uint32, seconds int64) uint32 {
 	// signature rather than a corrupt one. Reducing modulo 2^32 first keeps
 	// the addition inside the field's own arithmetic.
 	return base + uint32(seconds%(1<<32))
+}
+
+// RemoveNSEC deletes one NSEC RRset and its signature from a zone.
+//
+// This is how a proof is made incomplete without being made invalid:
+// everything still present verifies, and what is missing is the part that
+// would have completed the argument. Removing the wildcard denial from an
+// NXDOMAIN is the canonical case, and a validator that stops after the first
+// covering record accepts it.
+func (h *Hierarchy) RemoveNSEC(zoneName, owner string) error {
+	if h.Set(zoneName, owner, dns.TypeNSEC) == nil {
+		return fmt.Errorf("lab: no NSEC at %s in %s to remove", owner, zoneName)
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC, nil)
+}
+
+// SetNSECBitmap rewrites the type bitmap of one NSEC and re-signs it.
+//
+// Re-signing matters: the point of these scenarios is a *validly signed*
+// record that says the wrong thing, because a record with a broken signature
+// is caught by machinery that already exists and proves nothing about the
+// denial logic.
+func (h *Hierarchy) SetNSECBitmap(zoneName, owner string, types []uint16) error {
+	return h.mutateNSEC(zoneName, owner, func(n *dns.NSEC) { n.TypeBitMap = types })
+}
+
+// SetNSECNext rewrites the Next Domain Name of one NSEC and re-signs it.
+func (h *Hierarchy) SetNSECNext(zoneName, owner, next string) error {
+	return h.mutateNSEC(zoneName, owner, func(n *dns.NSEC) { n.NextDomain = dns.CanonicalName(next) })
+}
+
+// mutateNSEC applies a change to an NSEC record and re-signs it with the
+// zone's own key, so the result is a genuine statement by that zone.
+func (h *Hierarchy) mutateNSEC(zoneName, owner string, apply func(*dns.NSEC)) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC at %s in %s", owner, zoneName)
+	}
+
+	kept := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		nsec, ok := rr.(*dns.NSEC)
+		if !ok {
+			continue // the old signature is discarded; a new one replaces it
+		}
+		clone, ok := dns.Copy(nsec).(*dns.NSEC)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC at %s did not produce an NSEC", owner)
+		}
+		apply(clone)
+		kept = append(kept, clone)
+	}
+	if len(kept) == 0 {
+		return fmt.Errorf("lab: nothing to re-sign at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, kept); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC}])
+}
+
+// responseOverride replaces part of the response to one specific question.
+//
+// The mutations above all break the zone. This one leaves the zone perfectly
+// correct and breaks the *response*, which is a different attacker and a
+// different class of bug. An on-path attacker cannot forge a signature, but
+// they can drop records, and they can move a genuinely signed record from the
+// place it belongs to a place where it appears to prove something else. Every
+// record planted this way is a real record this hierarchy really signed.
+type responseOverride struct {
+	rcode     *int
+	authority []dns.RR
+	set       bool
+}
+
+// SubstituteAuthority replaces the authority section of the answer to one
+// question. An empty slice strips the section entirely, which is what an
+// attacker who wants a claim to go unproved does.
+func (h *Hierarchy) SubstituteAuthority(qname string, rrtype uint16, records []dns.RR) {
+	h.override(qname, rrtype, func(o *responseOverride) {
+		o.authority = records
+		o.set = true
+	})
+}
+
+// ForceRcode changes the response code for one question, leaving every record
+// alone.
+//
+// This is the cheapest attack there is — one field of a header, no
+// cryptography involved — and it is how a NODATA becomes an NXDOMAIN. The
+// records that arrive alongside it are genuine and verify; the question is
+// whether they prove the stronger claim the attacker substituted.
+func (h *Hierarchy) ForceRcode(qname string, rrtype uint16, rcode int) {
+	h.override(qname, rrtype, func(o *responseOverride) { o.rcode = &rcode })
+}
+
+func (h *Hierarchy) override(qname string, rrtype uint16, apply func(*responseOverride)) {
+	if h.overrides == nil {
+		h.overrides = make(map[setKey]*responseOverride)
+	}
+	k := setKey{name: dns.CanonicalName(qname), rrtype: rrtype}
+	if h.overrides[k] == nil {
+		h.overrides[k] = &responseOverride{}
+	}
+	apply(h.overrides[k])
 }

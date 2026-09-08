@@ -138,17 +138,30 @@ func (h *Hierarchy) denialFor(zone *Zone, qname string, rcode int) []dns.RR {
 			add(match)
 			return out
 		}
+		// No NSEC at the name, and yet the name exists: an empty
+		// non-terminal. RFC 4035 §2.3 requires an NSEC only at names with
+		// authoritative data or a delegation NS RRset, and an empty
+		// non-terminal has neither, so a correctly signed NSEC zone
+		// publishes none there. RFC 7129 §5.1 puts it plainly: "An empty
+		// non-terminal will get an NSEC3 record but not an NSEC record."
+		//
+		// What proves the NODATA is the NSEC spanning the name, whose next
+		// name is a descendant of it — that descendant exists, so every
+		// ancestor of it exists too, including this one.
+		add(zone.nsecCovering(qname))
+		return out
 	}
 
-	if cover := zone.nsecCovering(qname); cover != nil {
-		add(cover)
-	}
-	// The wildcard denial. Its own closest encloser is the deepest existing
-	// ancestor, but a zone this size can prove it with the wildcard directly
-	// below the apex, which is what a real signer's chain covers too.
-	if wc := zone.nsecCovering(wildcardUnder(zone.Name)); wc != nil {
-		add(wc)
-	}
+	// NXDOMAIN. Two separate facts have to be proved, and the second is the
+	// one an attacker would omit.
+	add(zone.nsecCovering(qname))
+
+	// The wildcard that could have answered sits directly below the closest
+	// encloser — the deepest ancestor of qname that exists — and not below
+	// the zone apex. Denying "*.<apex>" instead would prove nothing about a
+	// zone whose wildcard lives deeper, and a validator checking the right
+	// name would correctly reject the proof.
+	add(zone.nsecCovering(wildcardUnder(zone.closestEncloser(qname))))
 	return out
 }
 

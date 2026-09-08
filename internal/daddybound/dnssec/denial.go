@@ -1,0 +1,194 @@
+package dnssec
+
+import "github.com/miekg/dns"
+
+// Authenticated denial of existence: the frame shared by NSEC and NSEC3.
+//
+// The single most important line in RFC 4035 §5.4 is not one of the two
+// bulleted rules. It is this one (R-DEN-01):
+//
+//	In addition, security-aware resolvers MUST authenticate the NSEC RRsets
+//	that comprise the non-existence proof as described in Section 5.3.
+//
+// Receiving an NSEC record proves nothing whatsoever. Anyone can put an NSEC
+// record in a response, and an attacker forging a denial will happily supply
+// one that covers exactly the name they want denied. What makes a denial a
+// proof is that the records carrying it were signed by a key this walk has
+// already authenticated, and that the intervals they assert genuinely entail
+// the claim being made.
+//
+// So this file does the first half — turning received records into
+// authenticated ones, and discarding everything that does not survive — and
+// nsec.go does the second. Nothing downstream is allowed to see an
+// unauthenticated denial record, which is enforced by the proof type carrying
+// only authenticated ones.
+
+// authenticNSEC is an NSEC RR whose RRset was verified against a zone's keys.
+//
+// The signer is carried alongside because RFC 6840 §4.1's ancestor-delegation
+// test is defined partly in terms of it: an NSEC is an ancestor delegation
+// record when, among other things, its "signer field ... is shorter than the
+// owner name of the NSEC RR". Recomputing that later from the zone name would
+// be the same value by construction here, but the rule is written about the
+// signer field, so the signer field is what gets stored.
+type authenticNSEC struct {
+	rr     *dns.NSEC
+	signer string
+}
+
+// denialProof is the authenticated denial material from one response.
+//
+// There is no constructor that takes records without authenticating them, and
+// no field that holds unauthenticated ones. That is the type doing the work
+// the comment above describes: code holding a denialProof cannot accidentally
+// reason about a record that was merely received.
+type denialProof struct {
+	// nsec holds every NSEC RR that verified.
+	nsec []authenticNSEC
+
+	// sawNSEC3 records that the response carried NSEC3 records.
+	//
+	// It matters because the two absences are different. A response with no
+	// denial records at all has failed to supply a proof it owed, which is a
+	// fault in the response. A response that supplied an NSEC3 proof to a
+	// validator that has not implemented NSEC3 is a perfectly good response
+	// this build cannot read, which is a fault in Daddybound — and the two
+	// must not produce the same verdict.
+	sawNSEC3 bool
+
+	// unauthenticated counts denial records that were present and did not
+	// verify. Recorded for the trace: "no proof" and "a proof that failed to
+	// verify" read very differently to somebody investigating.
+	unauthenticated int
+}
+
+// empty reports whether the proof carries nothing to reason with.
+func (d *denialProof) empty() bool { return len(d.nsec) == 0 }
+
+// collectDenial authenticates the NSEC and NSEC3 records in an authority
+// section against a zone whose apex DNSKEY RRset is already trusted.
+//
+// Records are grouped into RRsets by owner name before verification, because
+// that is what a signature covers (R-SET-01). Verifying record by record
+// would ask each signature to cover a subset of what it actually signed, and
+// every multi-record NSEC RRset would fail for a reason pointing at the
+// cryptography.
+//
+// A group that fails to verify is dropped rather than escalated. Dropping is
+// right because the response may legitimately carry denial records from more
+// than one place — a referral carries the parent's, and a validator asking
+// about something else entirely may see records it has no key for — and
+// because the caller decides what an insufficient proof means. Escalating
+// here would make an irrelevant unverifiable record poison a proof that is
+// otherwise complete.
+func (w *walk) collectDenial(zone *zoneState, authority []dns.RR) denialProof {
+	var proof denialProof
+
+	for _, group := range groupByOwner(authority, dns.TypeNSEC) {
+		set, reason := NewRRset(group.data)
+		if reason != ReasonNone {
+			proof.unauthenticated++
+			w.rec.skip(ValidationStep{
+				Kind: StepDenial, Zone: zone.name, Name: group.owner, RRType: dns.TypeNSEC,
+			}, reason)
+			continue
+		}
+		if reason := w.authenticate(set, group.sigs, zone.name, zone.keys); reason != ReasonNone {
+			proof.unauthenticated++
+			w.rec.skip(ValidationStep{
+				Kind: StepDenial, Zone: zone.name, Name: group.owner, RRType: dns.TypeNSEC,
+				Note: "not authenticated by this zone's keys, so it proves nothing",
+			}, reason)
+			continue
+		}
+
+		// The signer of whichever RRSIG authenticated the set. authenticate
+		// has already required it to be exactly this zone (the strong form
+		// of R-SIG-02), so this is the zone name; it is read from the
+		// signature rather than assumed, because R-DEN-06 is written about
+		// the signer field.
+		signer := zone.name
+		for _, rr := range group.data {
+			if nsec, ok := rr.(*dns.NSEC); ok {
+				proof.nsec = append(proof.nsec, authenticNSEC{rr: nsec, signer: signer})
+			}
+		}
+		w.rec.ok(ValidationStep{
+			Kind: StepDenial, Zone: zone.name, Name: group.owner, RRType: dns.TypeNSEC,
+		})
+	}
+
+	for _, rr := range authority {
+		if rr.Header().Rrtype == dns.TypeNSEC3 {
+			proof.sawNSEC3 = true
+			break
+		}
+	}
+	return proof
+}
+
+// ownerGroup is one RRset's worth of records plus the signatures over it.
+type ownerGroup struct {
+	owner string
+	data  []dns.RR
+	sigs  []*dns.RRSIG
+}
+
+// groupByOwner partitions records of one type into RRsets by owner name.
+//
+// Deterministic order: owners appear in the order they were first seen in the
+// section. A trace that reordered between runs could not be diffed, and this
+// package's evidence is its traces.
+func groupByOwner(records []dns.RR, rrtype uint16) []ownerGroup {
+	index := make(map[string]*ownerGroup)
+	var order []string
+
+	get := func(name string) *ownerGroup {
+		if g, seen := index[name]; seen {
+			return g
+		}
+		g := &ownerGroup{owner: name}
+		index[name] = g
+		order = append(order, name)
+		return g
+	}
+
+	for _, rr := range records {
+		if sig, ok := rr.(*dns.RRSIG); ok {
+			if sig.TypeCovered == rrtype {
+				g := get(dns.CanonicalName(sig.Hdr.Name))
+				g.sigs = append(g.sigs, sig)
+			}
+			continue
+		}
+		if rr.Header().Rrtype == rrtype {
+			g := get(dns.CanonicalName(rr.Header().Name))
+			g.data = append(g.data, rr)
+		}
+	}
+
+	out := make([]ownerGroup, 0, len(order))
+	for _, name := range order {
+		// An owner with signatures but no records is a signature over
+		// nothing. It is not an RRset and there is nothing for it to prove.
+		if len(index[name].data) == 0 {
+			continue
+		}
+		out = append(out, *index[name])
+	}
+	return out
+}
+
+// denialUnavailable turns "this proof carries nothing usable" into the right
+// reason, which depends on whose fault it is.
+//
+// Getting this distinction wrong in either direction is a real bug. Reporting
+// a missing proof as a Daddybound limitation excuses a response that owed one;
+// reporting an NSEC3 proof this build cannot read as a fault in the response
+// accuses a correctly signed zone of forgery.
+func (d *denialProof) denialUnavailable() Reason {
+	if d.sawNSEC3 {
+		return ReasonDenialNotImplemented
+	}
+	return ReasonNoDenialProof
+}

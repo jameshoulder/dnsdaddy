@@ -23,13 +23,28 @@ import "github.com/miekg/dns"
 //     the only `return ReasonNone` here sits directly after a verifier call
 //     that returned ReasonNone.
 func (w *walk) authenticate(set RRset, sigs []*dns.RRSIG, zone string, keys []*dns.DNSKEY) Reason {
+	_, reason := w.authenticateSigned(set, sigs, zone, keys)
+	return reason
+}
+
+// authenticateSigned is authenticate, additionally reporting which RRSIG did
+// the authenticating.
+//
+// Callers need that for exactly one rule, and it is not optional. R-DEN-11
+// (RFC 4035 §5.3.4) decides whether an answer was wildcard-expanded by
+// comparing the owner name's label count against "the Labels field of the
+// covering RRSIG RR" — the one that verified, not any of the others that may
+// be sitting alongside it in the response. Picking the wrong one lets an
+// attacker attach a second RRSIG whose Labels field hides the expansion, and
+// the wildcard proof would then never be demanded.
+func (w *walk) authenticateSigned(set RRset, sigs []*dns.RRSIG, zone string, keys []*dns.DNSKEY) (*dns.RRSIG, Reason) {
 	base := ValidationStep{Kind: StepRRSIG, Zone: zone, Name: set.Name, RRType: set.RRType}
 
 	if len(sigs) == 0 {
-		return w.rec.fail(base, ReasonMissingRRSIG)
+		return nil, w.rec.fail(base, ReasonMissingRRSIG)
 	}
 	if len(sigs) > w.v.cfg.Limits.MaxSignatures {
-		return w.rec.fail(base, ReasonResourceLimit)
+		return nil, w.rec.fail(base, ReasonResourceLimit)
 	}
 
 	worst := ReasonMissingRRSIG
@@ -37,7 +52,7 @@ func (w *walk) authenticate(set RRset, sigs []*dns.RRSIG, zone string, keys []*d
 
 	for _, sig := range sigs {
 		if err := w.ctx.Err(); err != nil {
-			return w.rec.fail(base, ReasonCancelled)
+			return nil, w.rec.fail(base, ReasonCancelled)
 		}
 
 		step := base
@@ -135,11 +150,11 @@ func (w *walk) authenticate(set RRset, sigs []*dns.RRSIG, zone string, keys []*d
 			note(w.rec.fail(step, reason))
 		}
 		if verified {
-			return ReasonNone
+			return sig, ReasonNone
 		}
 	}
 
-	return worst
+	return nil, worst
 }
 
 // worseReason combines two candidate reasons into the one worth reporting.

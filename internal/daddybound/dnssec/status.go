@@ -31,10 +31,12 @@ const (
 	// specific portion of the tree is secure. This is the default operation
 	// mode."
 	//
-	// Daddybound also returns Indeterminate in cases where a complete
-	// validator would return Insecure, because reaching Insecure honestly
-	// requires denial-of-existence proofs that v0.1 does not implement. See
-	// StatusInsecure.
+	// Daddybound still returns Indeterminate in one case where a complete
+	// validator would return Insecure: where a delegation supplied no
+	// authenticated proof either way, the walk assumes the name is not a
+	// zone cut and continues, so an unproved insecure delegation surfaces as
+	// Bogus rather than Insecure. That bias is one-sided by design — see
+	// noDSAtDelegation.
 	StatusIndeterminate ValidationStatus = iota
 
 	// StatusSecure means a chain of trust was walked from a configured trust
@@ -54,10 +56,16 @@ const (
 	//
 	// Note the words "signed proof". Insecure is not "we looked and found no
 	// signature"; it is a positive, authenticated statement that none should
-	// exist. Producing that proof needs NSEC or NSEC3, which v0.1 does not
-	// implement, so no code path in v0.1 returns this status. The constant
-	// exists because the type models the standard rather than the current
-	// milestone, and because a test asserts the absence — see status_test.go.
+	// exist.
+	//
+	// Exactly one code path returns it: noDSAtDelegation, and only when an
+	// authenticated NSEC at a delegation name has the NS bit set and the DS
+	// bit clear (R-DEN-08). It is deliberately not returned for a missing
+	// signature, an unsupported algorithm, a failed validation, an
+	// unexpectedly absent DNSKEY, a timeout, malformed DNSSEC records, or
+	// any other flavour of "we could not prove Secure". Each of those is
+	// Bogus or Indeterminate, and reporting them as Insecure would let an
+	// attacker downgrade a signed zone by breaking it.
 	StatusInsecure
 
 	// StatusBogus means the data should have validated and did not.

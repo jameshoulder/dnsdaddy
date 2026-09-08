@@ -288,42 +288,7 @@ func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationRes
 
 	dsRecords := dsOf(records)
 	if len(dsRecords) == 0 {
-		// No DS was returned, and two different situations produce that:
-		//
-		//   - child is not a zone cut at all, which is true of nearly every
-		//     name a query is ever asked about;
-		//   - child is a zone cut with no DS — an insecure delegation — and
-		//     everything below it is legitimately unsigned.
-		//
-		// Telling them apart needs a signed proof that no DS exists, which
-		// is NSEC or NSEC3, and v0.1 implements neither. So the walk assumes
-		// the first reading and continues in the same zone, recording where
-		// it did so.
-		//
-		// That assumption is deliberately biased. If it is wrong — if this
-		// really was an insecure delegation — the data below it is unsigned,
-		// the walk finds no signature from a zone it trusts, and the answer
-		// is reported Bogus where a complete validator would report Insecure.
-		// That is a false Bogus: it refuses data that was genuinely fine.
-		//
-		// The bias cannot run the other way. Concluding Secure would require
-		// a signature over the answer made by a key in an apex DNSKEY RRset
-		// this walk has already authenticated, and no attacker below an
-		// insecure delegation has that key. So the cost of the assumption is
-		// paid in refusals, never in false Secures, which is the direction
-		// this engine is willing to be wrong in.
-		//
-		// The earlier design carried this ambiguity to the end of the walk
-		// and downgraded any final failure to Indeterminate. That was worse
-		// in exactly the way that matters: because almost no answer name is
-		// a zone cut, it turned every genuinely tampered answer into "cannot
-		// tell", and an enforcing resolver reading Indeterminate as "allow"
-		// would have accepted forged data.
-		w.rec.skip(ValidationStep{
-			Kind: StepDS, Zone: child,
-			Note: "no DS; treated as not a zone cut, which v0.1 cannot prove without NSEC or NSEC3",
-		}, ReasonDenialNotImplemented)
-		return nil, ValidationResult{}, false
+		return w.noDSAtDelegation(zone, child, resp)
 	}
 
 	// A DS RRset exists, so it is data in the parent zone and must itself be
@@ -474,13 +439,10 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) Vali
 
 	data, sigs := SplitSignatures(resp.Answer, rrtype)
 	if len(data) == 0 {
-		// Nothing to validate. Establishing whether that absence is
-		// legitimate is a denial-of-existence question, which v0.1 does not
-		// answer, so it says so rather than guessing NXDOMAIN or NODATA.
-		return w.rec.indeterminate(w.rec.skip(
-			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype},
-			ReasonDenialNotImplemented,
-		))
+		// Nothing in the answer section. Whether that absence is legitimate
+		// is exactly the denial-of-existence question, and the response has
+		// to prove its own claim rather than be taken at its word.
+		return w.validateDenial(zone, qname, rrtype, resp)
 	}
 
 	set, reason := NewRRset(data)
@@ -490,7 +452,8 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) Vali
 		))
 	}
 
-	if reason := w.authenticate(set, sigs, zone.name, zone.keys); reason != ReasonNone {
+	accepted, reason := w.authenticateSigned(set, sigs, zone.name, zone.keys)
+	if reason != ReasonNone {
 		// Bogus is an accusation, and RFC 4033 §5 licenses it only where
 		// there is "a trust anchor and a secure delegation indicating that
 		// subsidiary data is signed". Reaching this line means both hold:
@@ -505,6 +468,12 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) Vali
 	}
 
 	w.rec.ok(ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype})
+
+	// A verified signature is not the end of the story for an answer the
+	// server synthesised from a wildcard. See wildcardProof.
+	if res, done := w.wildcardProof(zone, qname, rrtype, accepted, resp); done {
+		return res
+	}
 	return w.rec.secure()
 }
 

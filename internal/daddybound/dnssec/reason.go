@@ -156,6 +156,46 @@ const (
 	ReasonTrustAnchorMismatch Reason = "trust_anchor_mismatch"
 )
 
+// Authenticated denial of existence, per RFC 4035 §5.4 and RFC 6840 §4.
+//
+// These are separate reasons rather than one "denial failed" because they
+// describe genuinely different situations, and two of them decide a verdict.
+// A response that supplied no proof at all is a different accusation from one
+// that supplied a proof of the wrong thing, and a proof that contradicts the
+// server's own rcode is different again.
+const (
+	// ReasonNoDenialProof: a proof of non-existence was required and the
+	// response carried no authenticated NSEC or NSEC3 records capable of
+	// supplying one. R-DEN-01.
+	ReasonNoDenialProof Reason = "no_denial_proof"
+
+	// ReasonDenialIncomplete: denial records were present and authenticated,
+	// and together they do not establish what the response claims. The
+	// commonest case by far is an NXDOMAIN that proves the queried name is
+	// missing but never proves that no wildcard could have answered
+	// (R-DEN-05), which is the half-proof an attacker would supply.
+	ReasonDenialIncomplete Reason = "denial_incomplete"
+
+	// ReasonDenialContradicted: an authenticated NSEC says the very thing
+	// the response denies is present — the queried type is in the bitmap of
+	// the NSEC that matches the name, or a CNAME is (R-DEN-02, R-DEN-03).
+	// The zone's own signed records contradict the answer it was sent with.
+	ReasonDenialContradicted Reason = "denial_contradicted"
+
+	// ReasonDenialWrongZone: an NSEC was offered as proof of something it is
+	// not entitled to prove — an ancestor delegation NSEC used below its own
+	// zone cut (R-DEN-06), an NSEC with the DNAME bit used to deny a
+	// subdomain (R-DEN-07), or the child's apex NSEC offered as proof that
+	// no DS exists, when only the parent's may be used (R-DEN-09).
+	//
+	// This one is worth its own value because the signature on such a record
+	// is perfectly good. The record is real, the zone really signed it, and
+	// it simply does not say what it is being used to say. A validator that
+	// reported this as an ordinary signature failure would send an
+	// investigator looking at the cryptography.
+	ReasonDenialWrongZone Reason = "denial_wrong_zone"
+)
+
 // Limits of this milestone, and limits of any single validation run. These
 // exist so that "we did not do this" never has to be disguised as a verdict.
 const (
@@ -221,6 +261,11 @@ var explanations = map[Reason]string{
 
 	ReasonNoTrustAnchor:       "no configured trust anchor covers this name",
 	ReasonTrustAnchorMismatch: "no key at the trust anchor's name matched the configured anchor",
+
+	ReasonNoDenialProof:      "the response carried no authenticated proof that the name or type does not exist",
+	ReasonDenialIncomplete:   "the denial records do not prove everything the response claims; commonly the wildcard denial is missing",
+	ReasonDenialContradicted: "the zone's own signed denial records say the name or type does exist",
+	ReasonDenialWrongZone:    "a denial record was offered as proof of something its zone has no authority to state",
 
 	ReasonDenialNotImplemented: "answering this needs a proof of non-existence, which this version does not implement",
 	ReasonResourceLimit:        "validation stopped at a configured limit before reaching an answer",

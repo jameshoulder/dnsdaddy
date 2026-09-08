@@ -25,11 +25,41 @@ const (
 	AnswerName = "www.example.dnsdaddylab."
 	// MailName carries the multi-record MX RRset described in StandardSpec.
 	MailName = "mail.example.dnsdaddylab."
+
+	// UnsignedZone is delegated from the middle zone with NS and no DS. The
+	// parent's NSEC proves the absence, which is the only authenticated
+	// route to RFC 4033 §5's Insecure.
+	UnsignedZone = "unsigned.dnsdaddylab."
+	// UnsignedName is a name inside that insecurely delegated zone.
+	UnsignedName = "host.unsigned.dnsdaddylab."
+
+	// WildcardOwner is a wildcard two labels below the leaf apex rather than
+	// directly beneath it, so a validator that assumes the source of
+	// synthesis is always "*.<apex>" gets the wrong answer here. RFC 4592
+	// §3.3.1 anchors it at the closest encloser.
+	WildcardOwner = "*.wild.example.dnsdaddylab."
+	// WildcardMatch has no records of its own and is answered by expansion.
+	WildcardMatch = "anything.wild.example.dnsdaddylab."
+
+	// EmptyNonTerminal owns nothing and exists only because DeepName is
+	// below it. An NSEC zone publishes no NSEC at such a name (RFC 4035
+	// §2.3), so a NODATA there is proved by a spanning record instead.
+	EmptyNonTerminal = "ent.example.dnsdaddylab."
+	// DeepName is what makes EmptyNonTerminal exist.
+	DeepName = "deep.ent.example.dnsdaddylab."
+
+	// MissingName exists in no zone, for name-error proofs.
+	MissingName = "nope.example.dnsdaddylab."
 )
 
 // AnswerAddress is the address the leaf zone publishes for AnswerName. It is
 // in 192.0.2.0/24, the RFC 5737 documentation range.
-var AnswerAddress = net.IPv4(192, 0, 2, 1)
+var (
+	AnswerAddress   = net.IPv4(192, 0, 2, 1)
+	WildcardAddress = net.IPv4(192, 0, 2, 2)
+	DeepAddress     = net.IPv4(192, 0, 2, 3)
+	UnsignedAddress = net.IPv4(192, 0, 2, 4)
+)
 
 // Signature validity for the standard hierarchy. Fixed instants rather than
 // offsets from now, so that a recorded trace stays meaningful a year later
@@ -93,6 +123,29 @@ func StandardSpec() Spec {
 					mx(MailName, 10, "mail-primary.example.dnsdaddylab."),
 					mx(MailName, 20, "mx.example.dnsdaddylab."),
 					mx(MailName, 30, "a.example.dnsdaddylab."),
+
+					// A wildcard, and a name below an empty non-terminal.
+					// Both are in the standard hierarchy rather than in a
+					// scenario-specific one so that every positive run
+					// exercises the shapes a denial proof has to reason
+					// about, not only the runs that are about denial.
+					a(WildcardOwner, WildcardAddress),
+					a(DeepName, DeepAddress),
+				},
+			},
+			{
+				// Delegated with NS and no DS. The zone below is signed and
+				// unreachable: nothing authenticates its keys, so a
+				// validator must treat everything in it as Insecure rather
+				// than verify it against keys it has no reason to trust.
+				Name:      UnsignedZone,
+				Parent:    MiddleZone,
+				Insecure:  true,
+				Algorithm: dnssec.AlgED25519,
+				Records: []dns.RR{
+					soa(UnsignedZone),
+					ns(UnsignedZone, "ns.dnsdaddylab."),
+					a(UnsignedName, UnsignedAddress),
 				},
 			},
 		},

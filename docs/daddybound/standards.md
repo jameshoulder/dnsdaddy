@@ -503,6 +503,53 @@ would have accepted forged data. The scenario suite caught it — the tampered
 and corrupt-signature cases both went Indeterminate — which is the argument for
 having written the negative scenarios before trusting the positive one.
 
+## 5.6 A denial divergence between two mature validators, and which one Daddybound follows
+
+The scenario: an empty non-terminal answered NXDOMAIN instead of NOERROR. The
+NSEC records are genuine and verify; only the response code was changed. That
+covering NSEC's Next Domain Name lies *below* the queried name, which means the
+queried name exists — every ancestor of an existing name exists, at worst as an
+empty non-terminal.
+
+Three validators, two answers:
+
+| Validator | Verdict | What it does with the response |
+| --- | --- | --- |
+| **libunbound 1.19.2** | Secure | Hands the client NODATA. It disbelieved the response code and repaired it. |
+| **delv 9.18.39** | Bogus | `resolution failed: insecurity proof failed` |
+| **Daddybound** | Bogus, `denial_contradicted` | Refuses the response |
+
+Daddybound sides with delv, and the reason is not that two out of three is a
+majority. It is that Daddybound returns a *verdict* and not an *answer*. A full
+resolver can do what libunbound does — decline to believe the response code,
+substitute the one the records support, and report the records as authentic,
+which is both safe and more useful. Daddybound has no answer to substitute. Its
+only outputs are the four states, so the only way it can decline to endorse a
+claim is to refuse it.
+
+Endorsing it would matter, and RFC 8020 §2 says why:
+
+> When an iterative caching DNS resolver receives an NXDOMAIN response, it
+> SHOULD store it in its cache and then all names and resource record sets
+> (RRsets) at or below that node SHOULD be considered unreachable.
+
+and, in the same section:
+
+> Another exception is that a validating resolver MAY decide to implement the
+> "NXDOMAIN cut" behavior (described in the first paragraph of this section)
+> only when the NXDOMAIN response has been validated with DNSSEC.
+
+So a *validated* NXDOMAIN is precisely the thing that licenses erasing a whole
+subtree. In this scenario the subtree is not empty — the name below it is what
+makes the queried name exist in the first place. A validator that called this
+Secure would hand an attacker that licence in exchange for changing one field
+of a header, with no cryptography required.
+
+The scenario is annotated as a known gap in the differential suite so the
+disagreement is recorded rather than rediscovered. The annotation cannot hide
+anything that matters: the comparator classifies a false Secure before it looks
+at the annotation, and this divergence is in the other direction.
+
 ## 6. IANA registries
 
 Reproduced as read on 7 September 2026. Daddybound's tables are checked against
