@@ -42,6 +42,19 @@ type Response struct {
 // question" — which, crucially, is not a proof that nothing exists. A proof
 // is a signed denial record in the authority section, and the difference
 // between the two is the difference between Insecure and Indeterminate.
+//
+// Truncation is the Source's problem and deliberately not represented here.
+// A DNS message that sets TC has records the sender could not fit, and
+// recovering them means asking again over TCP — a transport decision, made
+// where the transport is. Nothing above this interface can tell a truncated
+// response from a short one, and nothing needs to: a response missing records
+// is a response whose claims are unproved, so the verdict is Indeterminate or
+// Bogus. The failure mode is refusing an answer that was fine, never
+// accepting one that was not.
+//
+// netsource does the TCP retry and counts it. A Source that did not would
+// make Daddybound conservative rather than wrong, which is the right way for
+// that seam to fail.
 type Source interface {
 	Lookup(ctx context.Context, name string, rrtype uint16) (Response, error)
 }
