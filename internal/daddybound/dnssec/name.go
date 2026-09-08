@@ -186,8 +186,23 @@ func parentName(name string) string {
 
 // wildcardAt returns the wildcard name immediately below name, which is the
 // name that could have synthesised an answer for anything under it.
+//
+// The root needs its own arm, and forgetting it was a real defect found by
+// the live corpus rather than by the lab. dns.CanonicalName(".") is ".", so
+// the obvious concatenation yields "*..", which is not a name: no NSEC covers
+// it, the wildcard half of every name-error proof fails to find one, and
+// every NXDOMAIN whose closest encloser is the root — that is, every query
+// for a top-level domain that does not exist — came back Bogus instead of
+// securely denied.
+//
+// It survived the lab because a lab hierarchy delegates from the root
+// immediately, so no scenario in it has the root as a closest encloser. The
+// Internet has one every time somebody mistypes a TLD.
 func wildcardAt(name string) string {
-	return "*." + dns.CanonicalName(name)
+	if canonical := dns.CanonicalName(name); canonical != "." {
+		return "*." + canonical
+	}
+	return "*."
 }
 
 // nextCloser returns the ancestor of qname exactly one label longer than

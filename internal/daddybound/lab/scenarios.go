@@ -973,6 +973,17 @@ func Scenarios() []Scenario {
 			Build:  Build,
 		},
 		{
+			Name:   "nxdomain-at-the-root",
+			Family: FamilyNSEC,
+			Why:    "a name error whose closest encloser is the root, which is what every query for a top-level domain that does not exist looks like. The wildcard half of the proof is the denial of \"*.\", and building that name by concatenating \"*.\" onto the encloser gives \"*..\" when the encloser is the root — not a name, covered by no NSEC, so the proof can never complete. Daddybound had exactly that defect and every mistyped TLD came back Bogus. No lab scenario could find it, because a lab hierarchy delegates out of the root at once and never has the root as a closest encloser; the live corpus found it on its first run. This scenario exists so the shape is reachable here from now on.",
+			Query:  "no-such-tld-4b1c9e.",
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
 			Name:   "any-query-for-a-name-that-exists",
 			Family: FamilyPositive,
 			Why:    "RFC 6840 §4.2 makes a QTYPE=* response validate every RRset it carries at the queried name. Type 255 is a query type: no record has it and no NSEC or NSEC3 bitmap lists it, so the ordinary answer filter matches nothing and the ordinary NODATA rule — omit the queried type from the bitmap — is satisfied by every bitmap there has ever been. A validator that runs an ANY query through the normal path therefore reports Secure for an absence the zone never asserted, having ignored the records it was sent. This scenario is the positive half: the records arrive and must be authenticated.",

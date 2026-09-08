@@ -51,6 +51,14 @@ type Config struct {
 	Forward string
 	// Anchor is the trust anchor to validate from.
 	Anchor dnssec.TrustAnchor
+	// Anchors, when non-empty, replaces Anchor with a set.
+	//
+	// The root has more than one anchor during a KSK rollover — the incoming
+	// key is published long before it signs anything — and an oracle given
+	// only one of them would report Bogus for the entire Internet on the day
+	// the roll completes. A lab hierarchy has exactly one, so Anchor stays
+	// for that case.
+	Anchors []dnssec.TrustAnchor
 	// WorkDir is where the generated trust-anchor file is written. A test's
 	// t.TempDir() is the intended value.
 	WorkDir string
@@ -77,7 +85,11 @@ func New(cfg Config) (differential.Reference, error) {
 	if cfg.Forward == "" {
 		return nil, errors.New("refdelv: no server address")
 	}
-	if len(cfg.Anchor.Digest) == 0 {
+	anchors := cfg.Anchors
+	if len(anchors) == 0 && len(cfg.Anchor.Digest) > 0 {
+		anchors = []dnssec.TrustAnchor{cfg.Anchor}
+	}
+	if len(anchors) == 0 {
 		return nil, errors.New("refdelv: no trust anchor")
 	}
 	if cfg.WorkDir == "" {
@@ -92,9 +104,12 @@ func New(cfg Config) (differential.Reference, error) {
 	// BIND's static-ds form: the same fields as a DS record, which is what
 	// makes an anchor checkable against IANA's published value by eye.
 	anchorFile := filepath.Join(cfg.WorkDir, "daddybound-anchor.conf")
-	content := fmt.Sprintf("trust-anchors {\n  %q static-ds %d %d %d %q;\n};\n",
-		cfg.Anchor.Name, cfg.Anchor.KeyTag, cfg.Anchor.Algorithm,
-		cfg.Anchor.DigestType, strings.ToUpper(hexOf(cfg.Anchor.Digest)))
+	content := "trust-anchors {\n"
+	for _, a := range anchors {
+		content += fmt.Sprintf("  %q static-ds %d %d %d %q;\n",
+			a.Name, a.KeyTag, a.Algorithm, a.DigestType, strings.ToUpper(hexOf(a.Digest)))
+	}
+	content += "};\n"
 	if err := os.WriteFile(anchorFile, []byte(content), 0o600); err != nil {
 		return nil, fmt.Errorf("refdelv: writing the anchor file: %w", err)
 	}
@@ -198,7 +213,7 @@ func parseDelv(out string) (differential.ReferenceResult, error) {
 	}
 	if strings.Contains(out, "resolution failed") {
 		reason := delvFailureReason(out)
-		switch classifyDelvFailure(reason) {
+		switch classifyDelv(out, reason) {
 		case delvNegativeAnswer:
 			// Not a failure at all. delv reports a name error or a NODATA
 			// as "resolution failed: ncache nxdomain" or "ncache nxrrset",
@@ -269,6 +284,35 @@ func delvFailureReason(out string) string {
 	return ""
 }
 
+// classifyDelv decides what delv meant, reading its generic reason against
+// the specific line above it when there is one.
+//
+// delv's canonical reason is sometimes the catch-all "failure", with the
+// actual diagnosis printed on the preceding line. A timeout is the common
+// case:
+//
+//	;; timed out resolving 'www.github.com/TXT/IN': 1.1.1.1#53
+//	;; resolution failed: failure
+//
+// Classifying on the canonical line alone reads that as a rejection, and the
+// corpus then records a manufactured Bogus for a query that never got an
+// answer at all — an oracle blaming a zone for the network. A timeout is
+// never a verdict, so the catch-all defers to the specific line.
+//
+// Only the catch-all defers. A named reason — "RRSIG failed to verify",
+// "broken trust chain" — is delv's own diagnosis and is taken as given, so a
+// transport hiccup elsewhere in a long chain cannot talk a real rejection
+// down into "no opinion".
+func classifyDelv(out, reason string) delvFailureKind {
+	if kind := classifyDelvFailure(reason); reason != "" && reason != "failure" {
+		return kind
+	}
+	if specific := firstDelvReason(out); specific != "" && specific != reason {
+		return classifyDelvFailure(specific)
+	}
+	return classifyDelvFailure(reason)
+}
+
 // classifyDelvFailure decides which of the three things delv means by
 // "resolution failed".
 //
@@ -291,7 +335,10 @@ func classifyDelvFailure(reason string) delvFailureKind {
 	case strings.Contains(reason, "quota reached"),
 		strings.Contains(reason, "timed out"),
 		strings.Contains(reason, "too many"),
-		strings.Contains(reason, "maximum number"):
+		strings.Contains(reason, "maximum number"),
+		strings.Contains(reason, "no servers could be reached"),
+		strings.Contains(reason, "network unreachable"),
+		strings.Contains(reason, "connection refused"):
 		return delvGaveUp
 	default:
 		return delvRejected
@@ -308,7 +355,13 @@ func firstDelvReason(out string) string {
 		case strings.HasPrefix(line, ";; no valid "),
 			strings.HasPrefix(line, ";; validating") && strings.Contains(line, "failed"),
 			strings.HasPrefix(line, ";; broken trust chain"),
-			strings.HasPrefix(line, ";; got insecure response"):
+			strings.HasPrefix(line, ";; got insecure response"),
+			// Transport, not validation. Listed here so that classifyDelv
+			// can see it when the canonical reason is the catch-all, and so
+			// that a human reading a failure is told the query never
+			// arrived rather than being shown the word "failure".
+			strings.HasPrefix(line, ";; timed out resolving"),
+			strings.HasPrefix(line, ";; no servers could be reached"):
 			return line
 		}
 	}

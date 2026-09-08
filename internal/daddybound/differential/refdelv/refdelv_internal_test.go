@@ -116,6 +116,36 @@ loopb.example.dnsdaddylab. 3600	IN CNAME loopa.example.dnsdaddylab.
 			unresolved: true,
 		},
 		{
+			// Transport, not verdict. delv's canonical reason here is its
+			// catch-all "failure" and the diagnosis is on the line above.
+			// Reading the catch-all alone records a manufactured Bogus for
+			// a query that never got an answer — an oracle blaming a zone
+			// for the network, and in a live corpus the shape most likely
+			// to drown out a real finding.
+			//
+			// Captured verbatim from a live run against 1.1.1.1.
+			name: "a timeout is Indeterminate, not a rejection",
+			out: `;; timed out resolving 'www.github.com/TXT/IN': 1.1.1.1#53
+;; resolution failed: failure
+`,
+			status:     dnssec.StatusIndeterminate,
+			unresolved: true,
+		},
+		{
+			// The other half: a named reason is delv's own diagnosis and
+			// is taken as given. A transport hiccup further down a long
+			// chain must not talk a real rejection down into "no opinion",
+			// which is the direction that would hide a Daddybound false
+			// Secure.
+			name: "a named rejection stands even alongside a timeout",
+			out: `;; timed out resolving 'ns2.example.com/AAAA/IN': 1.1.1.1#53
+;; validating www.example.com/A: no valid signature found
+;; RRSIG failed to verify resolving 'www.example.com/A/IN': 1.1.1.1#53
+;; resolution failed: RRSIG failed to verify
+`,
+			status: dnssec.StatusBogus,
+		},
+		{
 			name: "a broken trust chain is Bogus",
 			out: `;; no valid RRSIG resolving 'example.dnsdaddylab/DNSKEY/IN': 127.0.0.1#54377
 ;; broken trust chain resolving 'www.example.dnsdaddylab/A/IN': 127.0.0.1#54377

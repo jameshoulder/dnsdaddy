@@ -193,7 +193,15 @@ func (z *Zone) nsecCovering(name string) []dns.RR {
 	return nil
 }
 
-func wildcardUnder(zone string) string { return "*." + dns.CanonicalName(zone) }
+// wildcardUnder is the wildcard immediately below zone. The root arm is not
+// decoration: "*." + "." is "*..", which is not a name, and the validator had
+// exactly that bug until the live corpus found it.
+func wildcardUnder(zone string) string {
+	if canonical := dns.CanonicalName(zone); canonical != "." {
+		return "*." + canonical
+	}
+	return "*."
+}
 
 func containsRR(haystack []dns.RR, needle dns.RR) bool {
 	for _, rr := range haystack {
