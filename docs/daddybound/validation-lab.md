@@ -62,11 +62,11 @@ a comment near it.
 | `positive` | 10 | Correctly signed data that must validate — including one hierarchy per signature algorithm. Without these, every negative scenario is passed by a validator that never returns Secure |
 | `chain-failure` | 19 | Broken or forged chains: signatures, keys, delegation records, algorithm policy |
 | `nsec` | 18 | Authenticated denial with NSEC |
-| `nsec3` | 15 | The same questions asked of an NSEC3-signed hierarchy |
+| `nsec3` | 16 | The same questions asked of an NSEC3-signed hierarchy |
 | `alias` | 14 | CNAME chains and DNAME redirections, including the ones that cross a zone cut or a change in security status |
 | `configuration` | 1 | A property of Daddybound's own configuration rather than of any data |
 
-By expected verdict: 38 Secure, 28 Bogus, 7 Indeterminate, 4 Insecure. The
+By expected verdict: 38 Bogus, 28 Secure, 7 Indeterminate, 5 Insecure. The
 mixture matters as much as the count — a suite of only negatives is passed by
 a validator that rejects everything, and a suite of only positives by one that
 accepts everything.
@@ -239,8 +239,8 @@ how a comparison suite stops meaning anything.
 
 ### Current result
 
-**Zero false secures against either oracle**, across 77 laboratory scenarios
-and 612 live questions. Three scenarios are not comparable at all, seven carry
+**Zero false secures against either oracle**, across 78 laboratory scenarios
+and 612 live questions. Three scenarios are not comparable at all, eight carry
 a documented gap, and the rest match both references.
 
 `rollover-two-signatures-one-broken` is the one of those three worth naming
@@ -282,6 +282,16 @@ NXDOMAIN forged over an empty non-terminal, where libunbound repairs the
 response code and Daddybound — which returns a verdict and not an answer — can
 only refuse; and a DS query answered through NSEC3 opt-out, where delv agrees
 with Daddybound and libunbound does not.
+
+The eighth is the mirror of that last one, and the only gap where the two
+oracles disagree with each other about a denial rather than about policy:
+`nsec3-opt-out-span-cannot-prove-a-name-error`. libunbound reports insecure,
+delv reports a fully validated name error, and they do so on the live Internet
+as readily as on the fixture — darkegy.cam does not exist and .cam signs with
+opt-out. Daddybound reports insecure because RFC 5155 §12.2 says non-existence
+inside an opt-out span is not provable, which is `R-N3-13` in `standards.md`.
+Agreeing with libunbound is a consequence of following that sentence, not the
+reason for it.
 
 ### The disputed case, and how a second oracle changed the answer
 

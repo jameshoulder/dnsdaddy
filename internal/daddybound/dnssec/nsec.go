@@ -387,7 +387,7 @@ const (
 //	the SOA bit will be set in the child NSEC RR and clear in the parent NSEC
 //	RR.  A security-aware resolver MUST use the parent NSEC RR when
 //	attempting to prove that a DS RRset does not exist.
-func (d *denialProof) proveNoDS(child string) dsDenial {
+func (d *denialProof) proveNoDS(child string, nameError bool) dsDenial {
 	if d.empty() {
 		return dsDenialNone
 	}
@@ -407,6 +407,13 @@ func (d *denialProof) proveNoDS(child string) dsDenial {
 			return dsDenialContradicted
 		}
 		if nsecHasType(a.rr, dns.TypeNS) {
+			if nameError {
+				// R-DEN-13: a delegation is a name that exists. The zone's
+				// own signed NSEC says this one does and holds NS; the
+				// header says it does not exist. A message that contradicts
+				// its own signed records is not evidence of anything.
+				return dsDenialContradicted
+			}
 			return dsDenialInsecure
 		}
 		// The name exists, has no NS and no DS: not a zone cut at all,

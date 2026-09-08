@@ -48,10 +48,12 @@ with no identifier is either a bug or an invention.
 - Validates authenticated denial of existence with NSEC and NSEC3: NXDOMAIN,
   NODATA, empty non-terminals, wildcard expansion and insecure delegation,
   including NSEC3 closest-encloser proofs and opt-out.
-- Reaches RFC 4033's **Insecure**, and only where an authenticated denial
-  record at a delegation shows NS present and DS absent. Never for a missing
-  signature, an unsupported algorithm, a timeout, or any other flavour of
-  "could not prove Secure".
+- Reaches RFC 4033's **Insecure** only by proving something, never by failing
+  to. Two routes qualify: an authenticated denial record at a delegation
+  showing NS present and DS absent, and an authenticated NSEC3 Opt-Out span,
+  which RFC 5155 §12.2 says cannot prove non-existence and §7.1 says may only
+  omit unsigned names. Never for a missing signature, an unsupported
+  algorithm, a timeout, or any other flavour of "could not prove Secure".
 - Bounds the work an NSEC3 response can demand, by iteration count and by
   total hash computations, and refuses rather than downgrades when a response
   exceeds it.

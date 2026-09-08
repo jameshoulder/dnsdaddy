@@ -316,6 +316,14 @@ func (s *nsec3Set) proveNameError(qname string) Reason {
 		}
 		return ReasonDenialIncomplete
 	}
+	// R-N3-13. The shape §8.4 asks for is complete; the conclusion is not
+	// available. Opt-out is checked last deliberately: a proof missing its
+	// wildcard half is broken whatever the flag says, and calling that
+	// Insecure would let an incomplete proof buy a softer verdict than a
+	// complete one.
+	if proof.optOut {
+		return ReasonDenialOptOutSpan
+	}
 	return ReasonNone
 }
 
@@ -367,6 +375,12 @@ func (s *nsec3Set) proveNoData(qname string, rrtype uint16) Reason {
 	proof, reason := s.closestEncloser(qname)
 	if reason != ReasonNone {
 		return reason
+	}
+	if proof.optOut {
+		// R-N3-13. §8.7's wildcard NODATA rests on QNAME not existing, so
+		// that a wildcard was the right thing to answer with. Inside an
+		// Opt-Out span that half is not proved.
+		return ReasonDenialOptOutSpan
 	}
 	wildcard := s.match(wildcardAt(proof.encloser))
 	if wildcard == nil {
@@ -439,7 +453,7 @@ func (s *nsec3Set) proveNoDSData(qname string) Reason {
 //	delegation name.  The validator MUST verify that the Opt-Out bit is set
 //	in the NSEC3 RR that covers the "next closer" name to the delegation
 //	name.
-func (s *nsec3Set) proveNoDS(child string) dsDenial {
+func (s *nsec3Set) proveNoDS(child string, nameError bool) dsDenial {
 	if s.empty() {
 		return dsDenialNone
 	}
@@ -453,6 +467,12 @@ func (s *nsec3Set) proveNoDS(child string) dsDenial {
 			return dsDenialContradicted
 		}
 		if nsec3HasType(m.rr, dns.TypeNS) {
+			if nameError {
+				// The zone's own signed record says this name exists and
+				// holds a delegation; the header says it does not exist.
+				// One message, two incompatible claims.
+				return dsDenialContradicted
+			}
 			return dsDenialInsecure
 		}
 		return dsDenialNotADelegation
@@ -466,6 +486,21 @@ func (s *nsec3Set) proveNoDS(child string) dsDenial {
 		return dsDenialNone
 	}
 	if proof.optOut {
+		if nameError {
+			// R-N3-12. An opt-out span covers two entirely different
+			// situations and says nothing about which one it holds: an
+			// insecure delegation the signer chose not to record, or a
+			// name that does not exist at all. The span cannot tell them
+			// apart; the rcode can, because a delegation is a name that
+			// exists and a DS query at one is answered NODATA rather than
+			// NXDOMAIN (RFC 2308 §2.2).
+			//
+			// Reading the span as the first regardless is how a name the
+			// zone proves absent came back Insecure — a claim that
+			// unsigned data there is expected — instead of a securely
+			// denied NXDOMAIN. Found on the live Internet, not in the lab.
+			return dsDenialNameAbsent
+		}
 		// An opt-out span may hold insecure delegations without records of
 		// their own, which is exactly what this is.
 		return dsDenialInsecure
@@ -502,11 +537,21 @@ func (s *nsec3Set) proveWildcardAnswer(qname string, expandedFrom int) Reason {
 	if !ok {
 		return ReasonDenialIncomplete
 	}
-	if s.cover(closer) == nil {
+	covering := s.cover(closer)
+	if covering == nil {
 		if s.exhausted {
 			return ReasonResourceLimit
 		}
 		return ReasonDenialIncomplete
+	}
+	// R-N3-13 again, and RFC 5155 §12.2 names this case itself: what an
+	// attacker may insert or delete inside an Opt-Out span "also includes
+	// signed wildcard expansions (while the wildcard RR itself is signed,
+	// its expanded name is an unsigned name)". The answer's signature is
+	// genuine; what is not established is that no closer name existed to
+	// answer instead, which is the whole job of this proof.
+	if optOut(covering.rr) {
+		return ReasonDenialOptOutSpan
 	}
 	return ReasonNone
 }

@@ -287,6 +287,7 @@ validator an attacker can walk straight through.
 | `R-DEN-10` | The NSEC and RRSIG bits in a bitmap say nothing; a validated NSEC proves both records exist regardless | RFC 4035 §5.4: "Since a validated NSEC RR proves the existence of both itself and its corresponding RRSIG RR, a validator MUST ignore the settings of the NSEC and RRSIG bits in an NSEC RR" |
 | `R-DEN-11` | A positive answer whose owner has more labels than its RRSIG's Labels field was wildcard-expanded, and needs its own denial proof that no closer match existed | RFC 4035 §5.3.4: "If the number of labels in an RRset's owner name is greater than the Labels field of the covering RRSIG RR, then the RRset and its covering RRSIG RR were created as a result of wildcard expansion ... it must take additional steps to verify the non-existence of an exact match or closer wildcard match for the query" |
 | `R-DEN-12` | The work spent on a proof is bounded, and hitting the bound is not a verdict | RFC 4035 §5.4: "As with all DNS operations, however, the resolver MUST bound the work it puts into answering any particular query" |
+| `R-DEN-13` | A response whose rcode is NXDOMAIN cannot establish an insecure delegation, because a delegation is a name that exists | RFC 4035 §5.2 and RFC 6840 §4.4 both speak of "the delegation"; RFC 2308 §2.2: "Name Error ... it means that the name referred to by the QNAME does not exist", while a name that exists with no data of the queried type is answered as §2.2's "NODATA" with rcode NOERROR |
 
 Two of these deserve more than a table row.
 
@@ -333,6 +334,8 @@ one substitution — including the parts that do not survive it.
 | `R-N3-09` | Wildcard answer: an NSEC3 covering the next closer name to QNAME | RFC 5155 §8.8: "This proves that QNAME itself did not exist and that the correct wildcard was used to generate the response" |
 | `R-N3-10` | Insecure delegation: a matching NSEC3 with NS set, DS clear and SOA clear; or no match, plus a closest provable encloser proof whose next-closer NSEC3 has Opt-Out set | RFC 5155 §8.9 |
 | `R-N3-11` | Iteration counts are bounded, and a high count is refused rather than computed | RFC 9276 §3.1, and see below |
+| `R-N3-12` | An Opt-Out span may establish an insecure delegation only when the response says the name exists. Under NXDOMAIN the same span is a name-error proof, and the name is not a delegation at all | RFC 5155 §8.9 states its checks for "the delegation name" throughout; see below |
+| `R-N3-13` | An Opt-Out span cannot prove that a name does not exist, so no conclusion resting on that absence may be reported Secure. Name error (§8.4), wildcard-expanded answer (§8.8) and wildcard NODATA (§8.7) are reported **Insecure** instead | RFC 5155 §12.2: "the loss of the ability to prove the existence or nonexistence of an insecure delegation within the span of an Opt-Out NSEC3 RR", and "All unsigned names are, by definition, insecure"; see below |
 
 RFC 5155 §8.3's algorithm, quoted rather than paraphrased because the flag
 handling is where implementations go wrong:
@@ -354,6 +357,63 @@ conclusion — that a delegation is insecure (`R-N3-07`, `R-N3-10`) — and must
 never be read as proving that a name does not exist. A validator that treats
 opt-out coverage as a name-error proof will accept a forged NXDOMAIN for any
 name in any opt-out zone, which is most of the TLDs.
+
+**`R-N3-13` is the same rule pointing the other way, and it is the one
+Daddybound got wrong.** The paragraph above stops an opt-out record proving
+that a name does not exist when a *delegation* is being looked for. Nothing
+stopped it doing so when a name error was being validated, because §8.4's
+procedure does not mention opt-out at all:
+
+> A validator MUST verify that there is a closest encloser proof for QNAME
+> present in the response and that there is an NSEC3 RR that covers the
+> wildcard at the closest encloser (i.e., the name formed by prepending the
+> asterisk label to the closest encloser).
+
+Over an Opt-Out span that procedure completes: the records verify, the closest
+encloser is found, the wildcard is covered. §12.2 then says what the completed
+procedure is worth — "the primary difference in security when using Opt-Out is
+the loss of the ability to prove the existence or nonexistence of an insecure
+delegation within the span of an Opt-Out NSEC3 RR" — and §1.3 says the same
+thing structurally, since inside an opt-out zone the closest *provable*
+encloser is not the closest encloser. A validator reporting Secure there is
+claiming a proof the standard says is unavailable.
+
+So `R-N3-13` refuses the Secure. The verdict it substitutes is **Insecure**,
+and that too comes from the text rather than from taste: §7.1 permits a signer
+to omit only "owner names of unsigned delegations" from the chain, so a name
+covered by an opt-out span either does not exist or is unsigned, and §12.2
+opens by settling what that means — "All unsigned names are, by definition,
+insecure." The rule applies wherever a conclusion depends on the next closer
+name being absent: name error (§8.4), wildcard-expanded answer (§8.8, which
+§12.2 names explicitly — "this also includes signed wildcard expansions"), and
+wildcard NODATA (§8.7). It does **not** apply to §8.6 or §8.9, which are the
+one thing opt-out is permitted to establish and whose conclusion is already
+Insecure.
+
+**The two reference validators disagree about this, and the disagreement is
+real rather than a fault in either.** libunbound 1.19.2 reports insecure; delv
+9.18.39 reports a fully validated name error. They do so on the live Internet
+as well as on the laboratory fixture: darkegy.cam does not exist, .cam signs
+with opt-out, and the two answer differently. Daddybound follows §12.2, and
+the resulting agreement with libunbound is a consequence of that rather than a
+reason for it.
+
+**How this was found is worth recording, because the first attempt went the
+wrong way.** The live corpus showed Daddybound reporting Insecure where delv
+returned a validated NXDOMAIN, and the engine's *reason* for that Insecure was
+plainly false — it claimed "NS present and DS absent", an insecure delegation,
+about a name that does not exist. Correcting that reasoning is `R-N3-12`, and
+on its own it moved the verdict to Secure and looked like a fix. It was a
+regression. The old verdict had been right by accident: a check that happened
+to stop the walk before it could claim a proof it did not have. `R-N3-12`
+makes the reasoning honest and `R-N3-13` makes the verdict correct, and
+neither is sufficient alone.
+
+Neither rule is a security gate, and no security gate is available here.
+Inside an opt-out span there is no signed material distinguishing an unsigned
+delegation from an absent name, and an attacker who can replay an opt-out
+proof can set either rcode. What these rules fix is what Daddybound is
+entitled to claim about a response it has read correctly.
 
 **Iterations are an attacker-chosen loop count.** The hash iteration count and
 the salt both arrive in the response, and each iteration is a hash computation

@@ -16,8 +16,10 @@ Implemented, with the rules recorded as `R-DEN-01`..`R-DEN-12` and
 `R-N3-01`..`R-N3-11` in [standards.md](standards.md) §4.7 and §4.8. What it
 unblocked:
 
-- **Insecure is reachable**, by exactly one route: an authenticated denial
-  record at a delegation showing NS present and DS absent.
+- **Insecure is reachable**, and only ever by proving something: an
+  authenticated denial record at a delegation showing NS present and DS
+  absent, or an authenticated Opt-Out span, within which RFC 5155 §12.2 says
+  non-existence cannot be proved and every name is unsigned.
 - **The zone-cut ambiguity is closed where a proof is supplied.** A walk that
   finds no DS now reads the parent's signed record instead of assuming. One
   case remains: a response that supplies no proof either way, where the walk
@@ -125,7 +127,7 @@ validator. That gate is evidence, not features:
 > is still missing before it could enforce DNSSEC for a real deployment?
 
 The current answer is in [validation-lab.md](validation-lab.md) under "What
-this evidence does not cover". In short: 77 laboratory scenarios and 612 live
+this evidence does not cover". In short: 78 laboratory scenarios and 612 live
 questions, both against two independent oracles, five signature algorithms end
 to end, zero false Secures, and two real defects found by the corpus that the
 laboratory could not have reached.

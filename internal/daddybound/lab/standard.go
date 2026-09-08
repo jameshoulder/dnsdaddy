@@ -56,6 +56,21 @@ const (
 	// MissingName exists in no zone, for name-error proofs.
 	MissingName = "nope.example.dnsdaddylab."
 
+	// MissingUnderOptOut exists in no zone either, and its hash falls inside
+	// the middle zone's opt-out span. That placement is the whole point, and
+	// it is a property of this exact label: the span covering this name is
+	// the same record that covers a genuine insecure delegation, so the two
+	// situations are indistinguishable from the proof alone and only the
+	// response's rcode tells them apart.
+	//
+	// Choosing the label by where it hashes makes the fixture fragile in one
+	// specific way — add a name to the middle zone, the span splits, and this
+	// one could quietly fall outside it, leaving the scenario passing for the
+	// wrong reason. So the test that uses it asserts the covering record has
+	// the Opt-Out bit set rather than assuming it. The first version of that
+	// test did assume, and passed with the fix reverted.
+	MissingUnderOptOut = "absent.dnsdaddylab."
+
 	// OtherZone is a second signed zone delegated from the middle zone, so
 	// an alias can cross a zone cut without leaving the chain of trust.
 	OtherZone = "other.dnsdaddylab."

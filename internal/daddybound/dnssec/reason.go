@@ -204,6 +204,23 @@ const (
 	// statement about what is provable, not about the zone.
 	ReasonAnyNotProvable Reason = "any_not_provable"
 
+	// ReasonDenialOptOutSpan: the name whose non-existence the proof depends
+	// on falls inside an Opt-Out span, and RFC 5155 §12.2 states plainly what
+	// that costs — "the loss of the ability to prove the existence or
+	// nonexistence of an insecure delegation within the span of an Opt-Out
+	// NSEC3 RR".
+	//
+	// The proof is not broken and the zone is not accused of anything: the
+	// records verify and the shape is the one §8.4 asks for. What is missing
+	// is the conclusion. §7.1 lets a signer omit only unsigned delegations
+	// from the chain, so a name inside such a span either does not exist or
+	// is unsigned, and §12.2's first paragraph settles which verdict that is:
+	// "All unsigned names are, by definition, insecure."
+	//
+	// So this reason carries Insecure rather than Bogus or Indeterminate, and
+	// it is the only reason in this taxonomy that does.
+	ReasonDenialOptOutSpan Reason = "denial_opt_out_span"
+
 	// ReasonAliasLoop: the alias chain returns to a name it already visited.
 	// The records may all be authentic — the zone published a loop — so this
 	// is a statement about the data's shape rather than its authenticity.
@@ -289,11 +306,12 @@ var explanations = map[Reason]string{
 	ReasonNoTrustAnchor:       "no configured trust anchor covers this name",
 	ReasonTrustAnchorMismatch: "no key at the trust anchor's name matched the configured anchor",
 
-	ReasonAliasAmbiguous: "more than one CNAME exists at this name, so there is no single target to follow",
-	ReasonAliasLoop:      "the alias chain returns to a name it has already visited",
-	ReasonAnyNotProvable: "an empty answer to a QTYPE=ANY query cannot be authenticated: no NSEC or NSEC3 type bitmap can deny type ANY",
-	ReasonDnameNoMatch:   "the DNAME offered does not cover the queried name",
-	ReasonDnameTooLong:   "the DNAME substitution would produce a name longer than the DNS allows",
+	ReasonAliasAmbiguous:   "more than one CNAME exists at this name, so there is no single target to follow",
+	ReasonAliasLoop:        "the alias chain returns to a name it has already visited",
+	ReasonAnyNotProvable:   "an empty answer to a QTYPE=ANY query cannot be authenticated: no NSEC or NSEC3 type bitmap can deny type ANY",
+	ReasonDenialOptOutSpan: "the name is inside an Opt-Out span, within which RFC 5155 §12.2 says non-existence cannot be proved; every name in such a span is unsigned",
+	ReasonDnameNoMatch:     "the DNAME offered does not cover the queried name",
+	ReasonDnameTooLong:     "the DNAME substitution would produce a name longer than the DNS allows",
 
 	ReasonNoDenialProof:      "the response carried no authenticated proof that the name or type does not exist",
 	ReasonDenialIncomplete:   "the denial records do not prove everything the response claims; commonly the wildcard denial is missing",

@@ -54,7 +54,7 @@ build sets, so `CGO_ENABLED=0` and the static cross-compiled binaries are
 unaffected.
 
 Verdicts are compared against two independent reference validators —
-libunbound and BIND's `delv` — across 77 laboratory scenarios and, in a
+libunbound and BIND's `delv` — across 78 laboratory scenarios and, in a
 separate opt-in run, several hundred real Internet names. **No false secures
 against either oracle in either.** That is the failure class where a reference
 validator says data is forged and Daddybound says it is fine, and it is the
@@ -66,9 +66,13 @@ root, and a delegation response carrying the parent's DS as context. Both were
 false Bogus, neither could have been a false Secure, and both are laboratory
 scenarios now.
 
-All four RFC 4033 states are reachable, and **Insecure has exactly one route
-in**: an authenticated denial record at a delegation showing NS present and DS
-absent. Not a missing signature, not an unsupported algorithm, not a timeout.
+All four RFC 4033 states are reachable, and **Insecure is reached only by
+proving something**, never by failing to. Two routes qualify, both of them
+proofs: an authenticated denial record at a delegation showing NS present and
+DS absent, and an authenticated NSEC3 Opt-Out span, within which RFC 5155
+§12.2 says non-existence cannot be proved and every name is unsigned. Not a
+missing signature, not an unsupported algorithm, not a timeout — those are
+Bogus or Indeterminate.
 
 What it deliberately does not do: no recursive resolution of its own; no
 aggressive use of NSEC (RFC 8198); no RFC 5011 trust anchor rollover; no

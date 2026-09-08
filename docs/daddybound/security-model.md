@@ -95,11 +95,26 @@ Two rules keep that honest:
   where there is "a trust anchor and a secure delegation indicating that
   subsidiary data is signed". A failure before that point is Indeterminate.
 
-### Insecure has exactly one route in
+### Insecure is only ever reached by proving something
 
-RFC 4033's Insecure means *signed proof* that no DS exists, and that is the
-only way Daddybound reaches it: an authenticated denial record at a delegation
-showing NS present and DS absent. Nothing else qualifies.
+RFC 4033's Insecure is a claim, not a shrug: it tells a consumer that unsigned
+data here is expected and legitimate. So Daddybound reaches it only from
+authenticated evidence, by one of exactly two routes.
+
+**A signed proof that no DS exists** — an authenticated denial record at a
+delegation showing NS present and DS absent. This is the ordinary insecure
+delegation, and it is the majority of the Insecure verdicts anything will see.
+
+**An authenticated NSEC3 Opt-Out span** covering the name whose absence a
+proof depends on. RFC 5155 §12.2 states that opt-out costs "the ability to
+prove the existence or nonexistence of an insecure delegation within the span
+of an Opt-Out NSEC3 RR", and §7.1 permits a signer to omit only unsigned
+delegations from the chain — so a name inside such a span either does not
+exist or is unsigned, and §12.2 settles the verdict: "All unsigned names are,
+by definition, insecure." This route exists because the alternative is worse:
+reporting Secure for a non-existence the standard says is not provable. It is
+`R-N3-13`, and the reference validators disagree with each other about it —
+libunbound reports insecure, delv reports a validated name error.
 
 Stated in the negative, because every wrong implementation of Insecure is a
 downgrade. It is **not**: a missing signature, an unsupported algorithm, a
@@ -127,7 +142,7 @@ rebut a false Secure, because `Classify` has already returned by then. No case
 added below that line can quiet it.
 
 Current count against **both** reference validators: **0 false secures**,
-across 77 laboratory scenarios and 612 questions put to the live Internet.
+across 78 laboratory scenarios and 612 questions put to the live Internet.
 Sabotaging the verifier to accept a signature because one was present — the
 classic form of this bug — makes four scenarios report it, which is how we
 know the check does something.

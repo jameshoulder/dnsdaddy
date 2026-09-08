@@ -33,7 +33,7 @@ func (w *walk) noDSAtDelegation(zone *zoneState, child string, resp Response) (*
 	proof := w.collectDenial(zone, resp.Authority)
 	step := ValidationStep{Kind: StepDenial, Zone: zone.name, Name: child, RRType: dns.TypeDS}
 
-	switch w.dsDenialFrom(&proof, child) {
+	switch w.dsDenialFrom(&proof, child, resp.Rcode == dns.RcodeNameError) {
 	case dsDenialInsecure:
 		// NS present, DS absent, SOA absent: an authenticated insecure
 		// delegation. This is the one and only route to RFC 4033 §5's
@@ -131,6 +131,15 @@ func (w *walk) validateDenial(zone *zoneState, qname string, rrtype uint16, resp
 		return w.rec.indeterminate(w.rec.skip(step, ReasonUnknown))
 	}
 
+	if reason == ReasonDenialOptOutSpan {
+		// Not a failure. The records verify and the proof has the shape the
+		// standard asks for; what it does not have is the conclusion, and
+		// RFC 5155 §12.2 says why. Recorded as a step that passed, with the
+		// verdict the span actually supports.
+		step.Note = "the name is inside an Opt-Out span: non-existence is not provable there, and every name in one is unsigned"
+		w.rec.ok(step)
+		return w.rec.result(StatusInsecure, ReasonDenialOptOutSpan)
+	}
 	if reason != ReasonNone {
 		// A proof that was cut short cannot support an accusation. See
 		// denialProof.unreadOverReported.
@@ -169,6 +178,15 @@ func (w *walk) wildcardProof(zone *zoneState, qname string, rrtype uint16, sig *
 	if proof.hasNSEC3() {
 		reason = proof.nsec3.proveWildcardAnswer(qname, int(sig.Labels))
 	}
+	if reason == ReasonDenialOptOutSpan {
+		// The expanded name is an unsigned name (RFC 5155 §12.2), so the
+		// answer's own signature does not settle that the expansion was the
+		// right thing to do. Insecure rather than Bogus: nothing here is
+		// forged, and nothing here is proved either.
+		step.Note = "the name this answer expanded over is inside an Opt-Out span, so no closer match can be ruled out"
+		w.rec.ok(step)
+		return w.rec.result(StatusInsecure, ReasonDenialOptOutSpan), true
+	}
 	if reason != ReasonNone {
 		return w.rec.verdict(w.rec.fail(step, proof.unreadOverReported(reason))), true
 	}
@@ -184,9 +202,9 @@ func (w *walk) wildcardProof(zone *zoneState, qname string, rrtype uint16, sig *
 // supplied a broken NSEC3 proof be rescued by an unrelated NSEC record, and
 // vice versa. NSEC3 is preferred when present because its records are the
 // ones the zone's signer produced.
-func (w *walk) dsDenialFrom(proof *denialProof, child string) dsDenial {
+func (w *walk) dsDenialFrom(proof *denialProof, child string, nameError bool) dsDenial {
 	if proof.hasNSEC3() {
-		return proof.nsec3.proveNoDS(child)
+		return proof.nsec3.proveNoDS(child, nameError)
 	}
-	return proof.proveNoDS(child)
+	return proof.proveNoDS(child, nameError)
 }

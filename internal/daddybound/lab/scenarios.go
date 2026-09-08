@@ -689,6 +689,18 @@ func Scenarios() []Scenario {
 			Build:  nsec3(func(*Hierarchy) error { return nil }),
 		},
 		{
+			Name:     "nsec3-opt-out-span-cannot-prove-a-name-error",
+			Family:   FamilyNSEC3,
+			Why:      "RFC 5155 section 12.2 states what opt-out costs: \"the loss of the ability to prove the existence or nonexistence of an insecure delegation within the span of an Opt-Out NSEC3 RR\". Section 8.4's procedure still completes over such a span — the records verify and the shape is right — but the conclusion it would license is the one section 12.2 says is unavailable, so reporting a secure name error there claims a proof that does not exist. Section 7.1 lets a signer omit only unsigned delegations from the chain, so a name inside the span either does not exist or is unsigned, and section 12.2 settles which verdict that is: \"All unsigned names are, by definition, insecure.\"",
+			Query:    MissingUnderOptOut,
+			QType:    dns.TypeA,
+			At:       Now(),
+			Expect:   dnssec.StatusInsecure,
+			Reason:   dnssec.ReasonDenialOptOutSpan,
+			KnownGap: "libunbound 1.19.2 agrees (insecure). delv 9.18.39 reports the same response fully validated, and does so on the live Internet too: darkegy.cam does not exist, .cam signs with opt-out, and delv returns a validated NXDOMAIN where libunbound returns insecure. This is a real divergence between two mature validators rather than a fault in either. Daddybound follows the weaker verdict because RFC 5155 section 12.2 is explicit that non-existence within an opt-out span is not provable, and this project treats an unjustified Secure as the failure that matters. The refusal is confined to the conclusion: the same span still establishes an insecure delegation under section 8.9, which is the one thing opt-out is permitted to prove.",
+			Build:    nsec3(func(*Hierarchy) error { return nil }),
+		},
+		{
 			Name:   "nsec3-nxdomain-without-the-wildcard-denial",
 			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.4 requires both halves. The closest encloser proof still verifies; the record covering the wildcard is gone, so a wildcard could have answered and the name error is not proved.",

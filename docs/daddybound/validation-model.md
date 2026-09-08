@@ -48,7 +48,9 @@ property of the set rather than of the order it arrived in.
 of the two possible situations holds. An authenticated record at the cut with NS
 set and DS clear is an insecure delegation and produces **Insecure**. Neither
 bit set means the name is not a zone cut and the walk continues. The DS bit set
-while the DS is absent is a contradiction and produces Bogus.
+while the DS is absent is a contradiction and produces Bogus. A response whose
+rcode is NXDOMAIN establishes no delegation at all, whatever its records say —
+a delegation is a name that exists (`R-DEN-13`, `R-N3-12`).
 
 **Assumed, when no DS RRset is present and no denial is supplied:** that the
 name is not a zone cut. This is the one substantive assumption left in the walk,
@@ -117,7 +119,7 @@ however well signed its destination is.
 | State | Reached when |
 | --- | --- |
 | **Secure** | A chain from a configured anchor to the RRset, every signature verified. Or: an authenticated denial establishing the claimed absence. |
-| **Insecure** | One route only — an authenticated denial at a delegation showing NS present and DS absent. |
+| **Insecure** | Two routes, both of them proofs — an authenticated denial at a delegation showing NS present and DS absent, or an authenticated NSEC3 Opt-Out span, within which RFC 5155 §12.2 says non-existence cannot be proved and §7.1 says only unsigned names may be omitted. |
 | **Bogus** | A secure delegation was established and the response failed to validate. Never reached before a delegation is established. |
 | **Indeterminate** | No anchor covers the name; or a limit was hit; or the answer depends on something this build cannot evaluate. Never a soft yes and never a soft no. |
 

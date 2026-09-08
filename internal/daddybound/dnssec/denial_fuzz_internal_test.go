@@ -184,7 +184,11 @@ func FuzzNSEC3ProofsNeverPanic(f *testing.F) {
 		// bounded by the label count of a name already parsed.
 		_ = set.proveNameError(qname)
 		_ = set.proveNoData(qname, rrtype)
-		_ = set.proveNoDS(qname)
+		// Both rcode branches, because the name-error arm is a different
+		// path through the same record set and an input that panics on one
+		// of them is no less a panic.
+		_ = set.proveNoDS(qname, false)
+		_ = set.proveNoDS(qname, true)
 		_ = set.proveWildcardAnswer(qname, 1)
 	})
 }
@@ -228,7 +232,8 @@ func FuzzNSECProofsNeverPanic(f *testing.F) {
 
 		_ = proof.proveNameError(qname, rrtype)
 		_ = proof.proveNoData(qname, rrtype)
-		_ = proof.proveNoDS(qname)
+		_ = proof.proveNoDS(qname, false)
+		_ = proof.proveNoDS(qname, true)
 		_ = proof.proveWildcardAnswer(qname, 1, rrtype)
 	})
 }
