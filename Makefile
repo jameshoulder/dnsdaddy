@@ -56,9 +56,17 @@ test-daddybound: ## Compare Daddybound against libunbound and BIND delv (needs l
 
 .PHONY: fuzz-daddybound
 fuzz-daddybound: ## Fuzz the Daddybound input surface for 30s per target
-	@for target in FuzzCanonicalSignedData FuzzParseRSAPublicKey FuzzValidateWireResponse; do \
-		echo "--- $$target ---"; \
-		go test ./internal/daddybound/dnssec/ -run '^$$' -fuzz "^$$target$$" -fuzztime=30s || exit 1; \
+	@# Discovered rather than listed, for the reason the CI step gives: a
+	@# hard-coded list stops covering whatever was added last, which is how
+	@# fuzzing dies quietly. Package and target together, because -fuzz
+	@# refuses a pattern matching more than one package.
+	@grep -rn '^func Fuzz[A-Za-z0-9_]*(' ./internal/daddybound/ | \
+	while IFS= read -r line; do \
+		file=$${line%%:*}; fn=$${line##*func }; \
+		printf '%s %s\n' "$$(dirname "$$file")" "$${fn%%(*}"; \
+	done | sort -u | while read -r pkg target; do \
+		echo "--- $$pkg $$target ---"; \
+		go test "$$pkg" -run '^$$' -fuzz "^$$target$$" -fuzztime=30s || exit 1; \
 	done
 
 .PHONY: cover
