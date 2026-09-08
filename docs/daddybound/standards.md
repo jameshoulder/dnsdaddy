@@ -596,6 +596,63 @@ That loss is real and inherent. It is why an opt-out record may establish that a
 delegation is insecure (`R-N3-07`, `R-N3-10`) and may never be read as proof
 that a name does not exist.
 
+## 5.8 The ancestor-signature disagreement, settled by measurement
+
+One scenario has an ancestor zone signing a delegated child's data. The
+signature is cryptographically perfect and made by the wrong authority.
+Daddybound reports Bogus with `signer_not_zone`; libunbound 1.19.2 and BIND
+delv 9.18.39 both accept the answer.
+
+The explanation previously recorded here was that all three implementations
+know where the zone cut is and read RFC 4035 §5.3.1 differently — that the
+oracles take the containing zone from the RRSIG's signer name as a deliberate
+choice. That explanation was wrong, and the queries say so.
+
+The lab's authoritative server records every question a reference validator
+asks. Against the foreign-zone-signature scenario, delv asks exactly four:
+
+```
+www.example.dnsdaddylab.  A
+dnsdaddylab.              DNSKEY
+dnsdaddylab.              DS
+.                         DNSKEY
+```
+
+It never asks about `example.dnsdaddylab.` at all. Reading the containing zone
+off the signer name is not a judgement it makes *about* a cut it has found; it
+is what determines where it looks, so the cut is never discovered. RFC 4035
+§5.3.1 says "the RRSIG RR's Signer's Name field MUST be the name of the zone
+that contains the RRset", and delv cannot apply that sentence here because it
+has not established which zone that is. A lying signer redirects the walk to
+the zone where its signature verifies.
+
+Daddybound, over the same scenario, fetches the DS and the DNSKEY for
+`example.dnsdaddylab.` because it descends the delegations from the anchor
+rather than following the signature. So the refusal rests on evidence the
+other implementation did not gather. This is a difference in what was known,
+not a difference of reading.
+
+**It is still not a vulnerability in delv, and the earlier note was right
+about that.** RFC 4035 §5.3.1 also requires the signer to be at or above the
+owner name, which delv does check, so the only signatures this admits are from
+ancestors of the name. An ancestor can already seize any name beneath it by
+replacing the delegation and publishing its own DS, so accepting its signature
+grants no authority it lacked. That is a plausible reason not to spend a query
+on the check.
+
+Daddybound keeps the strict behaviour: it errs towards refusal, it cannot
+produce a false Secure, and it has the information anyway as a by-product of
+walking the chain. Two tests in `internal/daddybound/differential/zonecut_test.go`
+pin the measurement — one that Daddybound asks about every cut and asks the
+same questions whether or not the signer lies, and one that delv accepts
+without ever asking. If delv's query pattern changes, those tests fail and
+this section is to be re-derived rather than re-asserted.
+
+libunbound is not measured the same way here. It is pointed at the lab as a
+forwarder rather than resolving iteratively, so its query pattern reflects the
+harness as much as its own logic, and nothing can be concluded from it either
+way.
+
 ## 6. IANA registries
 
 Reproduced as read on 7 September 2026. Daddybound's tables are checked against
