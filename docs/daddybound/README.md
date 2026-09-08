@@ -1,9 +1,10 @@
 # Daddybound
 
 Daddybound is an experimental DNS resolution and validation engine, written
-from first principles in Go. Its first milestone is one thing done properly:
-walking a DNSSEC chain of trust from a configured trust anchor to a signed
-answer, and being honest about every case where it cannot.
+from first principles in Go. It walks a DNSSEC chain of trust from a
+configured trust anchor to an authenticated answer, an authenticated absence
+or an authenticated redirection — and is honest about every case where it
+cannot.
 
 **Daddybound is not a production DNSSEC validator and must not be relied upon
 as one.** It answers no queries. It enforces no policy. The DNS Daddy resolver
