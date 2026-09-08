@@ -1,6 +1,10 @@
 package dnssec
 
-import "github.com/miekg/dns"
+import (
+	"sort"
+
+	"github.com/miekg/dns"
+)
 
 // Authenticated denial of existence: the frame shared by NSEC and NSEC3.
 //
@@ -34,6 +38,12 @@ import "github.com/miekg/dns"
 type authenticNSEC struct {
 	rr     *dns.NSEC
 	signer string
+
+	// intervalUnusable marks a record merged from several that disagreed
+	// about their Next Domain Name. Such a group still says what types
+	// exist at its owner — the union — but it asserts two different
+	// intervals, and no interval arithmetic over that is sound.
+	intervalUnusable bool
 }
 
 // denialProof is the authenticated denial material from one response.
@@ -148,6 +158,8 @@ func (w *walk) collectDenial(zone *zoneState, authority []dns.RR) denialProof {
 		})
 	}
 
+	proof.nsec = mergeNSECByOwner(proof.nsec)
+
 	var n3truncated bool
 	proof.nsec3, proof.refusedNSEC3, n3truncated = w.collectNSEC3(zone, authority, budget)
 	proof.truncated = proof.truncated || n3truncated
@@ -244,4 +256,75 @@ func (d *denialProof) unreadOverReported(reason Reason) Reason {
 	default:
 		return reason
 	}
+}
+
+// mergeNSECByOwner collapses authenticated NSEC records sharing an owner name
+// into one record per name.
+//
+// A correct zone publishes one NSEC per name (RFC 4034 §4.1), and RFC 5155
+// §7.1 step 6 tells an NSEC3 signer to combine records with identical hashed
+// owner names "with the Type Bit Maps field consisting of the union of the
+// types represented by the set". Nothing enforces that on the wire, though: a
+// signer can emit two, both are then genuinely signed as one RRset, and a
+// validator that reads "the" record at a name has to pick.
+//
+// Picking the first was a defect, and an exploitable one. The records arrive
+// in whatever order an on-path attacker chooses, so if one bitmap lists the
+// queried type and the other does not, the attacker decides between "the type
+// exists, this NODATA is a lie" and "proved". They would choose the second.
+//
+// The union is both order-independent and the safe direction: a type present
+// in any record is treated as present, which produces refusals rather than
+// proofs. The interval is different — coverage is what licenses a proof, not
+// what withholds one — so records that disagree about their Next Domain Name
+// yield a group whose bitmap is still usable and whose interval is not.
+func mergeNSECByOwner(records []authenticNSEC) []authenticNSEC {
+	if len(records) < 2 {
+		return records
+	}
+
+	index := make(map[string]int, len(records))
+	out := make([]authenticNSEC, 0, len(records))
+
+	for _, a := range records {
+		owner := dns.CanonicalName(a.rr.Hdr.Name)
+		at, seen := index[owner]
+		if !seen {
+			index[owner] = len(out)
+			out = append(out, a)
+			continue
+		}
+
+		merged, ok := dns.Copy(out[at].rr).(*dns.NSEC)
+		if !ok {
+			// Cannot merge what cannot be copied. Refusing the interval
+			// leaves the group able to say what exists and unable to prove
+			// what does not, which is the direction to fail in.
+			out[at].intervalUnusable = true
+			continue
+		}
+		merged.TypeBitMap = unionTypes(out[at].rr.TypeBitMap, a.rr.TypeBitMap)
+		out[at].rr = merged
+		if !equalNames(out[at].rr.NextDomain, a.rr.NextDomain) {
+			out[at].intervalUnusable = true
+		}
+	}
+	return out
+}
+
+// unionTypes merges two NSEC type bitmaps, sorted ascending as the wire
+// format requires.
+func unionTypes(a, b []uint16) []uint16 {
+	seen := make(map[uint16]bool, len(a)+len(b))
+	out := make([]uint16, 0, len(a)+len(b))
+	for _, list := range [][]uint16{a, b} {
+		for _, t := range list {
+			if !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }

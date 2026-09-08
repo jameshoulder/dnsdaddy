@@ -945,3 +945,112 @@ func (h *Hierarchy) ReownNSEC3(zoneName, owner, newSuffix string) error {
 func (h *Hierarchy) SetNSEC3Flags(zoneName, owner string, flags uint8) error {
 	return h.mutateNSEC3(zoneName, owner, func(n *dns.NSEC3) { n.Flags = flags })
 }
+
+// AddSecondNSEC publishes a second NSEC record at an owner name that already
+// has one, and signs the pair as a single RRset.
+//
+// This is a broken zone rather than a forged response: RFC 4034 §4.1 describes
+// one NSEC per name and RFC 5155 §7.1 step 6 tells a signer to combine records
+// with identical hashed owner names into one. But nothing stops a signer
+// emitting two, both are then genuinely signed, and a validator that reads
+// "the" record at a name has to decide which. An attacker on the path chooses
+// the order they arrive in, so if that decides the verdict, it is the
+// attacker's verdict.
+func (h *Hierarchy) AddSecondNSEC(zoneName, owner string, apply func(*dns.NSEC)) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC at %s in %s", owner, zoneName)
+	}
+
+	var pair []dns.RR
+	for _, rr := range records {
+		n, ok := rr.(*dns.NSEC)
+		if !ok {
+			continue
+		}
+		pair = append(pair, dns.Copy(n))
+		second, ok := dns.Copy(n).(*dns.NSEC)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC at %s did not produce an NSEC", owner)
+		}
+		apply(second)
+		pair = append(pair, second)
+		break
+	}
+	if len(pair) != 2 {
+		return fmt.Errorf("lab: could not build a second NSEC at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, pair); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC}])
+}
+
+// NSEC3OwnerFor returns the NSEC3 owner name that matches a name in this zone,
+// or "" if the zone publishes none there.
+func (z *Zone) NSEC3OwnerFor(name string) string {
+	h := dns.HashName(name, z.n3alg, z.n3iter, z.n3salt)
+	if h == "" {
+		return ""
+	}
+	owner := nsec3Owner(h, z.Name)
+	if len(z.sets[setKey{name: owner, rrtype: dns.TypeNSEC3}]) == 0 {
+		return ""
+	}
+	return owner
+}
+
+// AddSecondNSEC3 publishes a second NSEC3 at an owner that already has one and
+// signs the pair as one RRset. The NSEC3 counterpart of AddSecondNSEC, and the
+// case RFC 5155 §7.1 step 6 tells signers to avoid by taking the union.
+func (h *Hierarchy) AddSecondNSEC3(zoneName, owner string, apply func(*dns.NSEC3)) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC3)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC3 at %s in %s", owner, zoneName)
+	}
+
+	var pair []dns.RR
+	for _, rr := range records {
+		n, ok := rr.(*dns.NSEC3)
+		if !ok {
+			continue
+		}
+		pair = append(pair, dns.Copy(n))
+		second, ok := dns.Copy(n).(*dns.NSEC3)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC3 at %s did not produce an NSEC3", owner)
+		}
+		apply(second)
+		pair = append(pair, second)
+		break
+	}
+	if len(pair) != 2 {
+		return fmt.Errorf("lab: could not build a second NSEC3 at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, pair); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC3,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC3}])
+}

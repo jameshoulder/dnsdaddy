@@ -145,6 +145,11 @@ func (d *denialProof) covering(name string, rrtype uint16) *authenticNSEC {
 	}
 	for i := range d.nsec {
 		a := d.nsec[i]
+		if a.intervalUnusable {
+			// Several records at this owner disagreed about where their
+			// interval ends. See mergeNSECByOwner.
+			continue
+		}
 		if !validNameForProof(a.rr.Hdr.Name) || !validNameForProof(a.rr.NextDomain) {
 			continue
 		}

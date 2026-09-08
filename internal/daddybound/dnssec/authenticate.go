@@ -1,6 +1,10 @@
 package dnssec
 
-import "github.com/miekg/dns"
+import (
+	"sort"
+
+	"github.com/miekg/dns"
+)
 
 // authenticate decides whether an RRset is authenticated by any of a zone's
 // keys, recording a step for every signature it considers.
@@ -30,13 +34,23 @@ func (w *walk) authenticate(set RRset, sigs []*dns.RRSIG, zone string, keys []*d
 // authenticateSigned is authenticate, additionally reporting which RRSIG did
 // the authenticating.
 //
-// Callers need that for exactly one rule, and it is not optional. R-DEN-11
-// (RFC 4035 §5.3.4) decides whether an answer was wildcard-expanded by
-// comparing the owner name's label count against "the Labels field of the
-// covering RRSIG RR" — the one that verified, not any of the others that may
-// be sitting alongside it in the response. Picking the wrong one lets an
-// attacker attach a second RRSIG whose Labels field hides the expansion, and
-// the wildcard proof would then never be demanded.
+// Callers need that for exactly one rule. R-DEN-11 (RFC 4035 §5.3.4) decides
+// whether an answer was wildcard-expanded by comparing the owner name's label
+// count against "the Labels field of the covering RRSIG RR" — the one that
+// verified, not any of the others sitting alongside it in the response.
+//
+// An attacker cannot influence that by adding an RRSIG, because an added one
+// does not verify and a signature that does not verify is never returned here.
+// A *zone* can, though, by signing one RRset twice with different Labels — as
+// a wildcard expansion and as a name in its own right. Both signatures are
+// then genuine and both authenticate, so neither verdict would be false, but
+// which one is picked decides whether the wildcard proof is demanded, and
+// picking by arrival order hands that choice to whoever orders the records.
+//
+// Signatures are therefore tried in ascending Labels order. The first to
+// verify then has the smallest Labels of any that would have, which is both
+// deterministic and the conservative reading: fewer labels means more likely a
+// wildcard, which means more proof required rather than less.
 func (w *walk) authenticateSigned(set RRset, sigs []*dns.RRSIG, zone string, keys []*dns.DNSKEY) (*dns.RRSIG, Reason) {
 	base := ValidationStep{Kind: StepRRSIG, Zone: zone, Name: set.Name, RRType: set.RRType}
 
@@ -50,7 +64,26 @@ func (w *walk) authenticateSigned(set RRset, sigs []*dns.RRSIG, zone string, key
 	worst := ReasonMissingRRSIG
 	note := func(reason Reason) { worst = worseReason(worst, reason) }
 
-	for _, sig := range sigs {
+	// A copy, sorted: the caller's slice comes from a response and must not
+	// be reordered under them. Ties are broken on fields that are part of
+	// the signature so that the order is a function of the set rather than
+	// of how it arrived.
+	ordered := append([]*dns.RRSIG(nil), sigs...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		switch {
+		case a.Labels != b.Labels:
+			return a.Labels < b.Labels
+		case a.KeyTag != b.KeyTag:
+			return a.KeyTag < b.KeyTag
+		case a.Algorithm != b.Algorithm:
+			return a.Algorithm < b.Algorithm
+		default:
+			return a.Signature < b.Signature
+		}
+	})
+
+	for _, sig := range ordered {
 		if err := w.ctx.Err(); err != nil {
 			return nil, w.rec.fail(base, ReasonCancelled)
 		}

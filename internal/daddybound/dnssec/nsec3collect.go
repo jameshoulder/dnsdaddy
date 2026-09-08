@@ -117,6 +117,12 @@ func (w *walk) collectNSEC3(zone *zoneState, authority []dns.RR, budget int) (se
 		}, ReasonDenialIncomplete)
 	}
 
+	// Merged only after the parameter filter. Two records can share a hashed
+	// owner label while having been hashed with different salts, and
+	// combining those would produce a record describing a name that exists
+	// in neither chain.
+	kept = mergeNSEC3ByHash(kept)
+
 	salt, err := hexSalt(chosen.Salt)
 	if err != nil {
 		// A salt that is not hexadecimal cannot have been produced by any

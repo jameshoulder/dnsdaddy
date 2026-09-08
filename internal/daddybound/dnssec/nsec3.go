@@ -29,6 +29,12 @@ type authenticNSEC3 struct {
 	// zone is the rest of the owner name, which must be the zone this record
 	// claims to be part of.
 	zone string
+
+	// intervalUnusable marks a record merged from several sharing a hashed
+	// owner that disagreed about their next hashed owner name. The union of
+	// their bitmaps still says what exists; two different intervals say
+	// nothing that can be reasoned over.
+	intervalUnusable bool
 }
 
 // hashBudget bounds the hash computations one validation may perform.
@@ -109,6 +115,9 @@ func (s *nsec3Set) cover(name string) *authenticNSEC3 {
 		return nil
 	}
 	for i := range s.records {
+		if s.records[i].intervalUnusable {
+			continue
+		}
 		if hashInInterval(h, s.records[i].hash, nsec3NextHash(s.records[i].rr)) {
 			return &s.records[i]
 		}
@@ -451,4 +460,51 @@ func (s *nsec3Set) proveWildcardAnswer(qname string, expandedFrom int) Reason {
 		return ReasonDenialIncomplete
 	}
 	return ReasonNone
+}
+
+// mergeNSEC3ByHash collapses authenticated NSEC3 records sharing a hashed
+// owner name, for the reason mergeNSECByOwner gives and with the extra
+// instruction RFC 5155 §7.1 step 6 gives a signer directly:
+//
+//	Combine NSEC3 RRs with identical hashed owner names by replacing them
+//	with a single NSEC3 RR with the Type Bit Maps field consisting of the
+//	union of the types represented by the set of NSEC3 RRs.
+//
+// A validator reading such a zone has to reach the same view, or the order
+// the records arrive in decides what it believes exists.
+//
+// Opt-out is merged the other way round, by conjunction. The flag licenses a
+// conclusion — that a delegation may be treated as insecure — so a group is
+// opt-out only if every record in it says so.
+func mergeNSEC3ByHash(records []authenticNSEC3) []authenticNSEC3 {
+	if len(records) < 2 {
+		return records
+	}
+
+	index := make(map[string]int, len(records))
+	out := make([]authenticNSEC3, 0, len(records))
+
+	for _, a := range records {
+		at, seen := index[a.hash]
+		if !seen {
+			index[a.hash] = len(out)
+			out = append(out, a)
+			continue
+		}
+
+		merged, ok := dns.Copy(out[at].rr).(*dns.NSEC3)
+		if !ok {
+			out[at].intervalUnusable = true
+			continue
+		}
+		merged.TypeBitMap = unionTypes(out[at].rr.TypeBitMap, a.rr.TypeBitMap)
+		if !optOut(a.rr) {
+			merged.Flags &^= 0x01
+		}
+		out[at].rr = merged
+		if nsec3NextHash(out[at].rr) != nsec3NextHash(a.rr) {
+			out[at].intervalUnusable = true
+		}
+	}
+	return out
 }
