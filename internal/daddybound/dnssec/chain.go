@@ -229,6 +229,21 @@ type walk struct {
 	rec     *recorder
 	now     time.Time
 	lookups int
+
+	// hashes is the NSEC3 hash allowance for this whole validation.
+	//
+	// One per walk rather than one per response, and the difference is a
+	// factor of hundreds. A validation collects a denial proof for every
+	// candidate zone cut, again for the answer, again for a wildcard
+	// justification, and all of that again for each hop of a CNAME chain. A
+	// per-response budget therefore bounds nothing an attacker cares about:
+	// the reachable total was MaxAliasHops × MaxZones × MaxNSEC3Hashes, some
+	// twelve hundred times the number the limit's documentation claims.
+	//
+	// Found by a review bot reading the limit's doc comment against its
+	// construction — which is the check a person skips, because the comment
+	// says "one validation" and the code is three files away.
+	hashes *hashBudget
 }
 
 // Validate walks the chain of trust for one RRset and returns the verdict
@@ -240,7 +255,10 @@ type walk struct {
 func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) ValidationResult {
 	qname := dns.CanonicalName(name)
 	now := v.cfg.Clock.Now()
-	w := &walk{v: v, ctx: ctx, rec: newRecorder(qname, rrtype, now), now: now}
+	w := &walk{
+		v: v, ctx: ctx, rec: newRecorder(qname, rrtype, now), now: now,
+		hashes: &hashBudget{remaining: v.cfg.Limits.MaxNSEC3Hashes},
+	}
 	return w.chase(qname, rrtype)
 }
 
@@ -670,6 +688,26 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) alia
 		// is exactly the denial-of-existence question, and the response has
 		// to prove its own claim rather than be taken at its word.
 		return aliasOutcome{result: w.validateDenial(zone, qname, rrtype, resp)}
+	}
+
+	// A response cannot both carry the data and deny that the name exists.
+	//
+	// The rcode is one unsigned field of the header, which makes changing it
+	// the cheapest edit available to anyone on the path. The records here are
+	// genuine and their signature verifies, so the *data* is fine — but the
+	// message contradicts itself, and a consumer that honours the header
+	// would cache this name, and possibly its whole subtree, as absent while
+	// the validator endorsed the message.
+	//
+	// The engine already refused the converse: an NXDOMAIN whose own covering
+	// NSEC proves the name exists is ReasonDenialContradicted. This direction
+	// had no rule, which is the asymmetry that let it through.
+	if resp.Rcode == dns.RcodeNameError {
+		return aliasOutcome{result: w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype,
+				Note: "the response carries an RRset for a name it says does not exist"},
+			ReasonDenialContradicted,
+		))}
 	}
 
 	set, reason := NewRRset(data)

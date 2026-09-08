@@ -3,6 +3,9 @@ package dnssec
 import (
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -99,5 +102,86 @@ func TestNSEC3HashRefusesUnknownAlgorithms(t *testing.T) {
 		if _, ok := nsec3Hash("example.", alg, 0, nil); ok {
 			t.Errorf("hash algorithm %d was accepted; only SHA-1 (1) is assigned", alg)
 		}
+	}
+}
+
+// The NSEC3 hash allowance belongs to the validation, not to the response.
+//
+// A validation collects a denial proof for every candidate zone cut, again
+// for the answer, again for a wildcard justification, and all of that again
+// for each hop of a CNAME chain. A budget created per response therefore
+// bounded MaxAliasHops × MaxZones × MaxNSEC3Hashes — some twelve hundred
+// times the number Limits.MaxNSEC3Hashes documents, which at the iteration
+// ceiling is tens of millions of SHA-1 computations for one query.
+//
+// Reported by a review bot, which found it by reading the limit's doc comment
+// against its construction three files away. That is exactly the check a
+// person skips, because the comment says the right thing.
+//
+// Checked at the source rather than through a validation, and the reason is
+// worth stating because a behavioural test would be the more natural
+// instinct. Exhausting the budget while probing a candidate zone cut is
+// *absorbed* — proveNoDS reports no usable proof and the walk falls back to
+// its zone-cut assumption — so an end-to-end measurement mostly observes the
+// final proof and returns the same threshold whichever way the budget is
+// scoped. The first attempt at this test asserted on a helper written beside
+// it and passed with the fix reverted, which is the vacuity trap this suite
+// has now hit three times.
+//
+// What actually went wrong was one expression in one file, so that is what is
+// pinned: exactly one hashBudget is ever constructed, in the function that
+// begins a validation.
+func TestOnlyAValidationMayCreateAHashBudget(t *testing.T) {
+	dir := "."
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading the package: %v", err)
+	}
+
+	found := map[string]int{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- a test reading its own package
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		if n := strings.Count(string(body), "hashBudget{"); n > 0 {
+			found[name] = n
+		}
+	}
+
+	want := map[string]int{"chain.go": 1}
+	if len(found) != len(want) {
+		t.Fatalf("hashBudget is constructed in %v; it must be constructed once, in %v", found, want)
+	}
+	for file, n := range want {
+		if found[file] != n {
+			t.Fatalf("hashBudget is constructed %d times in %s, want %d — a budget made "+
+				"anywhere but at the start of a validation bounds a response rather than "+
+				"a validation", found[file], file, n)
+		}
+	}
+}
+
+// And the arithmetic the shared pointer exists for: two proofs draw from one
+// allowance.
+func TestASharedHashBudgetIsSpentOnce(t *testing.T) {
+	w := &walk{hashes: &hashBudget{remaining: 10}}
+
+	first := &nsec3Set{budget: w.hashes}
+	second := &nsec3Set{budget: w.hashes}
+
+	if !first.budget.spend(6) {
+		t.Fatal("spending 6 of 10 failed")
+	}
+	if second.budget.spend(6) {
+		t.Fatal("a second proof spent 6 more from a 10-hash allowance with 4 left")
+	}
+	if w.hashes.remaining != 0 {
+		t.Errorf("remaining = %d, want 0: an over-spend must consume the rest rather than "+
+			"leave an allowance a later caller can use", w.hashes.remaining)
 	}
 }

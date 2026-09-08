@@ -139,7 +139,8 @@ func (w *walk) collectNSEC3(zone *zoneState, authority []dns.RR, budget int) (se
 		alg:     chosen.Hash,
 		iter:    chosen.Iterations,
 		salt:    salt,
-		budget:  &hashBudget{remaining: w.v.cfg.Limits.MaxNSEC3Hashes},
+		// The walk's budget, not a fresh one. See walk.hashes.
+		budget: w.hashes,
 	}, refusedForBudget, truncated
 }
 

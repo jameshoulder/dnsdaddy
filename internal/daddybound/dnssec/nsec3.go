@@ -238,11 +238,50 @@ func (s *nsec3Set) closestEncloser(qname string) (encloserProof, Reason) {
 // This is NSEC3's form of the ancestor-delegation rule: NS without SOA is a
 // delegation point, and a delegation point's record belongs to the parent and
 // says nothing about what lies below the cut.
+//
+// §8.3 phrases it for the closest encloser because that is the case it is
+// describing, but the rule is about the *record*, not about the role it is
+// being asked to play. RFC 6840 §4.1 says so directly and generally:
+//
+//	Ancestor delegation NSEC or NSEC3 RRs MUST NOT be used to assume
+//	nonexistence of any RRs below that zone cut, which include all RRs at
+//	that (original) owner name other than DS RRs, and all RRs below that
+//	owner name regardless of type.
+//
+// So recordUsable is applied wherever a record is consulted, not only at the
+// encloser — see recordUsableFor, which adds the "other than DS RRs"
+// exception the sentence writes into the middle of its own prohibition.
 func enclosingRecordUsable(a *authenticNSEC3) Reason {
+	return recordUsableFor(a, dns.TypeNone)
+}
+
+// recordUsableFor is enclosingRecordUsable for a record consulted about a
+// specific type at its own owner name.
+//
+// The difference is the exception in RFC 6840 §4.1: "other than DS RRs". A DS
+// lives in the parent, so the parent's delegation record is precisely the one
+// entitled to speak about it — and, per RFC 4035 §5.2, the only one.
+//
+// This existed on the NSEC side, in mayDeny, and was applied at every use.
+// NSEC3 had it in one place. The asymmetry was a false Secure: strip the DS
+// response so the walk keeps its zone-cut assumption and stays in the parent,
+// then answer any type at the delegation name with NOERROR and the parent's
+// own genuine NSEC3. Its bitmap lists NS, DS, RRSIG and NSEC3 and not the
+// queried type, so a validator checking only the queried type and CNAME
+// reports Secure for an entire signed zone's data.
+//
+// Two implementations of one rule is one more than can be kept in agreement,
+// which is the general lesson; the specific one is that a review of NSEC3
+// against NSEC should have compared them rule by rule rather than section by
+// section.
+func recordUsableFor(a *authenticNSEC3, rrtype uint16) Reason {
 	if nsec3HasType(a.rr, dns.TypeDNAME) {
 		return ReasonDenialWrongZone
 	}
 	if nsec3HasType(a.rr, dns.TypeNS) && !nsec3HasType(a.rr, dns.TypeSOA) {
+		if rrtype == dns.TypeDS {
+			return ReasonNone
+		}
 		return ReasonDenialWrongZone
 	}
 	return ReasonNone
@@ -307,6 +346,13 @@ func (s *nsec3Set) proveNoData(qname string, rrtype uint16) Reason {
 	}
 
 	if m := s.match(qname); m != nil {
+		// The record must be entitled to speak about this name and type
+		// before its bitmap is read. A parent's delegation record matches
+		// the delegation name exactly and is genuinely signed; what it may
+		// deny there is the DS and nothing else.
+		if reason := recordUsableFor(m, rrtype); reason != ReasonNone {
+			return reason
+		}
 		if nsec3HasType(m.rr, rrtype) || nsec3HasType(m.rr, dns.TypeCNAME) {
 			return ReasonDenialContradicted
 		}
@@ -328,6 +374,9 @@ func (s *nsec3Set) proveNoData(qname string, rrtype uint16) Reason {
 			return ReasonResourceLimit
 		}
 		return ReasonDenialIncomplete
+	}
+	if reason := recordUsableFor(wildcard, rrtype); reason != ReasonNone {
+		return reason
 	}
 	if nsec3HasType(wildcard.rr, rrtype) || nsec3HasType(wildcard.rr, dns.TypeCNAME) {
 		return ReasonDenialContradicted
