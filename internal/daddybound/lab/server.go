@@ -221,20 +221,6 @@ func filterSignatures(records []dns.RR, wantDNSSEC bool) []dns.RR {
 	return out
 }
 
-// enclosingZone returns the deepest zone that contains name.
-func (h *Hierarchy) enclosingZone(name string) *Zone {
-	var best *Zone
-	for _, z := range h.Zones {
-		if !dns.IsSubDomain(z.Name, name) {
-			continue
-		}
-		if best == nil || dns.CountLabel(z.Name) > dns.CountLabel(best.Name) {
-			best = z
-		}
-	}
-	return best
-}
-
 // AnchorDS renders the hierarchy's trust anchor in the DS presentation form a
 // reference validator accepts in a trust-anchor file or configuration option.
 func (h *Hierarchy) AnchorDS() string {

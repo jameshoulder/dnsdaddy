@@ -124,6 +124,10 @@ func (z *Zone) typesAt(name string) []uint16 {
 //     an answer. Without the second, a validator has been shown that the
 //     exact name is missing while a wildcard quietly answers for it.
 func (h *Hierarchy) denialFor(zone *Zone, qname string, rcode int) []dns.RR {
+	if zone.useNSEC3 {
+		return h.nsec3DenialFor(zone, qname, rcode)
+	}
+
 	var out []dns.RR
 	add := func(rr []dns.RR) {
 		for _, r := range rr {

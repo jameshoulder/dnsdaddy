@@ -33,7 +33,7 @@ func (w *walk) noDSAtDelegation(zone *zoneState, child string, resp Response) (*
 	proof := w.collectDenial(zone, resp.Authority)
 	step := ValidationStep{Kind: StepDenial, Zone: zone.name, Name: child, RRType: dns.TypeDS}
 
-	switch proof.proveNoDS(child) {
+	switch w.dsDenialFrom(&proof, child) {
 	case dsDenialInsecure:
 		// NS present, DS absent, SOA absent: an authenticated insecure
 		// delegation. This is the one and only route to RFC 4033 §5's
@@ -109,10 +109,18 @@ func (w *walk) validateDenial(zone *zoneState, qname string, rrtype uint16, resp
 	switch resp.Rcode {
 	case dns.RcodeNameError:
 		step.Note = "NXDOMAIN: the name must be covered, and so must the wildcard that could have answered"
-		reason = proof.proveNameError(qname, rrtype)
+		if proof.hasNSEC3() {
+			reason = proof.nsec3.proveNameError(qname)
+		} else {
+			reason = proof.proveNameError(qname, rrtype)
+		}
 	case dns.RcodeSuccess:
-		step.Note = "NODATA: the NSEC matching this name must omit both the queried type and CNAME"
-		reason = proof.proveNoData(qname, rrtype)
+		step.Note = "NODATA: the matching denial record must omit both the queried type and CNAME"
+		if proof.hasNSEC3() {
+			reason = proof.nsec3.proveNoData(qname, rrtype)
+		} else {
+			reason = proof.proveNoData(qname, rrtype)
+		}
 	default:
 		// SERVFAIL, REFUSED and the rest are not claims about the zone's
 		// contents, so there is nothing here to authenticate and nothing to
@@ -155,9 +163,28 @@ func (w *walk) wildcardProof(zone *zoneState, qname string, rrtype uint16, sig *
 		Note: "wildcard-expanded answer: the name it expanded over must be shown not to exist",
 	}
 	proof := w.collectDenial(zone, resp.Authority)
-	if reason := proof.proveWildcardAnswer(qname, int(sig.Labels), rrtype); reason != ReasonNone {
+	reason := proof.proveWildcardAnswer(qname, int(sig.Labels), rrtype)
+	if proof.hasNSEC3() {
+		reason = proof.nsec3.proveWildcardAnswer(qname, int(sig.Labels))
+	}
+	if reason != ReasonNone {
 		return w.rec.verdict(w.rec.fail(step, reason)), true
 	}
 	w.rec.ok(step)
 	return ValidationResult{}, false
+}
+
+// dsDenialFrom reads a delegation proof through whichever denial mechanism
+// the zone publishes.
+//
+// A zone signs with NSEC or with NSEC3, never both, so this is a choice and
+// not a fallback: trying the other after one fails would let a response that
+// supplied a broken NSEC3 proof be rescued by an unrelated NSEC record, and
+// vice versa. NSEC3 is preferred when present because its records are the
+// ones the zone's signer produced.
+func (w *walk) dsDenialFrom(proof *denialProof, child string) dsDenial {
+	if proof.hasNSEC3() {
+		return proof.nsec3.proveNoDS(child)
+	}
+	return proof.proveNoDS(child)
 }

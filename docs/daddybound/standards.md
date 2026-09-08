@@ -550,6 +550,52 @@ disagreement is recorded rather than rediscovered. The annotation cannot hide
 anything that matters: the comparator classifies a false Secure before it looks
 at the annotation, and this divergence is in the other direction.
 
+## 5.7 A second denial divergence, and why the weaker verdict buys nothing
+
+Asked for the DS RRset at a delegation that opt-out left out of the NSEC3
+chain, the three validators split again — and differently from §5.6:
+
+| Validator | Verdict |
+| --- | --- |
+| **delv 9.18.39** | Secure (`; negative response, fully validated`) |
+| **Daddybound** | Secure |
+| **libunbound 1.19.2** | Neither secure nor bogus: reported as insecure |
+
+The instinct is that libunbound's is the safe answer, because an opt-out record
+asserts less than an ordinary one. RFC 5155 §6 is explicit about how much less:
+
+> An Opt-Out NSEC3 RR does not assert the existence or non-existence of the
+> insecure delegations that it may cover.
+
+But that sentence is about *insecure* delegations, and the question here is
+whether a *secure* one could be hiding in the span. It could not, and the
+reason is structural rather than a matter of trust. RFC 5155 §7.1 requires an
+NSEC3 RR for every owner name that owns authoritative RRsets; a secure
+delegation owns a DS, so its hash is itself an owner name in the chain. Every
+record's interval runs from one owner to the next and is therefore open at both
+ends — no record's span contains another record's owner hash. An attacker
+cannot sign a record that does, and omitting the real record does not help
+either: with the matching record gone, nothing covers the next closer name, so
+the closest provable encloser proof fails outright rather than succeeding on the
+wrong evidence.
+
+So opt-out cannot conceal a secure delegation, and RFC 5155 §8.6 — the section
+is titled "Validating No Data Responses, QTYPE is DS" — lists checks which,
+when they pass, validate the response. Daddybound reports Secure. The scenario
+is annotated as a known gap so the disagreement with libunbound is recorded
+rather than rediscovered.
+
+What opt-out genuinely costs is stated by RFC 5155 §12.2, and Daddybound does
+not pretend otherwise:
+
+> the primary difference in security when using Opt-Out is the loss of the
+> ability to prove the existence or nonexistence of an insecure delegation
+> within the span of an Opt-Out NSEC3 RR.
+
+That loss is real and inherent. It is why an opt-out record may establish that a
+delegation is insecure (`R-N3-07`, `R-N3-10`) and may never be read as proof
+that a name does not exist.
+
 ## 6. IANA registries
 
 Reproduced as read on 7 September 2026. Daddybound's tables are checked against

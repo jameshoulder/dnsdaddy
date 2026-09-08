@@ -42,13 +42,11 @@ func orderingCorpus() []string {
 
 	// Names of differing length sharing a suffix, which is where "a suffix
 	// sorts before what it is a suffix of" is decided.
-	for _, n := range []string{
+	names = append(names,
 		"a.example.", "aa.example.", "a.a.example.", "b.a.a.example.",
 		"*.example.", `\000.example.`, `\000\000.example.`,
 		"example.example.", "zz.example.",
-	} {
-		names = append(names, n)
-	}
+	)
 
 	// Presentation forms that must fold to the same wire name.
 	names = append(names, "A.EXAMPLE.", "a.example", "A.Example.")

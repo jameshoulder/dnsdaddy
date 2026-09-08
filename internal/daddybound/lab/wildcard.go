@@ -86,6 +86,9 @@ func (z *Zone) wildcardJustification(qname, source string) []dns.RR {
 	if closer == "" {
 		return nil
 	}
+	if z.useNSEC3 {
+		return z.nsec3Covering(closer)
+	}
 	return z.nsecCovering(closer)
 }
 

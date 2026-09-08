@@ -46,15 +46,21 @@ type denialProof struct {
 	// nsec holds every NSEC RR that verified.
 	nsec []authenticNSEC
 
-	// sawNSEC3 records that the response carried NSEC3 records.
+	// nsec3 holds the authenticated NSEC3 material, already reduced to one
+	// parameter set. Nil when the response carried none.
+	nsec3 *nsec3Set
+
+	// refusedNSEC3 records that a usable NSEC3 record was set aside because
+	// of this validator's iteration ceiling.
 	//
-	// It matters because the two absences are different. A response with no
-	// denial records at all has failed to supply a proof it owed, which is a
-	// fault in the response. A response that supplied an NSEC3 proof to a
-	// validator that has not implemented NSEC3 is a perfectly good response
-	// this build cannot read, which is a fault in Daddybound — and the two
-	// must not produce the same verdict.
-	sawNSEC3 bool
+	// Only that one reason. Records ignored under RFC 5155 §8.1 and §8.2 —
+	// unassigned hash algorithms, reserved flag bits — are ignored on the
+	// standard's instruction, by every validator, so a response left
+	// unproved by them has failed to prove its claim and is Bogus. The
+	// ceiling is Daddybound's own choice, so a response left unproved by
+	// that is Indeterminate. Conflating the two was a real bug here, and
+	// both reference validators caught it.
+	refusedNSEC3 bool
 
 	// unauthenticated counts denial records that were present and did not
 	// verify. Recorded for the trace: "no proof" and "a proof that failed to
@@ -62,8 +68,13 @@ type denialProof struct {
 	unauthenticated int
 }
 
-// empty reports whether the proof carries nothing to reason with.
+// empty reports whether the proof carries no NSEC records. NSEC3 is asked
+// about separately, because the two are alternative proofs of the same fact
+// and a zone publishes one or the other.
 func (d *denialProof) empty() bool { return len(d.nsec) == 0 }
+
+// hasNSEC3 reports whether usable NSEC3 material is present.
+func (d *denialProof) hasNSEC3() bool { return !d.nsec3.empty() }
 
 // collectDenial authenticates the NSEC and NSEC3 records in an authority
 // section against a zone whose apex DNSKEY RRset is already trusted.
@@ -118,12 +129,7 @@ func (w *walk) collectDenial(zone *zoneState, authority []dns.RR) denialProof {
 		})
 	}
 
-	for _, rr := range authority {
-		if rr.Header().Rrtype == dns.TypeNSEC3 {
-			proof.sawNSEC3 = true
-			break
-		}
-	}
+	proof.nsec3, proof.refusedNSEC3 = w.collectNSEC3(zone, authority)
 	return proof
 }
 
@@ -184,10 +190,10 @@ func groupByOwner(records []dns.RR, rrtype uint16) []ownerGroup {
 //
 // Getting this distinction wrong in either direction is a real bug. Reporting
 // a missing proof as a Daddybound limitation excuses a response that owed one;
-// reporting an NSEC3 proof this build cannot read as a fault in the response
+// reporting a proof this build declines to read as a fault in the response
 // accuses a correctly signed zone of forgery.
 func (d *denialProof) denialUnavailable() Reason {
-	if d.sawNSEC3 {
+	if d.refusedNSEC3 {
 		return ReasonDenialNotImplemented
 	}
 	return ReasonNoDenialProof

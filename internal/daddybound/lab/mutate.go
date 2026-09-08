@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/miekg/dns"
 
@@ -807,4 +809,139 @@ func (h *Hierarchy) override(qname string, rrtype uint16, apply func(*responseOv
 		h.overrides[k] = &responseOverride{}
 	}
 	apply(h.overrides[k])
+}
+
+// SetNSEC3Hash relabels the hash algorithm on a zone's NSEC3 records and
+// re-signs them, without changing the hashes themselves.
+//
+// The records stay perfectly valid signed statements by the zone; only the
+// field naming how they were computed changes. That is the point: RFC 5155
+// §8.1 requires a validator to ignore such records, and ignoring them has to
+// mean concluding nothing rather than falling back on the response code.
+func (h *Hierarchy) SetNSEC3Hash(zoneName string, alg uint8) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	owners := make([]string, 0, len(z.sets))
+	for k := range z.sets {
+		if k.rrtype == dns.TypeNSEC3 {
+			owners = append(owners, k.name)
+		}
+	}
+	if len(owners) == 0 {
+		return fmt.Errorf("lab: %s publishes no NSEC3 records", zoneName)
+	}
+	sort.Strings(owners)
+	for _, owner := range owners {
+		if err := h.mutateNSEC3(zoneName, owner, func(n *dns.NSEC3) { n.Hash = alg }); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mutateNSEC3 applies a change to an NSEC3 record and re-signs it with the
+// zone's own key.
+func (h *Hierarchy) mutateNSEC3(zoneName, owner string, apply func(*dns.NSEC3)) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC3)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC3 at %s in %s", owner, zoneName)
+	}
+
+	kept := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		n, ok := rr.(*dns.NSEC3)
+		if !ok {
+			continue
+		}
+		clone, ok := dns.Copy(n).(*dns.NSEC3)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC3 at %s did not produce an NSEC3", owner)
+		}
+		apply(clone)
+		kept = append(kept, clone)
+	}
+	if len(kept) == 0 {
+		return fmt.Errorf("lab: nothing to re-sign at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, kept); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC3,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC3}])
+}
+
+// ReownNSEC3 moves one NSEC3 record to a different zone suffix, keeping its
+// hashed-owner label, and re-signs it with the same zone's key.
+//
+// The result is a record the zone genuinely signed, whose hash label still
+// matches the name it always matched, sitting at an owner name that places it
+// in a different zone. RFC 5155 §7.1 says an NSEC3 owner is "the hash of the
+// original owner name, prepended as a single label to the zone name", so a
+// validator that compares only the label will accept a statement about a zone
+// the signer has no authority over.
+func (h *Hierarchy) ReownNSEC3(zoneName, owner, newSuffix string) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC3)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC3 at %s in %s", owner, zoneName)
+	}
+
+	label := strings.SplitN(dns.CanonicalName(owner), ".", 2)[0]
+	moved := label + "." + dns.CanonicalName(newSuffix)
+
+	kept := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		n, ok := rr.(*dns.NSEC3)
+		if !ok {
+			continue
+		}
+		clone, ok := dns.Copy(n).(*dns.NSEC3)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC3 at %s did not produce an NSEC3", owner)
+		}
+		clone.Hdr.Name = moved
+		kept = append(kept, clone)
+	}
+	if len(kept) == 0 {
+		return fmt.Errorf("lab: nothing to move at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, kept); err != nil {
+		return err
+	}
+	if err := h.Replace(zoneName, owner, dns.TypeNSEC3, nil); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, moved, dns.TypeNSEC3,
+		scratch.sets[setKey{name: moved, rrtype: dns.TypeNSEC3}])
+}
+
+// SetNSEC3Flags rewrites the Flags field of one NSEC3 record and re-signs it.
+//
+// The field carries the Opt-Out bit, which is the difference between "no
+// record here means nothing" and "no record here means this is an insecure
+// delegation". Clearing it on a record a proof depends on leaves the proof
+// resting on an omission, which RFC 5155 §8.6 and §8.9 both refuse.
+func (h *Hierarchy) SetNSEC3Flags(zoneName, owner string, flags uint8) error {
+	return h.mutateNSEC3(zoneName, owner, func(n *dns.NSEC3) { n.Flags = flags })
 }

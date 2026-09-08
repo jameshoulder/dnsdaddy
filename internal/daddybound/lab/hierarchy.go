@@ -41,10 +41,24 @@ type ZoneSpec struct {
 	// only honest route to RFC 4033's Insecure.
 	Insecure bool
 
-	// NoDenial suppresses this zone's NSEC chain. A signed zone that
-	// publishes no denial records cannot prove any absence, and a validator
-	// must say so rather than accept the server's word for it.
+	// NoDenial suppresses this zone's denial records entirely. A signed zone
+	// that publishes none cannot prove any absence, and a validator must say
+	// so rather than accept the server's word for it.
 	NoDenial bool
+
+	// NSEC3 signs this zone with NSEC3 rather than NSEC.
+	NSEC3 bool
+	// NSEC3Salt is the salt in hexadecimal, empty for none. RFC 9276 §3.1
+	// recommends an empty salt, so that is the default.
+	NSEC3Salt string
+	// NSEC3Iterations is the extra iteration count. RFC 9276 §3.1: "an
+	// iterations count of 0 MUST be used", so that is the default, and a
+	// non-zero value here is testing what a validator does with a zone that
+	// ignores the recommendation.
+	NSEC3Iterations uint16
+	// NSEC3OptOut excludes unsigned delegations from the chain and sets the
+	// Opt-Out flag on the records that span them.
+	NSEC3OptOut bool
 }
 
 // Spec describes a whole hierarchy.
@@ -97,6 +111,14 @@ type Zone struct {
 	// signed but publishes no denial records, which is a real and broken
 	// configuration worth being able to construct.
 	useNSEC bool
+
+	// useNSEC3 and its parameters replace the NSEC chain with an NSEC3 one.
+	// A zone publishes one mechanism or the other, never both.
+	useNSEC3 bool
+	n3alg    uint8
+	n3iter   uint16
+	n3salt   string
+	n3optOut bool
 
 	sets map[setKey][]dns.RR
 }
@@ -210,6 +232,9 @@ func Build(spec Spec) (*Hierarchy, error) {
 		if err := zone.buildNSECChain(spec); err != nil {
 			return nil, err
 		}
+		if err := zone.buildNSEC3Chain(spec); err != nil {
+			return nil, err
+		}
 	}
 
 	top := h.Zones[0]
@@ -271,7 +296,12 @@ func buildZone(spec Spec, i int) (*Zone, error) {
 		Name: name, Key: key, Signer: signer,
 		Algorithm: alg, DigestType: digest,
 		delegations: map[string]bool{},
-		useNSEC:     !zs.NoDenial,
+		useNSEC:     !zs.NoDenial && !zs.NSEC3,
+		useNSEC3:    !zs.NoDenial && zs.NSEC3,
+		n3alg:       dns.SHA1,
+		n3iter:      zs.NSEC3Iterations,
+		n3salt:      zs.NSEC3Salt,
+		n3optOut:    zs.NSEC3OptOut,
 		sets:        make(map[setKey][]dns.RR),
 	}
 
@@ -576,18 +606,6 @@ func (z *Zone) nameExists(name string) bool {
 			return true
 		}
 		if k.name != name && dns.IsSubDomain(name, k.name) {
-			return true
-		}
-	}
-	return false
-}
-
-// ownsRecords reports whether name owns records in its own right, as opposed
-// to existing only because something below it does.
-func (z *Zone) ownsRecords(name string) bool {
-	name = dns.CanonicalName(name)
-	for k := range z.sets {
-		if k.name == name {
 			return true
 		}
 	}

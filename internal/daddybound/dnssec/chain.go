@@ -65,12 +65,46 @@ type Limits struct {
 	MaxSignatures int
 	// MaxKeys bounds DNSKEYs considered in one zone's apex RRset.
 	MaxKeys int
+
+	// MaxNSEC3Iterations is the highest NSEC3 iteration count this
+	// validator will compute. A record above it is set aside with
+	// ReasonResourceLimit, which is Indeterminate — never Insecure.
+	//
+	// RFC 9276 §3.1 tells zones to publish 0, and §3.2 offers validators two
+	// permissions for anything larger: report insecure, or refuse. Taking
+	// the first would let an attacker downgrade a signed zone by publishing
+	// an expensive NSEC3, and RFC 9276 §3.2 says so itself — "treating a
+	// high iterations count as insecure leaves zones subject to attack" — so
+	// this validator takes the second.
+	MaxNSEC3Iterations int
+
+	// MaxNSEC3Hashes bounds the total hash computations one validation may
+	// perform.
+	//
+	// Separate from the iteration ceiling because the cost is the product of
+	// two attacker-chosen numbers. Bounding iterations alone leaves them free
+	// to send many records; bounding records alone leaves them free to make
+	// each one expensive.
+	MaxNSEC3Hashes int
 }
 
 // DefaultLimits are generous enough that no correctly operated zone meets
 // them and small enough that meeting one is cheap.
 func DefaultLimits() Limits {
-	return Limits{MaxZones: 24, MaxLookups: 64, MaxSignatures: 16, MaxKeys: 16}
+	return Limits{
+		MaxZones: 24, MaxLookups: 64, MaxSignatures: 16, MaxKeys: 16,
+		// 100 is not a round number chosen for looking sensible. RFC 9276
+		// Appendix A reports it as the measured point at which an upper
+		// limit "is interoperable without significant problems", and the
+		// same appendix notes that even this "still enables CPU-exhausting
+		// DoS attacks" — which is why the total-hash budget exists as well.
+		MaxNSEC3Iterations: 100,
+		// Enough for a deep name's full closest-encloser walk at the
+		// iteration ceiling, and nowhere near enough to be a lever: at 100
+		// iterations this is a few thousand SHA-1 computations, bounded per
+		// validation rather than per record.
+		MaxNSEC3Hashes: 4096,
+	}
 }
 
 // Config is everything a Validator needs besides its Source.
@@ -112,6 +146,18 @@ func New(src Source, cfg Config) *Validator {
 	}
 	if cfg.Limits.MaxZones == 0 {
 		cfg.Limits = DefaultLimits()
+	}
+	// The NSEC3 bounds were added after the others, so a caller with a
+	// hand-built Limits from before them would otherwise get zero — which
+	// would refuse every NSEC3 record in existence, including the iteration
+	// count of 0 that RFC 9276 tells zones to publish. A zero here means
+	// "not set", not "permit nothing"; the policy layer is where an explicit
+	// deny-all belongs, and it says so with its own flag.
+	if cfg.Limits.MaxNSEC3Iterations == 0 {
+		cfg.Limits.MaxNSEC3Iterations = DefaultLimits().MaxNSEC3Iterations
+	}
+	if cfg.Limits.MaxNSEC3Hashes == 0 {
+		cfg.Limits.MaxNSEC3Hashes = DefaultLimits().MaxNSEC3Hashes
 	}
 	return &Validator{src: src, cfg: cfg}
 }

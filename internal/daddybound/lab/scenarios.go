@@ -3,6 +3,7 @@ package lab
 import (
 	"fmt"
 	"net"
+	"sort"
 	"time"
 
 	"github.com/miekg/dns"
@@ -551,6 +552,246 @@ func Scenarios() []Scenario {
 				return h, nil
 			},
 		},
+		// NSEC3. The same questions as the NSEC block above, asked of a
+		// hierarchy that differs in exactly one respect, so a failure here
+		// and a pass there isolates the difference to the denial mechanism.
+		{
+			Name:   "nsec3-positive-answer",
+			Why:    "the positive case for the NSEC3 hierarchy. Without it, every NSEC3 scenario below could be passed by a validator that fails to read NSEC3 zones at all.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  nsec3(func(*Hierarchy) error { return nil }),
+		},
+		{
+			Name:   "nsec3-nxdomain",
+			Why:    "RFC 5155 section 8.4: a closest encloser proof for the name, plus a record covering the wildcard at that encloser. Because a hash discards a name's ancestry, the encloser cannot be read off one record the way it can from an NSEC's next name; it has to be walked.",
+			Query:  MissingName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  nsec3(func(*Hierarchy) error { return nil }),
+		},
+		{
+			Name:   "nsec3-nodata",
+			Why:    "RFC 5155 section 8.5: the record matching the name must have neither the queried type nor CNAME set.",
+			Query:  AnswerName,
+			QType:  dns.TypeTXT,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  nsec3(func(*Hierarchy) error { return nil }),
+		},
+		{
+			Name:   "nsec3-empty-non-terminal-nodata",
+			Why:    "RFC 5155 section 7.1 requires an NSEC3 record for every empty non-terminal, unlike NSEC which gives them none. Section 8.5 notes the ordinary NODATA test therefore covers them, with an empty type bitmap. A validator carrying NSEC's special case over to NSEC3 looks for a proof that is not there.",
+			Query:  EmptyNonTerminal,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  nsec3(func(*Hierarchy) error { return nil }),
+		},
+		{
+			Name:   "nsec3-wildcard-expanded-answer",
+			Why:    "RFC 5155 section 8.8: the wildcard answer offers a candidate closest encloser, and a record covering the next closer name is what turns the candidate into the real one, proving the queried name did not exist and that the right wildcard was used.",
+			Query:  WildcardMatch,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  nsec3(func(*Hierarchy) error { return nil }),
+		},
+		{
+			Name:   "nsec3-opt-out-insecure-delegation",
+			Why:    "RFC 5155 section 8.9's second branch, and the only place opt-out is allowed to establish anything. The delegation has no NSEC3 record of its own; what proves it insecure is a closest provable encloser proof whose covering record has the Opt-Out bit set. This is the shape almost every large TLD serves, so a validator that cannot read it cannot validate most of the Internet.",
+			Query:  UnsignedName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusInsecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  nsec3(func(*Hierarchy) error { return nil }),
+		},
+		{
+			Name:   "nsec3-nxdomain-without-the-wildcard-denial",
+			Why:    "RFC 5155 section 8.4 requires both halves. The closest encloser proof still verifies; the record covering the wildcard is gone, so a wildcard could have answered and the name error is not proved.",
+			Query:  MissingName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Build: func(spec Spec) (*Hierarchy, error) {
+				h, err := Build(NSEC3Spec().withShift(spec))
+				if err != nil {
+					return nil, err
+				}
+				leaf := h.Zone(LeafZone)
+				wc := leaf.nsec3Covering(wildcardUnder(LeafZone))
+				if len(wc) == 0 {
+					return nil, fmt.Errorf("lab: no NSEC3 covers the wildcard at %s", LeafZone)
+				}
+				return h, h.Replace(LeafZone, wc[0].Header().Name, dns.TypeNSEC3, nil)
+			},
+		},
+		{
+			Name:   "nsec3-iterations-above-the-ceiling",
+			Why:    "RFC 9276 section 3.2 offers a validator two responses to an expensive NSEC3: report insecure, or refuse. Reporting insecure would let an attacker downgrade a signed zone by publishing an expensive record, and the same section says so — treating a high iterations count as insecure leaves zones subject to attack. So refusing is the answer, and the reason must describe this validator's budget rather than accuse the zone.",
+			Query:  MissingName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusIndeterminate,
+			Reason: dnssec.ReasonDenialNotImplemented,
+			Build: func(spec Spec) (*Hierarchy, error) {
+				out := NSEC3Spec().withShift(spec)
+				for i := range out.Zones {
+					// Far above RFC 9276 Appendix A's measured
+					// interoperability figure, and far above anything a
+					// zone has any reason to publish.
+					out.Zones[i].NSEC3Iterations = 2500
+				}
+				return Build(out)
+			},
+		},
+		{
+			Name:   "nsec3-with-an-unassigned-hash-algorithm",
+			Why:    "RFC 5155 section 8.1: a validator MUST ignore NSEC3 RRs with unknown hash types, and the same section states the consequence — responses containing only such records will generally be considered bogus. Ignoring a record the standard says to ignore is not a limitation of the validator, so the response has simply failed to prove its claim. Both reference validators agree, and both caught Daddybound calling this Indeterminate.",
+			Query:  MissingName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonNoDenialProof,
+			Build: nsec3(func(h *Hierarchy) error {
+				return h.SetNSEC3Hash(LeafZone, 99)
+			}),
+		},
+		{
+			Name:   "nsec3-nodata-contradicted-by-its-own-record",
+			Why:    "RFC 5155 section 8.5: the record matching the name must not have the queried type set. Here it does, and the answer says the type is absent. The zone's own signed statement refutes the response it arrived with, which is what stripping an RRset in transit produces.",
+			Query:  AnswerName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonDenialContradicted,
+			Build: nsec3(func(h *Hierarchy) error {
+				if err := h.Replace(LeafZone, AnswerName, dns.TypeA, nil); err != nil {
+					return err
+				}
+				// Without the removal the name owns nothing, so the lab
+				// answers NXDOMAIN rather than NODATA and a different rule
+				// catches it. The response code is forced back so that this
+				// scenario tests the bitmap check and only that.
+				h.ForceRcode(AnswerName, dns.TypeA, dns.RcodeSuccess)
+				return nil
+			}),
+		},
+		{
+			Name:   "nsec3-record-owned-by-another-zone",
+			Why:    "RFC 5155 section 7.1: an NSEC3 owner name is the hash prepended as a single label to the zone name. A validator that matches on the label alone accepts a record placed under a different zone, and the label is the part an attacker can arrange to match. The record here is genuinely signed and its hash is genuinely the right one; only the zone it sits in is wrong.",
+			Query:  MissingName,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Build: nsec3(func(h *Hierarchy) error {
+				leaf := h.Zone(LeafZone)
+				cover := leaf.nsec3Covering(MissingName)
+				if len(cover) == 0 {
+					return fmt.Errorf("lab: no NSEC3 covers %s", MissingName)
+				}
+				return h.ReownNSEC3(LeafZone, cover[0].Header().Name, "sub."+LeafZone)
+			}),
+		},
+		{
+			Name:   "nsec3-encloser-proved-by-a-delegation-record",
+			Why:    "RFC 5155 section 8.3: after finding the closest encloser, a validator MUST check that record is from the proper zone — DNAME clear, and NS set only if SOA is set. A delegation record has NS without SOA, and it belongs to the parent, which has no authority over anything below the cut. The RFC states the consequence itself: otherwise an attacker is using them to falsely deny the existence of RRs for which the server is not authoritative.",
+			Query:  "missing.example.dnsdaddylab.",
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonDenialWrongZone,
+			Build: func(spec Spec) (*Hierarchy, error) {
+				h, err := Build(NSEC3Spec().withShift(spec))
+				if err != nil {
+					return nil, err
+				}
+				// Every NSEC3 the middle zone signed. Real records, in the
+				// zone that made them.
+				var planted []dns.RR
+				middle := h.Zone(MiddleZone)
+				for k, records := range middle.sets {
+					if k.rrtype == dns.TypeNSEC3 {
+						planted = append(planted, records...)
+					}
+				}
+				sortRecords(planted)
+
+				// Strip the DS and the referral's proof so the walk cannot
+				// cross the cut and stays in the parent zone, where these
+				// records verify.
+				if err := h.Replace(MiddleZone, LeafZone, dns.TypeDS, nil); err != nil {
+					return nil, err
+				}
+				h.SubstituteAuthority(LeafZone, dns.TypeDS, nil)
+				h.SubstituteAuthority("missing.example.dnsdaddylab.", dns.TypeA, planted)
+				return h, nil
+			},
+		},
+		{
+			Name:     "nsec3-opt-out-proves-no-ds",
+			Why:      "RFC 5155 section 8.6's second branch, asked directly. No NSEC3 matches the delegation name, and what establishes that no DS is published is a closest provable encloser proof whose covering record has the Opt-Out bit set. This is the positive case for the one question opt-out is allowed to answer.",
+			Query:    UnsignedZone,
+			QType:    dns.TypeDS,
+			At:       Now(),
+			Expect:   dnssec.StatusSecure,
+			Reason:   dnssec.ReasonVerified,
+			KnownGap: "delv 9.18.39 agrees (fully validated); libunbound 1.19.2 reports the answer insecure instead. RFC 5155 §8.6 is titled \"Validating No Data Responses, QTYPE is DS\" and states what a validator MUST verify; those checks pass, so the response validates. The proof is also sound rather than merely permitted: §7.1 requires an NSEC3 at every secure delegation, so that name's hash is itself an owner in the chain and no record's open interval contains it. An attacker cannot fabricate a signed record, and omitting the real one leaves nothing covering the next closer name, so the proof fails rather than succeeding wrongly. Opt-out therefore cannot hide a secure delegation, and there is nothing left for the weaker verdict to protect against.",
+			Build:    nsec3(func(*Hierarchy) error { return nil }),
+		},
+		{
+			Name:   "nsec3-no-ds-claimed-without-opt-out",
+			Why:    "the same proof with the Opt-Out bit cleared. RFC 5155 section 6: an Opt-Out record does not assert the existence or non-existence of the insecure delegations it may cover, and a record without the bit asserts that nothing at all lies in its span. So without the bit the absence of a record at the delegation name is not a statement about that name, and reading it as one would let a response prove an insecure delegation by omission — the cheapest downgrade there is.",
+			Query:  UnsignedZone,
+			QType:  dns.TypeDS,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonDenialIncomplete,
+			Build: nsec3(func(h *Hierarchy) error {
+				middle := h.Zone(MiddleZone)
+				cover := middle.nsec3Covering(UnsignedZone)
+				if len(cover) == 0 {
+					return fmt.Errorf("lab: no NSEC3 covers %s", UnsignedZone)
+				}
+				return h.SetNSEC3Flags(MiddleZone, cover[0].Header().Name, 0)
+			}),
+		},
+		{
+			Name:   "nsec3-wildcard-answer-without-the-next-closer-denial",
+			Why:    "RFC 5155 section 8.8. The wildcard answer and its signature verify, and the same signature is valid for every name under the encloser. RFC 5155 section 7.2.6 requires exactly one record alongside it — the one covering the next closer name — and here a different, equally genuine record from the same zone is sent instead. Without checking what the record covers, one captured wildcard answer becomes replayable over names that have their own records.",
+			Query:  WildcardMatch,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonDenialIncomplete,
+			Build: nsec3(func(h *Hierarchy) error {
+				// Substituting rather than deleting, on purpose. Deleting
+				// the record leaves the authority section empty, and the
+				// response is then refused for carrying no proof at all —
+				// which is a different rule, and would leave this one
+				// untested. Sending a real record that proves the wrong
+				// thing is also the more realistic attack.
+				leaf := h.Zone(LeafZone)
+				apex := leaf.nsec3Matching(LeafZone)
+				if len(apex) == 0 {
+					return fmt.Errorf("lab: %s has no NSEC3 at its apex", LeafZone)
+				}
+				if containsRR(leaf.nsec3Covering(WildcardMatch), apex[0]) {
+					return fmt.Errorf("lab: the apex NSEC3 happens to cover %s, so this scenario would prove nothing", WildcardMatch)
+				}
+				h.SubstituteAuthority(WildcardMatch, dns.TypeA, apex)
+				return nil
+			}),
+		},
 		{
 			Name:     "no-trust-anchor",
 			Why:      "RFC 4033 section 5 calls having no anchor the default operation mode. A validator that returns anything but Indeterminate here has invented trust.",
@@ -606,4 +847,45 @@ func withoutDenial(spec Spec, zone string) Spec {
 		}
 	}
 	return out
+}
+
+// nsec3 adapts a mutation into a Scenario Build function over the NSEC3
+// hierarchy, preserving the time shift the caller asked for.
+func nsec3(apply func(*Hierarchy) error) func(Spec) (*Hierarchy, error) {
+	return func(spec Spec) (*Hierarchy, error) {
+		h, err := Build(NSEC3Spec().withShift(spec))
+		if err != nil {
+			return nil, err
+		}
+		if err := apply(h); err != nil {
+			return nil, err
+		}
+		return h, nil
+	}
+}
+
+// withShift copies the validity window of another specification.
+//
+// Scenario.Shifted moves a specification's signature window so that a
+// reference validator with no clock override sees current fixtures. A
+// scenario that builds its own specification from scratch would throw that
+// away and produce signatures that expired months ago, and the resulting
+// failure would look like a validation bug rather than a harness one.
+func (s Spec) withShift(from Spec) Spec {
+	out := s
+	out.Inception = from.Inception
+	out.Expiration = from.Expiration
+	return out
+}
+
+// sortRecords puts records into a deterministic order, so a planted authority
+// section is the same on every run and a failing scenario can be diffed.
+func sortRecords(records []dns.RR) {
+	sort.SliceStable(records, func(i, j int) bool {
+		a, b := records[i].Header(), records[j].Header()
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		return a.Rrtype < b.Rrtype
+	})
 }

@@ -2,7 +2,6 @@ package dnssec
 
 import (
 	"bytes"
-	"strings"
 
 	"github.com/miekg/dns"
 )
@@ -243,11 +242,6 @@ func ancestorsOf(qname, zone string) []string {
 		}
 	}
 	return out
-}
-
-// isWildcardName reports whether name's leftmost label is the asterisk.
-func isWildcardName(name string) bool {
-	return strings.HasPrefix(dns.CanonicalName(name), "*.")
 }
 
 // CompareCanonicalNames orders two domain names as RFC 4034 §6.1 requires,

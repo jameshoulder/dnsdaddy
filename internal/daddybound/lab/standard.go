@@ -215,3 +215,36 @@ func a(name string, ip net.IP) dns.RR {
 		A:   ip,
 	}
 }
+
+// NSEC3Spec is the same hierarchy signed with NSEC3 instead of NSEC.
+//
+// The same names, the same records, the same keys: only the denial mechanism
+// changes. Keeping everything else identical is what makes the two suites
+// comparable — a scenario that passes under NSEC and fails under NSEC3 has
+// isolated the difference to the denial logic, which is the only thing this
+// milestone changed.
+//
+// Parameters follow RFC 9276 §3.1: iterations 0 and an empty salt. A separate
+// scenario raises the iteration count, because a validator's behaviour at a
+// value no zone should publish is exactly what an attacker will choose.
+//
+// The middle zone uses opt-out, so the insecure delegation beneath it has no
+// NSEC3 record of its own and must be proved insecure through the opt-out
+// branch of RFC 5155 §8.9. That is the shape almost every large TLD serves,
+// and the one place opt-out is allowed to establish anything.
+func NSEC3Spec() Spec {
+	spec := StandardSpec()
+	spec.Seed = "daddybound-nsec3-standard"
+	for i := range spec.Zones {
+		spec.Zones[i].NSEC3 = true
+		spec.Zones[i].NSEC3Iterations = 0
+		spec.Zones[i].NSEC3Salt = ""
+		if dns.CanonicalName(spec.Zones[i].Name) == MiddleZone {
+			spec.Zones[i].NSEC3OptOut = true
+		}
+	}
+	return spec
+}
+
+// NSEC3 builds the NSEC3-signed hierarchy.
+func NSEC3() (*Hierarchy, error) { return Build(NSEC3Spec()) }
