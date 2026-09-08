@@ -54,6 +54,17 @@ test-ui: ## Run the dashboard's JavaScript tests (needs node; no packages to ins
 test-daddybound: ## Compare Daddybound against libunbound and BIND delv (needs libunbound-dev, bind9-dnsutils, cgo)
 	CGO_ENABLED=1 go test -tags daddybound_unbound -v ./internal/daddybound/...
 
+.PHONY: corpus
+corpus: ## Compare Daddybound against libunbound and delv over real Internet names (needs network, several minutes)
+	@# Deliberately not part of `make test` and not in CI. It needs the
+	@# network, a public recursive resolver, both reference validators and
+	@# several minutes, and its result depends on the state of zones nobody
+	@# here controls — every one of which is a reason it must not gate a pull
+	@# request. A CI job that goes red because someone else let a signature
+	@# expire teaches contributors to re-run red builds.
+	DADDYBOUND_CORPUS=1 CGO_ENABLED=1 go test -tags daddybound_unbound \
+		./internal/daddybound/differential/ -run TestRealWorldCorpus -v -count=1 -timeout 60m
+
 .PHONY: fuzz-daddybound
 fuzz-daddybound: ## Fuzz the Daddybound input surface for 30s per target
 	@# Discovered rather than listed, for the reason the CI step gives: a

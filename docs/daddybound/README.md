@@ -54,11 +54,29 @@ with no identifier is either a bug or an invention.
 - Bounds the work an NSEC3 response can demand, by iteration count and by
   total hash computations, and refuses rather than downgrades when a response
   exceeds it.
+- Follows **CNAME chains**, validating each hop from the trust anchor down and
+  reporting the weakest link's verdict. A signed alias into an unsigned zone
+  is Insecure however well signed its destination is; neither the first hop's
+  classification nor the last is inherited.
+- Follows **DNAME redirections** (RFC 6672), authenticating the DNAME RRset and
+  recomputing the substitution from it. The server-synthesised CNAME is never
+  read: RFC 6672 §5.3.1 requires it to be unsigned, so its target is whatever
+  the sender wrote.
+- Validates **QTYPE=ANY** per RFC 6840 §4.2 — every RRset received at the
+  queried name must validate — and refuses to authenticate an empty ANY
+  answer, because no NSEC or NSEC3 type bitmap can deny a query type.
+- Bounds a chain by hops and by a visited set, so a loop or a long chain
+  produces Indeterminate with a resource reason rather than an accusation
+  against the zone.
 - Produces a deterministic, structured trace of every step, with typed
   reasons rather than English strings.
 - Runs a deterministic signed laboratory offline, and compares its verdicts
   against two independent reference validators — libunbound and BIND's
   `delv` — over the same served records.
+- Compares those verdicts against the **live Internet** in a separate,
+  opt-in run: several hundred real names, most of them sampled from a public
+  ranked list by rank arithmetic rather than chosen, each put to the same two
+  oracles. See [validation-lab.md](validation-lab.md).
 
 ## What Daddybound does not do
 
@@ -68,14 +86,14 @@ being complete:
 - **No aggressive use of NSEC or NSEC3** (RFC 8198). Denial proofs are checked
   when a response carries them; they are never used to answer a question that
   was not asked.
-- **No DNAME, no CNAME chasing, no ANY-query validation.** Each has its own
-  denial rules. Daddybound refuses to conclude where those records appear —
-  the safe half — rather than following them.
 - **One remaining zone-cut assumption.** Where a delegation supplies no proof
   either way, the walk assumes the name is not a zone cut. That can cost a
-  false Bogus and cannot produce a false Secure; see standards.md §5.5.
-- **No recursive resolution.** It validates records it is given. It does not
-  discover them by querying the Internet.
+  false Bogus and cannot produce a false Secure — argued in standards.md §5.5
+  and measured by a property test that strips every delegation proof and
+  checks no verdict strengthens.
+- **No recursive resolution.** It validates records something else supplies.
+  The live corpus points it at a recursive resolver with CD set; that is a
+  test harness reading records, not Daddybound discovering them.
 - **No trust anchor rollover** (RFC 5011). Anchors are configuration.
 - **No encrypted transports** as part of the engine.
 - **No enforcement.** There is no configuration that makes Daddybound decide a
@@ -92,8 +110,18 @@ dnsdaddy daddybound validate -scenario tampered-answer -trace
 ```
 
 These commands build a signed hierarchy in memory. They cannot be pointed at
-the Internet or at a running deployment, because Daddybound performs no recursive
-resolution — there is nothing to point at a real name with.
+a running deployment: no configuration wires Daddybound into the query path,
+and the isolation is checked as a property of the import graph rather than
+promised here.
+
+The live differential corpus is a separate, opt-in test rather than a
+subcommand, for the same reason it is not in CI — it needs the network, both
+reference validators, and several minutes, and its result depends on the state
+of other people's zones:
+
+```
+make corpus
+```
 
 ## The documents
 

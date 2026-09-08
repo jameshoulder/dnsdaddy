@@ -81,6 +81,37 @@ type and CNAME. The records must verify; receiving them proves nothing.
 **Assumed:** that the Source returned what an authoritative server would have
 sent. Daddybound does not resolve; it validates what it is handed.
 
+## 4a. A chain of answers
+
+A CNAME or DNAME answer is not one RRset but a sequence, and what Secure means
+for it has to be stated rather than inherited.
+
+**Proved for each hop:** everything in §4, from the trust anchor down — the
+target's own chain, not the previous hop's. A target may sit in another zone,
+under another anchor, or below a delegation the first name never crossed.
+
+**Proved for the chain:** that its verdict is the weakest of its hops, in the
+order Bogus, Indeterminate, Insecure, Secure. That the chain is bounded, by a
+hop count and by a visited set, and that reaching either bound is Indeterminate
+rather than an accusation.
+
+**Proved for a DNAME:** that the DNAME RRset itself authenticates, and that the
+redirection was recomputed from its owner and target. The synthesised CNAME is
+never read (RFC 6672 §5.3.1 requires it to be unsigned), so editing it, removing
+it or signing it changes nothing — asserted by a test that requires the verdict
+to be *identical* in each case rather than merely non-Secure.
+
+**Not proved, for QTYPE=\*:** that the answer is complete. RFC 1034 §6.2.2 lets
+a server return a subset of the records at a name and RFC 6840 §4.2 says a
+validator must not expect otherwise, so Secure for an ANY query means "every
+RRset that arrived is authentic" and says nothing about the ones that did not.
+An ANY answer that is *empty* under NOERROR is not provable at all — no type
+bitmap can deny type 255 — and is Indeterminate.
+
+**Assumed:** nothing further. In particular the chain's verdict is not the
+first hop's and not the last: a signed alias into an unsigned zone is Insecure
+however well signed its destination is.
+
 ## 5. What the four states mean here
 
 | State | Reached when |
@@ -124,11 +155,45 @@ pointed at the Internet.
 This is structural, not a setting. It stays that way until the false-Secure
 evidence is much stronger than one laboratory and two oracles can make it.
 
-## 8. What would change these lists
+## 8. Measured cost
+
+The bounds in §6 are worth a number as well as an argument. One validation, on
+four cores of a 2.8 GHz Xeon, walking the whole chain from the anchor with
+nothing cached:
+
+| Shape | Time | Allocated |
+| --- | --- | --- |
+| signed positive answer | 0.54 ms | 20 KB |
+| NSEC name error | 0.84 ms | 111 KB |
+| NSEC3 name error | 0.88 ms | 72 KB |
+| CNAME chain, three hops | 2.28 ms | 88 KB |
+| DNAME redirection | 1.21 ms | 44 KB |
+| NSEC3 at the iteration ceiling | 1.29 ms | 100 KB |
+| authority section padded past the budget | 3.20 ms | 199 KB |
+
+The last row is the worst an attacker can construct: admissible signatures, so
+every padded record reaches the verifier before failing, placed ahead of the
+genuine proof so the budget is spent burying it. Its pair — the same padding
+*after* a valid proof — still validates, so an answer cannot be denied by
+appending to it.
+
+These are not optimisation targets and they are pessimistic: a resolver caches
+the DNSKEY and DS records that dominate them. They exist to answer one
+question, which is whether a structure the sender chooses can make the work
+grow without bound. Reproduce with `go test ./internal/daddybound/dnssec/
+-run '^$' -bench . -benchmem`.
+
+## 9. What would change these lists
 
 - A recursive resolver of its own would move §4's "assumed" line: Daddybound
   would then know it saw what the authoritative servers sent.
-- CNAME, DNAME and ANY validation would each add a proof obligation that is
-  currently a refusal to conclude.
-- Real signed zones, signed by signers other than this repository's, would test
-  §3 and §4 against chains nobody here designed.
+- Aggressive use of NSEC and NSEC3 (RFC 8198) would let a proof answer a
+  question that was not asked, which is a new proof obligation rather than a
+  new capability.
+- RFC 5011 rollover would move §1's assumption from "these anchors" to "these
+  anchors and whatever they later attest".
+- More real signed zones. The live corpus put several hundred names signed by
+  people outside this repository through §3, §4 and §4a, and found a defect in
+  §4's denial reasoning that no laboratory scenario could have reached — a
+  name error whose closest encloser is the root. A larger corpus would test
+  more of the same kind.

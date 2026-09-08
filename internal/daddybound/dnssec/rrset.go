@@ -116,6 +116,49 @@ func dnskeysOf(records []dns.RR) []*dns.DNSKEY {
 	return keys
 }
 
+// recordsAt keeps the records owned by exactly one name.
+//
+// The same rule SplitSignaturesAt applies to an answer, applied to the
+// delegation walk. A response answers one question, and the records that
+// answer it are the ones at the queried name; everything else in the section
+// is context. The DNS puts context there routinely — a CNAME response carries
+// the alias *and* what it points at — so "records of the right type in the
+// answer section" and "the answer" are different sets at every step of the
+// walk, not only at the last one.
+//
+// The live corpus found the delegation half of that. Asked for the DS of
+// www.office365.com — a name that is a CNAME to its own zone apex — a public
+// resolver returned the apex's DS instead, signed by com. The walk, standing
+// in office365.com by then, authenticated a com.-signed RRset against the
+// wrong zone and reported Bogus for a correctly signed name. Both reference
+// validators returned Secure.
+//
+// That direction is the only one available here, which is worth stating
+// because it is not obvious. A DS for the wrong owner cannot promote
+// anything: RFC 4034 §5.1.4 computes the digest over the *DNSKEY's* owner
+// name, so a sibling's DS never matches the child's keys however well it is
+// signed. Filtering by owner is still the fix, because relying on the digest
+// to catch it is relying on a second check to cover a first one that is
+// simply wrong.
+func recordsAt(records []dns.RR, owner string) []dns.RR {
+	want := dns.CanonicalName(owner)
+	out := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		if dns.CanonicalName(rr.Header().Name) == want {
+			out = append(out, rr)
+		}
+	}
+	return out
+}
+
+// dsAt returns the DS records owned by name.
+func dsAt(records []dns.RR, owner string) []*dns.DS { return dsOf(recordsAt(records, owner)) }
+
+// dnskeysAt returns the DNSKEY records owned by name.
+func dnskeysAt(records []dns.RR, owner string) []*dns.DNSKEY {
+	return dnskeysOf(recordsAt(records, owner))
+}
+
 // dsOf returns the DS records from a set, ignoring anything else.
 func dsOf(records []dns.RR) []*dns.DS {
 	var out []*dns.DS

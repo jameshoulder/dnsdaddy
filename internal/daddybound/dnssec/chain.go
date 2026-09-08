@@ -370,7 +370,7 @@ func (w *walk) establishAnchorZone(zoneName string, anchors []TrustAnchor) (*zon
 	}
 	records := resp.Answer
 
-	keys := dnskeysOf(records)
+	keys := dnskeysAt(records, zoneName)
 	if len(keys) == 0 {
 		// No apex DNSKEY where an anchor says there should be one. The
 		// anchor is a standing claim that this zone is signed, so failing to
@@ -441,7 +441,7 @@ func (w *walk) authenticateDNSKEYRRset(zoneName string, records []dns.RR, all, t
 		)), false
 	}
 
-	_, sigs := SplitSignatures(records, dns.TypeDNSKEY)
+	_, sigs := SplitSignaturesAt(records, zoneName, dns.TypeDNSKEY)
 	if reason := w.authenticate(set, sigs, zoneName, trusted); reason != ReasonNone {
 		return nil, w.rec.verdict(reason), false
 	}
@@ -463,7 +463,7 @@ func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationRes
 	}
 	records := resp.Answer
 
-	dsRecords := dsOf(records)
+	dsRecords := dsAt(records, child)
 	if len(dsRecords) == 0 {
 		return w.noDSAtDelegation(zone, child, resp)
 	}
@@ -476,7 +476,7 @@ func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationRes
 			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: child, RRType: dns.TypeDS}, reason,
 		)), true
 	}
-	_, sigs := SplitSignatures(records, dns.TypeDS)
+	_, sigs := SplitSignaturesAt(records, child, dns.TypeDS)
 	if reason := w.authenticate(set, sigs, zone.name, zone.keys); reason != ReasonNone {
 		return nil, w.rec.verdict(reason), true
 	}
@@ -496,7 +496,7 @@ func (w *walk) crossDelegation(child string, dsRecords []*dns.DS) (*zoneState, V
 	}
 	records := resp.Answer
 
-	keys := dnskeysOf(records)
+	keys := dnskeysAt(records, child)
 	if len(keys) == 0 {
 		// A DS is the parent's signed statement that this zone is signed, so
 		// an absent DNSKEY here is a broken chain and not an unsigned zone.

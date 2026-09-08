@@ -395,6 +395,102 @@ Reading an expensive proof as "insecure" would let an attacker downgrade a
 signed zone by publishing an expensive NSEC3, which converts a denial-of-service
 lever into a security one.
 
+### 4.9 Aliases: CNAME (RFC 1034, RFC 2181 §10.1, RFC 4035 §5.3.4)
+
+A CNAME answer is not one RRset to check. It is a sequence: the alias at the
+queried name, then whatever the target resolves to, possibly through more
+aliases and possibly through zones of differing security status.
+
+RFC 1034 §4.3.2 step 3a is what produces the shape — a server that finds a
+CNAME puts it in the answer, restarts at the target, and appends what it finds
+if it is authoritative there. So a single message routinely holds records at
+several owner names, only one of which answers the question.
+
+| ID | Rule | Source |
+| --- | --- | --- |
+| `R-ALIAS-01` | The answer to (QNAME, QTYPE) is the RRset **at QNAME**. Records of the right type at another owner are not the answer. | RFC 1034 §4.3.2 |
+| `R-ALIAS-02` | Where QTYPE is absent at QNAME and a CNAME is present, the CNAME is the answer and the chain continues at its target. | RFC 1034 §3.6.2 |
+| `R-ALIAS-03` | More than one CNAME at a name is refused. "A CNAME record is not allowed to coexist with any other data", and a fortiori not with a second CNAME. | RFC 2181 §10.1 |
+| `R-ALIAS-04` | Each hop is resolved from the trust anchor down, not from the previous hop's zone. A target may be in another zone, under another anchor, or below a delegation the first name never crossed. | RFC 4035 §5.3.1 |
+| `R-ALIAS-05` | A wildcard-expanded CNAME owes the same denial proof as any other wildcard-expanded RRset. | RFC 4035 §5.3.4 |
+| `R-ALIAS-06` | The chain's verdict is the **weakest** hop: Bogus over Indeterminate over Insecure over Secure. Neither the first hop's classification nor the last is inherited. | RFC 4033 §5, RFC 6672 §5.3.3 |
+| `R-ALIAS-07` | Hops are bounded, and a name visited twice ends the chain. Reaching either bound is Indeterminate with a resource reason — a deeply aliased zone is unusual, not forged. | operational |
+
+`R-ALIAS-01` is the one that was a live defect. Filtering the answer section by
+*type* rather than by owner accepts any correctly signed RRset of the right
+type as the answer to a question it has nothing to do with, and every signature
+in the response verifies. No forgery is required.
+
+`R-ALIAS-06` is the definition of what Secure means for a chain, and it is
+narrower than "the answer validated". A signed alias into an unsigned zone is
+Insecure however well signed its destination is: whoever controls the unsigned
+part chooses the destination, and the signature there attests that the
+destination is genuine, never that this query should have been sent to it.
+
+### 4.10 Aliases: DNAME (RFC 6672)
+
+A DNAME at an ancestor of the queried name redirects everything beneath it.
+The server sends the DNAME together with a CNAME it synthesised, and RFC 6672
+§5.3.1 fixes what that CNAME is worth:
+
+> In any response, a signed DNAME RR indicates a non-terminal redirection of
+> the query. There might or might not be a server-synthesized CNAME in the
+> answer section; if there is, the CNAME will never be signed. For a DNSSEC
+> validator, verification of the DNAME RR and then that the CNAME was properly
+> synthesized is sufficient proof.
+
+| ID | Rule | Source |
+| --- | --- | --- |
+| `R-DNAME-01` | The DNAME RRset is authenticated and the redirection recomputed from its owner and target. The synthesised CNAME is not read at all. | RFC 6672 §5.3.1 |
+| `R-DNAME-02` | Only whole labels are replaced. A name ending in the owner's *characters* without ending in its *labels* is not redirected. | RFC 6672 §2.2 |
+| `R-DNAME-03` | The owner name is not redirected by its own DNAME; only proper subdomains are. | RFC 6672 §2.3 |
+| `R-DNAME-04` | Where several DNAMEs could apply, the deepest owner wins. | RFC 1034 §4.3.2 |
+| `R-DNAME-05` | Only one DNAME may exist at a name; two are refused rather than chosen between. | RFC 6672 §2.4 |
+| `R-DNAME-06` | A substitution producing a name longer than the DNS allows is refused. | RFC 6672 §2.2 |
+| `R-DNAME-07` | A chain of DNAME and CNAME redirections is as strong as its weakest link. | RFC 6672 §5.3.3 |
+| `R-DEN-07` | An NSEC or NSEC3 with the DNAME bit set may not deny a subdomain of its owner. | RFC 6672 §5.3.2, RFC 6840 §4.1 |
+
+`R-DNAME-01` is the whole difficulty. A validator that treats the synthesised
+CNAME as an ordinary alias finds an unsigned RRset and reports Bogus for every
+DNAME-using name in the DNS; one that *trusts* it because a signed DNAME sits
+nearby has accepted a target the sender chose, authenticated by a signature
+over a different record. Not reading it makes tampering with it a no-op rather
+than something to detect.
+
+`R-DNAME-02` is where a plausible implementation goes wrong quietly. RFC 6672
+§2.2 publishes a substitution table for exactly that reason, and it lists
+`ab.example.com.` under a DNAME owned by `b.example.com.` as "<no match>" — a
+string-suffix implementation redirects it.
+
+### 4.11 QTYPE=ANY (RFC 6840 §4.2)
+
+> When validating a response to QTYPE=*, all received RRsets that match QNAME
+> and QCLASS MUST be validated. If any of those RRsets fail validation, the
+> answer is considered Bogus. If there are no RRsets matching QNAME and
+> QCLASS, that fact MUST be validated according to the rules in Section 5.4 of
+> [RFC4035] ... To be clear, a validator must not expect to receive all
+> records at the QNAME in response to QTYPE=*.
+
+| ID | Rule | Source |
+| --- | --- | --- |
+| `R-ANY-01` | Every RRset at QNAME in the answer is validated. The verdict is the weakest of them. | RFC 6840 §4.2 |
+| `R-ANY-02` | An empty answer with NXDOMAIN is proved by the ordinary name-error rules: a name that does not exist has no records of any type. | RFC 4035 §5.4 |
+| `R-ANY-03` | An empty answer with NOERROR is **not provable**. A NODATA proof works by showing the queried type is absent from a type bitmap, and no bitmap contains type 255 because no record has it. Reported Indeterminate, never Secure and never Bogus. | RFC 6840 §4.2, RFC 4035 §5.4 |
+| `R-ANY-04` | Completeness is not checked. RFC 1034 §6.2.2 lets a server return a subset, so "these are all the records" is not a claim the response makes. | RFC 6840 §4.2 |
+
+`R-ANY-03` is the reason this section exists. Type 255 is a query type, not a
+record type, so a validator that runs an ANY query through the ordinary path
+finds an answer filter that matches nothing and a NODATA rule that every
+bitmap in existence satisfies. Composed, those produce **Secure, and there is
+no data here** for a name whose own NSEC — in the same response — lists its
+types. An attacker needs only to delete the answer section and forward the
+zone's genuine denial records untouched.
+
+`R-ANY-04` is why Secure means less for an ANY query than for any other, and
+the implementation is written so the narrower claim is the only one it can
+make: every RRset that arrived is authentic, and nothing is said about the
+ones that did not.
+
 ## 5. Algorithm support versus algorithm permission
 
 This distinction is not Daddybound's invention. It is written into the
@@ -763,15 +859,13 @@ being complete and blunt.
 - **No aggressive use of NSEC/NSEC3 (RFC 8198).** Denial proofs are validated
   when a response carries them; they are never used to synthesise an answer to
   a question that was not asked.
-- **No DNAME handling.** An NSEC or NSEC3 with the DNAME bit is refused as
-  proof about anything beneath it (`R-DEN-07`), which is the safe half of
-  RFC 6672. Following a DNAME to its target is not implemented.
-- **No CNAME chasing.** A NODATA proof checks the CNAME bit (`R-DEN-03`) and
-  refuses to conclude when it is set, but Daddybound does not follow the alias.
-- **No ANY-query handling (RFC 6840 §4.2).** QTYPE=* has its own validation
-  rules and none of them are implemented.
-- **No recursive resolution.** Daddybound validates responses it is given; it does
-  not discover them by walking the Internet.
+- **No recursive resolution.** Daddybound validates responses something else
+  supplies. The live differential corpus points it at a recursive resolver
+  with CD set; that is a harness reading records, not Daddybound discovering
+  them.
+- **No YXDOMAIN handling.** A DNAME substitution that would overflow the legal
+  name length is refused (`R-DNAME-06`) rather than reported as the RCODE
+  RFC 6672 §2.2 has a *server* return.
 - **No RFC 5011 trust anchor rollover.** Trust anchors are configuration.
 - **No encrypted transports** as part of the validation engine.
 - **No production enforcement.** Daddybound cannot be configured to decide a
