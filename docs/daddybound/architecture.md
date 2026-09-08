@@ -57,9 +57,11 @@ type Source interface {
 }
 ```
 
-Separates validation from retrieval. v0.1 validates a complete hierarchy held
-in memory; the same validation code will later read from a real resolver
-without changing. Nothing above this interface knows where records came from.
+Separates validation from retrieval, and the separation has been exercised in
+both directions: the laboratory holds a complete hierarchy in memory, and
+`internal/daddybound/netsource` reads from a recursive resolver over the
+network. The same validation code runs against both without changing, which is
+what the interface was for. Nothing above it knows where records came from.
 
 Its contract carries one subtlety that shapes the engine: returning no records
 and no error means "no records of this type as far as I know", which is *not*
