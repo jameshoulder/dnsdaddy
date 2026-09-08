@@ -1099,3 +1099,45 @@ func (h *Hierarchy) AddSecondCNAME(zoneName, owner, target string) error {
 	return h.Replace(zoneName, owner, dns.TypeCNAME,
 		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeCNAME}])
 }
+
+// CorruptDenialFor breaks the signature on every denial record the zone would
+// send to justify an absence at qname.
+//
+// Derived rather than listed, and that is the whole reason it exists. A
+// scenario that names the NSEC owners it wants to corrupt is a scenario tied
+// to the zone's current shape: adding one name to the zone moves which record
+// covers which interval, and the fixture then corrupts a record that is no
+// longer part of the proof while leaving the one that is. The scenario keeps
+// passing — the verdict is still Bogus — for a reason that no longer matches
+// what it says it tests, and nothing points that out. That happened here when
+// a DNAME was added to the standard hierarchy.
+//
+// Asking the zone which records it would actually send keeps the fixture and
+// its stated intent in step however the zone changes.
+func (h *Hierarchy) CorruptDenialFor(zoneName, qname string, rrtype uint16, rcode int) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+
+	// Owners rather than records: the proof is a set of RRsets, and it is
+	// the RRset's signature that has to break.
+	owners := map[setKey]bool{}
+	for _, rr := range h.denialFor(z, dns.CanonicalName(qname), rrtype, rcode) {
+		h := rr.Header()
+		switch h.Rrtype {
+		case dns.TypeNSEC, dns.TypeNSEC3:
+			owners[setKey{name: dns.CanonicalName(h.Name), rrtype: h.Rrtype}] = true
+		}
+	}
+	if len(owners) == 0 {
+		return fmt.Errorf("lab: %s sends no denial records for %s", zoneName, qname)
+	}
+
+	for k := range owners {
+		if err := h.CorruptSignature(zoneName, k.name, k.rrtype); err != nil {
+			return err
+		}
+	}
+	return nil
+}

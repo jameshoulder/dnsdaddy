@@ -595,7 +595,17 @@ func (h *Hierarchy) assemble(qname string, rrtype uint16, wantDNSSEC bool) dnsse
 		return out
 	}
 
-	if records := zone.sets[setKey{name: qname, rrtype: rrtype}]; len(records) > 0 {
+	// QTYPE=* is a query type and matches no set, so it is answered by
+	// gathering the sets rather than by looking one up. RFC 1034 §6.2.2 lets
+	// a server return a subset; this returns everything, which is the harder
+	// case for a validator — RFC 6840 §4.2 makes it check every RRset it
+	// receives, so more records mean more that must verify.
+	if rrtype == dns.TypeANY {
+		if answer := zone.everythingAt(qname, wantDNSSEC); len(answer) > 0 {
+			out.Answer = answer
+			return out
+		}
+	} else if records := zone.sets[setKey{name: qname, rrtype: rrtype}]; len(records) > 0 {
 		out.Answer = filterSignatures(records, wantDNSSEC)
 		return out
 	}
@@ -608,6 +618,22 @@ func (h *Hierarchy) assemble(qname string, rrtype uint16, wantDNSSEC bool) dnsse
 			out.Answer = filterSignatures(alias, wantDNSSEC)
 			return out
 		}
+	}
+
+	// A DNAME at an ancestor redirects everything beneath it (RFC 6672
+	// §2.2). The server answers with the signed DNAME and a CNAME it
+	// synthesises for the queried name — and RFC 6672 §5.3.1 requires that
+	// synthesised CNAME to be *unsigned*, which is exactly what makes this
+	// worth building rather than approximating. A lab that signed it would
+	// let a validator pass by treating it as an ordinary alias, and the real
+	// DNS would then reject that validator on the first DNAME it met.
+	if owner := zone.dnameCovering(qname); owner != "" {
+		out.Answer = append(out.Answer,
+			filterSignatures(zone.sets[setKey{name: owner, rrtype: dns.TypeDNAME}], wantDNSSEC)...)
+		if syn := zone.synthesiseCNAME(qname, owner); syn != nil {
+			out.Answer = append(out.Answer, syn)
+		}
+		return out
 	}
 
 	// Nothing at the name itself. Before deciding it is missing, the server
@@ -783,4 +809,73 @@ func appendUnseen(dst, src []dns.RR) []dns.RR {
 		}
 	}
 	return dst
+}
+
+// everythingAt returns every RRset the zone holds at one name, for a QTYPE=*
+// query.
+//
+// Ordered by type so that the message is a function of the zone rather than
+// of Go's map iteration. That is not cosmetic here: the differential suite
+// compares two validators on the same response, and a response that differs
+// between runs turns a disagreement into a coin toss.
+func (z *Zone) everythingAt(name string, wantDNSSEC bool) []dns.RR {
+	name = dns.CanonicalName(name)
+	types := make([]uint16, 0, 8)
+	for k := range z.sets {
+		if k.name == name && k.rrtype != dns.TypeRRSIG {
+			types = append(types, k.rrtype)
+		}
+	}
+	sort.Slice(types, func(i, j int) bool { return types[i] < types[j] })
+
+	var out []dns.RR
+	for _, rrtype := range types {
+		out = append(out, filterSignatures(z.sets[setKey{name: name, rrtype: rrtype}], wantDNSSEC)...)
+	}
+	return out
+}
+
+// dnameCovering returns the owner of the DNAME that redirects qname, or "".
+//
+// The deepest one wins, matching RFC 1034 §4.3.2's label-by-label descent,
+// and the owner itself is never redirected (RFC 6672 §2.3).
+func (z *Zone) dnameCovering(qname string) string {
+	qname = dns.CanonicalName(qname)
+	best, bestLabels := "", -1
+	for k := range z.sets {
+		if k.rrtype != dns.TypeDNAME || k.name == qname {
+			continue
+		}
+		if !dns.IsSubDomain(k.name, qname) {
+			continue
+		}
+		if n := dns.CountLabel(k.name); n > bestLabels {
+			best, bestLabels = k.name, n
+		}
+	}
+	return best
+}
+
+// synthesiseCNAME builds the unsigned CNAME a server puts in a DNAME
+// response, per RFC 6672 §3.1.
+//
+// Unsigned deliberately, and its TTL taken from the DNAME. A validator must
+// derive the redirection from the DNAME rather than from this record; the lab
+// sends it because a real server does, so that a validator which reads it
+// instead is caught here rather than in production.
+func (z *Zone) synthesiseCNAME(qname, owner string) dns.RR {
+	qname = dns.CanonicalName(qname)
+	records := z.sets[setKey{name: owner, rrtype: dns.TypeDNAME}]
+	for _, rr := range records {
+		d, ok := rr.(*dns.DNAME)
+		if !ok {
+			continue
+		}
+		prefix := qname[:len(qname)-len(owner)]
+		return &dns.CNAME{
+			Hdr:    dns.RR_Header{Name: qname, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: d.Hdr.Ttl},
+			Target: prefix + dns.CanonicalName(d.Target),
+		}
+	}
+	return nil
 }

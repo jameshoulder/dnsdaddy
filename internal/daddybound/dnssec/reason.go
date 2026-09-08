@@ -188,6 +188,22 @@ const (
 	// of a response an attacker ordered.
 	ReasonAliasAmbiguous Reason = "alias_ambiguous"
 
+	// ReasonDnameNoMatch: a DNAME was offered for a name its owner does not
+	// cover. Only whole labels are replaced (RFC 6672 §2.2), so a name that
+	// merely ends in the owner's characters is not redirected by it.
+	ReasonDnameNoMatch Reason = "dname_no_match"
+
+	// ReasonDnameTooLong: the DNAME substitution would produce a name longer
+	// than the DNS allows. RFC 6672 §2.2 has a server answer YXDOMAIN; there
+	// is nothing to authenticate about a name that cannot exist.
+	ReasonDnameTooLong Reason = "dname_too_long"
+
+	// ReasonAnyNotProvable: an empty answer to a QTYPE=* query. No NSEC or
+	// NSEC3 type bitmap can deny type 255, because no record has that type,
+	// so there is no proof to check rather than a proof that failed. A
+	// statement about what is provable, not about the zone.
+	ReasonAnyNotProvable Reason = "any_not_provable"
+
 	// ReasonAliasLoop: the alias chain returns to a name it already visited.
 	// The records may all be authentic — the zone published a loop — so this
 	// is a statement about the data's shape rather than its authenticity.
@@ -275,6 +291,9 @@ var explanations = map[Reason]string{
 
 	ReasonAliasAmbiguous: "more than one CNAME exists at this name, so there is no single target to follow",
 	ReasonAliasLoop:      "the alias chain returns to a name it has already visited",
+	ReasonAnyNotProvable: "an empty answer to a QTYPE=ANY query cannot be authenticated: no NSEC or NSEC3 type bitmap can deny type ANY",
+	ReasonDnameNoMatch:   "the DNAME offered does not cover the queried name",
+	ReasonDnameTooLong:   "the DNAME substitution would produce a name longer than the DNS allows",
 
 	ReasonNoDenialProof:      "the response carried no authenticated proof that the name or type does not exist",
 	ReasonDenialIncomplete:   "the denial records do not prove everything the response claims; commonly the wildcard denial is missing",
@@ -322,15 +341,20 @@ func (r Reason) Known() bool {
 // RFC 6840 makes the same point twice for the algorithm cases, in §5.3 for
 // signature algorithms and §5.2 for DS digests: where nothing usable is left,
 // "the zone is treated as if it were unsigned". A complete validator reports
-// Insecure there. v0.1 cannot, because Insecure needs a signed proof of
-// non-existence and v0.1 implements none, so it reports Indeterminate with
-// the specific reason — a weaker claim than the RFC's, and an honest one.
-// docs/daddybound/standards.md §5.3 records that gap.
+// Insecure there. This one reports Indeterminate instead, and the difference
+// is deliberate rather than a missing feature: Insecure is a claim that the
+// data was *proved* unsigned, and the proof this validator has is an
+// authenticated absence of DS at a delegation. Nothing proves a zone unsigned
+// merely because this build cannot read its algorithm — the zone is signed,
+// and saying otherwise would let a build option decide what a zone published.
+// Indeterminate with the specific reason is the weaker and honest claim.
+// docs/daddybound/standards.md §5.3 records it.
 func (r Reason) aboutValidator() bool {
 	switch r {
 	case ReasonUnsupportedAlgorithm, ReasonDisallowedAlgorithm,
 		ReasonUnsupportedDigest, ReasonDisallowedDigest,
 		ReasonDenialNotImplemented, ReasonResourceLimit,
+		ReasonAnyNotProvable,
 		ReasonCancelled, ReasonUnknown:
 		return true
 	default:

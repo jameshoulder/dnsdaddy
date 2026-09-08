@@ -539,14 +539,13 @@ func Scenarios() []Scenario {
 			Expect: dnssec.StatusBogus,
 			Reason: dnssec.ReasonNoDenialProof,
 			Build: mutated(func(h *Hierarchy) error {
-				// Both records an NXDOMAIN proof needs here: the one
-				// covering the name and the one covering the wildcard.
-				for _, owner := range []string{LeafZone, MailName} {
-					if err := h.CorruptSignature(LeafZone, owner, dns.TypeNSEC); err != nil {
-						return err
-					}
-				}
-				return nil
+				// Every record this NXDOMAIN proof is made of, asked of the
+				// zone rather than listed. Listing them tied the fixture to
+				// which NSEC happened to cover which interval, and adding
+				// one name to the hierarchy later left the covering record
+				// intact while corrupting one that was no longer part of the
+				// proof — still Bogus, no longer this scenario.
+				return h.CorruptDenialFor(LeafZone, MissingName, dns.TypeA, dns.RcodeNameError)
 			}),
 		},
 		{
@@ -922,6 +921,94 @@ func Scenarios() []Scenario {
 			Expect: dnssec.StatusSecure,
 			Reason: dnssec.ReasonVerified,
 			Build:  Build,
+		},
+		{
+			Name:   "dname-redirection",
+			Family: FamilyAlias,
+			Why:    "RFC 6672 §5.3.1: \"if there is [a synthesized CNAME], the CNAME will never be signed. For a DNSSEC validator, verification of the DNAME RR and then that the CNAME was properly synthesized is sufficient proof.\" A validator that reads the synthesised CNAME as an ordinary alias finds an unsigned RRset and reports Bogus for every DNAME-using name in the DNS; one that trusts it because a signed DNAME was nearby accepts a target the sender chose. The only correct reading is to authenticate the DNAME and recompute the redirection from it.",
+			Query:  DnameMatch,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "dname-with-a-broken-signature",
+			Family: FamilyChainFailure,
+			Why:    "the DNAME is the only authenticated thing in a DNAME response, so it carries the whole redirection. If its signature does not verify there is nothing left: the synthesised CNAME is unsigned by design and cannot stand in for it. A validator that fell back to the CNAME here would follow a redirection nobody signed.",
+			Query:  DnameMatch,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonSignatureCryptoFailed,
+			Build: mutated(func(h *Hierarchy) error {
+				return h.CorruptSignature(LeafZone, DnameOwner, dns.TypeDNAME)
+			}),
+		},
+		{
+			Name:   "dname-with-a-rewritten-target",
+			Family: FamilyChainFailure,
+			Why:    "the redirection itself is the thing an attacker wants. Rewriting a DNAME target moves an entire subtree, not one name, so it is the highest-leverage single-record edit in the DNS. The signature is left untouched: it still verifies against the key, over the record the signer actually signed, which is why the data must be canonicalised and checked rather than assumed to match.",
+			Query:  DnameMatch,
+			QType:  dns.TypeA,
+			At:     Now(),
+			Expect: dnssec.StatusBogus,
+			Reason: dnssec.ReasonSignatureCryptoFailed,
+			Build: mutated(func(h *Hierarchy) error {
+				return h.TamperData(LeafZone, DnameOwner, dns.TypeDNAME, func(rr dns.RR) {
+					rr.(*dns.DNAME).Target = OtherZone
+				})
+			}),
+		},
+		{
+			Name:   "dname-owner-queried-directly",
+			Family: FamilyPositive,
+			Why:    "RFC 6672 §2.3: \"the owner name of a DNAME is not redirected itself.\" A validator that applied the substitution at the owner would redirect the query to a name derived from itself — the empty prefix case — and either loop or answer the wrong question. The owner is answered from the owner.",
+			Query:  DnameOwner,
+			QType:  dns.TypeDNAME,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "any-query-for-a-name-that-exists",
+			Family: FamilyPositive,
+			Why:    "RFC 6840 §4.2 makes a QTYPE=* response validate every RRset it carries at the queried name. Type 255 is a query type: no record has it and no NSEC or NSEC3 bitmap lists it, so the ordinary answer filter matches nothing and the ordinary NODATA rule — omit the queried type from the bitmap — is satisfied by every bitmap there has ever been. A validator that runs an ANY query through the normal path therefore reports Secure for an absence the zone never asserted, having ignored the records it was sent. This scenario is the positive half: the records arrive and must be authenticated.",
+			Query:  AnswerName,
+			QType:  dns.TypeANY,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:   "any-query-for-a-name-that-does-not-exist",
+			Family: FamilyNSEC,
+			Why:    "the negative half. An NXDOMAIN proof does answer QTYPE=*, because a name that does not exist has no records of any type — unlike a NODATA proof, which works by naming the absent type and so can say nothing about type 255. Refusing every ANY query would close the false Secure this pair exists for; this scenario is what stops that being the fix.",
+			Query:  MissingName,
+			QType:  dns.TypeANY,
+			At:     Now(),
+			Expect: dnssec.StatusSecure,
+			Reason: dnssec.ReasonVerified,
+			Build:  Build,
+		},
+		{
+			Name:     "any-answer-with-a-tampered-rrset",
+			Family:   FamilyChainFailure,
+			Why:      "RFC 6840 §4.2: \"If any of those RRsets fail validation, the answer is considered Bogus.\" A validator that ignores the answer section of an ANY response reaches the same verdict whether the records are genuine or rewritten, which is what not validating them means.",
+			KnownGap: "delv disagrees, and the RFC decides it. Given a QTYPE=* answer holding a good NSEC RRset and a rewritten A RRset, delv 9.18.39 prints \";; RRSIG failed to verify resolving \u0027www.example.dnsdaddylab/ANY/IN\u0027\", drops the A RRset from its output, and then reports \"; fully validated\" over what is left — a partial answer marked authentic. RFC 6840 §4.2 is explicit that this is not the rule: \"all received RRsets that match QNAME and QCLASS MUST be validated. If any of those RRsets fail validation, the answer is considered Bogus.\" libunbound 1.19.2 reads it the same way Daddybound does and returns bogus, so this is one implementation against the standard and a second implementation, not Daddybound against the field. Nothing here is excused in the dangerous direction: delv reports Secure and Daddybound reports Bogus, and Classify checks for a false Secure before it ever reaches this annotation.",
+			Query:    AnswerName,
+			QType:    dns.TypeANY,
+			At:       Now(),
+			Expect:   dnssec.StatusBogus,
+			Reason:   dnssec.ReasonSignatureCryptoFailed,
+			Build: mutated(func(h *Hierarchy) error {
+				return h.TamperData(LeafZone, AnswerName, dns.TypeA, func(rr dns.RR) {
+					rr.(*dns.A).A = net.IPv4(198, 51, 100, 77)
+				})
+			}),
 		},
 		{
 			Name:   "cname-from-an-insecure-zone-into-a-signed-one",

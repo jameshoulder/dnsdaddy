@@ -80,6 +80,13 @@ const (
 	// by expanding it, so the alias itself owes a denial proof.
 	WildcardAliasOwner = "*.aka.example.dnsdaddylab."
 	WildcardAliasMatch = "anything.aka.example.dnsdaddylab."
+
+	// DnameOwner redirects everything beneath it to the leaf apex, so
+	// DnameMatch is answered by substitution and resolves to AnswerName.
+	// Nothing exists at DnameOwner's subdomains, which is what RFC 6672 §2.4
+	// requires of a zone containing a DNAME.
+	DnameOwner = "moved.example.dnsdaddylab."
+	DnameMatch = "www.moved.example.dnsdaddylab."
 )
 
 // AnswerAddress is the address the leaf zone publishes for AnswerName. It is
@@ -176,6 +183,11 @@ func StandardSpec() Spec {
 					cname(AliasLoopA, AliasLoopB),
 					cname(AliasLoopB, AliasLoopA),
 					cname(WildcardAliasOwner, AnswerName),
+
+					// A DNAME, which redirects a whole subtree rather than
+					// one name and whose synthesised CNAME is unsigned by
+					// design (RFC 6672 §5.3.1).
+					dname(DnameOwner, LeafZone),
 				},
 			},
 			{
@@ -267,6 +279,13 @@ func mx(name string, pref uint16, target string) dns.RR {
 		Hdr:        dns.RR_Header{Name: name, Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 3600},
 		Preference: pref,
 		Mx:         target,
+	}
+}
+
+func dname(name, target string) dns.RR {
+	return &dns.DNAME{
+		Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeDNAME, Class: dns.ClassINET, Ttl: 3600},
+		Target: target,
 	}
 }
 

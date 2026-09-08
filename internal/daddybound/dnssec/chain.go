@@ -87,6 +87,12 @@ type Limits struct {
 	// deeply aliased zone is unusual, not forged.
 	MaxAliasHops int
 
+	// MaxAnyRRsets bounds how many distinct types one QTYPE=* answer may
+	// carry. RFC 6840 §4.2 requires every one of them to be validated, so
+	// the number of public-key operations an ANY query costs is chosen by
+	// whoever sends the response.
+	MaxAnyRRsets int
+
 	// MaxDenialRecords bounds how many denial RRsets one response may have
 	// authenticated.
 	//
@@ -123,6 +129,9 @@ func DefaultLimits() Limits {
 		// DoS attacks" — which is why the total-hash budget exists as well.
 		MaxNSEC3Iterations: 100,
 		MaxAliasHops:       12,
+		// More distinct types at one name than any real name carries, and
+		// far fewer than the 65535 an answer section could name.
+		MaxAnyRRsets: 32,
 		// Eight times what the largest correct proof in this suite needs,
 		// and small enough that reaching it is free.
 		MaxDenialRecords: 32,
@@ -191,6 +200,9 @@ func New(src Source, cfg Config) *Validator {
 	}
 	if cfg.Limits.MaxAliasHops == 0 {
 		cfg.Limits.MaxAliasHops = DefaultLimits().MaxAliasHops
+	}
+	if cfg.Limits.MaxAnyRRsets == 0 {
+		cfg.Limits.MaxAnyRRsets = DefaultLimits().MaxAnyRRsets
 	}
 	return &Validator{src: src, cfg: cfg}
 }
@@ -603,6 +615,15 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) alia
 		))}
 	}
 
+	// QTYPE=* has its own rule and cannot share this one. See any.go: type
+	// 255 matches no record and appears in no type bitmap, so both the
+	// answer filter below and the NODATA proof it falls through to are
+	// vacuous for it — together, a Secure verdict on an absence nobody
+	// proved.
+	if rrtype == dns.TypeANY {
+		return w.validateAny(zone, qname, resp)
+	}
+
 	// Restricted to the queried owner name. See SplitSignaturesAt: an answer
 	// section legitimately carries records for other names, and taking them
 	// as the answer is a false Secure that needs no forgery at all.
@@ -616,6 +637,17 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) alia
 		// records — which the branch above already did — is what every
 		// resolver does with such a zone. Only where the type is genuinely
 		// absent does the alias become the answer.
+		//
+		// DNAME is tried before CNAME and that order is the point. A DNAME
+		// response carries a server-synthesised CNAME at the queried name
+		// which RFC 6672 §5.3.1 says "will never be signed", so reaching
+		// the alias path first finds an unsigned RRset and reports Bogus
+		// for every DNAME-using name there is. See dname.go: the DNAME is
+		// authenticated and the redirection recomputed from it, and the
+		// synthesised CNAME is never read.
+		if out, isDname := w.validateDname(zone, qname, resp); isDname {
+			return out
+		}
 		if rrtype != dns.TypeCNAME {
 			if alias, _ := SplitSignaturesAt(resp.Answer, qname, dns.TypeCNAME); len(alias) > 0 {
 				return w.validateAlias(zone, qname, rrtype, resp)
