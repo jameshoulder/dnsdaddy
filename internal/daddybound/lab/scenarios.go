@@ -35,6 +35,12 @@ type Scenario struct {
 	// only where more than one is legitimately correct.
 	Reason dnssec.Reason
 
+	// Family groups scenarios by the part of the engine they exercise, so
+	// that a coverage claim can be checked rather than assumed. A suite can
+	// grow to fifty entries and still have a blind spot; counting by family
+	// is what makes the spot visible.
+	Family Family
+
 	// KnownGap explains a disagreement with a reference validator that this
 	// milestone predicts and can justify.
 	//
@@ -69,6 +75,31 @@ type Scenario struct {
 	Build func(Spec) (*Hierarchy, error)
 }
 
+// Family names the part of the engine a scenario exercises.
+type Family string
+
+const (
+	// FamilyPositive: correctly signed data that must validate. Without
+	// these, every negative scenario could be passed by a validator that
+	// never returns Secure.
+	FamilyPositive Family = "positive"
+
+	// FamilyChainFailure: the chain of trust is broken or the data is
+	// forged. Signatures, keys, delegation records and algorithm policy.
+	FamilyChainFailure Family = "chain-failure"
+
+	// FamilyNSEC: authenticated denial of existence using NSEC.
+	FamilyNSEC Family = "nsec"
+
+	// FamilyNSEC3: the same questions asked of an NSEC3-signed hierarchy.
+	FamilyNSEC3 Family = "nsec3"
+
+	// FamilyConfiguration: a property of Daddybound's own configuration
+	// rather than of any data — what it does with no trust anchor, for
+	// instance. These are the scenarios with nothing to ask an oracle.
+	FamilyConfiguration Family = "configuration"
+)
+
 // Shifted returns the same scenario moved by d: every signature window and
 // the instant it is validated at.
 //
@@ -94,6 +125,7 @@ func Scenarios() []Scenario {
 	return []Scenario{
 		{
 			Name:   "valid",
+			Family: FamilyPositive,
 			Why:    "the positive case. Without it, every other scenario could be passed by a validator that never returns Secure.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -104,6 +136,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "multi-record-rrset",
+			Family: FamilyPositive,
 			Why:    "RFC 4034 section 6.3 orders an RRset by RDATA, not by record length. The signer sorted one way; a validator sorting packed records sorts the other and declares this correctly signed RRset bogus. The MX preferences are chosen so the two orders genuinely differ.",
 			Query:  MailName,
 			QType:  dns.TypeMX,
@@ -114,6 +147,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "tampered-answer",
+			Family: FamilyChainFailure,
 			Why:    "an on-path attacker rewriting an address. This is the attack DNSSEC exists to stop, so a false Secure here is the worst possible outcome.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -128,6 +162,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "corrupt-signature",
+			Family: FamilyChainFailure,
 			Why:    "one flipped bit in an otherwise admissible signature. Reaching the arithmetic is the point: a validator that rejected it on a length or format check would pass this while being unable to verify anything.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -140,6 +175,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "expired-signature",
+			Family: FamilyChainFailure,
 			Why:    "R-SIG-05. An expired signature is a replay of data that was once genuine, which is why expiry is enforced rather than advisory.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -154,6 +190,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "not-yet-valid-signature",
+			Family: FamilyChainFailure,
 			Why:    "R-SIG-06, the boundary in the other direction. Easy to omit, because a validator that only checks expiry looks correct against every well-run zone.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -166,6 +203,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "missing-signature",
+			Family: FamilyChainFailure,
 			Why:    "signed data arriving with its signature stripped. Distinct from a signature that fails, and a validator must not treat an absent signature as an absent objection.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -178,6 +216,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "malformed-signature",
+			Family: FamilyChainFailure,
 			Why:    "the parsing path rather than the cryptographic one. Hostile input reaches this code before any check does.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -189,7 +228,8 @@ func Scenarios() []Scenario {
 			}),
 		},
 		{
-			Name: "stripped-signature-unsupported-algorithm",
+			Name:   "stripped-signature-unsupported-algorithm",
+			Family: FamilyChainFailure,
 			Why: "the downgrade attack. The zone is authenticated through a supported algorithm, so it is known to be signed with one; " +
 				"an attacker strips the valid signature and leaves one naming an algorithm this build cannot verify. " +
 				"Reporting the validator's own inability here would turn forged data into an allow-prone Indeterminate. " +
@@ -205,7 +245,8 @@ func Scenarios() []Scenario {
 			}),
 		},
 		{
-			Name: "stripped-signature-disallowed-algorithm",
+			Name:   "stripped-signature-disallowed-algorithm",
+			Family: FamilyChainFailure,
 			Why: "the same attack using an algorithm this build CAN verify but policy refuses. " +
 				"The two must not be distinguishable to an attacker: neither the validator's capability nor the operator's policy " +
 				"may be used to soften the absence of a valid signature from an algorithm the zone actually signs with.",
@@ -219,6 +260,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "ds-digest-mismatch",
+			Family: FamilyChainFailure,
 			Why:    "the parent's delegation names this exact key and disagrees about its contents, which is the shape of a substituted zone key.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -231,6 +273,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "missing-dnskey",
+			Family: FamilyChainFailure,
 			Why:    "a secure delegation to a zone with no keys. The DS is the parent's signed promise that the zone is signed, so this is a broken chain and not an unsigned zone.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -243,6 +286,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "rogue-key-appended",
+			Family: FamilyChainFailure,
 			Why:    "a key added to an authenticated apex DNSKEY RRset without re-signing it, then used to sign the answer. A validator that trusts every key in a set because one matched a DS returns Secure here. That is the P0 failure class.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -254,6 +298,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:     "foreign-zone-signature",
+			Family:   FamilyChainFailure,
 			Why:      "R-SIG-02. The signature is cryptographically perfect and made by the wrong authority: an ancestor zone signing a delegated child's data.",
 			Query:    AnswerName,
 			QType:    dns.TypeA,
@@ -266,6 +311,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:     "unsupported-algorithm",
+			Family:   FamilyChainFailure,
 			Why:      "a zone signed with an algorithm this build cannot verify. RFC 6840 section 5.3 says such a zone is treated as unsigned, so this must not be Bogus: the data may be perfect and the validator simply cannot check it.",
 			Query:    AnswerName,
 			QType:    dns.TypeA,
@@ -281,26 +327,28 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:     "disallowed-algorithm",
+			Family:   FamilyChainFailure,
 			Why:      "RFC 9905. This build can verify RSASHA1 and the default policy refuses to rely on it, which is both obligations at once. Reporting it as Bogus would blame the zone for the operator's policy.",
 			Query:    AnswerName,
 			QType:    dns.TypeA,
 			At:       Now(),
 			Expect:   dnssec.StatusIndeterminate,
 			Reason:   dnssec.ReasonDisallowedAlgorithm,
-			KnownGap: "the reference has its own algorithm policy and need not share this one. Where it still validates RSASHA1, it reports Secure and Daddybound reports Indeterminate.",
+			KnownGap: "policy, not protocol, and the standards put the two implementations on opposite sides of it deliberately. RFC 9905 section 2 tells validator implementations they MUST continue to support validation using RSASHA1, and in the same paragraph tells validator operators they MUST treat it as unsupported. A reference validator built to the first sentence reports Secure; Daddybound's default policy is built to the second and reports Indeterminate with disallowed_algorithm. Neither is wrong about the data, and the disagreement would vanish if the oracle were configured with the same policy. What must not happen is Bogus, because the zone is not broken.",
 			Build: mutated(func(h *Hierarchy) error {
 				return h.RelabelAlgorithm(LeafZone, dnssec.AlgRSASHA1)
 			}),
 		},
 		{
 			Name:     "unsupported-ds-digest",
+			Family:   FamilyChainFailure,
 			Why:      "RFC 6840 section 5.2: a DS with an unusable digest type is treated like a DS to an unsupported algorithm, and where none is left the zone is treated as unsigned. Not Bogus.",
 			Query:    AnswerName,
 			QType:    dns.TypeA,
 			At:       Now(),
 			Expect:   dnssec.StatusIndeterminate,
 			Reason:   dnssec.ReasonUnsupportedDigest,
-			KnownGap: "RFC 6840 §5.2 says the zone is treated as unsigned. A complete validator reports Insecure; v0.1 reports Indeterminate.",
+			KnownGap: "RFC 6840 section 5.2 says that where no usable DS digest is left, the zone is treated as if it were unsigned, and a complete validator therefore reports Insecure. Daddybound reports Indeterminate with unsupported_digest. The difference is that Insecure is a claim — RFC 4033 section 5 defines it as signed proof that no DS exists — and here no such proof was offered: the DS records are present and this build simply cannot compute their digest type. Reporting Insecure would say the parent proved something it never asserted. The honest statement is that this validator could not evaluate the delegation, which is what Indeterminate means and what the reason says.",
 			Build: mutated(func(h *Hierarchy) error {
 				// GOST R 34.11-94, deprecated by RFC 9906 and not
 				// implemented here.
@@ -314,6 +362,7 @@ func Scenarios() []Scenario {
 		// positive here and fails every negative.
 		{
 			Name:   "nxdomain",
+			Family: FamilyNSEC,
 			Why:    "RFC 4035 section 5.4. A proved non-existence is a Secure answer. Without this, a validator could pass every other denial scenario by refusing to conclude anything about absences.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -324,6 +373,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nodata",
+			Family: FamilyNSEC,
 			Why:    "RFC 4035 section 5.4 first bullet: the name exists and the type does not, proved by the queried type being absent from the matching NSEC's bitmap.",
 			Query:  AnswerName,
 			QType:  dns.TypeTXT,
@@ -334,6 +384,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "empty-non-terminal-nodata",
+			Family: FamilyNSEC,
 			Why:    "RFC 4035 section 2.3 requires an NSEC only at names with authoritative data or a delegation NS RRset, so an empty non-terminal has none. A validator that demands a matching NSEC for every NODATA rejects a correctly signed zone here; one that reads the spanning NSEC as a name error turns NODATA into NXDOMAIN.",
 			Query:  EmptyNonTerminal,
 			QType:  dns.TypeA,
@@ -344,6 +395,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "wildcard-expanded-answer",
+			Family: FamilyNSEC,
 			Why:    "RFC 4035 section 5.3.4. The signature over a wildcard answer is genuine and is valid for every name under the encloser, so it does not on its own establish that this expansion was legitimate. The wildcard here sits two labels below the apex, so a validator assuming the source of synthesis is always the apex wildcard looks for the wrong name.",
 			Query:  WildcardMatch,
 			QType:  dns.TypeA,
@@ -354,6 +406,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "insecure-delegation",
+			Family: FamilyNSEC,
 			Why:    "RFC 4033 section 5's Insecure, and the only honest route to it: the parent's signed NSEC has NS set and DS clear (RFC 6840 section 4.4), so the absence of a DS is proved rather than merely observed. A validator that reports Secure here has verified data against keys nothing authenticates; one that reports Bogus refuses a legitimately unsigned zone.",
 			Query:  UnsignedName,
 			QType:  dns.TypeA,
@@ -364,6 +417,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nxdomain-without-wildcard-denial",
+			Family: FamilyNSEC,
 			Why:    "RFC 4035 section 5.4: proving the queried name is missing is only half the proof, because a wildcard could have answered. Everything left in the response verifies; what was removed is the half a validator that stops at the first covering NSEC never asks for. This is the forged NXDOMAIN that works against every wildcard-bearing zone.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -379,6 +433,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nxdomain-with-no-denial-at-all",
+			Family: FamilyNSEC,
 			Why:    "the server asserts NXDOMAIN and proves nothing. A validator that trusts the rcode accepts every forged name error ever sent.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -391,6 +446,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nodata-contradicted-by-its-own-nsec",
+			Family: FamilyNSEC,
 			Why:    "the response claims no A exists at a name whose signed NSEC lists A. The zone's own records refute the answer it was sent with, which is what an attacker stripping an RRset produces.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -404,6 +460,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nodata-hiding-a-cname",
+			Family: FamilyNSEC,
 			Why:    "RFC 6840 section 4.3. An attacker turns a positive CNAME response into NOERROR/NODATA by deleting the CNAME RRset. The matching NSEC does not list the queried type, so a validator checking only that bit accepts it; the CNAME bit is what gives the removal away.",
 			Query:  AnswerName,
 			QType:  dns.TypeTXT,
@@ -419,6 +476,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "insecure-delegation-claimed-without-the-ns-bit",
+			Family: FamilyNSEC,
 			Why:    "RFC 6840 section 4.4. An attacker strips the DS from a referral and supplies an NSEC that does not list NS, reusing a record from an ordinary name to claim an unsigned delegation. Concluding Insecure here would put a signed zone outside DNSSEC's protection entirely — which is the point of the attack. The NS-bit check is the whole defence.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -438,6 +496,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "ds-stripped-while-its-nsec-still-lists-it",
+			Family: FamilyNSEC,
 			Why:    "the parent's own signed NSEC says a DS is published at this delegation and the referral does not carry one. That is removal in transit, not an insecure delegation, and a validator that reads the absence rather than the zone's statement about it downgrades a secure delegation on request.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -452,6 +511,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "wildcard-answer-without-its-denial",
+			Family: FamilyNSEC,
 			Why:    "RFC 4035 section 5.3.4. The wildcard answer and its signature are genuine and verify; what is missing is the proof that the queried name did not exist in its own right. Without demanding it, a validator accepts one replayed wildcard answer for every name under the encloser, including names that have their own records.",
 			Query:  WildcardMatch,
 			QType:  dns.TypeA,
@@ -467,6 +527,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nxdomain-with-an-unsigned-denial",
+			Family: FamilyNSEC,
 			Why:    "RFC 4035 section 5.4: the NSEC RRsets comprising a non-existence proof MUST themselves be authenticated. Anyone can put an NSEC record in a response, and an attacker forging a denial will supply one covering exactly the name they want denied. Receiving the record is not the proof; verifying it is.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -486,6 +547,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "ancestor-nsec-denying-the-childs-own-data",
+			Family: FamilyNSEC,
 			Why:    "RFC 6840 section 4.1, and the reason that section exists. Every zone cut has two NSEC records at the same name; the parent's is genuinely signed by a zone inside the chain of trust, and says only what the parent is entitled to say. Reused as a NODATA proof for the child's data it hides an entire signed zone, and every signature still verifies. Without the ancestor-delegation restriction this is a false Secure.",
 			Query:  LeafZone,
 			QType:  dns.TypeTXT,
@@ -517,6 +579,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "insecure-delegation-claimed-by-a-child-side-nsec",
+			Family: FamilyNSEC,
 			Why:    "RFC 4035 section 5.2: the parent's NSEC and the child's are distinguished by the SOA bit, and a resolver MUST use the parent's when proving no DS exists. An NSEC carrying SOA describes a zone apex, which is a statement about the child's contents and not about the delegation. Reading it as a no-DS proof turns a secure delegation into an insecure one, which is the downgrade the whole chain exists to prevent.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -536,6 +599,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:     "nxdomain-for-a-name-that-exists",
+			Family:   FamilyNSEC,
 			Why:      "an empty non-terminal answered NXDOMAIN instead of NODATA. Nothing is forged: the covering NSEC is genuine and verifies, and only the response code changed. But its next name lies below the queried name, so that name provably exists, and accepting the stronger claim lets one header field delete a whole branch of a zone.",
 			Query:    EmptyNonTerminal,
 			QType:    dns.TypeA,
@@ -557,6 +621,7 @@ func Scenarios() []Scenario {
 		// and a pass there isolates the difference to the denial mechanism.
 		{
 			Name:   "nsec3-positive-answer",
+			Family: FamilyNSEC3,
 			Why:    "the positive case for the NSEC3 hierarchy. Without it, every NSEC3 scenario below could be passed by a validator that fails to read NSEC3 zones at all.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -567,6 +632,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-nxdomain",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.4: a closest encloser proof for the name, plus a record covering the wildcard at that encloser. Because a hash discards a name's ancestry, the encloser cannot be read off one record the way it can from an NSEC's next name; it has to be walked.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -577,6 +643,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-nodata",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.5: the record matching the name must have neither the queried type nor CNAME set.",
 			Query:  AnswerName,
 			QType:  dns.TypeTXT,
@@ -587,6 +654,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-empty-non-terminal-nodata",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 7.1 requires an NSEC3 record for every empty non-terminal, unlike NSEC which gives them none. Section 8.5 notes the ordinary NODATA test therefore covers them, with an empty type bitmap. A validator carrying NSEC's special case over to NSEC3 looks for a proof that is not there.",
 			Query:  EmptyNonTerminal,
 			QType:  dns.TypeA,
@@ -597,6 +665,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-wildcard-expanded-answer",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.8: the wildcard answer offers a candidate closest encloser, and a record covering the next closer name is what turns the candidate into the real one, proving the queried name did not exist and that the right wildcard was used.",
 			Query:  WildcardMatch,
 			QType:  dns.TypeA,
@@ -607,6 +676,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-opt-out-insecure-delegation",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.9's second branch, and the only place opt-out is allowed to establish anything. The delegation has no NSEC3 record of its own; what proves it insecure is a closest provable encloser proof whose covering record has the Opt-Out bit set. This is the shape almost every large TLD serves, so a validator that cannot read it cannot validate most of the Internet.",
 			Query:  UnsignedName,
 			QType:  dns.TypeA,
@@ -617,6 +687,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-nxdomain-without-the-wildcard-denial",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.4 requires both halves. The closest encloser proof still verifies; the record covering the wildcard is gone, so a wildcard could have answered and the name error is not proved.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -637,6 +708,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-iterations-above-the-ceiling",
+			Family: FamilyNSEC3,
 			Why:    "RFC 9276 section 3.2 offers a validator two responses to an expensive NSEC3: report insecure, or refuse. Reporting insecure would let an attacker downgrade a signed zone by publishing an expensive record, and the same section says so — treating a high iterations count as insecure leaves zones subject to attack. So refusing is the answer, and the reason must describe this validator's budget rather than accuse the zone.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -656,6 +728,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-with-an-unassigned-hash-algorithm",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.1: a validator MUST ignore NSEC3 RRs with unknown hash types, and the same section states the consequence — responses containing only such records will generally be considered bogus. Ignoring a record the standard says to ignore is not a limitation of the validator, so the response has simply failed to prove its claim. Both reference validators agree, and both caught Daddybound calling this Indeterminate.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -668,6 +741,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-nodata-contradicted-by-its-own-record",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.5: the record matching the name must not have the queried type set. Here it does, and the answer says the type is absent. The zone's own signed statement refutes the response it arrived with, which is what stripping an RRset in transit produces.",
 			Query:  AnswerName,
 			QType:  dns.TypeA,
@@ -688,6 +762,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-record-owned-by-another-zone",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 7.1: an NSEC3 owner name is the hash prepended as a single label to the zone name. A validator that matches on the label alone accepts a record placed under a different zone, and the label is the part an attacker can arrange to match. The record here is genuinely signed and its hash is genuinely the right one; only the zone it sits in is wrong.",
 			Query:  MissingName,
 			QType:  dns.TypeA,
@@ -704,6 +779,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-encloser-proved-by-a-delegation-record",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.3: after finding the closest encloser, a validator MUST check that record is from the proper zone — DNAME clear, and NS set only if SOA is set. A delegation record has NS without SOA, and it belongs to the parent, which has no authority over anything below the cut. The RFC states the consequence itself: otherwise an attacker is using them to falsely deny the existence of RRs for which the server is not authoritative.",
 			Query:  "missing.example.dnsdaddylab.",
 			QType:  dns.TypeA,
@@ -739,6 +815,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:     "nsec3-opt-out-proves-no-ds",
+			Family:   FamilyNSEC3,
 			Why:      "RFC 5155 section 8.6's second branch, asked directly. No NSEC3 matches the delegation name, and what establishes that no DS is published is a closest provable encloser proof whose covering record has the Opt-Out bit set. This is the positive case for the one question opt-out is allowed to answer.",
 			Query:    UnsignedZone,
 			QType:    dns.TypeDS,
@@ -750,6 +827,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-no-ds-claimed-without-opt-out",
+			Family: FamilyNSEC3,
 			Why:    "the same proof with the Opt-Out bit cleared. RFC 5155 section 6: an Opt-Out record does not assert the existence or non-existence of the insecure delegations it may cover, and a record without the bit asserts that nothing at all lies in its span. So without the bit the absence of a record at the delegation name is not a statement about that name, and reading it as one would let a response prove an insecure delegation by omission — the cheapest downgrade there is.",
 			Query:  UnsignedZone,
 			QType:  dns.TypeDS,
@@ -767,6 +845,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:   "nsec3-wildcard-answer-without-the-next-closer-denial",
+			Family: FamilyNSEC3,
 			Why:    "RFC 5155 section 8.8. The wildcard answer and its signature verify, and the same signature is valid for every name under the encloser. RFC 5155 section 7.2.6 requires exactly one record alongside it — the one covering the next closer name — and here a different, equally genuine record from the same zone is sent instead. Without checking what the record covers, one captured wildcard answer becomes replayable over names that have their own records.",
 			Query:  WildcardMatch,
 			QType:  dns.TypeA,
@@ -794,6 +873,7 @@ func Scenarios() []Scenario {
 		},
 		{
 			Name:     "no-trust-anchor",
+			Family:   FamilyConfiguration,
 			Why:      "RFC 4033 section 5 calls having no anchor the default operation mode. A validator that returns anything but Indeterminate here has invented trust.",
 			Query:    "www.somewhere-else.invalid.",
 			QType:    dns.TypeA,
