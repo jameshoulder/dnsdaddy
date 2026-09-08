@@ -8,20 +8,42 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Response is what a Source returns for one question.
+//
+// The authority section is not decoration. Authenticated denial of existence
+// — the proof that a name or a type does not exist — is carried there and
+// nowhere else, so a Source that returned only answers could never support
+// anything but positive validation. That was the shape of the earlier
+// interface, and it is why Insecure was unreachable.
+type Response struct {
+	// Rcode is the response code. NXDOMAIN and NOERROR are the two that
+	// carry different denial obligations, and a validator must not take
+	// either on trust: the rcode says what the server claims, and the
+	// authority section is where it has to prove it.
+	Rcode int
+
+	// Answer holds the records that answer the question, with their RRSIGs.
+	Answer []dns.RR
+
+	// Authority holds the records that justify the absence of an answer —
+	// NSEC, NSEC3, SOA, and the NS RRset of a delegation — with their
+	// RRSIGs.
+	Authority []dns.RR
+}
+
 // Source supplies the records a chain walk needs.
 //
-// It is the seam between validation and retrieval, and it exists so that
-// v0.1 can validate a complete, deterministic hierarchy offline while the
+// It is the seam between validation and retrieval, and it exists so that the
+// engine can validate a complete, deterministic hierarchy offline while the
 // same validation code later runs against a real resolver. Nothing above this
 // interface knows or cares where records came from.
 //
-// A Source returns the records for one (name, type) including any covering
-// RRSIGs. Returning no records and no error means "this name has no records
-// of this type as far as I know" — which, crucially, is not the same as a
-// proof that none exist. The chain walk treats the two very differently; see
-// the discussion of unproven gaps in Validate.
+// Returning an empty Response and no error means "I have nothing for this
+// question" — which, crucially, is not a proof that nothing exists. A proof
+// is a signed denial record in the authority section, and the difference
+// between the two is the difference between Insecure and Indeterminate.
 type Source interface {
-	Lookup(ctx context.Context, name string, rrtype uint16) ([]dns.RR, error)
+	Lookup(ctx context.Context, name string, rrtype uint16) (Response, error)
 }
 
 // Limits bound the work one validation may do.
@@ -163,12 +185,13 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 // establishAnchorZone authenticates a zone's apex DNSKEY RRset against
 // configured trust anchors.
 func (w *walk) establishAnchorZone(zoneName string, anchors []TrustAnchor) (*zoneState, ValidationResult, bool) {
-	records, reason := w.lookup(zoneName, dns.TypeDNSKEY)
+	resp, reason := w.lookup(zoneName, dns.TypeDNSKEY)
 	if reason != ReasonNone {
 		return nil, w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepDNSKEY, Zone: zoneName}, reason,
 		)), false
 	}
+	records := resp.Answer
 
 	keys := dnskeysOf(records)
 	if len(keys) == 0 {
@@ -255,12 +278,13 @@ func (w *walk) authenticateDNSKEYRRset(zoneName string, records []dns.RR, all, t
 // It returns the new zone when a secure delegation was crossed, a terminal
 // result when the walk must stop, and done=true in that case.
 func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationResult, bool) {
-	records, reason := w.lookup(child, dns.TypeDS)
+	resp, reason := w.lookup(child, dns.TypeDS)
 	if reason != ReasonNone {
 		return nil, w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepDS, Zone: child}, reason,
 		)), true
 	}
+	records := resp.Answer
 
 	dsRecords := dsOf(records)
 	if len(dsRecords) == 0 {
@@ -322,12 +346,13 @@ func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationRes
 // crossDelegation authenticates the child zone's apex DNSKEY RRset against an
 // authenticated DS RRset.
 func (w *walk) crossDelegation(child string, dsRecords []*dns.DS) (*zoneState, ValidationResult, bool) {
-	records, reason := w.lookup(child, dns.TypeDNSKEY)
+	resp, reason := w.lookup(child, dns.TypeDNSKEY)
 	if reason != ReasonNone {
 		return nil, w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepDNSKEY, Zone: child}, reason,
 		)), true
 	}
+	records := resp.Answer
 
 	keys := dnskeysOf(records)
 	if len(keys) == 0 {
@@ -440,14 +465,14 @@ func (w *walk) usableDS(child string, dsRecords []*dns.DS) ([]*dns.DS, Reason) {
 
 // validateAnswer authenticates the RRset the caller actually asked about.
 func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) ValidationResult {
-	records, reason := w.lookup(qname, rrtype)
+	resp, reason := w.lookup(qname, rrtype)
 	if reason != ReasonNone {
 		return w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype}, reason,
 		))
 	}
 
-	data, sigs := SplitSignatures(records, rrtype)
+	data, sigs := SplitSignatures(resp.Answer, rrtype)
 	if len(data) == 0 {
 		// Nothing to validate. Establishing whether that absence is
 		// legitimate is a denial-of-existence question, which v0.1 does not
@@ -491,30 +516,30 @@ type zoneState struct {
 
 // lookup calls the Source, enforcing the lookup budget and the caller's
 // context.
-func (w *walk) lookup(name string, rrtype uint16) ([]dns.RR, Reason) {
+func (w *walk) lookup(name string, rrtype uint16) (Response, Reason) {
 	if err := w.ctx.Err(); err != nil {
-		return nil, ReasonCancelled
+		return Response{}, ReasonCancelled
 	}
 	if w.lookups >= w.v.cfg.Limits.MaxLookups {
-		return nil, ReasonResourceLimit
+		return Response{}, ReasonResourceLimit
 	}
 	w.lookups++
 
-	records, err := w.v.src.Lookup(w.ctx, name, rrtype)
+	resp, err := w.v.src.Lookup(w.ctx, name, rrtype)
 	if err != nil {
 		// A cancelled context reaching us as an error is still a
 		// cancellation, not a statement about the data.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, ReasonCancelled
+			return Response{}, ReasonCancelled
 		}
 		// A source that cannot answer leaves the validator unable to tell,
 		// which is Indeterminate territory and never a verdict. The
 		// underlying error text is deliberately not carried into a Reason:
 		// reasons are typed, and an error string from a network library is
 		// not a category.
-		return nil, ReasonUnknown
+		return Response{}, ReasonUnknown
 	}
-	return records, ReasonNone
+	return resp, ReasonNone
 }
 
 func toRRs[T dns.RR](in []T) []dns.RR {

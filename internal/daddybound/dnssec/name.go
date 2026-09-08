@@ -249,3 +249,15 @@ func ancestorsOf(qname, zone string) []string {
 func isWildcardName(name string) bool {
 	return strings.HasPrefix(dns.CanonicalName(name), "*.")
 }
+
+// CompareCanonicalNames orders two domain names as RFC 4034 §6.1 requires,
+// returning a negative number if a sorts before b, zero if they are the same
+// name, and a positive number otherwise.
+//
+// It is exported for one purpose. The test lab builds NSEC chains using its
+// own, deliberately separate implementation of this same ordering, so that a
+// mistake here cannot cancel out against a matching mistake there and leave
+// every test passing over a zone no other implementation could read. The
+// cross-check that holds the two against each other lives in that package
+// and needs to be able to call this one.
+func CompareCanonicalNames(a, b string) int { return compareCanonicalNames(a, b) }

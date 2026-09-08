@@ -144,9 +144,9 @@ func FuzzValidateWireResponse(f *testing.F) {
 // validator sees whatever records the fuzzer managed to encode.
 type fuzzSource struct{ msg *dns.Msg }
 
-func (s *fuzzSource) Lookup(ctx context.Context, name string, rrtype uint16) ([]dns.RR, error) {
+func (s *fuzzSource) Lookup(ctx context.Context, name string, rrtype uint16) (Response, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return Response{}, err
 	}
 	var out []dns.RR
 	for _, section := range [][]dns.RR{s.msg.Answer, s.msg.Ns, s.msg.Extra} {
@@ -160,7 +160,10 @@ func (s *fuzzSource) Lookup(ctx context.Context, name string, rrtype uint16) ([]
 			}
 		}
 	}
-	return out, nil
+	// Everything the fuzzer produced goes into both sections, so denial
+	// reasoning sees arbitrary records too rather than only positive
+	// validation.
+	return Response{Answer: out, Authority: out}, nil
 }
 
 // sanitiseName keeps the fuzzer's names inside what the wire format can

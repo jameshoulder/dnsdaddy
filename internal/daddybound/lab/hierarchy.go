@@ -24,9 +24,27 @@ type ZoneSpec struct {
 	Algorithm dnssec.Algorithm
 	// DigestType is used for the DS this zone's parent publishes.
 	DigestType dnssec.DigestType
-	// Records is the zone's unsigned data, excluding DNSKEY and DS, which
-	// are generated. Owner names must be at or below Name.
+	// Records is the zone's unsigned data, excluding DNSKEY, DS and NSEC,
+	// which are generated. Owner names must be at or below Name.
 	Records []dns.RR
+
+	// Parent names the delegating zone. Empty means the zone listed
+	// immediately before this one, which keeps a simple chain simple.
+	//
+	// Naming it is what allows siblings — two zones delegated from the same
+	// parent — and siblings are needed as soon as one delegation is secure
+	// and another is not, which is the whole point of testing Insecure.
+	Parent string
+
+	// Insecure delegates this zone from its parent with NS but no DS, so the
+	// parent proves that no DS exists. That authenticated absence is the
+	// only honest route to RFC 4033's Insecure.
+	Insecure bool
+
+	// NoDenial suppresses this zone's NSEC chain. A signed zone that
+	// publishes no denial records cannot prove any absence, and a validator
+	// must say so rather than accept the server's word for it.
+	NoDenial bool
 }
 
 // Spec describes a whole hierarchy.
@@ -67,8 +85,18 @@ type Zone struct {
 	DigestType dnssec.DigestType
 
 	// DS is the delegation record the parent publishes for this zone. Nil
-	// for the top zone, which is vouched for by a trust anchor instead.
+	// for the top zone, which is vouched for by a trust anchor instead, and
+	// nil for a child delegated insecurely.
 	DS *dns.DS
+
+	// delegations names the child zones delegated from here, secure or not.
+	// A referral is served for anything at or below one of them.
+	delegations map[string]bool
+
+	// useNSEC generates an NSEC chain for this zone. Off means the zone is
+	// signed but publishes no denial records, which is a real and broken
+	// configuration worth being able to construct.
+	useNSEC bool
 
 	sets map[setKey][]dns.RR
 }
@@ -123,17 +151,58 @@ func Build(spec Spec) (*Hierarchy, error) {
 		h.byName[zone.Name] = zone
 	}
 
-	// The parent publishes each child's DS and signs it, which is the link
-	// the chain walk crosses. Built after all zones exist because a DS is a
-	// statement about a key that is created with the child.
+	// The parent delegates to each child. Built after all zones exist
+	// because a DS is a statement about a key created with the child.
+	//
+	// The NS RRset is added unsigned: delegation NS records sit on the
+	// parent side of a cut and are not authoritative data there, so no
+	// signer signs them. A validator that demanded a signature would reject
+	// every real delegation.
 	for i := 1; i < len(h.Zones); i++ {
-		parent, child := h.Zones[i-1], h.Zones[i]
+		child := h.Zones[i]
+
+		parentName := dns.CanonicalName(spec.Zones[i].Parent)
+		if spec.Zones[i].Parent == "" {
+			parentName = h.Zones[i-1].Name
+		}
+		parent := h.byName[parentName]
+		if parent == nil {
+			return nil, fmt.Errorf("lab: %s names parent %s, which is not in this hierarchy", child.Name, parentName)
+		}
+		// A delegation only exists between a zone and a name inside it.
+		// Without this check a specification can describe a hierarchy no
+		// resolver could ever walk, and the resulting failures look like
+		// validator bugs.
+		if parent.Name == child.Name || !dns.IsSubDomain(parent.Name, child.Name) {
+			return nil, fmt.Errorf("lab: %s cannot delegate %s; it is not inside that zone", parent.Name, child.Name)
+		}
+		parent.delegations[child.Name] = true
+
+		parent.sets[setKey{name: child.Name, rrtype: dns.TypeNS}] = []dns.RR{
+			ns(child.Name, "ns."+MiddleZone),
+		}
+
+		if spec.Zones[i].Insecure {
+			// No DS. The parent's NSEC chain shows NS set and DS clear at
+			// this name, which is the authenticated proof of an insecure
+			// delegation.
+			continue
+		}
 		ds, err := makeDS(child)
 		if err != nil {
 			return nil, err
 		}
 		child.DS = ds
 		if err := parent.addSigned(spec, []dns.RR{ds}); err != nil {
+			return nil, err
+		}
+	}
+
+	// NSEC chains last: the type bitmaps describe what is present, and a
+	// bitmap computed before the DS records existed would omit them and
+	// prove the opposite of the truth.
+	for _, zone := range h.Zones {
+		if err := zone.buildNSECChain(spec); err != nil {
 			return nil, err
 		}
 	}
@@ -196,7 +265,9 @@ func buildZone(spec Spec, i int) (*Zone, error) {
 	zone := &Zone{
 		Name: name, Key: key, Signer: signer,
 		Algorithm: alg, DigestType: digest,
-		sets: make(map[setKey][]dns.RR),
+		delegations: map[string]bool{},
+		useNSEC:     !zs.NoDenial,
+		sets:        make(map[setKey][]dns.RR),
 	}
 
 	// The apex DNSKEY RRset signs itself, which is what a DS or trust anchor
@@ -346,14 +417,108 @@ func (h *Hierarchy) Zone(name string) *Zone { return h.byName[dns.CanonicalName(
 // exercises only the validation logic. The context is honoured anyway: code
 // that ignores cancellation in the easy case tends to ignore it in the hard
 // one too.
-func (h *Hierarchy) Lookup(ctx context.Context, name string, rrtype uint16) ([]dns.RR, error) {
+//
+// The answer and authority sections are built by the same routine the
+// authoritative server uses, so a validator reading the hierarchy directly
+// and a validator reading it over DNS see the same records — which is what
+// makes a differential comparison against those two paths meaningful.
+func (h *Hierarchy) Lookup(ctx context.Context, name string, rrtype uint16) (dnssec.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return dnssec.Response{}, err
 	}
-	records := h.sets[setKey{name: dns.CanonicalName(name), rrtype: rrtype}]
-	// Copied so a caller — or a mutation applied later — cannot reach into
-	// the hierarchy's own slices.
-	return append([]dns.RR{}, records...), nil
+	return h.respond(name, rrtype, true), nil
+}
+
+// respond assembles the answer and authority sections for one question.
+//
+// wantDNSSEC mirrors the DO bit: without it the signatures and denial records
+// are withheld, which is what an unaware client would see.
+func (h *Hierarchy) respond(name string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
+	qname := dns.CanonicalName(name)
+	out := dnssec.Response{Rcode: dns.RcodeSuccess}
+
+	zone := h.authoritativeZone(qname, rrtype)
+	if zone == nil {
+		out.Rcode = dns.RcodeNameError
+		return out
+	}
+
+	// Below a delegation this zone does not answer for: it refers, and the
+	// referral carries either the DS or the proof that none exists.
+	if child := h.delegationCovering(zone, qname); child != "" && !(qname == child && rrtype == dns.TypeDS) {
+		out.Authority = append(out.Authority, h.referral(zone, child, wantDNSSEC)...)
+		return out
+	}
+
+	if records := zone.sets[setKey{name: qname, rrtype: rrtype}]; len(records) > 0 {
+		out.Answer = filterSignatures(records, wantDNSSEC)
+		return out
+	}
+
+	// No data of that type. Everything from here is the server explaining
+	// itself, and a validator is entitled to disbelieve all of it until the
+	// signatures check out.
+	if !zone.nameExists(qname) {
+		out.Rcode = dns.RcodeNameError
+	}
+	if soa := zone.sets[setKey{name: zone.Name, rrtype: dns.TypeSOA}]; len(soa) > 0 {
+		out.Authority = append(out.Authority, filterSignatures(soa, wantDNSSEC)...)
+	}
+	if wantDNSSEC {
+		out.Authority = append(out.Authority, h.denialFor(zone, qname, out.Rcode)...)
+	}
+	return out
+}
+
+// authoritativeZone picks the zone that answers a question.
+//
+// This is the zone-cut reasoning, and it has two cases that a naive "deepest
+// zone containing the name" gets wrong — both of which matter for denial:
+//
+//   - A DS RRset lives in the *parent*. Asking the child would ask a zone
+//     that never publishes its own DS, and the answer would be a spurious
+//     NODATA rather than the delegation record.
+//   - A zone apex name exists in two zones at once: as the child's apex and
+//     as the parent's delegation point. They publish different NSEC records
+//     at that name — the parent's carries NS with DS clear or set, the
+//     child's carries SOA — and RFC 6840 §4.1 exists precisely because
+//     confusing the two lets an ancestor's NSEC deny things inside the
+//     child.
+//
+// The lab therefore keeps records per zone rather than in one flat index, so
+// the two NSECs at a delegation name both survive and the right one is
+// served.
+func (h *Hierarchy) authoritativeZone(qname string, rrtype uint16) *Zone {
+	if rrtype == dns.TypeDS {
+		// The parent side of the cut, if this name is a delegation point.
+		for _, z := range h.Zones {
+			if z.delegations[qname] {
+				return z
+			}
+		}
+	}
+
+	var best *Zone
+	for _, z := range h.Zones {
+		if !dns.IsSubDomain(z.Name, qname) {
+			continue
+		}
+		if best == nil || dns.CountLabel(z.Name) > dns.CountLabel(best.Name) {
+			best = z
+		}
+	}
+	return best
+}
+
+// nameExists reports whether this zone holds any record at name.
+func (z *Zone) nameExists(name string) bool {
+	name = dns.CanonicalName(name)
+	for k := range z.sets {
+		if k.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Records returns every record in the hierarchy, for an authoritative server

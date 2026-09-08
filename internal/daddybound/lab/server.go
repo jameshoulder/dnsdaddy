@@ -172,33 +172,20 @@ func (h *Hierarchy) answer(s *Server, w dns.ResponseWriter, req *dns.Msg) {
 	// is why it is a comment rather than just a function call.
 	name := dns.CanonicalName(q.Name)
 
-	records := h.sets[setKey{name: name, rrtype: q.Qtype}]
 	wantDNSSEC := false
 	if opt := req.IsEdns0(); opt != nil {
 		wantDNSSEC = opt.Do()
 	}
 
-	if len(records) > 0 {
-		m.Answer = filterSignatures(records, wantDNSSEC)
-		s.record(Query{Name: name, Type: q.Qtype, DOBit: wantDNSSEC, Rcode: m.Rcode, Answer: len(m.Answer)})
-		writeOrServfail(w, m)
-		return
-	}
+	// The same assembly the in-memory Source uses. Two code paths building
+	// "the same" response would make every differential disagreement
+	// ambiguous — is the validator wrong, or did it see different records?
+	resp := h.respond(name, q.Qtype, wantDNSSEC)
+	m.Rcode = resp.Rcode
+	m.Answer = resp.Answer
+	m.Ns = resp.Authority
 
-	// No data of that type. Whether the name exists at all decides between
-	// NODATA and NXDOMAIN, and the enclosing zone's SOA goes in the
-	// authority section either way so the asker can tell a real absence from
-	// a broken server.
-	zone := h.enclosingZone(name)
-	if zone != nil {
-		if soa := zone.sets[setKey{name: zone.Name, rrtype: dns.TypeSOA}]; len(soa) > 0 {
-			m.Ns = filterSignatures(soa, wantDNSSEC)
-		}
-	}
-	if !h.nameExists(name) {
-		m.Rcode = dns.RcodeNameError
-	}
-	s.record(Query{Name: name, Type: q.Qtype, DOBit: wantDNSSEC, Rcode: m.Rcode, Answer: 0})
+	s.record(Query{Name: name, Type: q.Qtype, DOBit: wantDNSSEC, Rcode: m.Rcode, Answer: len(m.Answer)})
 	writeOrServfail(w, m)
 }
 
@@ -206,11 +193,11 @@ func (h *Hierarchy) answer(s *Server, w dns.ResponseWriter, req *dns.Msg) {
 // be packed.
 //
 // Dropping the response instead — which is what ignoring WriteMsg's error
-// amounts to — makes a scenario the lab cannot serialise look like a
-// scenario the validator under test was slow about. That cost seventeen
-// seconds of retries and one misattributed disagreement before it was
-// noticed. An explicit SERVFAIL says "this harness could not answer", which
-// is a different sentence from "this validator could not decide".
+// amounts to — makes a scenario the lab cannot serialise look like a scenario
+// the validator under test was slow about. That cost seventeen seconds of
+// retries and one misattributed disagreement before it was noticed. An
+// explicit SERVFAIL says "this harness could not answer", which is a
+// different sentence from "this validator could not decide".
 func writeOrServfail(w dns.ResponseWriter, m *dns.Msg) {
 	if err := w.WriteMsg(m); err == nil {
 		return
@@ -232,16 +219,6 @@ func filterSignatures(records []dns.RR, wantDNSSEC bool) []dns.RR {
 		}
 	}
 	return out
-}
-
-// nameExists reports whether the hierarchy holds any record at name.
-func (h *Hierarchy) nameExists(name string) bool {
-	for k := range h.sets {
-		if k.name == name {
-			return true
-		}
-	}
-	return false
 }
 
 // enclosingZone returns the deepest zone that contains name.
