@@ -173,13 +173,33 @@ func (d *denialProof) covering(name string, rrtype uint16) *authenticNSEC {
 // RFC 4592 §3.3.1 defines the closest encloser and RFC 5155 §1.3 restates it
 // as "the longest existing ancestor of a name". This is that name, derived
 // from one record rather than looked up.
-func closestEncloser(qname string, a authenticNSEC) string {
+func closestEncloser(qname string, a authenticNSEC) (string, bool) {
+	if !validNameForProof(qname) {
+		return "", false
+	}
+
 	fromOwner := longestCommonSuffix(qname, a.rr.Hdr.Name)
 	fromNext := longestCommonSuffix(qname, a.rr.NextDomain)
+	best := fromOwner
 	if dns.CountLabel(fromNext) > dns.CountLabel(fromOwner) {
-		return fromNext
+		best = fromNext
 	}
-	return fromOwner
+
+	// The derivation is only sound if it lands on an ancestor, and the
+	// second return value exists because it does not always. A name the wire
+	// format cannot express — a dangling escape, say — has no well-defined
+	// label structure, and the suffix arithmetic above will happily produce
+	// something that is not above qname at all. A fuzz target found exactly
+	// that.
+	//
+	// Refusing is the only safe answer. A caller handed such a name would go
+	// on to demand the denial of a wildcard beneath it, and a response can
+	// supply that trivially, because it is a name nobody protects. The check
+	// is cheap and it turns a derivation into a guarantee.
+	if !isSubDomainOf(best, qname) {
+		return "", false
+	}
+	return best, true
 }
 
 // longestCommonSuffix returns the longest sequence of trailing labels a and b
@@ -300,7 +320,11 @@ func (d *denialProof) proveNameError(qname string, rrtype uint16) Reason {
 
 	// The wildcard that could have synthesised an answer sits directly below
 	// the closest encloser, which the covering record itself establishes.
-	wildcard := wildcardAt(closestEncloser(qname, *cover))
+	encloser, ok := closestEncloser(qname, *cover)
+	if !ok {
+		return ReasonDenialIncomplete
+	}
+	wildcard := wildcardAt(encloser)
 
 	// A record matching the wildcard exactly means the wildcard exists, so
 	// the response should have been a wildcard expansion rather than
