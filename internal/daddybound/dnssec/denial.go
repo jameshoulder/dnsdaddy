@@ -66,6 +66,16 @@ type denialProof struct {
 	// verify. Recorded for the trace: "no proof" and "a proof that failed to
 	// verify" read very differently to somebody investigating.
 	unauthenticated int
+
+	// truncated records that the response carried more denial RRsets than
+	// MaxDenialRecords and collection stopped early.
+	//
+	// It changes what a subsequent failure is allowed to say. Records that
+	// were read and found wanting support an accusation; records that were
+	// never read support only an admission. Without this a response could be
+	// padded until the real proof fell off the end and the verdict came back
+	// Bogus, which blames the zone for the attacker's padding.
+	truncated bool
 }
 
 // empty reports whether the proof carries no NSEC records. NSEC3 is asked
@@ -95,7 +105,16 @@ func (d *denialProof) hasNSEC3() bool { return !d.nsec3.empty() }
 func (w *walk) collectDenial(zone *zoneState, authority []dns.RR) denialProof {
 	var proof denialProof
 
+	// One budget across both mechanisms, so a response cannot get a full
+	// allowance of each by mixing them.
+	budget := w.v.cfg.Limits.MaxDenialRecords
+
 	for _, group := range groupByOwner(authority, dns.TypeNSEC) {
+		if budget <= 0 {
+			proof.truncated = true
+			break
+		}
+		budget--
 		set, reason := NewRRset(group.data)
 		if reason != ReasonNone {
 			proof.unauthenticated++
@@ -129,7 +148,15 @@ func (w *walk) collectDenial(zone *zoneState, authority []dns.RR) denialProof {
 		})
 	}
 
-	proof.nsec3, proof.refusedNSEC3 = w.collectNSEC3(zone, authority)
+	var n3truncated bool
+	proof.nsec3, proof.refusedNSEC3, n3truncated = w.collectNSEC3(zone, authority, budget)
+	proof.truncated = proof.truncated || n3truncated
+	if proof.truncated {
+		w.rec.skip(ValidationStep{
+			Kind: StepDenial, Zone: zone.name,
+			Note: "more denial records than the configured budget; the rest were not read",
+		}, ReasonResourceLimit)
+	}
 	return proof
 }
 
@@ -197,4 +224,24 @@ func (d *denialProof) denialUnavailable() Reason {
 		return ReasonDenialNotImplemented
 	}
 	return ReasonNoDenialProof
+}
+
+// unreadOverReported turns a failure reason into an admission when the proof
+// was truncated before it could be read in full.
+//
+// Only the reasons that mean "not enough evidence" are converted. A
+// contradiction or a wrong-zone finding comes from a record that *was* read
+// and verified, so it stands on its own however many records went unread
+// afterwards — and downgrading it would let padding hide a lie as easily as
+// it hides a proof.
+func (d *denialProof) unreadOverReported(reason Reason) Reason {
+	if !d.truncated {
+		return reason
+	}
+	switch reason {
+	case ReasonNoDenialProof, ReasonDenialIncomplete:
+		return ReasonResourceLimit
+	default:
+		return reason
+	}
 }

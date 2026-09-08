@@ -101,8 +101,15 @@ Indeterminate.
 
 Every input arrives from the network, so every loop over one is a loop an
 adversary chooses the length of. Chain depth, lookups, signatures per RRset,
-keys per zone, NSEC3 iterations per record and total hash computations per
-validation are all bounded. Hitting a bound produces Indeterminate with
+keys per zone, denial RRsets per response, NSEC3 iterations per record and
+total hash computations per validation are all bounded.
+
+The denial-record bound has a second job beyond stopping the work. Reaching it
+must not be reported as a fault in the zone, or a response padded until the
+real proof falls off the end would come back Bogus — handing an attacker a way
+to fail validation for any name at all. So a proof cut short reports
+`resource_limit`, while a contradiction found in a record that *was* read still
+stands: padding can hide a proof, and must not be able to hide a lie. Hitting a bound produces Indeterminate with
 `resource_limit`: stopping early is not evidence about the data, and answering
 Secure after giving up would turn a denial of service into a forgery.
 

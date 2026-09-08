@@ -85,7 +85,7 @@ func (w *walk) noDSAtDelegation(zone *zoneState, child string, resp Response) (*
 		// resolver reading Indeterminate as "allow" would then accept
 		// forged data.
 		step.Note = "no authenticated proof either way; assuming this is not a zone cut, which can only cost a false Bogus"
-		w.rec.skip(step, proof.denialUnavailable())
+		w.rec.skip(step, proof.unreadOverReported(proof.denialUnavailable()))
 		return nil, ValidationResult{}, false
 	}
 }
@@ -132,7 +132,9 @@ func (w *walk) validateDenial(zone *zoneState, qname string, rrtype uint16, resp
 	}
 
 	if reason != ReasonNone {
-		return w.rec.verdict(w.rec.fail(step, reason))
+		// A proof that was cut short cannot support an accusation. See
+		// denialProof.unreadOverReported.
+		return w.rec.verdict(w.rec.fail(step, proof.unreadOverReported(reason)))
 	}
 	w.rec.ok(step)
 	return w.rec.secure()
@@ -168,7 +170,7 @@ func (w *walk) wildcardProof(zone *zoneState, qname string, rrtype uint16, sig *
 		reason = proof.nsec3.proveWildcardAnswer(qname, int(sig.Labels))
 	}
 	if reason != ReasonNone {
-		return w.rec.verdict(w.rec.fail(step, reason)), true
+		return w.rec.verdict(w.rec.fail(step, proof.unreadOverReported(reason))), true
 	}
 	w.rec.ok(step)
 	return ValidationResult{}, false

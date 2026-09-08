@@ -36,11 +36,16 @@ import (
 // of Daddybound, so a response left unproved by it has failed to prove its
 // claim. Only the iteration ceiling is Daddybound's own choice, and only that
 // may reach Indeterminate.
-func (w *walk) collectNSEC3(zone *zoneState, authority []dns.RR) (*nsec3Set, bool) {
+func (w *walk) collectNSEC3(zone *zoneState, authority []dns.RR, budget int) (set *nsec3Set, refused, truncated bool) {
 	var candidates []authenticNSEC3
 	refusedForBudget := false
 
 	for _, group := range groupByOwner(authority, dns.TypeNSEC3) {
+		if budget <= 0 {
+			truncated = true
+			break
+		}
+		budget--
 		set, reason := NewRRset(group.data)
 		if reason != ReasonNone {
 			w.rec.skip(ValidationStep{
@@ -96,7 +101,7 @@ func (w *walk) collectNSEC3(zone *zoneState, authority []dns.RR) (*nsec3Set, boo
 	}
 
 	if len(candidates) == 0 {
-		return nil, refusedForBudget
+		return nil, refusedForBudget, truncated
 	}
 
 	chosen := chooseNSEC3Parameters(candidates)
@@ -120,7 +125,7 @@ func (w *walk) collectNSEC3(zone *zoneState, authority []dns.RR) (*nsec3Set, boo
 			Kind: StepDenial, Zone: zone.name, RRType: dns.TypeNSEC3,
 			Note: "the NSEC3 salt is not hexadecimal",
 		}, ReasonMalformedRecord)
-		return nil, false
+		return nil, false, truncated
 	}
 	return &nsec3Set{
 		records: kept,
@@ -129,7 +134,7 @@ func (w *walk) collectNSEC3(zone *zoneState, authority []dns.RR) (*nsec3Set, boo
 		iter:    chosen.Iterations,
 		salt:    salt,
 		budget:  &hashBudget{remaining: w.v.cfg.Limits.MaxNSEC3Hashes},
-	}, refusedForBudget
+	}, refusedForBudget, truncated
 }
 
 // nsec3Usable applies the two RFC 5155 §8 filters and this validator's

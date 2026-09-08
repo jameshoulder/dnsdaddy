@@ -78,6 +78,20 @@ type Limits struct {
 	// this validator takes the second.
 	MaxNSEC3Iterations int
 
+	// MaxDenialRecords bounds how many denial RRsets one response may have
+	// authenticated.
+	//
+	// Each one costs a canonicalisation and, usually, a public-key
+	// operation, and the number of them is chosen by whoever sent the
+	// response. A correct proof needs at most a handful — RFC 4035 §5.4 and
+	// RFC 5155 §7.2 both describe proofs of three or four records — so a
+	// response carrying hundreds is not a proof, it is a bill.
+	//
+	// Stopping early is recorded rather than hidden: a proof that then fails
+	// is reported as a limit rather than as a fault in the data, because a
+	// validator that stopped reading has no business accusing anyone.
+	MaxDenialRecords int
+
 	// MaxNSEC3Hashes bounds the total hash computations one validation may
 	// perform.
 	//
@@ -99,6 +113,9 @@ func DefaultLimits() Limits {
 		// same appendix notes that even this "still enables CPU-exhausting
 		// DoS attacks" — which is why the total-hash budget exists as well.
 		MaxNSEC3Iterations: 100,
+		// Eight times what the largest correct proof in this suite needs,
+		// and small enough that reaching it is free.
+		MaxDenialRecords: 32,
 		// Enough for a deep name's full closest-encloser walk at the
 		// iteration ceiling, and nowhere near enough to be a lever: at 100
 		// iterations this is a few thousand SHA-1 computations, bounded per
@@ -158,6 +175,9 @@ func New(src Source, cfg Config) *Validator {
 	}
 	if cfg.Limits.MaxNSEC3Hashes == 0 {
 		cfg.Limits.MaxNSEC3Hashes = DefaultLimits().MaxNSEC3Hashes
+	}
+	if cfg.Limits.MaxDenialRecords == 0 {
+		cfg.Limits.MaxDenialRecords = DefaultLimits().MaxDenialRecords
 	}
 	return &Validator{src: src, cfg: cfg}
 }

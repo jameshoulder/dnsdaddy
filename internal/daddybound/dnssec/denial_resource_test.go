@@ -2,6 +2,7 @@ package dnssec_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -176,5 +177,67 @@ func TestAnEmptyAuthoritySectionIsNeverAProof(t *testing.T) {
 		if got.Status == dnssec.StatusSecure {
 			t.Fatalf("an empty authority section proved a name error\n%s", got.Trace())
 		}
+	}
+}
+
+// TestPaddingADenialProofIsNotAnAccusation covers the bound on how many denial
+// RRsets one response may have authenticated.
+//
+// Each one costs a canonicalisation and usually a public-key operation, and
+// the count is chosen by whoever sent the response. Two things must hold. The
+// work has to stop, and — less obviously — stopping must not be reported as a
+// fault in the zone. A response padded until the real proof falls off the end
+// would otherwise come back Bogus, which blames the zone for the padding and
+// gives an attacker a way to turn any name into a validation failure.
+func TestPaddingADenialProofIsNotAnAccusation(t *testing.T) {
+	h, err := lab.Standard()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	genuine, err := h.Lookup(context.Background(), lab.MissingName, dns.TypeA)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+
+	// Real, correctly signed NSEC records from the zone, repeated under
+	// fresh owner names so each one is a separate RRset to authenticate.
+	// They will not verify at their new owners, which is the point: the cost
+	// is paid before that is discovered.
+	padded := make([]dns.RR, 0, 256)
+	for i := 0; i < 200; i++ {
+		for _, rr := range genuine.Authority {
+			clone := dns.Copy(rr)
+			clone.Header().Name = fmt.Sprintf("pad%d.%s", i, lab.LeafZone)
+			if sig, ok := clone.(*dns.RRSIG); ok {
+				sig.Hdr.Name = fmt.Sprintf("pad%d.%s", i, lab.LeafZone)
+			}
+			padded = append(padded, clone)
+		}
+	}
+	padded = append(padded, genuine.Authority...)
+
+	h.SubstituteAuthority(lab.MissingName, dns.TypeA, padded)
+	v, err := h.Validator(lab.Now())
+	if err != nil {
+		t.Fatalf("validator: %v", err)
+	}
+
+	start := time.Now()
+	got := v.Validate(context.Background(), lab.MissingName, dns.TypeA)
+	elapsed := time.Since(start)
+
+	if got.Status == dnssec.StatusSecure {
+		t.Fatalf("padding was read as a proof\n%s", got.Trace())
+	}
+	if got.Status == dnssec.StatusBogus {
+		t.Errorf("a truncated read was reported as a fault in the zone (%s); "+
+			"padding must not be a way to make any name fail validation\n%s", got.Reason, got.Trace())
+	}
+	if got.Reason != dnssec.ReasonResourceLimit {
+		t.Errorf("reason = %s, want %s: the verdict should say this validator stopped reading",
+			got.Reason, dnssec.ReasonResourceLimit)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("validating a padded response took %s; the records were being verified rather than skipped", elapsed)
 	}
 }
