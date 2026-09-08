@@ -24,10 +24,11 @@ should be swapping a binary, not restoring a backup.
 
 ### Daddybound: an experimental DNSSEC validation engine
 
-A DNS resolution and validation engine built from first principles in Go. Its
-first milestone walks a DNSSEC chain of trust from a configured trust anchor
-through DS and DNSKEY records to a signed answer, and produces a deterministic
-structured trace of every step.
+A DNS resolution and validation engine built from first principles in Go. It
+walks a DNSSEC chain of trust from a configured trust anchor through DS and
+DNSKEY records to a signed answer; validates authenticated denial of existence
+with NSEC and NSEC3; follows CNAME chains, DNAME redirections and QTYPE=ANY
+answers; and produces a deterministic structured trace of every step.
 
 **Nothing about how DNS Daddy answers queries has changed.** The resolver still
 records the upstream's verdict and does not validate locally. Daddybound
@@ -53,17 +54,27 @@ build sets, so `CGO_ENABLED=0` and the static cross-compiled binaries are
 unaffected.
 
 Verdicts are compared against two independent reference validators —
-libunbound and BIND's `delv` — across eighteen laboratory scenarios, with no
-false secures against either. That is the failure class where a reference
-validator says data is forged and Daddybound says it is fine. Three
-disagreements are documented gaps, and one is recorded as an open question
-rather than resolved in Daddybound's favour.
+libunbound and BIND's `delv` — across 77 laboratory scenarios and, in a
+separate opt-in run, several hundred real Internet names. **No false secures
+against either oracle in either.** That is the failure class where a reference
+validator says data is forged and Daddybound says it is fine, and it is the
+one class no annotation in the suite can excuse.
 
-What it deliberately does not do: no NSEC or NSEC3, so no authenticated
-NXDOMAIN or NODATA and no wildcard denial; no recursive resolution; no
-RFC 5011 trust anchor rollover; no enforcement. Because RFC 4033's Insecure
-requires a signed proof that no DS exists, it is unreachable and reported
-honestly as Indeterminate with a reason.
+The live corpus earned its place immediately: it found two defects in shapes
+no laboratory scenario reached — a name error whose closest encloser is the
+root, and a delegation response carrying the parent's DS as context. Both were
+false Bogus, neither could have been a false Secure, and both are laboratory
+scenarios now.
+
+All four RFC 4033 states are reachable, and **Insecure has exactly one route
+in**: an authenticated denial record at a delegation showing NS present and DS
+absent. Not a missing signature, not an unsupported algorithm, not a timeout.
+
+What it deliberately does not do: no recursive resolution of its own; no
+aggressive use of NSEC (RFC 8198); no RFC 5011 trust anchor rollover; no
+enforcement. One conservative assumption remains, where a delegation supplies
+no proof either way — it can cost a false Bogus and cannot produce a false
+Secure, and a property test measures that rather than asserting it.
 
 Full detail in [docs/daddybound/](docs/daddybound/README.md).
 

@@ -114,18 +114,20 @@ a signed answer, implementing the protocol and trust logic from the standards
 in pure Go.
 
 **It validates nothing for anybody.** It answers no queries, enforces no
-policy, and cannot be pointed at the Internet or at a running deployment — it
-performs no recursive resolution, so there is nothing to point at a real name
-with. A test parses the module's imports and asserts that no package on the
-query path can reach it, and that it cannot reach the store, config, resolver
-or policy engine.
+policy, and no configuration wires it into how a client's question is
+answered. A test parses the module's imports and asserts that no package on
+the query path can reach it, and that it cannot reach the store, config,
+resolver or policy engine — in both directions, so a verdict can never depend
+on deployment state either.
 
-What exists today is the positive chain walk and a differential laboratory.
-There is no NSEC or NSEC3, so no authenticated NXDOMAIN or NODATA, and the
-Insecure status is unreachable and reported as Indeterminate instead.
+What exists today: the chain walk, authenticated denial of existence with NSEC
+and NSEC3, CNAME chains, DNAME redirections and QTYPE=ANY, all four RFC 4033
+states, and a differential comparison against libunbound and BIND's `delv`
+over both a signed laboratory and several hundred real Internet names.
 
 `dnsdaddy daddybound validate` runs it against a signed hierarchy built in
-memory. Full detail in [daddybound/README.md](daddybound/README.md).
+memory; `make corpus` runs the live comparison. Full detail in
+[daddybound/README.md](daddybound/README.md).
 
 ### Behavioural detection
 
@@ -175,7 +177,7 @@ how likely it is to happen — see [roadmap.md](roadmap.md) for the reasoning.
 
 | | Why it is not done |
 |---|---|
-| **Local DNSSEC validation** | Requires trust-anchor management, negative-proof handling and a considered failure mode. Getting it wrong means silently accepting forged answers, which is worse than not claiming it. The Daddybound engine (Experimental, above) is the work towards it; it has no negative-proof handling yet and enforces nothing. |
+| **Local DNSSEC validation** | Requires trust-anchor management, negative-proof handling and a considered failure mode. Getting it wrong means silently accepting forged answers, which is worse than not claiming it. The Daddybound engine (Experimental, above) is the work towards it: it now handles negative proofs and validates real Internet names in a test harness, and it still enforces nothing. What stands between it and enforcing is evidence rather than features — it has never resolved a name for itself, and has not run anywhere long enough for the failure modes that only appear over time. |
 | **Policy enforcement from behavioural findings** | Needs a measured false-positive rate first. Blocking on a heuristic with an unknown FP rate is not a feature. |
 | **`safeSearch` enforcement** | The flag is accepted by the API and stored on the policy. The resolver does not act on it, and setting it changes nothing about how queries are answered. A known gap since the first release; the field is marked `deprecated` in the OpenAPI schema with that stated in the description, so a generated client cannot present it as a working control. |
 | **Webhook and syslog sinks** | The NDJSON file plus a log shipper covers the same ground today without a bespoke client per vendor. |
