@@ -40,8 +40,9 @@ This makes the model explicit rather than changing what the two settings mean:
 So the effective ACL is no longer a plain union, and the documentation no
 longer describes it as one. Turning ad-hoc access on never adds an address to
 the configured list, so it cannot create an open resolver; `allow_public_resolver`
-remains the only way to run one, unchanged. Loopback is served in either state,
-so the resolver stays usable from the machine it runs on.
+remains the only way to run one, unchanged. The loopback ranges you configured
+stay served in either state — and only those, so the switch never admits an
+address `dns.allowed_client_cidrs` does not already name.
 
 **A new installation starts with ad-hoc access off**, which means a fresh
 install refuses a client it has never been told about — including one inside

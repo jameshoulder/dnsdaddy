@@ -66,9 +66,10 @@ dns:
   #       you add a Network or turn it on. Turning it on never adds an address
   #       to this list, so it cannot make DNS Daddy an open resolver.
   #
-  # Loopback is always served while any ACL is configured, so the resolver
-  # stays usable from this machine in either state. `dnsdaddy doctor` reports
-  # each source separately. See docs/deploy.md#who-may-use-the-resolver.
+  # Loopback ranges listed here stay served in either state, so the resolver
+  # remains usable from this machine — but only the ones listed: nothing is
+  # added that this list does not already name. `dnsdaddy doctor` reports each
+  # source separately. See docs/deploy.md#who-may-use-the-resolver.
   allowed_client_cidrs:
     - "127.0.0.0/8"
     - "10.0.0.0/8"

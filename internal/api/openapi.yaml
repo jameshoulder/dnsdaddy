@@ -1694,8 +1694,8 @@ components:
         addresses eligible to be served, and the built-in Default network's
         ad-hoc access switch decides whether unmatched clients inside them are
         actually served. A permitted network contributes its own ranges
-        regardless of that switch, and loopback is admitted whenever the ACL is
-        restricted.
+        regardless of that switch, and the loopback ranges named in bootstrapCidrs
+        stay admitted while it is off.
       properties:
         unrestricted:
           type: boolean

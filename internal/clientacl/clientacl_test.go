@@ -119,10 +119,8 @@ func TestLegacyDeploymentIsUnchanged(t *testing.T) {
 			t.Errorf("Allows(%s) = %v, want %v — an upgrade changed who may resolve", addr, !ok, ok)
 		}
 	}
-	// The configured list plus ::1, which is now always admitted and which this
-	// fixture's IPv4-only pool does not name.
-	if got := s.Effective(); len(got) != len(bootstrap)+1 {
-		t.Errorf("effective ACL = %v, want the configured list plus loopback", got)
+	if got := s.Effective(); len(got) != len(bootstrap) {
+		t.Errorf("effective ACL = %v, want exactly the configured list", got)
 	}
 }
 

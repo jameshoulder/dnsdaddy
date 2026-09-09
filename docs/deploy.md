@@ -129,8 +129,10 @@ first as though it were the whole answer:
 
 So the effective ACL is **not** a plain union of the first and the third. The
 configured pool contributes only while ad-hoc access is on; a Network
-permission contributes always. Loopback is served in either state, so the
-resolver stays usable from the machine it runs on.
+permission contributes always. The loopback ranges you configured stay served in either state, so the
+resolver remains usable from the machine it runs on. Only the ranges you
+configured: the switch never admits an address `dns.allowed_client_cidrs`
+does not already name.
 
 Ad-hoc access is **off on a new installation**. A fresh install therefore
 refuses a client it has never been told about, even one inside

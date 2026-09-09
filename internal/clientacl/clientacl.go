@@ -61,11 +61,17 @@
 // about specific addresses, and ad-hoc access is a decision about everyone
 // else.
 //
-// Loopback is always admitted while the ACL is restricted, in either state.
-// The resolver has to stay usable from the machine it runs on — health checks,
-// `dig @127.0.0.1`, a local stub resolver — and making that depend on the
-// ad-hoc switch would mean turning ad-hoc access *on* could take localhost
-// away from an operator whose configured pool happened not to name it.
+// While the gate is closed, the loopback ranges the operator configured stay
+// admitted, so the resolver remains usable from the machine it runs on. Only
+// the ranges they configured: this adds nothing that dns.allowed_client_cidrs
+// does not already name, because an operator who left loopback out of that
+// list did so deliberately and admitting it back would widen the one list that
+// decides who may query at all. The shipped default names both loopback
+// ranges, so a stock install keeps localhost with ad-hoc access off.
+//
+// A pool that gates down to nothing stays restricted rather than becoming
+// unrestricted: that flag is settled from the configured list, before the
+// gate, so an empty result refuses everyone instead of admitting them.
 //
 // A networks list with no n_default row at all leaves the gate out of the
 // picture and the bootstrap pool active, which is the behaviour that predates
@@ -171,12 +177,6 @@ func AdHocAccess(networks []Network) (enabled, present bool) {
 		return n.Enabled && n.AllowResolver, true
 	}
 	return false, false
-}
-
-// loopbackPrefixes are admitted whenever the ACL is restricted.
-var loopbackPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("127.0.0.0/8"),
-	netip.MustParsePrefix("::1/128"),
 }
 
 // Grant is one permitted range, carrying where it came from so a diagnostic
@@ -312,26 +312,31 @@ func Compute(bootstrapCIDRs []string, allowPublicResolver bool, networks []Netwo
 
 	s.adHoc, s.adHocGated = AdHocAccess(networks)
 
-	seen := make(map[netip.Prefix]bool, len(s.bootstrap)+len(s.grants)+len(loopbackPrefixes))
+	seen := make(map[netip.Prefix]bool, len(s.bootstrap)+len(s.grants))
 
 	// The configured pool is admitted only when unmatched clients are allowed
 	// to use it. s.bootstrap is left intact either way: it is what the
 	// operator wrote, every diagnostic reports it as such, and overwriting it
 	// with the filtered result would make the product misdescribe its own
 	// configuration.
-	if s.adHoc || !s.adHocGated {
-		for _, p := range s.bootstrap {
-			if !seen[p] {
-				seen[p] = true
-				s.all = append(s.all, p)
-			}
+	//
+	// While the gate is closed, the loopback ranges the operator configured
+	// stay admitted, so the resolver remains usable from the machine it runs
+	// on — health checks, `dig @127.0.0.1`, a local stub resolver. Only the
+	// ranges they configured: nothing is added here that
+	// dns.allowed_client_cidrs does not already name. An operator who left
+	// loopback out did so deliberately, and manufacturing it back would admit
+	// a client they excluded — a silent widening of the one list that decides
+	// who may query at all.
+	//
+	// The empty case needs no invention either. `unrestricted` was settled
+	// above from the *configured* list, so a pool that gates down to nothing
+	// leaves an empty `all` with `unrestricted` false, and Allows refuses
+	// everyone. Fail-closed, which is what "off" has to mean.
+	for _, p := range s.bootstrap {
+		if !s.adHoc && s.adHocGated && !p.Addr().IsLoopback() {
+			continue
 		}
-	}
-
-	// Loopback, in both states. Note this runs after the unrestricted return
-	// above, so it can only ever narrow nothing: a restricted set gains
-	// localhost, and an unrestricted one was never reached.
-	for _, p := range loopbackPrefixes {
 		if !seen[p] {
 			seen[p] = true
 			s.all = append(s.all, p)

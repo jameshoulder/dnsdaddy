@@ -57,15 +57,60 @@ func TestAdHocAccessOnAdmitsTheConfiguredPoolAndNothingElse(t *testing.T) {
 	}
 }
 
-// Loopback is available in both states, so that turning ad-hoc access on can
-// never take localhost away from an operator whose pool does not name it.
-func TestLoopbackSurvivesBothAdHocStates(t *testing.T) {
+// Closing the gate must not close it on localhost. The shipped ACL names both
+// loopback ranges, so a stock install keeps `dig @127.0.0.1`, its health checks
+// and any local stub resolver working while unmatched clients are refused.
+func TestConfiguredLoopbackSurvivesBothAdHocStates(t *testing.T) {
+	for _, adHoc := range []bool{false, true} {
+		set := Compute(privatePool, false, []Network{defaultRow(adHoc)})
+		for _, addr := range []string{"127.0.0.1", "::1"} {
+			if !set.Allows(netip.MustParseAddr(addr)) {
+				t.Errorf("ad-hoc=%v: %s was refused", adHoc, addr)
+			}
+		}
+	}
+}
+
+// The other half, and the one that keeps the exception honest: loopback is
+// carried through the gate because the operator configured it, not because the
+// gate manufactures it.
+//
+// An operator who leaves loopback out of dns.allowed_client_cidrs has excluded
+// it deliberately — CI does exactly this to prove a client outside the pool is
+// refused — and inventing it back would widen the single list that decides who
+// may query at all. That is the silent security fallback this design forbids.
+func TestGatingOffDoesNotInventLoopback(t *testing.T) {
 	pool := []string{"192.168.0.0/16"} // deliberately no loopback entry
 	for _, adHoc := range []bool{false, true} {
 		set := Compute(pool, false, []Network{defaultRow(adHoc)})
 		for _, addr := range []string{"127.0.0.1", "::1"} {
-			if !set.Allows(netip.MustParseAddr(addr)) {
-				t.Errorf("ad-hoc=%v: %s was refused", adHoc, addr)
+			if set.Allows(netip.MustParseAddr(addr)) {
+				t.Errorf("ad-hoc=%v: %s was admitted, and no configured range names it", adHoc, addr)
+			}
+		}
+	}
+}
+
+// Whatever the gate admits when closed is a subset of what it admits when
+// open, for any pool. Without that, toggling the switch could take access away
+// instead of granting it — which is how the invented-loopback version behaved
+// for a pool that did not name loopback.
+func TestOpeningTheGateNeverRemovesAccess(t *testing.T) {
+	pools := [][]string{
+		privatePool,
+		{"192.168.0.0/16"},
+		{"127.0.0.0/8"},
+		{"203.0.113.42/32"},
+	}
+	probes := []string{"127.0.0.1", "::1", "192.168.1.20", "fd00::20", "203.0.113.42", "8.8.8.8"}
+
+	for _, pool := range pools {
+		off := Compute(pool, false, []Network{defaultRow(false)})
+		on := Compute(pool, false, []Network{defaultRow(true)})
+		for _, addr := range probes {
+			a := netip.MustParseAddr(addr)
+			if off.Allows(a) && !on.Allows(a) {
+				t.Errorf("pool %v: %s is admitted with ad-hoc off and refused with it on", pool, addr)
 			}
 		}
 	}
