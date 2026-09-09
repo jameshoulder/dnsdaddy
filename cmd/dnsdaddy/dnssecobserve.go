@@ -127,3 +127,13 @@ func dnssecStatsOrNil(d *dnssecObservation) api.DNSSECObserverStats {
 	}
 	return d.observer
 }
+
+// dnssecWriterOrNil exposes the writer's counters to the API, so an
+// observation that completed and was then lost before storage is visible
+// rather than only implied by a smaller dataset.
+func dnssecWriterOrNil(d *dnssecObservation) api.DNSSECWriterStats {
+	if d == nil || d.writer == nil {
+		return nil
+	}
+	return d.writer
+}

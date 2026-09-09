@@ -2411,3 +2411,18 @@ test('contained validator panics are surfaced as a defect', () => {
   assert.match(card, /4/);
   assert.match(card, /defect in the validator/i);
 });
+
+test('observations lost before storage are shown, not only those never taken', () => {
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: { total: 1088, byStatus: {}, disagreements: {} },
+    runtime: { dropped: 19463, unrecorded: 249, panics: 0 },
+  });
+  // Two different ways the dataset shrinks, and they mean different things:
+  // "we did not look" versus "we looked and lost it". A reader shown only the
+  // first would misread the second as quieter traffic.
+  assert.match(card, /Not observed/);
+  assert.match(card, /Observed but not stored/);
+  assert.match(card, /249/);
+  assert.match(card, /evidence that went missing/i);
+});

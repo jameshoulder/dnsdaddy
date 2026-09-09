@@ -6,6 +6,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
+	"github.com/jameshoulder/dnsdaddy/internal/dnssecobs"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -88,7 +89,27 @@ func (a *API) dnssecRuntime() map[string]any {
 		out["lastAt"] = s.LastAt
 		out["lastStatus"] = string(s.LastStatus)
 	}
+	if a.DNSSECWriter != nil {
+		w := a.DNSSECWriter.Stats()
+		out["stored"] = w.Written
+		// Completed validations whose result never reached the database.
+		// Reported beside "observed" so a smaller dataset than expected has
+		// a visible cause rather than looking like quieter traffic.
+		out["unrecorded"] = w.Dropped
+		out["writeErrors"] = w.Errors
+	}
 	return out
+}
+
+// DNSSECWriterStats reports what became of completed observations.
+//
+// Separate from DNSSECObserverStats because they answer different questions:
+// one is "how many queries did we look at", the other is "how many of those
+// verdicts survived to storage". A run where those two numbers differ is a run
+// whose dataset is smaller than it appears, and an operator has to be able to
+// see that.
+type DNSSECWriterStats interface {
+	Stats() dnssecobs.Stats
 }
 
 // DNSSECObserverStats is the reporting half of the observer.

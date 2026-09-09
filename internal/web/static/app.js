@@ -3836,6 +3836,7 @@ function localDnssecCard(data) {
         ${raw(stat('Could not validate', (by.timeout || 0) + (by.resource_limit || 0) + (by.unsupported || 0) + (by.internal_error || 0), 'timeout, limit or unsupported — not a DNSSEC state'))}
         ${raw(stat('Differs from upstream', disTotal, 'the point of the exercise'))}
         ${raw(stat('Not observed', runtime.dropped, 'queue was full — the sample is smaller than your traffic'))}
+        ${raw(stat('Observed but not stored', runtime.unrecorded, 'validated, then lost before the database — evidence that went missing'))}
         ${raw(stat('Median latency', (s.avgDurationMs || 0).toFixed(1) + ' ms', 'off the answer path'))}
         ${raw(stat('p95 latency', (s.p95DurationMs || 0).toFixed(1) + ' ms'))}
       </dl>

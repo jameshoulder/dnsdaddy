@@ -48,7 +48,13 @@ type Writer struct {
 // New builds a Writer. It does nothing until Run is called.
 func New(st *store.Store, o Options) *Writer {
 	if o.QueueSize <= 0 {
-		o.QueueSize = 1024
+		// Sized for the observed failure rather than guessed. The query log
+		// writes to the same SQLite database and SQLite serialises writers,
+		// so this queue's job is to absorb a batch of observations while the
+		// query log holds the write lock. 1024 was not enough under a load
+		// test at 5,000 queries per second; this is, with the drop counter
+		// above as the check on whether it stays enough.
+		o.QueueSize = 8192
 	}
 	if o.BatchSize <= 0 {
 		o.BatchSize = 64
@@ -149,6 +155,32 @@ func (w *Writer) Run(ctx context.Context) {
 func (w *Writer) Wait() { <-w.done }
 
 // Stats reports what the writer has done.
-func (w *Writer) Stats() (written, dropped, errors uint64) {
-	return w.written.Load(), w.dropped.Load(), w.errors.Load()
+//
+// Dropped is the one that matters and the reason this is exposed rather than
+// kept internal. Observations are the entire output of observe mode, and this
+// counter is the only place a lost one is visible.
+//
+// It is not hypothetical. A live run recorded 1337 completed validations and
+// stored 1088 of them: the query log was writing twenty thousand rows to the
+// same SQLite database, SQLite serialises writers, and this queue filled while
+// waiting behind it. Nothing said so, because nothing read this counter. An
+// operator would have seen a smaller dataset than their traffic and had no way
+// to tell that from a quieter network.
+func (w *Writer) Stats() Stats {
+	return Stats{
+		Written: w.written.Load(),
+		Dropped: w.dropped.Load(),
+		Errors:  w.errors.Load(),
+	}
+}
+
+// Stats is what the writer has done with the observations handed to it.
+type Stats struct {
+	// Written is how many rows reached the database.
+	Written uint64
+	// Dropped is how many completed observations were discarded because the
+	// write queue was full. Evidence that was collected and then lost.
+	Dropped uint64
+	// Errors is how many batches failed to write.
+	Errors uint64
 }

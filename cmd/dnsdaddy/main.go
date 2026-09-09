@@ -364,6 +364,7 @@ func run() error {
 		Intel:          intelSource,
 		Decisions:      decisionRecorder,
 		DNSSEC:         dnssecStatsOrNil(dnssecObserver),
+		DNSSECWriter:   dnssecWriterOrNil(dnssecObserver),
 	})
 
 	httpSrv := &http.Server{

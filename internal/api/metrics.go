@@ -351,5 +351,22 @@ func (a *API) dnssecMetricLines() []string {
 		"Validator panics contained by the observer. Any value above zero is a defect",
 		"counter", fmt.Sprintf("dnsdaddy_dnssec_local_panics_total %d", st.Panics))
 
+	// The second way evidence goes missing, and the one that is invisible
+	// without a counter: a validation that completed and then failed to reach
+	// the database because the write queue was full behind the query log.
+	// dropped_total says "we did not look"; this says "we looked and lost it".
+	if a.DNSSECWriter != nil {
+		w := a.DNSSECWriter.Stats()
+		metric(&b, "dnsdaddy_dnssec_local_stored_total",
+			"Observations written to the database", "counter",
+			fmt.Sprintf("dnsdaddy_dnssec_local_stored_total %d", w.Written))
+		metric(&b, "dnsdaddy_dnssec_local_unrecorded_total",
+			"Completed observations discarded before storage because the write queue was full",
+			"counter", fmt.Sprintf("dnsdaddy_dnssec_local_unrecorded_total %d", w.Dropped))
+		metric(&b, "dnsdaddy_dnssec_local_write_errors_total",
+			"Batches of observations that failed to write", "counter",
+			fmt.Sprintf("dnsdaddy_dnssec_local_write_errors_total %d", w.Errors))
+	}
+
 	return []string{b.String()}
 }

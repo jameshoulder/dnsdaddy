@@ -57,6 +57,10 @@ type Deps struct {
 	// observations, it never makes or acts on one.
 	DNSSEC DNSSECObserverStats
 
+	// DNSSECWriter reports what became of completed observations. Nil
+	// whenever local validation is off.
+	DNSSECWriter DNSSECWriterStats
+
 	// Decisions is the decision recorder, or nil when decision records are
 	// switched off. Read-only here: the API never records a decision, it only
 	// reports what the resolver already decided.
