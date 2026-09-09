@@ -120,12 +120,11 @@ type DNS struct {
 	// validation engine, does with real traffic. See
 	// docs/decisions/0002-daddybound-observe-mode.md.
 	//
-	//	off      the default. No validator is constructed and no supporting
-	//	         DNSSEC query is sent. Behaviourally identical to a build
-	//	         without the feature.
-	//	observe  validate alongside resolution and record the verdict. The
-	//	         answer a client receives is unchanged, whatever Daddybound
-	//	         concludes.
+	//	off      no validator is constructed and no supporting DNSSEC query is
+	//	         sent. Behaviourally identical to a build without the feature.
+	//	observe  the default, presented as Learn in the dashboard. Daddybound
+	//	         validates alongside resolution and records the verdict. The
+	//	         answer a client receives is unchanged, whatever it concludes.
 	//
 	// "enforce" is recognised and refused at startup. Accepting it and
 	// behaving as "observe" would leave an operator believing their resolver
@@ -404,10 +403,10 @@ func Default() Config {
 			AllowedClientCIDRs: append([]string(nil), DefaultAllowedClientCIDRs...),
 			RefuseANY:          true,
 			DNSSECTelemetry:    true,
-			// Off by default. Local validation is experimental, and a
-			// feature that sends extra upstream queries must be something an
-			// operator switched on rather than something they inherited.
-			LocalDNSSECValidation: LocalDNSSECOff,
+			// Learn mode is safe to inherit: Daddybound runs out of band,
+			// records its verdict and can never alter the client response. The
+			// extra work stays bounded by the worker/queue budgets below.
+			LocalDNSSECValidation: LocalDNSSECObserve,
 			LocalDNSSECWorkers:    2,
 			LocalDNSSECQueue:      256,
 			LocalDNSSECTimeout:    Duration(2 * time.Second),
@@ -980,7 +979,8 @@ const (
 	// LocalDNSSECOff: Daddybound is not constructed and sends nothing.
 	LocalDNSSECOff = "off"
 	// LocalDNSSECObserve: Daddybound validates alongside resolution and
-	// records what it concludes. The client's answer is unaffected.
+	// records what it concludes. The client's answer is unaffected. The UI
+	// calls this Learn mode.
 	LocalDNSSECObserve = "observe"
 	// LocalDNSSECEnforce is recognised so that configuring it fails loudly.
 	// It is not implemented. See validateLocalDNSSEC.
@@ -1023,7 +1023,8 @@ func (c *Config) validateLocalDNSSEC() error {
 }
 
 // LocalDNSSECMode returns the effective mode, treating the empty string as
-// off so that an older configuration file keeps its previous behaviour.
+// off so a deliberately empty/zero-value DNS config never enables work by
+// accident. Default() itself explicitly selects observe (Learn).
 func (d DNS) LocalDNSSECMode() string {
 	if d.LocalDNSSECValidation == "" {
 		return LocalDNSSECOff
