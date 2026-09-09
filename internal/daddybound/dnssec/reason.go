@@ -156,6 +156,90 @@ const (
 	ReasonTrustAnchorMismatch Reason = "trust_anchor_mismatch"
 )
 
+// Authenticated denial of existence, per RFC 4035 §5.4 and RFC 6840 §4.
+//
+// These are separate reasons rather than one "denial failed" because they
+// describe genuinely different situations, and two of them decide a verdict.
+// A response that supplied no proof at all is a different accusation from one
+// that supplied a proof of the wrong thing, and a proof that contradicts the
+// server's own rcode is different again.
+const (
+	// ReasonNoDenialProof: a proof of non-existence was required and the
+	// response carried no authenticated NSEC or NSEC3 records capable of
+	// supplying one. R-DEN-01.
+	ReasonNoDenialProof Reason = "no_denial_proof"
+
+	// ReasonDenialIncomplete: denial records were present and authenticated,
+	// and together they do not establish what the response claims. The
+	// commonest case by far is an NXDOMAIN that proves the queried name is
+	// missing but never proves that no wildcard could have answered
+	// (R-DEN-05), which is the half-proof an attacker would supply.
+	ReasonDenialIncomplete Reason = "denial_incomplete"
+
+	// ReasonDenialContradicted: an authenticated NSEC says the very thing
+	// the response denies is present — the queried type is in the bitmap of
+	// the NSEC that matches the name, or a CNAME is (R-DEN-02, R-DEN-03).
+	// The zone's own signed records contradict the answer it was sent with.
+	ReasonDenialContradicted Reason = "denial_contradicted"
+
+	// ReasonAliasAmbiguous: more than one CNAME at a name. RFC 2181 §10.1
+	// forbids a CNAME coexisting with other data, and a fortiori with a
+	// second CNAME; following one of them would mean choosing a target out
+	// of a response an attacker ordered.
+	ReasonAliasAmbiguous Reason = "alias_ambiguous"
+
+	// ReasonDnameNoMatch: a DNAME was offered for a name its owner does not
+	// cover. Only whole labels are replaced (RFC 6672 §2.2), so a name that
+	// merely ends in the owner's characters is not redirected by it.
+	ReasonDnameNoMatch Reason = "dname_no_match"
+
+	// ReasonDnameTooLong: the DNAME substitution would produce a name longer
+	// than the DNS allows. RFC 6672 §2.2 has a server answer YXDOMAIN; there
+	// is nothing to authenticate about a name that cannot exist.
+	ReasonDnameTooLong Reason = "dname_too_long"
+
+	// ReasonAnyNotProvable: an empty answer to a QTYPE=* query. No NSEC or
+	// NSEC3 type bitmap can deny type 255, because no record has that type,
+	// so there is no proof to check rather than a proof that failed. A
+	// statement about what is provable, not about the zone.
+	ReasonAnyNotProvable Reason = "any_not_provable"
+
+	// ReasonDenialOptOutSpan: the name whose non-existence the proof depends
+	// on falls inside an Opt-Out span, and RFC 5155 §12.2 states plainly what
+	// that costs — "the loss of the ability to prove the existence or
+	// nonexistence of an insecure delegation within the span of an Opt-Out
+	// NSEC3 RR".
+	//
+	// The proof is not broken and the zone is not accused of anything: the
+	// records verify and the shape is the one §8.4 asks for. What is missing
+	// is the conclusion. §7.1 lets a signer omit only unsigned delegations
+	// from the chain, so a name inside such a span either does not exist or
+	// is unsigned, and §12.2's first paragraph settles which verdict that is:
+	// "All unsigned names are, by definition, insecure."
+	//
+	// So this reason carries Insecure rather than Bogus or Indeterminate, and
+	// it is the only reason in this taxonomy that does.
+	ReasonDenialOptOutSpan Reason = "denial_opt_out_span"
+
+	// ReasonAliasLoop: the alias chain returns to a name it already visited.
+	// The records may all be authentic — the zone published a loop — so this
+	// is a statement about the data's shape rather than its authenticity.
+	ReasonAliasLoop Reason = "alias_loop"
+
+	// ReasonDenialWrongZone: an NSEC was offered as proof of something it is
+	// not entitled to prove — an ancestor delegation NSEC used below its own
+	// zone cut (R-DEN-06), an NSEC with the DNAME bit used to deny a
+	// subdomain (R-DEN-07), or the child's apex NSEC offered as proof that
+	// no DS exists, when only the parent's may be used (R-DEN-09).
+	//
+	// This one is worth its own value because the signature on such a record
+	// is perfectly good. The record is real, the zone really signed it, and
+	// it simply does not say what it is being used to say. A validator that
+	// reported this as an ordinary signature failure would send an
+	// investigator looking at the cryptography.
+	ReasonDenialWrongZone Reason = "denial_wrong_zone"
+)
+
 // Limits of this milestone, and limits of any single validation run. These
 // exist so that "we did not do this" never has to be disguised as a verdict.
 const (
@@ -222,6 +306,18 @@ var explanations = map[Reason]string{
 	ReasonNoTrustAnchor:       "no configured trust anchor covers this name",
 	ReasonTrustAnchorMismatch: "no key at the trust anchor's name matched the configured anchor",
 
+	ReasonAliasAmbiguous:   "more than one CNAME exists at this name, so there is no single target to follow",
+	ReasonAliasLoop:        "the alias chain returns to a name it has already visited",
+	ReasonAnyNotProvable:   "an empty answer to a QTYPE=ANY query cannot be authenticated: no NSEC or NSEC3 type bitmap can deny type ANY",
+	ReasonDenialOptOutSpan: "the name is inside an Opt-Out span, within which RFC 5155 §12.2 says non-existence cannot be proved; every name in such a span is unsigned",
+	ReasonDnameNoMatch:     "the DNAME offered does not cover the queried name",
+	ReasonDnameTooLong:     "the DNAME substitution would produce a name longer than the DNS allows",
+
+	ReasonNoDenialProof:      "the response carried no authenticated proof that the name or type does not exist",
+	ReasonDenialIncomplete:   "the denial records do not prove everything the response claims; commonly the wildcard denial is missing",
+	ReasonDenialContradicted: "the zone's own signed denial records say the name or type does exist",
+	ReasonDenialWrongZone:    "a denial record was offered as proof of something its zone has no authority to state",
+
 	ReasonDenialNotImplemented: "answering this needs a proof of non-existence, which this version does not implement",
 	ReasonResourceLimit:        "validation stopped at a configured limit before reaching an answer",
 	ReasonCancelled:            "validation was cancelled before it finished",
@@ -263,15 +359,20 @@ func (r Reason) Known() bool {
 // RFC 6840 makes the same point twice for the algorithm cases, in §5.3 for
 // signature algorithms and §5.2 for DS digests: where nothing usable is left,
 // "the zone is treated as if it were unsigned". A complete validator reports
-// Insecure there. v0.1 cannot, because Insecure needs a signed proof of
-// non-existence and v0.1 implements none, so it reports Indeterminate with
-// the specific reason — a weaker claim than the RFC's, and an honest one.
-// docs/daddybound/standards.md §5.3 records that gap.
+// Insecure there. This one reports Indeterminate instead, and the difference
+// is deliberate rather than a missing feature: Insecure is a claim that the
+// data was *proved* unsigned, and the proof this validator has is an
+// authenticated absence of DS at a delegation. Nothing proves a zone unsigned
+// merely because this build cannot read its algorithm — the zone is signed,
+// and saying otherwise would let a build option decide what a zone published.
+// Indeterminate with the specific reason is the weaker and honest claim.
+// docs/daddybound/standards.md §5.3 records it.
 func (r Reason) aboutValidator() bool {
 	switch r {
 	case ReasonUnsupportedAlgorithm, ReasonDisallowedAlgorithm,
 		ReasonUnsupportedDigest, ReasonDisallowedDigest,
 		ReasonDenialNotImplemented, ReasonResourceLimit,
+		ReasonAnyNotProvable,
 		ReasonCancelled, ReasonUnknown:
 		return true
 	default:

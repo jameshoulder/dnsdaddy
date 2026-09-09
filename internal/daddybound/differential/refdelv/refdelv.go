@@ -51,6 +51,14 @@ type Config struct {
 	Forward string
 	// Anchor is the trust anchor to validate from.
 	Anchor dnssec.TrustAnchor
+	// Anchors, when non-empty, replaces Anchor with a set.
+	//
+	// The root has more than one anchor during a KSK rollover — the incoming
+	// key is published long before it signs anything — and an oracle given
+	// only one of them would report Bogus for the entire Internet on the day
+	// the roll completes. A lab hierarchy has exactly one, so Anchor stays
+	// for that case.
+	Anchors []dnssec.TrustAnchor
 	// WorkDir is where the generated trust-anchor file is written. A test's
 	// t.TempDir() is the intended value.
 	WorkDir string
@@ -77,7 +85,11 @@ func New(cfg Config) (differential.Reference, error) {
 	if cfg.Forward == "" {
 		return nil, errors.New("refdelv: no server address")
 	}
-	if len(cfg.Anchor.Digest) == 0 {
+	anchors := cfg.Anchors
+	if len(anchors) == 0 && len(cfg.Anchor.Digest) > 0 {
+		anchors = []dnssec.TrustAnchor{cfg.Anchor}
+	}
+	if len(anchors) == 0 {
 		return nil, errors.New("refdelv: no trust anchor")
 	}
 	if cfg.WorkDir == "" {
@@ -92,9 +104,12 @@ func New(cfg Config) (differential.Reference, error) {
 	// BIND's static-ds form: the same fields as a DS record, which is what
 	// makes an anchor checkable against IANA's published value by eye.
 	anchorFile := filepath.Join(cfg.WorkDir, "daddybound-anchor.conf")
-	content := fmt.Sprintf("trust-anchors {\n  %q static-ds %d %d %d %q;\n};\n",
-		cfg.Anchor.Name, cfg.Anchor.KeyTag, cfg.Anchor.Algorithm,
-		cfg.Anchor.DigestType, strings.ToUpper(hexOf(cfg.Anchor.Digest)))
+	content := "trust-anchors {\n"
+	for _, a := range anchors {
+		content += fmt.Sprintf("  %q static-ds %d %d %d %q;\n",
+			a.Name, a.KeyTag, a.Algorithm, a.DigestType, strings.ToUpper(hexOf(a.Digest)))
+	}
+	content += "};\n"
 	if err := os.WriteFile(anchorFile, []byte(content), 0o600); err != nil {
 		return nil, fmt.Errorf("refdelv: writing the anchor file: %w", err)
 	}
@@ -154,51 +169,203 @@ func (o *oracle) Validate(ctx context.Context, qname string, qtype uint16) (diff
 
 // parseDelv maps delv's own words onto the four RFC 4033 states.
 //
-// delv states its conclusion in a comment line rather than in an exit code,
-// and the mapping is deliberately narrow: anything unrecognised is an error
-// rather than a guess, because an oracle that quietly reports Insecure when
-// it actually failed would flatter every comparison it took part in.
+// delv states its conclusion in comment lines rather than in an exit code, and
+// it prints one per RRset it looked at. A CNAME chain therefore produces
+// several: the alias may be "; fully validated" while the record it points at
+// is "; unsigned answer", or while the resolution as a whole failed.
+//
+// Taking the first marker found was a defect in this adapter, and a dangerous
+// one. delv prints the per-RRset comments before the failure line, so a chain
+// whose terminal RRset failed to verify came back as Secure — an oracle
+// reporting agreement where the real validator had refused. In the
+// FALSE_BOGUS direction that is noise; in the other direction it would have
+// let a Daddybound false Secure be recorded as a match, which is the one
+// outcome this suite exists to make impossible.
+//
+// So every marker is collected and the weakest wins, which is the same rule a
+// resolver applies to a chain and the same one Daddybound applies in
+// dnssec.weakest. The mapping stays narrow: output containing no recognised
+// marker is an error rather than a guess.
 func parseDelv(out string) (differential.ReferenceResult, error) {
-	switch {
-	case strings.Contains(out, "; fully validated"):
-		return differential.ReferenceResult{Status: dnssec.StatusSecure}, nil
+	var (
+		found   bool
+		result  differential.ReferenceResult
+		weakest int
+		detail  string
+	)
+	take := func(rank int, r differential.ReferenceResult, d string) {
+		if !found || rank > weakest {
+			found, weakest, result, detail = true, rank, r, d
+		}
+	}
 
-	case strings.Contains(out, "; negative response, fully validated"):
-		return differential.ReferenceResult{Status: dnssec.StatusSecure, Detail: "negative response"}, nil
-
-	case strings.Contains(out, "; unsigned answer"),
-		strings.Contains(out, "; negative response, unsigned answer"):
+	if strings.Contains(out, "; fully validated") ||
+		strings.Contains(out, "; negative response, fully validated") {
+		take(0, differential.ReferenceResult{Status: dnssec.StatusSecure}, "")
+	}
+	if strings.Contains(out, "; unsigned answer") ||
+		strings.Contains(out, "; negative response, unsigned answer") {
 		// delv reports an unsigned answer without distinguishing RFC 4033's
 		// Insecure from its Indeterminate, exactly as libunbound does.
-		return differential.ReferenceResult{
-			Status: dnssec.StatusInsecure, Unresolved: true, Detail: "unsigned answer",
-		}, nil
-
-	case strings.Contains(out, "resolution failed"):
-		return differential.ReferenceResult{
-			Status: dnssec.StatusBogus, Detail: firstDelvReason(out),
-		}, nil
+		take(1, differential.ReferenceResult{
+			Status: dnssec.StatusInsecure, Unresolved: true,
+		}, "unsigned answer")
 	}
-	return differential.ReferenceResult{}, errors.New("delv said nothing this adapter recognises")
+	if strings.Contains(out, "resolution failed") {
+		reason := delvFailureReason(out)
+		switch classifyDelv(out, reason) {
+		case delvNegativeAnswer:
+			// Not a failure at all. delv reports a name error or a NODATA
+			// as "resolution failed: ncache nxdomain" or "ncache nxrrset",
+			// and says separately whether the negative answer validated.
+			// Reading the word "failed" literally turns every correct
+			// NXDOMAIN into a rejection — which is what happened here the
+			// first time this function was rewritten.
+		case delvGaveUp:
+			// delv stopped walking rather than judging the data. That is
+			// its equivalent of Indeterminate, and recording it as Bogus
+			// would manufacture a disagreement out of two validators
+			// choosing different budgets.
+			take(2, differential.ReferenceResult{
+				Status: dnssec.StatusIndeterminate, Unresolved: true,
+			}, reason)
+		default:
+			// Rejected. The detail is the most specific line delv printed
+			// rather than the canonical reason, because this is the string
+			// a human reads out of a failing differential test and
+			// "broken trust chain resolving 'example/DNSKEY/IN'" localises
+			// the problem where "broken trust chain" does not. The verdict
+			// above was decided from the canonical reason; only the prose
+			// comes from here.
+			take(3, differential.ReferenceResult{Status: dnssec.StatusBogus}, firstDelvReason(out))
+		}
+	}
+
+	if !found {
+		return differential.ReferenceResult{}, errors.New("delv said nothing this adapter recognises")
+	}
+	result.Detail = detail
+	return result, nil
 }
 
-// firstDelvReason extracts the most specific line delv gave, for a human
-// reading a failure. Never parsed for a decision.
+// How to read a "resolution failed" line from delv.
+//
+// The word "failed" covers three different things, and telling them apart is
+// the difference between an oracle that reports what delv concluded and one
+// that reports what it printed.
+type delvFailureKind int
+
+const (
+	// delvRejected: delv judged the data and refused it.
+	delvRejected delvFailureKind = iota
+	// delvNegativeAnswer: a name error or NODATA, which delv reports through
+	// the same line. Whether it validated is said elsewhere.
+	delvNegativeAnswer
+	// delvGaveUp: delv stopped walking — a budget, not a verdict.
+	delvGaveUp
+)
+
+// delvFailureReason returns the text after "resolution failed:".
+//
+// This is the single reader of that line. Classification below depends on it,
+// and so does the human-facing message, because two readers of the same line
+// is how one of them drifts: the first version of this adapter had exactly
+// that, with classification routed through firstDelvReason, whose prefix
+// match expected one semicolon where delv prints two. It returned "", every
+// reason fell through to the rejecting default arm, and every authenticated
+// NXDOMAIN in the suite was recorded as a disagreement.
+func delvFailureReason(out string) string {
+	const marker = "resolution failed:"
+	for _, line := range strings.Split(out, "\n") {
+		if i := strings.Index(line, marker); i >= 0 {
+			return strings.TrimSpace(line[i+len(marker):])
+		}
+	}
+	return ""
+}
+
+// classifyDelv decides what delv meant, reading its generic reason against
+// the specific line above it when there is one.
+//
+// delv's canonical reason is sometimes the catch-all "failure", with the
+// actual diagnosis printed on the preceding line. A timeout is the common
+// case:
+//
+//	;; timed out resolving 'www.github.com/TXT/IN': 1.1.1.1#53
+//	;; resolution failed: failure
+//
+// Classifying on the canonical line alone reads that as a rejection, and the
+// corpus then records a manufactured Bogus for a query that never got an
+// answer at all — an oracle blaming a zone for the network. A timeout is
+// never a verdict, so the catch-all defers to the specific line.
+//
+// Only the catch-all defers. A named reason — "RRSIG failed to verify",
+// "broken trust chain" — is delv's own diagnosis and is taken as given, so a
+// transport hiccup elsewhere in a long chain cannot talk a real rejection
+// down into "no opinion".
+func classifyDelv(out, reason string) delvFailureKind {
+	if kind := classifyDelvFailure(reason); reason != "" && reason != "failure" {
+		return kind
+	}
+	if specific := firstDelvReason(out); specific != "" && specific != reason {
+		return classifyDelvFailure(specific)
+	}
+	return classifyDelvFailure(reason)
+}
+
+// classifyDelvFailure decides which of the three things delv means by
+// "resolution failed".
+//
+// This is the one place the adapter reads prose to make a decision, and it is
+// only tolerable because delv has no exit code that distinguishes these and
+// because the strings are delv's own fixed vocabulary rather than free text.
+// Nothing downstream of it reaches Daddybound: the result is the *oracle's*
+// verdict, never the validator's.
+//
+// The default arm rejects. An unrecognised reason must not be read as a
+// budget, because the comparison layer excuses an oracle that could not
+// decide — so a future delv wording landing in delvGaveUp would silently turn
+// real rejections into "no opinion", which is the direction that hides a
+// Daddybound false Secure.
+func classifyDelvFailure(reason string) delvFailureKind {
+	switch {
+	case strings.Contains(reason, "ncache nxdomain"),
+		strings.Contains(reason, "ncache nxrrset"):
+		return delvNegativeAnswer
+	case strings.Contains(reason, "quota reached"),
+		strings.Contains(reason, "timed out"),
+		strings.Contains(reason, "too many"),
+		strings.Contains(reason, "maximum number"),
+		strings.Contains(reason, "no servers could be reached"),
+		strings.Contains(reason, "network unreachable"),
+		strings.Contains(reason, "connection refused"):
+		return delvGaveUp
+	default:
+		return delvRejected
+	}
+}
+
+// firstDelvReason builds the message a human reads in a test failure. It
+// prefers whichever line localises the problem best and falls back to the
+// canonical reason. Never parsed for a decision — classifyDelvFailure is.
 func firstDelvReason(out string) string {
-	var fallback string
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, ";; no valid "),
 			strings.HasPrefix(line, ";; validating") && strings.Contains(line, "failed"),
 			strings.HasPrefix(line, ";; broken trust chain"),
-			strings.HasPrefix(line, ";; got insecure response"):
+			strings.HasPrefix(line, ";; got insecure response"),
+			// Transport, not validation. Listed here so that classifyDelv
+			// can see it when the canonical reason is the catch-all, and so
+			// that a human reading a failure is told the query never
+			// arrived rather than being shown the word "failure".
+			strings.HasPrefix(line, ";; timed out resolving"),
+			strings.HasPrefix(line, ";; no servers could be reached"):
 			return line
-		case strings.HasPrefix(line, "; resolution failed:") && fallback == "":
-			fallback = line
 		}
 	}
-	return fallback
+	return delvFailureReason(out)
 }
 
 func delvVersion() string {

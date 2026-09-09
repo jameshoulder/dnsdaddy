@@ -60,11 +60,17 @@ failed to compile without the tag would break `go build ./...` for everyone.
 ### The command surface
 
 `dnsdaddy daddybound` runs the in-memory laboratory and prints what the engine
-concluded. There is no flag that points it at the Internet or at a running
-deployment — not because one was withheld, but because v0.1 performs no
-recursive resolution and there is nothing to point at a real name with. Adding
-a switch that appeared to do so would be the most misleading thing the command
-could offer.
+concluded. There is no flag that points it at a running deployment. Adding a
+switch that appeared to wire Daddybound into the query path would be the most
+misleading thing the command could offer, and the isolation it would seem to
+break is asserted over the import graph rather than left to the absence of a
+flag.
+
+Real Internet names are reachable — the live differential corpus points the
+engine at a recursive resolver — but through a test rather than a subcommand.
+That is the honest place for it: the corpus needs the network, both reference
+validators and several minutes, and what it produces is a comparison report,
+not an answer anyone should act on.
 
 ## What Daddybound is trusted to say
 
@@ -89,16 +95,37 @@ Two rules keep that honest:
   where there is "a trust anchor and a secure delegation indicating that
   subsidiary data is signed". A failure before that point is Indeterminate.
 
-### Insecure is unreachable, and says so
+### Insecure is only ever reached by proving something
 
-RFC 4033's Insecure means *signed proof* that no DS exists. Producing that
-proof needs NSEC or NSEC3, and v0.1 implements neither. So no code path
-returns Insecure. Where a complete validator would — an unsupported algorithm,
-an unusable digest, a delegation with no DS — Daddybound returns Indeterminate
-with a specific reason. A weaker claim, and a true one.
+RFC 4033's Insecure is a claim, not a shrug: it tells a consumer that unsigned
+data here is expected and legitimate. So Daddybound reaches it only from
+authenticated evidence, by one of exactly two routes.
+
+**A signed proof that no DS exists** — an authenticated denial record at a
+delegation showing NS present and DS absent. This is the ordinary insecure
+delegation, and it is the majority of the Insecure verdicts anything will see.
+
+**An authenticated NSEC3 Opt-Out span** covering the name whose absence a
+proof depends on. RFC 5155 §12.2 states that opt-out costs "the ability to
+prove the existence or nonexistence of an insecure delegation within the span
+of an Opt-Out NSEC3 RR", and §7.1 permits a signer to omit only unsigned
+delegations from the chain — so a name inside such a span either does not
+exist or is unsigned, and §12.2 settles the verdict: "All unsigned names are,
+by definition, insecure." This route exists because the alternative is worse:
+reporting Secure for a non-existence the standard says is not provable. It is
+`R-N3-13`, and the reference validators disagree with each other about it —
+libunbound reports insecure, delv reports a validated name error.
+
+Stated in the negative, because every wrong implementation of Insecure is a
+downgrade. It is **not**: a missing signature, an unsupported algorithm, a
+digest policy refuses, a failed validation, an unexpectedly absent DNSKEY, a
+timeout, malformed DNSSEC records, an NSEC3 iteration count above the budget,
+or "could not prove Secure". Each of those is Bogus or Indeterminate.
 
 Returning Insecure because an RFC's sentence ends in that word, without the
-proof the same RFC requires to reach it, would be a fabricated verdict.
+proof the same RFC requires to reach it, would be a fabricated verdict — and a
+fabricated verdict in the one direction an enforcing resolver would read as
+permission.
 
 ## The P0 failure class
 
@@ -114,13 +141,21 @@ justification and thereby rebut a false-Bogus classification; it can never
 rebut a false Secure, because `Classify` has already returned by then. No case
 added below that line can quiet it.
 
-Current count across the laboratory scenarios, against **both** reference
-validators: **0 false secures**. Sabotaging the verifier to accept a signature
-because one was present — the classic form of this bug — makes four scenarios
-report it, which is how we know the check does something.
+Current count against **both** reference validators: **0 false secures**,
+across 78 laboratory scenarios and 612 questions put to the live Internet.
+Sabotaging the verifier to accept a signature because one was present — the
+classic form of this bug — makes four scenarios report it, which is how we
+know the check does something.
 
-That number is evidence about eighteen hand-built scenarios and nothing more.
-See [validation-lab.md](validation-lab.md) for what it does not cover.
+The live corpus is the more interesting half of that number, because it is the
+half nobody designed. It found two defects on its first runs, both false
+Bogus and both in shapes no laboratory scenario reached: a name error whose
+closest encloser is the root, and a delegation response carrying the parent's
+DS as context. Neither could have produced a false Secure. Both are now
+scenarios as well.
+
+See [validation-lab.md](validation-lab.md) for what the evidence does not
+cover — and it is a sample of the DNS, not a survey of it.
 
 ## Trust anchors
 

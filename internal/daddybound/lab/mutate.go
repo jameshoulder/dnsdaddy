@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/miekg/dns"
 
@@ -658,12 +660,19 @@ func (h *Hierarchy) resignInParent(childZone string, rrtype uint16) error {
 	return h.Replace(parent.Name, childZone, rrtype, scratch.sets[setKey{name: dns.CanonicalName(childZone), rrtype: rrtype}])
 }
 
-// parentOf returns the zone directly above name in this hierarchy.
+// parentOf returns the zone that delegates name.
+//
+// Read from the recorded delegations rather than from position in the zone
+// list. The list is not a chain: two zones may be delegated from the same
+// parent, which is exactly the shape needed to have one secure delegation and
+// one insecure one in the same hierarchy. Taking "the zone before this one"
+// as the parent worked only while every hierarchy was a straight line, and
+// returned a sibling as soon as one was not.
 func (h *Hierarchy) parentOf(name string) *Zone {
 	name = dns.CanonicalName(name)
-	for i, z := range h.Zones {
-		if z.Name == name && i > 0 {
-			return h.Zones[i-1]
+	for _, z := range h.Zones {
+		if z.delegations[name] {
+			return z
 		}
 	}
 	return nil
@@ -684,4 +693,521 @@ func shiftSerial(base uint32, seconds int64) uint32 {
 	// signature rather than a corrupt one. Reducing modulo 2^32 first keeps
 	// the addition inside the field's own arithmetic.
 	return base + uint32(seconds%(1<<32))
+}
+
+// RemoveNSEC deletes one NSEC RRset and its signature from a zone.
+//
+// This is how a proof is made incomplete without being made invalid:
+// everything still present verifies, and what is missing is the part that
+// would have completed the argument. Removing the wildcard denial from an
+// NXDOMAIN is the canonical case, and a validator that stops after the first
+// covering record accepts it.
+func (h *Hierarchy) RemoveNSEC(zoneName, owner string) error {
+	if h.Set(zoneName, owner, dns.TypeNSEC) == nil {
+		return fmt.Errorf("lab: no NSEC at %s in %s to remove", owner, zoneName)
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC, nil)
+}
+
+// SetNSECBitmap rewrites the type bitmap of one NSEC and re-signs it.
+//
+// Re-signing matters: the point of these scenarios is a *validly signed*
+// record that says the wrong thing, because a record with a broken signature
+// is caught by machinery that already exists and proves nothing about the
+// denial logic.
+func (h *Hierarchy) SetNSECBitmap(zoneName, owner string, types []uint16) error {
+	return h.mutateNSEC(zoneName, owner, func(n *dns.NSEC) { n.TypeBitMap = types })
+}
+
+// SetNSECNext rewrites the Next Domain Name of one NSEC and re-signs it.
+func (h *Hierarchy) SetNSECNext(zoneName, owner, next string) error {
+	return h.mutateNSEC(zoneName, owner, func(n *dns.NSEC) { n.NextDomain = dns.CanonicalName(next) })
+}
+
+// mutateNSEC applies a change to an NSEC record and re-signs it with the
+// zone's own key, so the result is a genuine statement by that zone.
+func (h *Hierarchy) mutateNSEC(zoneName, owner string, apply func(*dns.NSEC)) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC at %s in %s", owner, zoneName)
+	}
+
+	kept := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		nsec, ok := rr.(*dns.NSEC)
+		if !ok {
+			continue // the old signature is discarded; a new one replaces it
+		}
+		clone, ok := dns.Copy(nsec).(*dns.NSEC)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC at %s did not produce an NSEC", owner)
+		}
+		apply(clone)
+		kept = append(kept, clone)
+	}
+	if len(kept) == 0 {
+		return fmt.Errorf("lab: nothing to re-sign at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, kept); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC}])
+}
+
+// responseOverride replaces part of the response to one specific question.
+//
+// The mutations above all break the zone. This one leaves the zone perfectly
+// correct and breaks the *response*, which is a different attacker and a
+// different class of bug. An on-path attacker cannot forge a signature, but
+// they can drop records, and they can move a genuinely signed record from the
+// place it belongs to a place where it appears to prove something else. Every
+// record planted this way is a real record this hierarchy really signed.
+type responseOverride struct {
+	rcode     *int
+	authority []dns.RR
+	set       bool
+	answer    []dns.RR
+	answerSet bool
+}
+
+// SubstituteAnswer replaces the answer section of the answer to one question.
+//
+// The counterpart of SubstituteAuthority, and it exists for the chain fuzzer:
+// a CNAME chain, a DNAME redirection and a positive answer are all "records
+// in the answer section", so an attacker who can write that section can offer
+// any of them. Nothing else in this hierarchy changes, so the chain of trust
+// above the substituted name stays genuine and the only unknown is what the
+// answer claims.
+func (h *Hierarchy) SubstituteAnswer(qname string, rrtype uint16, records []dns.RR) {
+	h.override(qname, rrtype, func(o *responseOverride) {
+		o.answer = records
+		o.answerSet = true
+	})
+}
+
+// SubstituteAuthority replaces the authority section of the answer to one
+// question. An empty slice strips the section entirely, which is what an
+// attacker who wants a claim to go unproved does.
+func (h *Hierarchy) SubstituteAuthority(qname string, rrtype uint16, records []dns.RR) {
+	h.override(qname, rrtype, func(o *responseOverride) {
+		o.authority = records
+		o.set = true
+	})
+}
+
+// ForceRcode changes the response code for one question, leaving every record
+// alone.
+//
+// This is the cheapest attack there is — one field of a header, no
+// cryptography involved — and it is how a NODATA becomes an NXDOMAIN. The
+// records that arrive alongside it are genuine and verify; the question is
+// whether they prove the stronger claim the attacker substituted.
+func (h *Hierarchy) ForceRcode(qname string, rrtype uint16, rcode int) {
+	h.override(qname, rrtype, func(o *responseOverride) { o.rcode = &rcode })
+}
+
+func (h *Hierarchy) override(qname string, rrtype uint16, apply func(*responseOverride)) {
+	if h.overrides == nil {
+		h.overrides = make(map[setKey]*responseOverride)
+	}
+	k := setKey{name: dns.CanonicalName(qname), rrtype: rrtype}
+	if h.overrides[k] == nil {
+		h.overrides[k] = &responseOverride{}
+	}
+	apply(h.overrides[k])
+}
+
+// SetNSEC3Hash relabels the hash algorithm on a zone's NSEC3 records and
+// re-signs them, without changing the hashes themselves.
+//
+// The records stay perfectly valid signed statements by the zone; only the
+// field naming how they were computed changes. That is the point: RFC 5155
+// §8.1 requires a validator to ignore such records, and ignoring them has to
+// mean concluding nothing rather than falling back on the response code.
+func (h *Hierarchy) SetNSEC3Hash(zoneName string, alg uint8) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	owners := make([]string, 0, len(z.sets))
+	for k := range z.sets {
+		if k.rrtype == dns.TypeNSEC3 {
+			owners = append(owners, k.name)
+		}
+	}
+	if len(owners) == 0 {
+		return fmt.Errorf("lab: %s publishes no NSEC3 records", zoneName)
+	}
+	sort.Strings(owners)
+	for _, owner := range owners {
+		if err := h.mutateNSEC3(zoneName, owner, func(n *dns.NSEC3) { n.Hash = alg }); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mutateNSEC3 applies a change to an NSEC3 record and re-signs it with the
+// zone's own key.
+func (h *Hierarchy) mutateNSEC3(zoneName, owner string, apply func(*dns.NSEC3)) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC3)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC3 at %s in %s", owner, zoneName)
+	}
+
+	kept := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		n, ok := rr.(*dns.NSEC3)
+		if !ok {
+			continue
+		}
+		clone, ok := dns.Copy(n).(*dns.NSEC3)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC3 at %s did not produce an NSEC3", owner)
+		}
+		apply(clone)
+		kept = append(kept, clone)
+	}
+	if len(kept) == 0 {
+		return fmt.Errorf("lab: nothing to re-sign at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, kept); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC3,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC3}])
+}
+
+// ReownNSEC3 moves one NSEC3 record to a different zone suffix, keeping its
+// hashed-owner label, and re-signs it with the same zone's key.
+//
+// The result is a record the zone genuinely signed, whose hash label still
+// matches the name it always matched, sitting at an owner name that places it
+// in a different zone. RFC 5155 §7.1 says an NSEC3 owner is "the hash of the
+// original owner name, prepended as a single label to the zone name", so a
+// validator that compares only the label will accept a statement about a zone
+// the signer has no authority over.
+func (h *Hierarchy) ReownNSEC3(zoneName, owner, newSuffix string) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC3)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC3 at %s in %s", owner, zoneName)
+	}
+
+	label := strings.SplitN(dns.CanonicalName(owner), ".", 2)[0]
+	moved := label + "." + dns.CanonicalName(newSuffix)
+
+	kept := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		n, ok := rr.(*dns.NSEC3)
+		if !ok {
+			continue
+		}
+		clone, ok := dns.Copy(n).(*dns.NSEC3)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC3 at %s did not produce an NSEC3", owner)
+		}
+		clone.Hdr.Name = moved
+		kept = append(kept, clone)
+	}
+	if len(kept) == 0 {
+		return fmt.Errorf("lab: nothing to move at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, kept); err != nil {
+		return err
+	}
+	if err := h.Replace(zoneName, owner, dns.TypeNSEC3, nil); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, moved, dns.TypeNSEC3,
+		scratch.sets[setKey{name: moved, rrtype: dns.TypeNSEC3}])
+}
+
+// SetNSEC3Flags rewrites the Flags field of one NSEC3 record and re-signs it.
+//
+// The field carries the Opt-Out bit, which is the difference between "no
+// record here means nothing" and "no record here means this is an insecure
+// delegation". Clearing it on a record a proof depends on leaves the proof
+// resting on an omission, which RFC 5155 §8.6 and §8.9 both refuse.
+func (h *Hierarchy) SetNSEC3Flags(zoneName, owner string, flags uint8) error {
+	return h.mutateNSEC3(zoneName, owner, func(n *dns.NSEC3) { n.Flags = flags })
+}
+
+// AddSecondNSEC publishes a second NSEC record at an owner name that already
+// has one, and signs the pair as a single RRset.
+//
+// This is a broken zone rather than a forged response: RFC 4034 §4.1 describes
+// one NSEC per name and RFC 5155 §7.1 step 6 tells a signer to combine records
+// with identical hashed owner names into one. But nothing stops a signer
+// emitting two, both are then genuinely signed, and a validator that reads
+// "the" record at a name has to decide which. An attacker on the path chooses
+// the order they arrive in, so if that decides the verdict, it is the
+// attacker's verdict.
+func (h *Hierarchy) AddSecondNSEC(zoneName, owner string, apply func(*dns.NSEC)) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC at %s in %s", owner, zoneName)
+	}
+
+	var pair []dns.RR
+	for _, rr := range records {
+		n, ok := rr.(*dns.NSEC)
+		if !ok {
+			continue
+		}
+		pair = append(pair, dns.Copy(n))
+		second, ok := dns.Copy(n).(*dns.NSEC)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC at %s did not produce an NSEC", owner)
+		}
+		apply(second)
+		pair = append(pair, second)
+		break
+	}
+	if len(pair) != 2 {
+		return fmt.Errorf("lab: could not build a second NSEC at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, pair); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC}])
+}
+
+// NSEC3OwnerFor returns the NSEC3 owner name that matches a name in this zone,
+// or "" if the zone publishes none there.
+func (z *Zone) NSEC3OwnerFor(name string) string {
+	h := dns.HashName(name, z.n3alg, z.n3iter, z.n3salt)
+	if h == "" {
+		return ""
+	}
+	owner := nsec3Owner(h, z.Name)
+	if len(z.sets[setKey{name: owner, rrtype: dns.TypeNSEC3}]) == 0 {
+		return ""
+	}
+	return owner
+}
+
+// AddSecondNSEC3 publishes a second NSEC3 at an owner that already has one and
+// signs the pair as one RRset. The NSEC3 counterpart of AddSecondNSEC, and the
+// case RFC 5155 §7.1 step 6 tells signers to avoid by taking the union.
+func (h *Hierarchy) AddSecondNSEC3(zoneName, owner string, apply func(*dns.NSEC3)) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeNSEC3)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no NSEC3 at %s in %s", owner, zoneName)
+	}
+
+	var pair []dns.RR
+	for _, rr := range records {
+		n, ok := rr.(*dns.NSEC3)
+		if !ok {
+			continue
+		}
+		pair = append(pair, dns.Copy(n))
+		second, ok := dns.Copy(n).(*dns.NSEC3)
+		if !ok {
+			return fmt.Errorf("lab: copying the NSEC3 at %s did not produce an NSEC3", owner)
+		}
+		apply(second)
+		pair = append(pair, second)
+		break
+	}
+	if len(pair) != 2 {
+		return fmt.Errorf("lab: could not build a second NSEC3 at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, pair); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeNSEC3,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeNSEC3}])
+}
+
+// AddSecondCNAME publishes a second CNAME at a name that already has one and
+// signs the pair as one RRset.
+//
+// RFC 2181 §10.1 forbids it, which is exactly why it is worth building: the
+// records are genuinely signed, so a validator cannot dismiss them on the
+// cryptography, and it has to decide what to do with a name that redirects to
+// two places.
+func (h *Hierarchy) AddSecondCNAME(zoneName, owner, target string) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+	records := h.Set(zoneName, owner, dns.TypeCNAME)
+	if len(records) == 0 {
+		return fmt.Errorf("lab: no CNAME at %s in %s", owner, zoneName)
+	}
+
+	var pair []dns.RR
+	for _, rr := range records {
+		c, ok := rr.(*dns.CNAME)
+		if !ok {
+			continue
+		}
+		pair = append(pair, dns.Copy(c), &dns.CNAME{
+			Hdr:    dns.RR_Header{Name: c.Hdr.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: c.Hdr.Ttl},
+			Target: dns.CanonicalName(target),
+		})
+		break
+	}
+	if len(pair) != 2 {
+		return fmt.Errorf("lab: could not build a second CNAME at %s", owner)
+	}
+
+	scratch := &Zone{
+		Name: z.Name, Key: z.Key, Signer: z.Signer,
+		Algorithm: z.Algorithm, DigestType: z.DigestType,
+		sets: make(map[setKey][]dns.RR),
+	}
+	if err := scratch.addSigned(h.spec, pair); err != nil {
+		return err
+	}
+	return h.Replace(zoneName, owner, dns.TypeCNAME,
+		scratch.sets[setKey{name: dns.CanonicalName(owner), rrtype: dns.TypeCNAME}])
+}
+
+// CorruptDenialFor breaks the signature on every denial record the zone would
+// send to justify an absence at qname.
+//
+// Derived rather than listed, and that is the whole reason it exists. A
+// scenario that names the NSEC owners it wants to corrupt is a scenario tied
+// to the zone's current shape: adding one name to the zone moves which record
+// covers which interval, and the fixture then corrupts a record that is no
+// longer part of the proof while leaving the one that is. The scenario keeps
+// passing — the verdict is still Bogus — for a reason that no longer matches
+// what it says it tests, and nothing points that out. That happened here when
+// a DNAME was added to the standard hierarchy.
+//
+// Asking the zone which records it would actually send keeps the fixture and
+// its stated intent in step however the zone changes.
+func (h *Hierarchy) CorruptDenialFor(zoneName, qname string, rrtype uint16, rcode int) error {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return fmt.Errorf("lab: no zone %s", zoneName)
+	}
+
+	// Owners rather than records: the proof is a set of RRsets, and it is
+	// the RRset's signature that has to break.
+	owners := map[setKey]bool{}
+	for _, rr := range h.denialFor(z, dns.CanonicalName(qname), rrtype, rcode) {
+		h := rr.Header()
+		switch h.Rrtype {
+		case dns.TypeNSEC, dns.TypeNSEC3:
+			owners[setKey{name: dns.CanonicalName(h.Name), rrtype: h.Rrtype}] = true
+		}
+	}
+	if len(owners) == 0 {
+		return fmt.Errorf("lab: %s sends no denial records for %s", zoneName, qname)
+	}
+
+	for k := range owners {
+		if err := h.CorruptSignature(zoneName, k.name, k.rrtype); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// BreakSignatureFirstInOrder corrupts the nth signature over an RRset and
+// makes it sort before every other signature on that RRset.
+//
+// The sorting half is what makes the scenario mean anything. A validator
+// trying several signatures over one RRset must continue past one that fails
+// — RFC 6840 §5.4: "only determine that an RRset is Bogus if all RRSIGs fail
+// validation" — and a fixture that merely adds a broken signature does not
+// test that at all if the good one happens to be tried first. Daddybound
+// orders signatures by labels, key tag, algorithm and then by the signature
+// bytes, precisely so the order is a function of the set rather than of how
+// the response arrived; that makes the order predictable, and this makes it
+// predictable in the direction the test needs.
+//
+// Zeroing the leading octets is how. Base64 of a zero octet begins with 'A',
+// which is the lowest character the alphabet produces, so the result sorts
+// first. The signature stays the right length for its algorithm and stays
+// fully admissible — same key tag, same algorithm, same validity — so it
+// reaches the verifier and fails there, which is the case the RFC is about.
+// A signature naming a key tag the zone does not publish would be discarded
+// before any arithmetic and would prove only that an inapplicable signature
+// is skipped.
+func (h *Hierarchy) BreakSignatureFirstInOrder(zoneName, owner string, rrtype uint16, n int) error {
+	records := h.Set(zoneName, owner, rrtype)
+	seen := 0
+	broken := false
+	for i, rr := range records {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok {
+			continue
+		}
+		if seen != n {
+			seen++
+			continue
+		}
+		c := dns.Copy(sig).(*dns.RRSIG)
+		raw, err := base64.StdEncoding.DecodeString(c.Signature)
+		if err != nil || len(raw) < 8 {
+			return fmt.Errorf("lab: signature %d on %s %s is not decodable", n, owner, dns.TypeToString[rrtype])
+		}
+		for j := 0; j < 8; j++ {
+			raw[j] = 0
+		}
+		c.Signature = base64.StdEncoding.EncodeToString(raw)
+		records[i] = c
+		broken = true
+		break
+	}
+	if !broken {
+		return fmt.Errorf("lab: %s %s has no signature %d", owner, dns.TypeToString[rrtype], n)
+	}
+	return h.Replace(zoneName, owner, rrtype, records)
 }

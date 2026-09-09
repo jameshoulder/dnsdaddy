@@ -8,20 +8,55 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Response is what a Source returns for one question.
+//
+// The authority section is not decoration. Authenticated denial of existence
+// — the proof that a name or a type does not exist — is carried there and
+// nowhere else, so a Source that returned only answers could never support
+// anything but positive validation. That was the shape of the earlier
+// interface, and it is why Insecure was unreachable.
+type Response struct {
+	// Rcode is the response code. NXDOMAIN and NOERROR are the two that
+	// carry different denial obligations, and a validator must not take
+	// either on trust: the rcode says what the server claims, and the
+	// authority section is where it has to prove it.
+	Rcode int
+
+	// Answer holds the records that answer the question, with their RRSIGs.
+	Answer []dns.RR
+
+	// Authority holds the records that justify the absence of an answer —
+	// NSEC, NSEC3, SOA, and the NS RRset of a delegation — with their
+	// RRSIGs.
+	Authority []dns.RR
+}
+
 // Source supplies the records a chain walk needs.
 //
-// It is the seam between validation and retrieval, and it exists so that
-// v0.1 can validate a complete, deterministic hierarchy offline while the
+// It is the seam between validation and retrieval, and it exists so that the
+// engine can validate a complete, deterministic hierarchy offline while the
 // same validation code later runs against a real resolver. Nothing above this
 // interface knows or cares where records came from.
 //
-// A Source returns the records for one (name, type) including any covering
-// RRSIGs. Returning no records and no error means "this name has no records
-// of this type as far as I know" — which, crucially, is not the same as a
-// proof that none exist. The chain walk treats the two very differently; see
-// the discussion of unproven gaps in Validate.
+// Returning an empty Response and no error means "I have nothing for this
+// question" — which, crucially, is not a proof that nothing exists. A proof
+// is a signed denial record in the authority section, and the difference
+// between the two is the difference between Insecure and Indeterminate.
+//
+// Truncation is the Source's problem and deliberately not represented here.
+// A DNS message that sets TC has records the sender could not fit, and
+// recovering them means asking again over TCP — a transport decision, made
+// where the transport is. Nothing above this interface can tell a truncated
+// response from a short one, and nothing needs to: a response missing records
+// is a response whose claims are unproved, so the verdict is Indeterminate or
+// Bogus. The failure mode is refusing an answer that was fine, never
+// accepting one that was not.
+//
+// netsource does the TCP retry and counts it. A Source that did not would
+// make Daddybound conservative rather than wrong, which is the right way for
+// that seam to fail.
 type Source interface {
-	Lookup(ctx context.Context, name string, rrtype uint16) ([]dns.RR, error)
+	Lookup(ctx context.Context, name string, rrtype uint16) (Response, error)
 }
 
 // Limits bound the work one validation may do.
@@ -43,12 +78,82 @@ type Limits struct {
 	MaxSignatures int
 	// MaxKeys bounds DNSKEYs considered in one zone's apex RRset.
 	MaxKeys int
+
+	// MaxNSEC3Iterations is the highest NSEC3 iteration count this
+	// validator will compute. A record above it is set aside with
+	// ReasonResourceLimit, which is Indeterminate — never Insecure.
+	//
+	// RFC 9276 §3.1 tells zones to publish 0, and §3.2 offers validators two
+	// permissions for anything larger: report insecure, or refuse. Taking
+	// the first would let an attacker downgrade a signed zone by publishing
+	// an expensive NSEC3, and RFC 9276 §3.2 says so itself — "treating a
+	// high iterations count as insecure leaves zones subject to attack" — so
+	// this validator takes the second.
+	MaxNSEC3Iterations int
+
+	// MaxAliasHops bounds how many CNAMEs one resolution may follow.
+	//
+	// A chain arrives from the network and each hop costs a full walk from
+	// the trust anchor. RFC 1034 sets no limit and real resolvers pick one;
+	// this is generous next to any legitimate chain and small enough that
+	// reaching it is cheap. Reaching it is Indeterminate, never Bogus: a
+	// deeply aliased zone is unusual, not forged.
+	MaxAliasHops int
+
+	// MaxAnyRRsets bounds how many distinct types one QTYPE=* answer may
+	// carry. RFC 6840 §4.2 requires every one of them to be validated, so
+	// the number of public-key operations an ANY query costs is chosen by
+	// whoever sends the response.
+	MaxAnyRRsets int
+
+	// MaxDenialRecords bounds how many denial RRsets one response may have
+	// authenticated.
+	//
+	// Each one costs a canonicalisation and, usually, a public-key
+	// operation, and the number of them is chosen by whoever sent the
+	// response. A correct proof needs at most a handful — RFC 4035 §5.4 and
+	// RFC 5155 §7.2 both describe proofs of three or four records — so a
+	// response carrying hundreds is not a proof, it is a bill.
+	//
+	// Stopping early is recorded rather than hidden: a proof that then fails
+	// is reported as a limit rather than as a fault in the data, because a
+	// validator that stopped reading has no business accusing anyone.
+	MaxDenialRecords int
+
+	// MaxNSEC3Hashes bounds the total hash computations one validation may
+	// perform.
+	//
+	// Separate from the iteration ceiling because the cost is the product of
+	// two attacker-chosen numbers. Bounding iterations alone leaves them free
+	// to send many records; bounding records alone leaves them free to make
+	// each one expensive.
+	MaxNSEC3Hashes int
 }
 
 // DefaultLimits are generous enough that no correctly operated zone meets
 // them and small enough that meeting one is cheap.
 func DefaultLimits() Limits {
-	return Limits{MaxZones: 24, MaxLookups: 64, MaxSignatures: 16, MaxKeys: 16}
+	return Limits{
+		MaxZones: 24, MaxLookups: 64, MaxSignatures: 16, MaxKeys: 16,
+		// 100 is not a round number chosen for looking sensible. RFC 9276
+		// Appendix A reports it as the measured point at which an upper
+		// limit "is interoperable without significant problems", and the
+		// same appendix notes that even this "still enables CPU-exhausting
+		// DoS attacks" — which is why the total-hash budget exists as well.
+		MaxNSEC3Iterations: 100,
+		MaxAliasHops:       12,
+		// More distinct types at one name than any real name carries, and
+		// far fewer than the 65535 an answer section could name.
+		MaxAnyRRsets: 32,
+		// Eight times what the largest correct proof in this suite needs,
+		// and small enough that reaching it is free.
+		MaxDenialRecords: 32,
+		// Enough for a deep name's full closest-encloser walk at the
+		// iteration ceiling, and nowhere near enough to be a lever: at 100
+		// iterations this is a few thousand SHA-1 computations, bounded per
+		// validation rather than per record.
+		MaxNSEC3Hashes: 4096,
+	}
 }
 
 // Config is everything a Validator needs besides its Source.
@@ -91,6 +196,27 @@ func New(src Source, cfg Config) *Validator {
 	if cfg.Limits.MaxZones == 0 {
 		cfg.Limits = DefaultLimits()
 	}
+	// The NSEC3 bounds were added after the others, so a caller with a
+	// hand-built Limits from before them would otherwise get zero — which
+	// would refuse every NSEC3 record in existence, including the iteration
+	// count of 0 that RFC 9276 tells zones to publish. A zero here means
+	// "not set", not "permit nothing"; the policy layer is where an explicit
+	// deny-all belongs, and it says so with its own flag.
+	if cfg.Limits.MaxNSEC3Iterations == 0 {
+		cfg.Limits.MaxNSEC3Iterations = DefaultLimits().MaxNSEC3Iterations
+	}
+	if cfg.Limits.MaxNSEC3Hashes == 0 {
+		cfg.Limits.MaxNSEC3Hashes = DefaultLimits().MaxNSEC3Hashes
+	}
+	if cfg.Limits.MaxDenialRecords == 0 {
+		cfg.Limits.MaxDenialRecords = DefaultLimits().MaxDenialRecords
+	}
+	if cfg.Limits.MaxAliasHops == 0 {
+		cfg.Limits.MaxAliasHops = DefaultLimits().MaxAliasHops
+	}
+	if cfg.Limits.MaxAnyRRsets == 0 {
+		cfg.Limits.MaxAnyRRsets = DefaultLimits().MaxAnyRRsets
+	}
 	return &Validator{src: src, cfg: cfg}
 }
 
@@ -103,6 +229,21 @@ type walk struct {
 	rec     *recorder
 	now     time.Time
 	lookups int
+
+	// hashes is the NSEC3 hash allowance for this whole validation.
+	//
+	// One per walk rather than one per response, and the difference is a
+	// factor of hundreds. A validation collects a denial proof for every
+	// candidate zone cut, again for the answer, again for a wildcard
+	// justification, and all of that again for each hop of a CNAME chain. A
+	// per-response budget therefore bounds nothing an attacker cares about:
+	// the reachable total was MaxAliasHops × MaxZones × MaxNSEC3Hashes, some
+	// twelve hundred times the number the limit's documentation claims.
+	//
+	// Found by a review bot reading the limit's doc comment against its
+	// construction — which is the check a person skips, because the comment
+	// says "one validation" and the code is three files away.
+	hashes *hashBudget
 }
 
 // Validate walks the chain of trust for one RRset and returns the verdict
@@ -114,14 +255,103 @@ type walk struct {
 func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) ValidationResult {
 	qname := dns.CanonicalName(name)
 	now := v.cfg.Clock.Now()
-	w := &walk{v: v, ctx: ctx, rec: newRecorder(qname, rrtype, now), now: now}
+	w := &walk{
+		v: v, ctx: ctx, rec: newRecorder(qname, rrtype, now), now: now,
+		hashes: &hashBudget{remaining: v.cfg.Limits.MaxNSEC3Hashes},
+	}
+	return w.chase(qname, rrtype)
+}
 
-	anchorName, anchors := v.cfg.Anchors.deepestFor(qname)
+// chase resolves a name, following CNAMEs, and combines what it finds.
+//
+// The loop is bounded three ways, because every one of its inputs comes from
+// the network. Hops are capped; a name seen twice is a loop and stops; and the
+// lookup budget is shared with everything else this walk does rather than
+// reset per hop, so a chain cannot buy itself more work by being long.
+//
+// The verdict is the weakest of the hops — see weakest, which explains why
+// that ordering and not another. It is accumulated as the loop goes rather
+// than at the end, so a chain that later hits a limit still carries the
+// verdict of the links it did check.
+func (w *walk) chase(qname string, rrtype uint16) ValidationResult {
+	visited := map[string]bool{}
+	status := StatusSecure
+	reason := ReasonVerified
+
+	for hop := 0; ; hop++ {
+		if hop >= w.v.cfg.Limits.MaxAliasHops {
+			// Not a verdict about the data: this validator stopped walking.
+			// Reporting Bogus would accuse a zone of forgery for being
+			// deeply aliased, which plenty of real ones are.
+			return w.rec.indeterminate(w.rec.fail(
+				ValidationStep{Kind: StepLimit, Name: qname, RRType: rrtype,
+					Note: "the alias chain is longer than the configured hop limit"},
+				ReasonResourceLimit,
+			))
+		}
+		if visited[qname] {
+			// The zone signed a chain that returns to a name it already
+			// passed through. Every record in it may be authentic; it simply
+			// does not resolve, which is a statement about the data's shape
+			// rather than about its authenticity, so it is not Bogus.
+			return w.rec.indeterminate(w.rec.fail(
+				ValidationStep{Kind: StepRRset, Name: qname, RRType: dns.TypeCNAME,
+					Note: "the alias chain returns to a name it has already visited"},
+				ReasonAliasLoop,
+			))
+		}
+		visited[qname] = true
+
+		outcome := w.resolveOnce(qname, rrtype)
+		// Status and reason move together, and only when this hop is
+		// strictly weaker than what the chain has so far.
+		//
+		// Updating them separately was wrong in a way that would have shown
+		// up as an operator chasing the wrong hop: a chain whose first link
+		// was Indeterminate and whose second was Insecure came out
+		// Indeterminate — correct — carrying the *Insecure* link's reason,
+		// because the second assignment was conditioned on "not Secure"
+		// rather than on having decided anything. The verdict and the
+		// sentence explaining it have to come from the same link.
+		//
+		// Equal ranks leave both alone, so the earliest hop at the deciding
+		// rank is the one reported. That is a function of the chain's own
+		// order rather than of anything a server controls: the order is
+		// CNAME target following CNAME target, and a server that reorders
+		// its answer section does not change it.
+		if next := weakest(status, outcome.result.Status); next != status {
+			status, reason = next, outcome.result.Reason
+		}
+
+		if outcome.followTo == "" {
+			// The end of the chain, for good or ill. The accumulated status
+			// is what the whole answer is worth.
+			return w.rec.result(status, reason)
+		}
+		if status == StatusBogus {
+			// A link failed to authenticate. Following the target would only
+			// add steps to a trace whose conclusion is already fixed, and
+			// would spend lookups on a chain nobody should act on.
+			return w.rec.result(status, reason)
+		}
+		qname = outcome.followTo
+	}
+}
+
+// resolveOnce walks the chain of trust to one name and validates its answer.
+//
+// Split out of Validate so that a CNAME target can be resolved the same way
+// the original name was, from the trust anchor down. A target can sit in a
+// different zone, under a different anchor, or below a delegation the first
+// name never crossed, so reusing the first name's zone would be validating
+// the second name's data against the wrong keys.
+func (w *walk) resolveOnce(qname string, rrtype uint16) aliasOutcome {
+	anchorName, anchors := w.v.cfg.Anchors.deepestFor(qname)
 	if len(anchors) == 0 {
-		return w.rec.indeterminate(w.rec.skip(
+		return aliasOutcome{result: w.rec.indeterminate(w.rec.skip(
 			ValidationStep{Kind: StepTrustAnchor, Zone: qname},
 			ReasonNoTrustAnchor,
-		))
+		))}
 	}
 
 	// The anchor zone is established first: its apex DNSKEY RRset has to be
@@ -129,11 +359,11 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 	// anything.
 	zone, res, ok := w.establishAnchorZone(anchorName, anchors)
 	if !ok {
-		return res
+		return aliasOutcome{result: res}
 	}
 
 	// Then descend one delegation at a time.
-	candidates, truncated := zoneCandidates(anchorName, qname, rrtype, v.cfg.Limits.MaxZones)
+	candidates, truncated := zoneCandidates(anchorName, qname, rrtype, w.v.cfg.Limits.MaxZones)
 	if truncated {
 		// The chain is deeper than the depth budget allows. Continuing with
 		// the names that fit would validate the answer against whichever
@@ -141,16 +371,16 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 		// contains it — and the resulting failure would be reported as
 		// Bogus, turning "this validator gave up early" into an accusation
 		// against the data. Stopping here says the true thing instead.
-		return w.rec.indeterminate(w.rec.fail(
+		return aliasOutcome{result: w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepLimit, Zone: anchorName, Name: qname, RRType: rrtype,
 				Note: "the chain is deeper than the configured zone limit"},
 			ReasonResourceLimit,
-		))
+		))}
 	}
 	for _, child := range candidates {
 		next, res, done := w.descend(zone, child)
 		if done {
-			return res
+			return aliasOutcome{result: res}
 		}
 		if next != nil {
 			zone = next
@@ -163,14 +393,15 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 // establishAnchorZone authenticates a zone's apex DNSKEY RRset against
 // configured trust anchors.
 func (w *walk) establishAnchorZone(zoneName string, anchors []TrustAnchor) (*zoneState, ValidationResult, bool) {
-	records, reason := w.lookup(zoneName, dns.TypeDNSKEY)
+	resp, reason := w.lookup(zoneName, dns.TypeDNSKEY)
 	if reason != ReasonNone {
 		return nil, w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepDNSKEY, Zone: zoneName}, reason,
 		)), false
 	}
+	records := resp.Answer
 
-	keys := dnskeysOf(records)
+	keys := dnskeysAt(records, zoneName)
 	if len(keys) == 0 {
 		// No apex DNSKEY where an anchor says there should be one. The
 		// anchor is a standing claim that this zone is signed, so failing to
@@ -241,7 +472,7 @@ func (w *walk) authenticateDNSKEYRRset(zoneName string, records []dns.RR, all, t
 		)), false
 	}
 
-	_, sigs := SplitSignatures(records, dns.TypeDNSKEY)
+	_, sigs := SplitSignaturesAt(records, zoneName, dns.TypeDNSKEY)
 	if reason := w.authenticate(set, sigs, zoneName, trusted); reason != ReasonNone {
 		return nil, w.rec.verdict(reason), false
 	}
@@ -255,51 +486,17 @@ func (w *walk) authenticateDNSKEYRRset(zoneName string, records []dns.RR, all, t
 // It returns the new zone when a secure delegation was crossed, a terminal
 // result when the walk must stop, and done=true in that case.
 func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationResult, bool) {
-	records, reason := w.lookup(child, dns.TypeDS)
+	resp, reason := w.lookup(child, dns.TypeDS)
 	if reason != ReasonNone {
 		return nil, w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepDS, Zone: child}, reason,
 		)), true
 	}
+	records := resp.Answer
 
-	dsRecords := dsOf(records)
+	dsRecords := dsAt(records, child)
 	if len(dsRecords) == 0 {
-		// No DS was returned, and two different situations produce that:
-		//
-		//   - child is not a zone cut at all, which is true of nearly every
-		//     name a query is ever asked about;
-		//   - child is a zone cut with no DS — an insecure delegation — and
-		//     everything below it is legitimately unsigned.
-		//
-		// Telling them apart needs a signed proof that no DS exists, which
-		// is NSEC or NSEC3, and v0.1 implements neither. So the walk assumes
-		// the first reading and continues in the same zone, recording where
-		// it did so.
-		//
-		// That assumption is deliberately biased. If it is wrong — if this
-		// really was an insecure delegation — the data below it is unsigned,
-		// the walk finds no signature from a zone it trusts, and the answer
-		// is reported Bogus where a complete validator would report Insecure.
-		// That is a false Bogus: it refuses data that was genuinely fine.
-		//
-		// The bias cannot run the other way. Concluding Secure would require
-		// a signature over the answer made by a key in an apex DNSKEY RRset
-		// this walk has already authenticated, and no attacker below an
-		// insecure delegation has that key. So the cost of the assumption is
-		// paid in refusals, never in false Secures, which is the direction
-		// this engine is willing to be wrong in.
-		//
-		// The earlier design carried this ambiguity to the end of the walk
-		// and downgraded any final failure to Indeterminate. That was worse
-		// in exactly the way that matters: because almost no answer name is
-		// a zone cut, it turned every genuinely tampered answer into "cannot
-		// tell", and an enforcing resolver reading Indeterminate as "allow"
-		// would have accepted forged data.
-		w.rec.skip(ValidationStep{
-			Kind: StepDS, Zone: child,
-			Note: "no DS; treated as not a zone cut, which v0.1 cannot prove without NSEC or NSEC3",
-		}, ReasonDenialNotImplemented)
-		return nil, ValidationResult{}, false
+		return w.noDSAtDelegation(zone, child, resp)
 	}
 
 	// A DS RRset exists, so it is data in the parent zone and must itself be
@@ -310,7 +507,7 @@ func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationRes
 			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: child, RRType: dns.TypeDS}, reason,
 		)), true
 	}
-	_, sigs := SplitSignatures(records, dns.TypeDS)
+	_, sigs := SplitSignaturesAt(records, child, dns.TypeDS)
 	if reason := w.authenticate(set, sigs, zone.name, zone.keys); reason != ReasonNone {
 		return nil, w.rec.verdict(reason), true
 	}
@@ -322,14 +519,15 @@ func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationRes
 // crossDelegation authenticates the child zone's apex DNSKEY RRset against an
 // authenticated DS RRset.
 func (w *walk) crossDelegation(child string, dsRecords []*dns.DS) (*zoneState, ValidationResult, bool) {
-	records, reason := w.lookup(child, dns.TypeDNSKEY)
+	resp, reason := w.lookup(child, dns.TypeDNSKEY)
 	if reason != ReasonNone {
 		return nil, w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepDNSKEY, Zone: child}, reason,
 		)), true
 	}
+	records := resp.Answer
 
-	keys := dnskeysOf(records)
+	keys := dnskeysAt(records, child)
 	if len(keys) == 0 {
 		// A DS is the parent's signed statement that this zone is signed, so
 		// an absent DNSKEY here is a broken chain and not an unsigned zone.
@@ -438,34 +636,89 @@ func (w *walk) usableDS(child string, dsRecords []*dns.DS) ([]*dns.DS, Reason) {
 	return usable, unusable
 }
 
-// validateAnswer authenticates the RRset the caller actually asked about.
-func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) ValidationResult {
-	records, reason := w.lookup(qname, rrtype)
+// validateAnswer authenticates the RRset the caller actually asked about, or
+// reports the alias that stands where it would have been.
+func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) aliasOutcome {
+	resp, reason := w.lookup(qname, rrtype)
 	if reason != ReasonNone {
-		return w.rec.indeterminate(w.rec.fail(
+		return aliasOutcome{result: w.rec.indeterminate(w.rec.fail(
 			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype}, reason,
-		))
+		))}
 	}
 
-	data, sigs := SplitSignatures(records, rrtype)
+	// QTYPE=* has its own rule and cannot share this one. See any.go: type
+	// 255 matches no record and appears in no type bitmap, so both the
+	// answer filter below and the NODATA proof it falls through to are
+	// vacuous for it — together, a Secure verdict on an absence nobody
+	// proved.
+	if rrtype == dns.TypeANY {
+		return w.validateAny(zone, qname, resp)
+	}
+
+	// Restricted to the queried owner name. See SplitSignaturesAt: an answer
+	// section legitimately carries records for other names, and taking them
+	// as the answer is a false Secure that needs no forgery at all.
+	data, sigs := SplitSignaturesAt(resp.Answer, qname, rrtype)
 	if len(data) == 0 {
-		// Nothing to validate. Establishing whether that absence is
-		// legitimate is a denial-of-existence question, which v0.1 does not
-		// answer, so it says so rather than guessing NXDOMAIN or NODATA.
-		return w.rec.indeterminate(w.rec.skip(
-			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype},
-			ReasonDenialNotImplemented,
-		))
+		// No records of the queried type. Before deciding the answer is an
+		// absence, look for the alias that would explain it.
+		//
+		// The order matters: a name that has both a CNAME and the queried
+		// type violates RFC 2181 §10.1, and answering from the direct
+		// records — which the branch above already did — is what every
+		// resolver does with such a zone. Only where the type is genuinely
+		// absent does the alias become the answer.
+		//
+		// DNAME is tried before CNAME and that order is the point. A DNAME
+		// response carries a server-synthesised CNAME at the queried name
+		// which RFC 6672 §5.3.1 says "will never be signed", so reaching
+		// the alias path first finds an unsigned RRset and reports Bogus
+		// for every DNAME-using name there is. See dname.go: the DNAME is
+		// authenticated and the redirection recomputed from it, and the
+		// synthesised CNAME is never read.
+		if out, isDname := w.validateDname(zone, qname, resp); isDname {
+			return out
+		}
+		if rrtype != dns.TypeCNAME {
+			if alias, _ := SplitSignaturesAt(resp.Answer, qname, dns.TypeCNAME); len(alias) > 0 {
+				return w.validateAlias(zone, qname, rrtype, resp)
+			}
+		}
+		// Nothing in the answer section. Whether that absence is legitimate
+		// is exactly the denial-of-existence question, and the response has
+		// to prove its own claim rather than be taken at its word.
+		return aliasOutcome{result: w.validateDenial(zone, qname, rrtype, resp)}
+	}
+
+	// A response cannot both carry the data and deny that the name exists.
+	//
+	// The rcode is one unsigned field of the header, which makes changing it
+	// the cheapest edit available to anyone on the path. The records here are
+	// genuine and their signature verifies, so the *data* is fine — but the
+	// message contradicts itself, and a consumer that honours the header
+	// would cache this name, and possibly its whole subtree, as absent while
+	// the validator endorsed the message.
+	//
+	// The engine already refused the converse: an NXDOMAIN whose own covering
+	// NSEC proves the name exists is ReasonDenialContradicted. This direction
+	// had no rule, which is the asymmetry that let it through.
+	if resp.Rcode == dns.RcodeNameError {
+		return aliasOutcome{result: w.rec.verdict(w.rec.fail(
+			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype,
+				Note: "the response carries an RRset for a name it says does not exist"},
+			ReasonDenialContradicted,
+		))}
 	}
 
 	set, reason := NewRRset(data)
 	if reason != ReasonNone {
-		return w.rec.verdict(w.rec.fail(
+		return aliasOutcome{result: w.rec.verdict(w.rec.fail(
 			ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype}, reason,
-		))
+		))}
 	}
 
-	if reason := w.authenticate(set, sigs, zone.name, zone.keys); reason != ReasonNone {
+	accepted, reason := w.authenticateSigned(set, sigs, zone.name, zone.keys)
+	if reason != ReasonNone {
 		// Bogus is an accusation, and RFC 4033 §5 licenses it only where
 		// there is "a trust anchor and a secure delegation indicating that
 		// subsidiary data is signed". Reaching this line means both hold:
@@ -476,11 +729,17 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) Vali
 		// verdict still declines to say Bogus for reasons that describe this
 		// validator rather than the data — an unsupported algorithm, a
 		// digest policy refuses, a limit reached.
-		return w.rec.verdict(reason)
+		return aliasOutcome{result: w.rec.verdict(reason)}
 	}
 
 	w.rec.ok(ValidationStep{Kind: StepRRset, Zone: zone.name, Name: qname, RRType: rrtype})
-	return w.rec.secure()
+
+	// A verified signature is not the end of the story for an answer the
+	// server synthesised from a wildcard. See wildcardProof.
+	if res, done := w.wildcardProof(zone, qname, rrtype, accepted, resp); done {
+		return aliasOutcome{result: res}
+	}
+	return aliasOutcome{result: w.rec.secure()}
 }
 
 // zoneState is a zone whose apex DNSKEY RRset has been authenticated.
@@ -491,30 +750,30 @@ type zoneState struct {
 
 // lookup calls the Source, enforcing the lookup budget and the caller's
 // context.
-func (w *walk) lookup(name string, rrtype uint16) ([]dns.RR, Reason) {
+func (w *walk) lookup(name string, rrtype uint16) (Response, Reason) {
 	if err := w.ctx.Err(); err != nil {
-		return nil, ReasonCancelled
+		return Response{}, ReasonCancelled
 	}
 	if w.lookups >= w.v.cfg.Limits.MaxLookups {
-		return nil, ReasonResourceLimit
+		return Response{}, ReasonResourceLimit
 	}
 	w.lookups++
 
-	records, err := w.v.src.Lookup(w.ctx, name, rrtype)
+	resp, err := w.v.src.Lookup(w.ctx, name, rrtype)
 	if err != nil {
 		// A cancelled context reaching us as an error is still a
 		// cancellation, not a statement about the data.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, ReasonCancelled
+			return Response{}, ReasonCancelled
 		}
 		// A source that cannot answer leaves the validator unable to tell,
 		// which is Indeterminate territory and never a verdict. The
 		// underlying error text is deliberately not carried into a Reason:
 		// reasons are typed, and an error string from a network library is
 		// not a category.
-		return nil, ReasonUnknown
+		return Response{}, ReasonUnknown
 	}
-	return records, ReasonNone
+	return resp, ReasonNone
 }
 
 func toRRs[T dns.RR](in []T) []dns.RR {

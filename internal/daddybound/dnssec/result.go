@@ -41,9 +41,19 @@ type ValidationResult struct {
 //
 // Provided so that callers write result.Secure() rather than comparing
 // against a constant, which is one fewer place for an inverted condition to
-// hide. There is deliberately no Insecure() helper: v0.1 never returns that
-// status, and offering the accessor would imply otherwise.
+// hide.
 func (r ValidationResult) Secure() bool { return r.Status == StatusSecure }
+
+// Insecure reports whether the data was proved to lie below an authenticated
+// insecure delegation.
+//
+// Deliberately not folded into Secure(). The two are both "nothing is wrong
+// here", and they are not the same claim: Secure means the data was signed
+// and the signature verified, Insecure means the data was never supposed to
+// be signed and that fact was proved. A caller that conflates them cannot
+// tell an authenticated unsigned zone from an authenticated signed one, which
+// is precisely the distinction DNSSEC exists to make.
+func (r ValidationResult) Insecure() bool { return r.Status == StatusInsecure }
 
 // Bogus reports whether validation actively failed, as opposed to being
 // unable to reach a conclusion.
@@ -141,6 +151,21 @@ func (r *recorder) secure() ValidationResult {
 // walk's responsibility to enforce, not this recorder's.
 func (r *recorder) bogus(reason Reason) ValidationResult {
 	return r.result(StatusBogus, reason)
+}
+
+// insecure publishes RFC 4033 §5's Insecure: an authenticated proof that no
+// DS record exists at a delegation point, so the data below it is legitimately
+// unsigned.
+//
+// It takes no reason argument because there is exactly one thing Insecure is
+// allowed to mean. It is not "no signature was found", not "the algorithm is
+// unsupported", not "validation failed", not "the DNSKEY was missing", not a
+// timeout, not malformed DNSSEC records, and above all not "we could not prove
+// Secure". Every one of those is Bogus or Indeterminate. A caller that wants
+// Insecure has to have run a denial proof and had it succeed, and the only
+// caller that can is the one that did.
+func (r *recorder) insecure() ValidationResult {
+	return r.result(StatusInsecure, ReasonVerified)
 }
 
 // indeterminate publishes "could not tell", which is the honest answer

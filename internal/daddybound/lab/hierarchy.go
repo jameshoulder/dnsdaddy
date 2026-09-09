@@ -24,9 +24,41 @@ type ZoneSpec struct {
 	Algorithm dnssec.Algorithm
 	// DigestType is used for the DS this zone's parent publishes.
 	DigestType dnssec.DigestType
-	// Records is the zone's unsigned data, excluding DNSKEY and DS, which
-	// are generated. Owner names must be at or below Name.
+	// Records is the zone's unsigned data, excluding DNSKEY, DS and NSEC,
+	// which are generated. Owner names must be at or below Name.
 	Records []dns.RR
+
+	// Parent names the delegating zone. Empty means the zone listed
+	// immediately before this one, which keeps a simple chain simple.
+	//
+	// Naming it is what allows siblings — two zones delegated from the same
+	// parent — and siblings are needed as soon as one delegation is secure
+	// and another is not, which is the whole point of testing Insecure.
+	Parent string
+
+	// Insecure delegates this zone from its parent with NS but no DS, so the
+	// parent proves that no DS exists. That authenticated absence is the
+	// only honest route to RFC 4033's Insecure.
+	Insecure bool
+
+	// NoDenial suppresses this zone's denial records entirely. A signed zone
+	// that publishes none cannot prove any absence, and a validator must say
+	// so rather than accept the server's word for it.
+	NoDenial bool
+
+	// NSEC3 signs this zone with NSEC3 rather than NSEC.
+	NSEC3 bool
+	// NSEC3Salt is the salt in hexadecimal, empty for none. RFC 9276 §3.1
+	// recommends an empty salt, so that is the default.
+	NSEC3Salt string
+	// NSEC3Iterations is the extra iteration count. RFC 9276 §3.1: "an
+	// iterations count of 0 MUST be used", so that is the default, and a
+	// non-zero value here is testing what a validator does with a zone that
+	// ignores the recommendation.
+	NSEC3Iterations uint16
+	// NSEC3OptOut excludes unsigned delegations from the chain and sets the
+	// Opt-Out flag on the records that span them.
+	NSEC3OptOut bool
 }
 
 // Spec describes a whole hierarchy.
@@ -67,8 +99,26 @@ type Zone struct {
 	DigestType dnssec.DigestType
 
 	// DS is the delegation record the parent publishes for this zone. Nil
-	// for the top zone, which is vouched for by a trust anchor instead.
+	// for the top zone, which is vouched for by a trust anchor instead, and
+	// nil for a child delegated insecurely.
 	DS *dns.DS
+
+	// delegations names the child zones delegated from here, secure or not.
+	// A referral is served for anything at or below one of them.
+	delegations map[string]bool
+
+	// useNSEC generates an NSEC chain for this zone. Off means the zone is
+	// signed but publishes no denial records, which is a real and broken
+	// configuration worth being able to construct.
+	useNSEC bool
+
+	// useNSEC3 and its parameters replace the NSEC chain with an NSEC3 one.
+	// A zone publishes one mechanism or the other, never both.
+	useNSEC3 bool
+	n3alg    uint8
+	n3iter   uint16
+	n3salt   string
+	n3optOut bool
 
 	sets map[setKey][]dns.RR
 }
@@ -97,6 +147,11 @@ type Hierarchy struct {
 	byName map[string]*Zone
 	sets   map[setKey][]dns.RR
 	spec   Spec
+
+	// overrides rewrite the response to specific questions, for scenarios
+	// where the zone is correct and the response is not. See
+	// responseOverride.
+	overrides map[setKey]*responseOverride
 }
 
 // Build constructs and signs a hierarchy.
@@ -123,17 +178,61 @@ func Build(spec Spec) (*Hierarchy, error) {
 		h.byName[zone.Name] = zone
 	}
 
-	// The parent publishes each child's DS and signs it, which is the link
-	// the chain walk crosses. Built after all zones exist because a DS is a
-	// statement about a key that is created with the child.
+	// The parent delegates to each child. Built after all zones exist
+	// because a DS is a statement about a key created with the child.
+	//
+	// The NS RRset is added unsigned: delegation NS records sit on the
+	// parent side of a cut and are not authoritative data there, so no
+	// signer signs them. A validator that demanded a signature would reject
+	// every real delegation.
 	for i := 1; i < len(h.Zones); i++ {
-		parent, child := h.Zones[i-1], h.Zones[i]
+		child := h.Zones[i]
+
+		parentName := dns.CanonicalName(spec.Zones[i].Parent)
+		if spec.Zones[i].Parent == "" {
+			parentName = h.Zones[i-1].Name
+		}
+		parent := h.byName[parentName]
+		if parent == nil {
+			return nil, fmt.Errorf("lab: %s names parent %s, which is not in this hierarchy", child.Name, parentName)
+		}
+		// A delegation only exists between a zone and a name inside it.
+		// Without this check a specification can describe a hierarchy no
+		// resolver could ever walk, and the resulting failures look like
+		// validator bugs.
+		if parent.Name == child.Name || !dns.IsSubDomain(parent.Name, child.Name) {
+			return nil, fmt.Errorf("lab: %s cannot delegate %s; it is not inside that zone", parent.Name, child.Name)
+		}
+		parent.delegations[child.Name] = true
+
+		parent.sets[setKey{name: child.Name, rrtype: dns.TypeNS}] = []dns.RR{
+			ns(child.Name, "ns."+MiddleZone),
+		}
+
+		if spec.Zones[i].Insecure {
+			// No DS. The parent's NSEC chain shows NS set and DS clear at
+			// this name, which is the authenticated proof of an insecure
+			// delegation.
+			continue
+		}
 		ds, err := makeDS(child)
 		if err != nil {
 			return nil, err
 		}
 		child.DS = ds
 		if err := parent.addSigned(spec, []dns.RR{ds}); err != nil {
+			return nil, err
+		}
+	}
+
+	// NSEC chains last: the type bitmaps describe what is present, and a
+	// bitmap computed before the DS records existed would omit them and
+	// prove the opposite of the truth.
+	for _, zone := range h.Zones {
+		if err := zone.buildNSECChain(spec); err != nil {
+			return nil, err
+		}
+		if err := zone.buildNSEC3Chain(spec); err != nil {
 			return nil, err
 		}
 	}
@@ -196,7 +295,14 @@ func buildZone(spec Spec, i int) (*Zone, error) {
 	zone := &Zone{
 		Name: name, Key: key, Signer: signer,
 		Algorithm: alg, DigestType: digest,
-		sets: make(map[setKey][]dns.RR),
+		delegations: map[string]bool{},
+		useNSEC:     !zs.NoDenial && !zs.NSEC3,
+		useNSEC3:    !zs.NoDenial && zs.NSEC3,
+		n3alg:       dns.SHA1,
+		n3iter:      zs.NSEC3Iterations,
+		n3salt:      zs.NSEC3Salt,
+		n3optOut:    zs.NSEC3OptOut,
+		sets:        make(map[setKey][]dns.RR),
 	}
 
 	// The apex DNSKEY RRset signs itself, which is what a DS or trust anchor
@@ -238,6 +344,18 @@ func (z *Zone) addSigned(spec Spec, rrset []dns.RR) error {
 	// field would produce signatures that fail for a reason pointing
 	// somewhere else entirely.
 	labels := dns.CountLabel(h.Name)
+	if strings.HasPrefix(dns.CanonicalName(h.Name), "*.") {
+		// RFC 4034 §3.1.3: the Labels field is "the number of labels in the
+		// original RRSIG RR owner name ... not counting the null root label
+		// and not counting any leading asterisk label".
+		//
+		// Without the subtraction a wildcard RRset is signed claiming one
+		// label more than it has, and a validator reconstructing the signed
+		// name from the Labels field (RFC 4035 §5.3.2) rebuilds the wrong
+		// name and rejects the signature. The failure looks like a
+		// cryptographic one, which is exactly the wrong place to go looking.
+		labels--
+	}
 	if labels < 0 || labels > maxDNSLabels {
 		return fmt.Errorf("lab: %s has %d labels, which cannot be expressed in an RRSIG Labels field", h.Name, labels)
 	}
@@ -346,14 +464,277 @@ func (h *Hierarchy) Zone(name string) *Zone { return h.byName[dns.CanonicalName(
 // exercises only the validation logic. The context is honoured anyway: code
 // that ignores cancellation in the easy case tends to ignore it in the hard
 // one too.
-func (h *Hierarchy) Lookup(ctx context.Context, name string, rrtype uint16) ([]dns.RR, error) {
+//
+// The answer and authority sections are built by the same routine the
+// authoritative server uses, so a validator reading the hierarchy directly
+// and a validator reading it over DNS see the same records — which is what
+// makes a differential comparison against those two paths meaningful.
+func (h *Hierarchy) Lookup(ctx context.Context, name string, rrtype uint16) (dnssec.Response, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return dnssec.Response{}, err
 	}
-	records := h.sets[setKey{name: dns.CanonicalName(name), rrtype: rrtype}]
-	// Copied so a caller — or a mutation applied later — cannot reach into
-	// the hierarchy's own slices.
-	return append([]dns.RR{}, records...), nil
+	return h.respond(name, rrtype, true), nil
+}
+
+// respond assembles the answer and authority sections for one question.
+//
+// wantDNSSEC mirrors the DO bit: without it the signatures and denial records
+// are withheld, which is what an unaware client would see.
+func (h *Hierarchy) respond(name string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
+	qname := dns.CanonicalName(name)
+	out := h.chaseAliases(qname, rrtype, wantDNSSEC)
+
+	// Applied last, to the finished response, because that is where an
+	// on-path attacker sits: after the server has decided what to send and
+	// before the validator sees it.
+	if o := h.overrides[setKey{name: qname, rrtype: rrtype}]; o != nil {
+		if o.rcode != nil {
+			out.Rcode = *o.rcode
+		}
+		if o.set {
+			out.Authority = o.authority
+		}
+		if o.answerSet {
+			out.Answer = o.answer
+		}
+	}
+	return out
+}
+
+// chaseAliases builds a response the way an authoritative server does, by
+// following a CNAME within the zones it serves.
+//
+// RFC 1034 §4.3.2 step 3a: when a query for (QNAME, QTYPE) finds a CNAME, the
+// server puts the CNAME in the answer section, restarts the query at the
+// target, and — where it is authoritative for the target too — appends what it
+// finds. A resolver receives the whole chain in one message.
+//
+// The lab has to do this or the oracle comparison stops being a comparison.
+// delv validates a message rather than resolving a chain, so a server that
+// returned only the alias would have delv authenticate one CNAME, call the
+// answer fully validated and never see the tampered link two hops along. It
+// would agree with nothing, and the disagreement would be about the harness.
+//
+// Bounded, because the zones it walks can contain a loop and this is a server
+// rather than a resolver: it stops and returns what it has, which is what a
+// real one does.
+func (h *Hierarchy) chaseAliases(qname string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
+	out := h.assemble(qname, rrtype, wantDNSSEC)
+	if rrtype == dns.TypeCNAME {
+		return out
+	}
+
+	seen := map[string]bool{qname: true}
+	for hop := 0; hop < maxServerAliasHops; hop++ {
+		alias := lastCNAME(out.Answer)
+		if alias == nil {
+			return out
+		}
+		target := dns.CanonicalName(alias.Target)
+		if seen[target] {
+			// A loop in the zone data. The records so far are genuine and
+			// the chain does not terminate; a server sends what it has.
+			return out
+		}
+		seen[target] = true
+
+		next := h.assemble(target, rrtype, wantDNSSEC)
+		out.Rcode = next.Rcode
+		out.Answer = append(out.Answer, next.Answer...)
+		// Every hop's authority section is kept, not just the last.
+		//
+		// This was wrong the first time and the failure was instructive. A
+		// wildcard-expanded CNAME carries its own justification — RFC 4035
+		// §3.1.3 makes the server include the NSEC or NSEC3 proving the
+		// expansion was legitimate — and that proof belongs to the hop that
+		// was expanded, not to the end of the chain. Overwriting the
+		// authority section on the next hop deleted it, and the validator
+		// then correctly refused an answer whose wildcard nobody had
+		// justified. The verdict was right; the message was not one an
+		// authoritative server would have sent.
+		//
+		// Keeping the earlier proofs is also what a real server does: BIND
+		// accumulates the DNSSEC records for each expansion it performs
+		// while following the chain, and sends them alongside whatever
+		// explains the end of it.
+		out.Authority = appendUnseen(out.Authority, next.Authority)
+		if len(next.Answer) == 0 {
+			return out
+		}
+	}
+	return out
+}
+
+// maxServerAliasHops bounds the lab server's own chase. Deliberately larger
+// than the validator's default hop budget, so a scenario testing the
+// validator's limit is testing the validator's limit.
+const maxServerAliasHops = 24
+
+// lastCNAME returns the final CNAME in an answer section, which is the one
+// whose target has not yet been followed.
+func lastCNAME(answer []dns.RR) *dns.CNAME {
+	for i := len(answer) - 1; i >= 0; i-- {
+		if c, ok := answer[i].(*dns.CNAME); ok {
+			return c
+		}
+	}
+	return nil
+}
+
+// assemble builds the response an honest authoritative server would send.
+func (h *Hierarchy) assemble(qname string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
+	out := dnssec.Response{Rcode: dns.RcodeSuccess}
+
+	zone := h.authoritativeZone(qname, rrtype)
+	if zone == nil {
+		out.Rcode = dns.RcodeNameError
+		return out
+	}
+
+	// Below a delegation this zone does not answer for: it refers, and the
+	// referral carries either the DS or the proof that none exists.
+	if child := h.delegationCovering(zone, qname); child != "" && !(qname == child && rrtype == dns.TypeDS) {
+		out.Authority = append(out.Authority, h.referral(zone, child, wantDNSSEC)...)
+		return out
+	}
+
+	// QTYPE=* is a query type and matches no set, so it is answered by
+	// gathering the sets rather than by looking one up. RFC 1034 §6.2.2 lets
+	// a server return a subset; this returns everything, which is the harder
+	// case for a validator — RFC 6840 §4.2 makes it check every RRset it
+	// receives, so more records mean more that must verify.
+	if rrtype == dns.TypeANY {
+		if answer := zone.everythingAt(qname, wantDNSSEC); len(answer) > 0 {
+			out.Answer = answer
+			return out
+		}
+	} else if records := zone.sets[setKey{name: qname, rrtype: rrtype}]; len(records) > 0 {
+		out.Answer = filterSignatures(records, wantDNSSEC)
+		return out
+	}
+
+	// No records of the queried type at this name. RFC 1034 §3.6.2 makes a
+	// CNAME the answer to a query for any other type at the same name, so a
+	// server checks for one before deciding the type is absent.
+	if rrtype != dns.TypeCNAME {
+		if alias := zone.sets[setKey{name: qname, rrtype: dns.TypeCNAME}]; len(alias) > 0 {
+			out.Answer = filterSignatures(alias, wantDNSSEC)
+			return out
+		}
+	}
+
+	// A DNAME at an ancestor redirects everything beneath it (RFC 6672
+	// §2.2). The server answers with the signed DNAME and a CNAME it
+	// synthesises for the queried name — and RFC 6672 §5.3.1 requires that
+	// synthesised CNAME to be *unsigned*, which is exactly what makes this
+	// worth building rather than approximating. A lab that signed it would
+	// let a validator pass by treating it as an ordinary alias, and the real
+	// DNS would then reject that validator on the first DNAME it met.
+	if owner := zone.dnameCovering(qname); owner != "" {
+		out.Answer = append(out.Answer,
+			filterSignatures(zone.sets[setKey{name: owner, rrtype: dns.TypeDNAME}], wantDNSSEC)...)
+		if syn := zone.synthesiseCNAME(qname, owner); syn != nil {
+			out.Answer = append(out.Answer, syn)
+		}
+		return out
+	}
+
+	// Nothing at the name itself. Before deciding it is missing, the server
+	// does what RFC 4592 requires and looks for a wildcard that covers it.
+	if !zone.nameExists(qname) {
+		// A wildcard CNAME answers a query for any type, exactly as a
+		// non-wildcard one does, so the type tried second is CNAME.
+		answer, source := zone.synthesise(qname, rrtype)
+		if len(answer) == 0 && rrtype != dns.TypeCNAME {
+			answer, source = zone.synthesise(qname, dns.TypeCNAME)
+		}
+		if len(answer) > 0 {
+			out.Answer = filterSignatures(answer, wantDNSSEC)
+			if wantDNSSEC {
+				// The expansion has to be justified: the name the wildcard
+				// stood in for must be shown not to exist, or the same
+				// signed wildcard answer works for every name under the
+				// encloser.
+				out.Authority = append(out.Authority, zone.wildcardJustification(qname, source)...)
+			}
+			return out
+		}
+	}
+
+	// No data of that type. Everything from here is the server explaining
+	// itself, and a validator is entitled to disbelieve all of it until the
+	// signatures check out.
+	if !zone.nameExists(qname) {
+		out.Rcode = dns.RcodeNameError
+	}
+	if soa := zone.sets[setKey{name: zone.Name, rrtype: dns.TypeSOA}]; len(soa) > 0 {
+		out.Authority = append(out.Authority, filterSignatures(soa, wantDNSSEC)...)
+	}
+	if wantDNSSEC {
+		out.Authority = append(out.Authority, h.denialFor(zone, qname, rrtype, out.Rcode)...)
+	}
+	return out
+}
+
+// authoritativeZone picks the zone that answers a question.
+//
+// This is the zone-cut reasoning, and it has two cases that a naive "deepest
+// zone containing the name" gets wrong — both of which matter for denial:
+//
+//   - A DS RRset lives in the *parent*. Asking the child would ask a zone
+//     that never publishes its own DS, and the answer would be a spurious
+//     NODATA rather than the delegation record.
+//   - A zone apex name exists in two zones at once: as the child's apex and
+//     as the parent's delegation point. They publish different NSEC records
+//     at that name — the parent's carries NS with DS clear or set, the
+//     child's carries SOA — and RFC 6840 §4.1 exists precisely because
+//     confusing the two lets an ancestor's NSEC deny things inside the
+//     child.
+//
+// The lab therefore keeps records per zone rather than in one flat index, so
+// the two NSECs at a delegation name both survive and the right one is
+// served.
+func (h *Hierarchy) authoritativeZone(qname string, rrtype uint16) *Zone {
+	if rrtype == dns.TypeDS {
+		// The parent side of the cut, if this name is a delegation point.
+		for _, z := range h.Zones {
+			if z.delegations[qname] {
+				return z
+			}
+		}
+	}
+
+	var best *Zone
+	for _, z := range h.Zones {
+		if !dns.IsSubDomain(z.Name, qname) {
+			continue
+		}
+		if best == nil || dns.CountLabel(z.Name) > dns.CountLabel(best.Name) {
+			best = z
+		}
+	}
+	return best
+}
+
+// nameExists reports whether name is a name in this zone.
+//
+// A name exists if it owns records, and also if anything below it does: that
+// second case is an empty non-terminal (RFC 5155 §1.3, "a domain name that
+// owns no resource records, but has one or more subdomains that do"). An
+// authoritative server answers NOERROR/NODATA at such a name, not NXDOMAIN,
+// and a lab that got this wrong would be teaching a validator to accept a
+// name error for a name that exists.
+func (z *Zone) nameExists(name string) bool {
+	name = dns.CanonicalName(name)
+	for k := range z.sets {
+		if k.name == name {
+			return true
+		}
+		if k.name != name && dns.IsSubDomain(name, k.name) {
+			return true
+		}
+	}
+	return false
 }
 
 // Records returns every record in the hierarchy, for an authoritative server
@@ -410,4 +791,94 @@ func (h *Hierarchy) Description() string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// appendUnseen appends records not already present, compared on their full
+// text.
+//
+// Two hops of one chain routinely need the same record — the zone's apex SOA
+// most obviously — and sending it twice would be a message no server
+// produces. The comparison is on the rendered record rather than on the owner
+// name and type, because two different NSECs can share both.
+func appendUnseen(dst, src []dns.RR) []dns.RR {
+	seen := make(map[string]bool, len(dst))
+	for _, rr := range dst {
+		seen[rr.String()] = true
+	}
+	for _, rr := range src {
+		if k := rr.String(); !seen[k] {
+			seen[k] = true
+			dst = append(dst, rr)
+		}
+	}
+	return dst
+}
+
+// everythingAt returns every RRset the zone holds at one name, for a QTYPE=*
+// query.
+//
+// Ordered by type so that the message is a function of the zone rather than
+// of Go's map iteration. That is not cosmetic here: the differential suite
+// compares two validators on the same response, and a response that differs
+// between runs turns a disagreement into a coin toss.
+func (z *Zone) everythingAt(name string, wantDNSSEC bool) []dns.RR {
+	name = dns.CanonicalName(name)
+	types := make([]uint16, 0, 8)
+	for k := range z.sets {
+		if k.name == name && k.rrtype != dns.TypeRRSIG {
+			types = append(types, k.rrtype)
+		}
+	}
+	sort.Slice(types, func(i, j int) bool { return types[i] < types[j] })
+
+	var out []dns.RR
+	for _, rrtype := range types {
+		out = append(out, filterSignatures(z.sets[setKey{name: name, rrtype: rrtype}], wantDNSSEC)...)
+	}
+	return out
+}
+
+// dnameCovering returns the owner of the DNAME that redirects qname, or "".
+//
+// The deepest one wins, matching RFC 1034 §4.3.2's label-by-label descent,
+// and the owner itself is never redirected (RFC 6672 §2.3).
+func (z *Zone) dnameCovering(qname string) string {
+	qname = dns.CanonicalName(qname)
+	best, bestLabels := "", -1
+	for k := range z.sets {
+		if k.rrtype != dns.TypeDNAME || k.name == qname {
+			continue
+		}
+		if !dns.IsSubDomain(k.name, qname) {
+			continue
+		}
+		if n := dns.CountLabel(k.name); n > bestLabels {
+			best, bestLabels = k.name, n
+		}
+	}
+	return best
+}
+
+// synthesiseCNAME builds the unsigned CNAME a server puts in a DNAME
+// response, per RFC 6672 §3.1.
+//
+// Unsigned deliberately, and its TTL taken from the DNAME. A validator must
+// derive the redirection from the DNAME rather than from this record; the lab
+// sends it because a real server does, so that a validator which reads it
+// instead is caught here rather than in production.
+func (z *Zone) synthesiseCNAME(qname, owner string) dns.RR {
+	qname = dns.CanonicalName(qname)
+	records := z.sets[setKey{name: owner, rrtype: dns.TypeDNAME}]
+	for _, rr := range records {
+		d, ok := rr.(*dns.DNAME)
+		if !ok {
+			continue
+		}
+		prefix := qname[:len(qname)-len(owner)]
+		return &dns.CNAME{
+			Hdr:    dns.RR_Header{Name: qname, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: d.Hdr.Ttl},
+			Target: prefix + dns.CanonicalName(d.Target),
+		}
+	}
+	return nil
 }

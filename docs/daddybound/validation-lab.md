@@ -51,28 +51,49 @@ run. The same reasoning applies to the DS digests.
 Each mutation breaks exactly one thing. A scenario that broke two would still
 fail, and nobody would notice when one of the two checks stopped working.
 
+There are **77**, and the authoritative list is the code rather than this
+document: `dnsdaddy daddybound scenarios` prints every one with the
+justification attached to it. A scenario nobody can justify is a scenario
+nobody will maintain, so the justification is a field on the scenario and not
+a comment near it.
+
+| Family | Count | What it exercises |
+| --- | --- | --- |
+| `positive` | 10 | Correctly signed data that must validate — including one hierarchy per signature algorithm. Without these, every negative scenario is passed by a validator that never returns Secure |
+| `chain-failure` | 19 | Broken or forged chains: signatures, keys, delegation records, algorithm policy |
+| `nsec` | 18 | Authenticated denial with NSEC |
+| `nsec3` | 16 | The same questions asked of an NSEC3-signed hierarchy |
+| `alias` | 14 | CNAME chains and DNAME redirections, including the ones that cross a zone cut or a change in security status |
+| `configuration` | 1 | A property of Daddybound's own configuration rather than of any data |
+
+By expected verdict: 38 Bogus, 28 Secure, 7 Indeterminate, 5 Insecure. The
+mixture matters as much as the count — a suite of only negatives is passed by
+a validator that rejects everything, and a suite of only positives by one that
+accepts everything.
+
+Seven scenarios carry a `KnownGap`: a disagreement with a reference validator
+that is predicted and argued from the RFC, never "the other implementation
+says otherwise". Three carry a `NoOracle`: there is no question to put to
+another validator, because the property is about Daddybound's own
+configuration or about a behaviour the standards leave to local policy. A
+known gap can never absorb a false Secure — the comparator checks for that
+class first, and returns before it reaches the annotation.
+
+The ones worth reading are below.
+
 | Scenario | Expected | What it would mean if it passed wrongly |
 | --- | --- | --- |
-| `valid` | Secure | Without it, every other scenario is passed by a validator that never returns Secure |
-| `multi-record-rrset` | Secure | RFC 4034 §6.3 orders an RRset by RDATA, not record length. The MX preferences make the two orders genuinely differ, so a length-based sort declares this correctly signed RRset Bogus |
-| `tampered-answer` | Bogus | An on-path attacker rewriting an address. The attack DNSSEC exists to stop |
-| `corrupt-signature` | Bogus | One flipped bit, reaching the arithmetic rather than a length check |
-| `expired-signature` | Bogus | A replay of data that was once genuine |
-| `not-yet-valid-signature` | Bogus | The other boundary, easy to omit because well-run zones never hit it |
-| `missing-signature` | Bogus | An absent signature treated as an absent objection |
-| `malformed-signature` | Bogus | The parsing path, which hostile input reaches before any check |
-| `stripped-signature-unsupported-algorithm` | Bogus | The downgrade attack: the real signature stripped and one naming an unverifiable algorithm left behind. Reporting the validator's own inability would make forged data Indeterminate |
-| `stripped-signature-disallowed-algorithm` | Bogus | The same attack with an algorithm policy refuses. Neither capability nor policy may soften a missing signature |
-| `ds-digest-mismatch` | Bogus | The parent names this key and disagrees about its contents: a substituted key |
-| `missing-dnskey` | Bogus | A secure delegation to a zone with no keys |
 | `rogue-key-appended` | Bogus | **The P0 case.** A key added to an authenticated apex RRset without re-signing it |
 | `foreign-zone-signature` | Bogus | A cryptographically perfect signature made by the wrong authority |
+| `ancestor-nsec-denying-the-childs-own-data` | Bogus | A parent's genuine delegation NSEC reused to hide an entire signed zone. Every signature verifies |
+| `stripped-signature-unsupported-algorithm` | Bogus | The downgrade attack: the real signature stripped and one naming an unverifiable algorithm left behind, so the failure reads as the validator's own inability |
+| `nodata-hiding-a-cname` | Bogus | RFC 6840 §4.3: a positive CNAME answer turned into a NOERROR/NODATA by deleting the CNAME. The NSEC's own CNAME bit is what catches it |
+| `nxdomain-at-the-root` | Secure | Every query for a top-level domain that does not exist. Building the wildcard name by concatenation gives `*..`, and the proof can never complete |
+| `cname-into-an-insecure-zone` | Insecure | A signed alias whose destination is unsigned. Inheriting the first hop's Secure would authenticate an attacker's choice of destination |
+| `cname-chain-longer-than-the-hop-limit` | Indeterminate | Reaching a budget is not evidence about the data. Bogus here accuses a deeply aliased zone of forgery |
+| `any-answer-with-a-tampered-rrset` | Bogus | RFC 6840 §4.2. Type 255 matches no record, so the ordinary path never looks at the answer at all |
 | `unsupported-algorithm` | Indeterminate | Must not be Bogus: the data may be perfect and the validator cannot check it |
-| `disallowed-algorithm` | Indeterminate | Must not be Bogus: that would blame the zone for the operator's policy |
-| `unsupported-ds-digest` | Indeterminate | RFC 6840 §5.2, same shape |
 | `no-trust-anchor` | Indeterminate | Anything else here is invented trust |
-
-`dnsdaddy daddybound scenarios` prints this list with each justification.
 
 ### The one worth reading twice
 
@@ -109,13 +130,32 @@ scenario — fails.
 | Use the received TTL instead of the RRSIG's Original TTL | the canonical-form TTL test |
 | Remove the RDATA down-casing call from canonical form | *nothing* — see below |
 | Fail the chain when the zone budget truncates it | the limits test |
+| Take the queried *type* from an answer section without checking the owner | the answer-owner test, both halves |
+| Take the queried type from a DS or DNSKEY response without checking the owner | the delegation-owner test — and *not* the substitution half of it, which the DS digest already caught |
+| Build the root's wildcard by concatenation (`"*." + "."`) | `nxdomain-at-the-root`, and the root name-error unit test |
+| Read the synthesised CNAME in a DNAME response instead of the DNAME | every `dname-*` scenario, and the synthesis test |
+| Route QTYPE=\* through the ordinary answer path | the empty-ANY test, both tamper tests, and the ANY ordering test |
+| Take the first status marker delv prints instead of the weakest | four of the twelve delv-parser cases |
+| Try alias hops without a visited set or a hop cap | `cname-loop`, `cname-chain-longer-than-the-hop-limit` |
+| Let the good signature be tried before the broken one | *nothing* — see below |
 
-The sixth row is the reason this table exists. Removing the RDATA down-casing
-call broke no test at all: the type-list test called the function directly and
-never established that anything used it. There is now a test that fails
-without the call, and a counterpart pinning SVCB *outside* RFC 4034 §6.2's
-enumeration, since inventing membership would produce signed data no signer
-ever signed.
+Two rows are the reason this table exists, and they are the two that say
+*nothing*.
+
+Removing the RDATA down-casing call broke no test at all: the type-list test
+called the function directly and never established that anything used it.
+There is now a test that fails without the call, and a counterpart pinning
+SVCB *outside* RFC 4034 §6.2's enumeration, since inventing membership would
+produce signed data no signer ever signed.
+
+The last row is the same failure in a fixture rather than in a test. The
+rollover scenario adds a broken signature alongside a good one to check that a
+validator continues past a failure — and the validator sorts signatures
+deterministically, so the good one was tried first and the broken one never
+touched. The scenario passed while testing nothing, and the result looked
+identical either way. It was caught by reading the trace rather than the
+verdict; the fixture now forces the broken signature to the front of that
+order.
 
 ## Differential comparison
 
@@ -199,9 +239,21 @@ how a comparison suite stops meaning anything.
 
 ### Current result
 
-**Zero false secures against either oracle.** Of the eighteen scenarios, one
-is not comparable and the rest match both references except for the
-documented gaps below.
+**Zero false secures against either oracle**, across 78 laboratory scenarios
+and 612 live questions. Three scenarios are not comparable at all, eight carry
+a documented gap, and the rest match both references.
+
+`rollover-two-signatures-one-broken` is the one of those three worth naming
+here, because it is the only place where the two oracles disagree with each
+other about correctly signed data. RFC 4035 §5.3.3 leaves conflict resolution
+between multiple RRSIGs to "local resolver security policy"; RFC 6840 §5.4
+recommends accepting any valid one, which libunbound does and Daddybound
+follows, and warns that a stricter resolver "is also vulnerable to malicious
+insertion of gibberish signatures", which is what delv's rejection here
+demonstrates. Comparing it would file a policy choice as a false Secure, and
+that class must never be manufactured or it stops meaning what it says. The
+behaviour is pinned by a unit test instead, and the companion scenario with
+nothing valid in it stays fully comparable — both oracles reject that one.
 
 Both oracles report an unresolved verdict — neither secure nor bogus — for
 RFC 4033's Insecure and its Indeterminate alike, and cannot say which they
@@ -211,17 +263,46 @@ inventing evidence the oracle never gave.
 
 ### The documented gaps
 
-Two are v0.1 admitting it cannot reach Insecure without denial proofs:
-`unsupported-algorithm` and `unsupported-ds-digest`, where RFC 6840 §5.3 and
-§5.2 say the zone is treated as unsigned. `disallowed-algorithm` is an oracle
-applying its own algorithm policy, which it is entitled to do.
+Two are places where RFC 6840 §5.3 and §5.2 end in "treated as if it were
+unsigned" — RFC 4033's Insecure — and Daddybound reports Indeterminate instead:
+`unsupported-algorithm` and `unsupported-ds-digest`. That is no longer a
+missing capability; denial proofs exist. It is a distinction. Insecure is a
+claim that the parent proved no DS exists, and here the DS records are present
+and this build cannot evaluate them, which is a fact about the build. Saying
+Insecure would report a proof nobody offered, and would let an attacker
+downgrade a zone by publishing a delegation this validator cannot read.
+
+`disallowed-algorithm` is an oracle applying its own algorithm policy, which it
+is entitled to do: RFC 9905 §2 tells implementations to keep validating RSASHA1
+and operators to treat it as unsupported, and the two sides of the comparison
+are built to different sentences of the same paragraph.
+
+Two more are denial divergences argued out in `standards.md` §5.6 and §5.7: an
+NXDOMAIN forged over an empty non-terminal, where libunbound repairs the
+response code and Daddybound — which returns a verdict and not an answer — can
+only refuse; and a DS query answered through NSEC3 opt-out, where delv agrees
+with Daddybound and libunbound does not.
+
+The eighth is the mirror of that last one, and the only gap where the two
+oracles disagree with each other about a denial rather than about policy:
+`nsec3-opt-out-span-cannot-prove-a-name-error`. libunbound reports insecure,
+delv reports a fully validated name error, and they do so on the live Internet
+as readily as on the fixture — darkegy.cam does not exist and .cam signs with
+opt-out. Daddybound reports insecure because RFC 5155 §12.2 says non-existence
+inside an opt-out span is not provable, which is `R-N3-13` in `standards.md`.
+Agreeing with libunbound is a consequence of following that sentence, not the
+reason for it.
 
 ### The disputed case, and how a second oracle changed the answer
 
 On `foreign-zone-signature` both libunbound and delv say Secure; Daddybound
-says Bogus. **This is recorded as an open question, not as a Daddybound
-correctness win.** The earlier version of this document claimed the latter,
-and was wrong.
+says Bogus. This was carried as an open question for two milestones and has
+now been settled by measurement rather than argument — see `standards.md` §5.8.
+The lab records what each validator asks, and delv never asks about the zone
+cut it is accepting across: it follows the RRSIG's signer name upwards and
+therefore never discovers that the name lies below a delegation. Daddybound
+descends the delegations instead, so it has the evidence delv does not. It is
+still not a vulnerability in delv, for the reason §5.8 gives.
 
 The scenario: `www.example.dnsdaddylab. A`, which lives in the zone
 `example.dnsdaddylab.` (apex SOA, NS and DNSKEY, delegated from
@@ -267,12 +348,86 @@ The query log that produced the evidence above is part of the lab server
 otherwise a matter of opinion, and the only way to settle it is to look at
 what was actually asked.
 
+## The real-world corpus
+
+The laboratory establishes that Daddybound reads the standards the way two
+other implementations do, on data built to make each rule reachable. What it
+cannot establish is that the rules are the right *set* — that no shape
+occurring in the wild falls outside every scenario anyone thought to write.
+Only real names can answer that, because nobody has to think of them.
+
+`make corpus` puts 612 questions to Daddybound, libunbound and delv over a
+public recursive resolver. Two disciplines make the answer worth having, and
+both are about the corpus rather than the code.
+
+**The names are not chosen by verdict.** 277 come from the Tranco top-1M,
+sampled by rank arithmetic across four bands — nothing inspected before
+inclusion, nothing removed after — with query types spread over them and a
+`www.` label added to some, which is where CNAMEs live. The rest are named for
+a DNSSEC *shape* a ranked sample reaches only by luck: the signed root and TLD
+apexes, NSEC versus NSEC3 versus NSEC3 opt-out, DS present and DS absent,
+NXDOMAIN and NODATA under signed and unsigned parents, and the well-known
+deliberately-broken zones. A majority of the sampled names are unsigned, and
+that is the point — an unsigned zone under a signed TLD is the commonest shape
+in the DNS, it must come out Insecure rather than Bogus, and a corpus of only
+signed names would never test it.
+
+**No expected verdict is stored.** The oracles produce them at run time. A
+file of expectations would date the moment a zone re-signed, and worse, would
+let a Daddybound change be "confirmed" by editing the file.
+
+It is opt-in and not in CI. It needs the network, a public resolver, both
+oracles and several minutes, and its result depends on the state of zones
+nobody here controls — every one of which is a reason it must not gate a pull
+request. A job that goes red because someone else let a signature expire
+teaches contributors to re-run red builds, which costs far more than the run
+is worth.
+
+Two things the harness has to get right, both learned the hard way on the
+first run:
+
+- **A disagreement is asked again, once, serially, before it is recorded.**
+  Not to make failures go away — a second run that agrees is recorded as it
+  stands, and a genuine false Secure reproduces every time. It is to stop the
+  network being read as a verdict: under concurrency an oracle that loses a
+  packet mid-chain prints words indistinguishable from a real refusal. delv
+  says "broken trust chain resolving 'org/DS/IN'" whether the DS is missing or
+  the query was dropped. The first run produced a FALSE_SECURE against
+  iana.org that validates cleanly the moment it is asked on its own.
+- **Root anchors are read from the system's managed root key file**, not
+  written into source. The root has two KSKs published today and will have one
+  again; a hard-coded anchor keeps working right up until the day it silently
+  reports the entire Internet Bogus.
+
+### What the first two runs found
+
+FALSE_SECURE was **0** against both oracles on both runs. Everything else was
+a finding to investigate individually:
+
+| Defect | Direction | Why the laboratory missed it |
+| --- | --- | --- |
+| `wildcardAt(".")` built `"*.."` by concatenation, so the wildcard half of a name-error proof could never be satisfied when the closest encloser is the root | false Bogus on every query for a TLD that does not exist | a lab hierarchy delegates out of the root immediately, so no scenario in it ever has the root as a closest encloser |
+| DS and DNSKEY records were taken from a response without checking their owner name | false Bogus on three names, all of the shape `www.X` aliased to `X`, where the resolver answered a DS query with the apex's DS | the lab's Source answers exactly the question asked; a real resolver helpfully sends context |
+
+Both are now laboratory scenarios as well, so the shapes are reachable
+offline from here on. Neither could have produced a false Secure — the second
+is provably one-directional, because RFC 4034 §5.1.4 computes a DS digest over
+the DNSKEY's owner name — but a validator that cries wolf gets turned off, and
+a validator that is turned off protects nobody.
+
+The remaining divergences are mostly Daddybound reporting Indeterminate
+(`cancelled`) where an oracle reported Bogus with "timed out resolving": the
+network under four concurrent workers and a delv process per question, not a
+reading of the data.
+
 ## What the fuzzers cover
 
-Three targets, on the three places attacker-chosen bytes arrive first:
-canonical signed-data construction, the RFC 3110 length-prefixed RSA key
-decoder, and validation of an arbitrary wire response. Roughly 1.3 million
-executions, no crashes.
+Four targets, on the places attacker-chosen bytes arrive first: canonical
+signed-data construction, the RFC 3110 length-prefixed RSA key decoder,
+validation of an arbitrary wire response, and — since a CNAME or DNAME answer
+lets the sender choose where the walk goes next — an arbitrary answer section
+injected at one link of a chain. Roughly 3 million executions, no crashes, no
+hangs.
 
 The third asserts more than "does not panic" — a validator returning Secure
 for everything would pass that. Its trust anchor's digest is thirty-two zero
@@ -281,11 +436,18 @@ validate. A Secure verdict there is a forged chain of trust and fails the run.
 
 ## What this evidence does not cover
 
-- Eighteen hand-built scenarios against two oracles. Better than one, and
-  still not a corpus of real signed zones — the scenarios are ones we thought
-  of.
-- One algorithm end to end. Ed25519 signs every laboratory zone; RSA and ECDSA
-  verification paths are exercised by unit tests and by the relabelling
-  scenarios, not by a full signed chain.
-- No NSEC or NSEC3, so nothing here says anything about denial of existence.
-- No real Internet zone has ever been validated by this engine.
+- The laboratory scenarios are still ones we thought of. The corpus is the
+  answer to that and it is a partial one: several hundred names is a sample of
+  the DNS, not a survey of it.
+- Zones signed by this repository's own signer. Every laboratory zone is
+  signed by code in `internal/daddybound/lab`; real zones are signed by BIND,
+  Knot, OpenDNSSEC and PowerDNS, and the corpus reaches those only through
+  whatever the sampled names happen to use.
+- One NSEC3 hash algorithm and a narrow iteration regime per hierarchy. The
+  parameter space a real validator meets is wider than the scenarios cover,
+  and the corpus samples it rather than enumerating it.
+- Aggressive use of NSEC and NSEC3 (RFC 8198), RFC 5011 rollover, and
+  recursive resolution: not implemented, so not tested.
+- The corpus runs against one public resolver's view. A resolver that
+  minimised qnames differently, or cached differently, would hand Daddybound a
+  different set of responses for the same names.

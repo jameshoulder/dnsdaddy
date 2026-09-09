@@ -49,23 +49,55 @@ func (q Query) String() string {
 		q.Name, dns.TypeToString[q.Type], dns.RcodeToString[q.Rcode], q.Answer)
 }
 
-// StartServer binds UDP and TCP on an ephemeral loopback port and serves h.
+// StartServer binds UDP and TCP on the same ephemeral loopback port and
+// serves h.
 //
 // Both protocols, because a validator retries over TCP when an answer is
 // truncated, and DNSSEC answers carrying keys and signatures truncate
-// routinely.
+// routinely. Both on one port, because that is what a DNS server looks like
+// and what an oracle configured with a single host:port expects.
+//
+// Hence the retry, which is not defensive padding. TCP and UDP have separate
+// port spaces: asking the kernel for an ephemeral port on one says nothing
+// about whether the same number is free on the other, so binding one and then
+// the other is a race against everything else on the machine. It lost on a CI
+// runner under -race, where the extra latency widened the window — and it lost
+// as a confusing failure inside a differential scenario ("serve: bind: address
+// already in use") that read like a fault in the scenario rather than in the
+// harness.
+//
+// A loop that discards a colliding pair and asks for another port is the
+// standard remedy and terminates immediately in practice; a bound on the
+// attempts keeps a genuinely exhausted machine from spinning.
 func (h *Hierarchy) StartServer() (*Server, error) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("lab: listen udp: %w", err)
-	}
-	addr := pc.LocalAddr().String()
+	const attempts = 16
 
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		_ = pc.Close()
-		return nil, fmt.Errorf("lab: listen tcp on %s: %w", addr, err)
+	var (
+		pc  net.PacketConn
+		ln  net.Listener
+		err error
+	)
+	for i := 0; i < attempts; i++ {
+		// TCP first: it is the scarcer of the two, both because listening
+		// sockets linger in TIME_WAIT and because far more software on a
+		// shared runner wants a TCP port than a UDP one. Choosing the
+		// number from the scarcer space makes the second bind the one
+		// likely to succeed.
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, fmt.Errorf("lab: listen tcp: %w", err)
+		}
+		pc, err = net.ListenPacket("udp", ln.Addr().String())
+		if err == nil {
+			break
+		}
+		_ = ln.Close()
+		ln, pc = nil, nil
 	}
+	if pc == nil || ln == nil {
+		return nil, fmt.Errorf("lab: could not bind udp and tcp on one loopback port in %d attempts: %w", attempts, err)
+	}
+	addr := ln.Addr().String()
 
 	s := &Server{addr: addr}
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
@@ -172,33 +204,20 @@ func (h *Hierarchy) answer(s *Server, w dns.ResponseWriter, req *dns.Msg) {
 	// is why it is a comment rather than just a function call.
 	name := dns.CanonicalName(q.Name)
 
-	records := h.sets[setKey{name: name, rrtype: q.Qtype}]
 	wantDNSSEC := false
 	if opt := req.IsEdns0(); opt != nil {
 		wantDNSSEC = opt.Do()
 	}
 
-	if len(records) > 0 {
-		m.Answer = filterSignatures(records, wantDNSSEC)
-		s.record(Query{Name: name, Type: q.Qtype, DOBit: wantDNSSEC, Rcode: m.Rcode, Answer: len(m.Answer)})
-		writeOrServfail(w, m)
-		return
-	}
+	// The same assembly the in-memory Source uses. Two code paths building
+	// "the same" response would make every differential disagreement
+	// ambiguous — is the validator wrong, or did it see different records?
+	resp := h.respond(name, q.Qtype, wantDNSSEC)
+	m.Rcode = resp.Rcode
+	m.Answer = resp.Answer
+	m.Ns = resp.Authority
 
-	// No data of that type. Whether the name exists at all decides between
-	// NODATA and NXDOMAIN, and the enclosing zone's SOA goes in the
-	// authority section either way so the asker can tell a real absence from
-	// a broken server.
-	zone := h.enclosingZone(name)
-	if zone != nil {
-		if soa := zone.sets[setKey{name: zone.Name, rrtype: dns.TypeSOA}]; len(soa) > 0 {
-			m.Ns = filterSignatures(soa, wantDNSSEC)
-		}
-	}
-	if !h.nameExists(name) {
-		m.Rcode = dns.RcodeNameError
-	}
-	s.record(Query{Name: name, Type: q.Qtype, DOBit: wantDNSSEC, Rcode: m.Rcode, Answer: 0})
+	s.record(Query{Name: name, Type: q.Qtype, DOBit: wantDNSSEC, Rcode: m.Rcode, Answer: len(m.Answer)})
 	writeOrServfail(w, m)
 }
 
@@ -206,11 +225,11 @@ func (h *Hierarchy) answer(s *Server, w dns.ResponseWriter, req *dns.Msg) {
 // be packed.
 //
 // Dropping the response instead — which is what ignoring WriteMsg's error
-// amounts to — makes a scenario the lab cannot serialise look like a
-// scenario the validator under test was slow about. That cost seventeen
-// seconds of retries and one misattributed disagreement before it was
-// noticed. An explicit SERVFAIL says "this harness could not answer", which
-// is a different sentence from "this validator could not decide".
+// amounts to — makes a scenario the lab cannot serialise look like a scenario
+// the validator under test was slow about. That cost seventeen seconds of
+// retries and one misattributed disagreement before it was noticed. An
+// explicit SERVFAIL says "this harness could not answer", which is a
+// different sentence from "this validator could not decide".
 func writeOrServfail(w dns.ResponseWriter, m *dns.Msg) {
 	if err := w.WriteMsg(m); err == nil {
 		return
@@ -232,30 +251,6 @@ func filterSignatures(records []dns.RR, wantDNSSEC bool) []dns.RR {
 		}
 	}
 	return out
-}
-
-// nameExists reports whether the hierarchy holds any record at name.
-func (h *Hierarchy) nameExists(name string) bool {
-	for k := range h.sets {
-		if k.name == name {
-			return true
-		}
-	}
-	return false
-}
-
-// enclosingZone returns the deepest zone that contains name.
-func (h *Hierarchy) enclosingZone(name string) *Zone {
-	var best *Zone
-	for _, z := range h.Zones {
-		if !dns.IsSubDomain(z.Name, name) {
-			continue
-		}
-		if best == nil || dns.CountLabel(z.Name) > dns.CountLabel(best.Name) {
-			best = z
-		}
-	}
-	return best
 }
 
 // AnchorDS renders the hierarchy's trust anchor in the DS presentation form a

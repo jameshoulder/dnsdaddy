@@ -54,11 +54,30 @@ test-ui: ## Run the dashboard's JavaScript tests (needs node; no packages to ins
 test-daddybound: ## Compare Daddybound against libunbound and BIND delv (needs libunbound-dev, bind9-dnsutils, cgo)
 	CGO_ENABLED=1 go test -tags daddybound_unbound -v ./internal/daddybound/...
 
+.PHONY: corpus
+corpus: ## Compare Daddybound against libunbound and delv over real Internet names (needs network, several minutes)
+	@# Deliberately not part of `make test` and not in CI. It needs the
+	@# network, a public recursive resolver, both reference validators and
+	@# several minutes, and its result depends on the state of zones nobody
+	@# here controls — every one of which is a reason it must not gate a pull
+	@# request. A CI job that goes red because someone else let a signature
+	@# expire teaches contributors to re-run red builds.
+	DADDYBOUND_CORPUS=1 CGO_ENABLED=1 go test -tags daddybound_unbound \
+		./internal/daddybound/differential/ -run TestRealWorldCorpus -v -count=1 -timeout 60m
+
 .PHONY: fuzz-daddybound
 fuzz-daddybound: ## Fuzz the Daddybound input surface for 30s per target
-	@for target in FuzzCanonicalSignedData FuzzParseRSAPublicKey FuzzValidateWireResponse; do \
-		echo "--- $$target ---"; \
-		go test ./internal/daddybound/dnssec/ -run '^$$' -fuzz "^$$target$$" -fuzztime=30s || exit 1; \
+	@# Discovered rather than listed, for the reason the CI step gives: a
+	@# hard-coded list stops covering whatever was added last, which is how
+	@# fuzzing dies quietly. Package and target together, because -fuzz
+	@# refuses a pattern matching more than one package.
+	@grep -rn '^func Fuzz[A-Za-z0-9_]*(' ./internal/daddybound/ | \
+	while IFS= read -r line; do \
+		file=$${line%%:*}; fn=$${line##*func }; \
+		printf '%s %s\n' "$$(dirname "$$file")" "$${fn%%(*}"; \
+	done | sort -u | while read -r pkg target; do \
+		echo "--- $$pkg $$target ---"; \
+		go test "$$pkg" -run '^$$' -fuzz "^$$target$$" -fuzztime=30s || exit 1; \
 	done
 
 .PHONY: cover

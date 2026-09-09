@@ -78,6 +78,33 @@ func SplitSignatures(records []dns.RR, rrType uint16) (data []dns.RR, sigs []*dn
 	return data, sigs
 }
 
+// SplitSignaturesAt is SplitSignatures restricted to one owner name.
+//
+// The answer to a query for (QNAME, QTYPE) is the RRset at QNAME, or a CNAME
+// chain leading to one (RFC 1034 §4.3.2). Nothing else in the answer section
+// answers the question, and a real response routinely carries something else:
+// a server that follows a CNAME within its own zone returns the alias and the
+// records it points at together, so an answer section holding records at two
+// different owner names is the normal case rather than an odd one.
+//
+// Filtering by owner is therefore not tidiness. Without it a validator picks
+// up whichever records match the queried *type*, authenticates them — they are
+// genuinely signed, just not an answer to this question — and reports Secure.
+// An attacker needs no forgery for that: any signed RRset of the right type
+// from anywhere in the zone will do, returned in answer to a query for a name
+// it has nothing to do with. This package did exactly that until the review
+// that added this function.
+func SplitSignaturesAt(records []dns.RR, owner string, rrType uint16) (data []dns.RR, sigs []*dns.RRSIG) {
+	want := dns.CanonicalName(owner)
+	at := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		if dns.CanonicalName(rr.Header().Name) == want {
+			at = append(at, rr)
+		}
+	}
+	return SplitSignatures(at, rrType)
+}
+
 // dnskeysOf returns the DNSKEY records from a set, ignoring anything else.
 func dnskeysOf(records []dns.RR) []*dns.DNSKEY {
 	var keys []*dns.DNSKEY
@@ -87,6 +114,49 @@ func dnskeysOf(records []dns.RR) []*dns.DNSKEY {
 		}
 	}
 	return keys
+}
+
+// recordsAt keeps the records owned by exactly one name.
+//
+// The same rule SplitSignaturesAt applies to an answer, applied to the
+// delegation walk. A response answers one question, and the records that
+// answer it are the ones at the queried name; everything else in the section
+// is context. The DNS puts context there routinely — a CNAME response carries
+// the alias *and* what it points at — so "records of the right type in the
+// answer section" and "the answer" are different sets at every step of the
+// walk, not only at the last one.
+//
+// The live corpus found the delegation half of that. Asked for the DS of
+// www.office365.com — a name that is a CNAME to its own zone apex — a public
+// resolver returned the apex's DS instead, signed by com. The walk, standing
+// in office365.com by then, authenticated a com.-signed RRset against the
+// wrong zone and reported Bogus for a correctly signed name. Both reference
+// validators returned Secure.
+//
+// That direction is the only one available here, which is worth stating
+// because it is not obvious. A DS for the wrong owner cannot promote
+// anything: RFC 4034 §5.1.4 computes the digest over the *DNSKEY's* owner
+// name, so a sibling's DS never matches the child's keys however well it is
+// signed. Filtering by owner is still the fix, because relying on the digest
+// to catch it is relying on a second check to cover a first one that is
+// simply wrong.
+func recordsAt(records []dns.RR, owner string) []dns.RR {
+	want := dns.CanonicalName(owner)
+	out := make([]dns.RR, 0, len(records))
+	for _, rr := range records {
+		if dns.CanonicalName(rr.Header().Name) == want {
+			out = append(out, rr)
+		}
+	}
+	return out
+}
+
+// dsAt returns the DS records owned by name.
+func dsAt(records []dns.RR, owner string) []*dns.DS { return dsOf(recordsAt(records, owner)) }
+
+// dnskeysAt returns the DNSKEY records owned by name.
+func dnskeysAt(records []dns.RR, owner string) []*dns.DNSKEY {
+	return dnskeysOf(recordsAt(records, owner))
 }
 
 // dsOf returns the DS records from a set, ignoring anything else.

@@ -1,9 +1,10 @@
 # Daddybound
 
 Daddybound is an experimental DNS resolution and validation engine, written
-from first principles in Go. Its first milestone is one thing done properly:
-walking a DNSSEC chain of trust from a configured trust anchor to a signed
-answer, and being honest about every case where it cannot.
+from first principles in Go. It walks a DNSSEC chain of trust from a
+configured trust anchor to an authenticated answer, an authenticated absence
+or an authenticated redirection — and is honest about every case where it
+cannot.
 
 **Daddybound is not a production DNSSEC validator and must not be relied upon
 as one.** It answers no queries. It enforces no policy. The DNS Daddy resolver
@@ -36,7 +37,7 @@ Every rule Daddybound enforces is traced to a sentence in a standard.
 each rule a stable identifier, and the code cites those identifiers. A rule
 with no identifier is either a bug or an invention.
 
-## What v0.1 does
+## What Daddybound does
 
 - Walks a chain of trust from a configured trust anchor through DS and DNSKEY
   records to a signed RRset.
@@ -44,23 +45,58 @@ with no identifier is either a bug or an invention.
   signatures; can verify RSASHA1 and refuses to rely on it by default, which
   is what RFC 9905 asks of an implementation and an operator respectively.
 - Matches DS records using SHA-1, SHA-256 and SHA-384 digests.
+- Validates authenticated denial of existence with NSEC and NSEC3: NXDOMAIN,
+  NODATA, empty non-terminals, wildcard expansion and insecure delegation,
+  including NSEC3 closest-encloser proofs and opt-out.
+- Reaches RFC 4033's **Insecure** only by proving something, never by failing
+  to. Two routes qualify: an authenticated denial record at a delegation
+  showing NS present and DS absent, and an authenticated NSEC3 Opt-Out span,
+  which RFC 5155 §12.2 says cannot prove non-existence and §7.1 says may only
+  omit unsigned names. Never for a missing signature, an unsupported
+  algorithm, a timeout, or any other flavour of "could not prove Secure".
+- Bounds the work an NSEC3 response can demand, by iteration count and by
+  total hash computations, and refuses rather than downgrades when a response
+  exceeds it.
+- Follows **CNAME chains**, validating each hop from the trust anchor down and
+  reporting the weakest link's verdict. A signed alias into an unsigned zone
+  is Insecure however well signed its destination is; neither the first hop's
+  classification nor the last is inherited.
+- Follows **DNAME redirections** (RFC 6672), authenticating the DNAME RRset and
+  recomputing the substitution from it. The server-synthesised CNAME is never
+  read: RFC 6672 §5.3.1 requires it to be unsigned, so its target is whatever
+  the sender wrote.
+- Validates **QTYPE=ANY** per RFC 6840 §4.2 — every RRset received at the
+  queried name must validate — and refuses to authenticate an empty ANY
+  answer, because no NSEC or NSEC3 type bitmap can deny a query type.
+- Bounds a chain by hops and by a visited set, so a loop or a long chain
+  produces Indeterminate with a resource reason rather than an accusation
+  against the zone.
 - Produces a deterministic, structured trace of every step, with typed
   reasons rather than English strings.
 - Runs a deterministic signed laboratory offline, and compares its verdicts
   against two independent reference validators — libunbound and BIND's
   `delv` — over the same served records.
+- Compares those verdicts against the **live Internet** in a separate,
+  opt-in run: several hundred real names, most of them sampled from a public
+  ranked list by rank arithmetic rather than chosen, each put to the same two
+  oracles. See [validation-lab.md](validation-lab.md).
 
-## What v0.1 does not do
+## What Daddybound does not do
 
 Stated plainly, because the credibility of the list above depends on this one
 being complete:
 
-- **No denial of existence.** No NSEC, no NSEC3, no authenticated NXDOMAIN or
-  NODATA, no wildcard denial proofs. A consequence is that Daddybound can
-  never legitimately return **Insecure**, and it does not: where a complete
-  validator would, Daddybound returns Indeterminate and names what is missing.
-- **No recursive resolution.** It validates records it is given. It does not
-  discover them by querying the Internet.
+- **No aggressive use of NSEC or NSEC3** (RFC 8198). Denial proofs are checked
+  when a response carries them; they are never used to answer a question that
+  was not asked.
+- **One remaining zone-cut assumption.** Where a delegation supplies no proof
+  either way, the walk assumes the name is not a zone cut. That can cost a
+  false Bogus and cannot produce a false Secure — argued in standards.md §5.5
+  and measured by a property test that strips every delegation proof and
+  checks no verdict strengthens.
+- **No recursive resolution.** It validates records something else supplies.
+  The live corpus points it at a recursive resolver with CD set; that is a
+  test harness reading records, not Daddybound discovering them.
 - **No trust anchor rollover** (RFC 5011). Anchors are configuration.
 - **No encrypted transports** as part of the engine.
 - **No enforcement.** There is no configuration that makes Daddybound decide a
@@ -77,13 +113,24 @@ dnsdaddy daddybound validate -scenario tampered-answer -trace
 ```
 
 These commands build a signed hierarchy in memory. They cannot be pointed at
-the Internet or at a running deployment, because v0.1 performs no recursive
-resolution — there is nothing to point at a real name with.
+a running deployment: no configuration wires Daddybound into the query path,
+and the isolation is checked as a property of the import graph rather than
+promised here.
+
+The live differential corpus is a separate, opt-in test rather than a
+subcommand, for the same reason it is not in CI — it needs the network, both
+reference validators, and several minutes, and its result depends on the state
+of other people's zones:
+
+```
+make corpus
+```
 
 ## The documents
 
 | | |
 | --- | --- |
+| [validation-model.md](validation-model.md) | What Daddybound proves and what it assumes, separated line by line |
 | [standards.md](standards.md) | Which RFCs were read, what they say, and the identifier each rule is cited by |
 | [architecture.md](architecture.md) | The packages, the dependency direction, and why the seams are where they are |
 | [security-model.md](security-model.md) | What Daddybound is trusted with, what it is not, and how that is enforced |

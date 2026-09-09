@@ -26,6 +26,9 @@ const (
 	// StepRRset: the verdict for one RRset, after every signature on it was
 	// considered.
 	StepRRset StepKind = "rrset"
+	// StepDenial: an NSEC or NSEC3 record was considered as proof that a
+	// name or a type does not exist.
+	StepDenial StepKind = "denial"
 	// StepPolicy: an algorithm or digest was allowed or refused.
 	StepPolicy StepKind = "policy"
 	// StepLimit: validation stopped at a bound, or was cancelled.
