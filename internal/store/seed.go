@@ -8,6 +8,8 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 )
 
+const defaultAccessMigrationKey = "migration.default_ad_hoc_access_v1"
+
 // seed installs first-run defaults: three policies, a catch-all network, and
 // the built-in feed list. It is idempotent — existing rows are left alone,
 // except that built-in feed metadata (name, URL, category) is refreshed so an
@@ -74,14 +76,48 @@ func (s *Store) seed(ctx context.Context) error {
 		return err
 	}
 
+	// Before Default became a real ad-hoc access switch, the bootstrap ACL was
+	// always active. Existing installations therefore served unmatched clients
+	// from dns.allowed_client_cidrs regardless of the n_default AllowResolver
+	// bit (which, with no CIDRs, granted nothing).
+	//
+	// Preserve that effective behaviour once, by turning the new switch on for
+	// a database that already contains networks. A genuinely fresh database is
+	// different: it gets n_default with ad-hoc access explicitly OFF. The marker
+	// is written in the same transaction so this cannot run twice after a crash.
+	var accessMigrationDone int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM settings WHERE key = ?", defaultAccessMigrationKey,
+	).Scan(&accessMigrationDone); err != nil {
+		return err
+	}
+
 	if networkCount == 0 {
 		// The catch-all network has no CIDRs: policy.Engine falls back to it for
-		// any client that does not match a more specific network.
+		// any client that does not match a more specific network. Its access bit
+		// is intentionally off on a fresh install; turning it on admits unmatched
+		// clients only inside dns.allowed_client_cidrs.
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO networks (id, name, location, policy_id, token, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+			INSERT INTO networks (id, name, location, policy_id, token, enabled, allow_resolver, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)`,
 			"n_default", "Default", "All unmatched clients", "p_standard", NewToken(10), now, now)
 		if err != nil {
+			return err
+		}
+	} else if accessMigrationDone == 0 {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE networks SET allow_resolver = 1, updated_at = ? WHERE id = ?",
+			now, "n_default",
+		); err != nil {
+			return err
+		}
+	}
+
+	if accessMigrationDone == 0 {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO settings (key, value) VALUES (?, ?)",
+			defaultAccessMigrationKey, "1",
+		); err != nil {
 			return err
 		}
 	}
