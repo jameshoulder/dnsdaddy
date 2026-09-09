@@ -58,7 +58,7 @@ the answer to be yours rather than the installation's.
 
 ### Learn does not change any answer
 
-**It does not change any answer.** In observe mode Daddybound validates the
+**It does not change any answer.** In Learn mode Daddybound validates the
 same names your clients ask for, records what it concludes, and stops there.
 A `bogus` verdict is a row in a table and a number on a dashboard; the client
 receives exactly the response the resolver produced. There is no configuration
@@ -73,7 +73,7 @@ an outage when it is not. DNS Daddy has a validator with a great deal of
 laboratory evidence behind it and almost none from production, and the honest
 order is to measure before deciding.
 
-What observe mode measures is the disagreement between two things you can
+What Learn mode measures is the disagreement between two things you can
 already see side by side in the query log:
 
 - **DNSSEC (upstream)** — the AD bit. Your upstream resolver validated this

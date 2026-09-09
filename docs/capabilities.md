@@ -78,7 +78,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 |---|---|
 | `dnsdaddy doctor` | Reads configuration and the database, and sends real DNS queries at the configured listeners and through each upstream. Reports SYSTEM, DATABASE, DNS LISTENER, CLIENT ACCESS, UPSTREAM, WEB INTERFACE and THREAT INTELLIGENCE as PASS/WARN/FAIL with the evidence behind each verdict. Changes nothing — the database is opened read-only — and exits non-zero on failure. `--json` for machine consumption. |
 | Client-access cross-check | Reports a network configured in the dashboard whose addresses the **effective** client ACL does not permit — the bootstrap list from configuration unioned with the dashboard's own permissions, with both sources named separately. Surfaced at startup, at `GET /api/v1/diagnostics`, in `dnsdaddy doctor`, and on the dashboard. Coverage is decided by single-prefix containment, so two allowed prefixes that between them cover a network are reported as *partial* rather than *full* — it over-warns in a rare case rather than under-warning in a common one. |
-| Dashboard-managed resolver access | A network can be permitted to query the resolver from the dashboard, in force on the next query with no restart. Enforced server-side: a default route is refused outright, and a publicly routable range needs an explicit acknowledgement recorded per range. See [docs/deploy.md](deploy.md#who-may-use-the-resolver) for the precedence rules and the properties that can surprise — an empty bootstrap ACL stays unrestricted, there are no deny rules, and permitting the catch-all grants nothing because it has no ranges of its own. |
+| Dashboard-managed resolver access | A network can be permitted to query the resolver from the dashboard, in force on the next query with no restart. Enforced server-side: a default route is refused outright, and a publicly routable range needs an explicit acknowledgement recorded per range. See [docs/deploy.md](deploy.md#who-may-use-the-resolver) for the precedence rules and the properties that can surprise — an empty bootstrap ACL stays unrestricted, there are no deny rules, and permitting a catch-all you created grants nothing because it has no ranges of its own. The built-in **Default** row is the exception: its control is *Ad-hoc DNS access*, which decides whether unmatched clients already inside `dns.allowed_client_cidrs` are served. Off on a new installation, turned on once when upgrading an installation that was already serving them, and never able to widen that list. |
 | Public-exposure warning | Names each permitted range that is reachable from the internet, every time diagnostics run, from **both** sources — a range permitted through `DNSDADDY_ALLOWED_CLIENT_CIDRS` exposes a resolver exactly as much as one permitted in the dashboard. Each is labelled with the setting responsible. It never resolves itself and never claims a firewall state: DNS Daddy cannot see a cloud security group and does not change one. |
 | First-run guidance | The dashboard's onboarding card branches on measurements, not inference: refusals counted by the ACL, and whether the effective ACL admits anything beyond loopback. It does not treat "no network carries a permission" as "every client will be refused" — a stock LAN install has no permissions and serves every private range. |
 | Port-conflict attribution | When nothing answers, distinguishes "nothing is listening" from "another process holds the port" and names that process by reading `/proc` socket inodes. Naming a process owned by another user needs root; without it the check says so rather than guessing. |
@@ -114,8 +114,8 @@ a signed answer, implementing the protocol and trust logic from the standards
 in pure Go.
 
 **It enforces nothing for anybody.** Since v0.4 it can be pointed at real
-traffic in **observe mode**, where it validates the same names your clients ask
-for and records what it concludes — and the answer the client receives is
+traffic in **Learn mode** (`local_dnssec_validation: observe`), where it
+validates the same names your clients ask for and records what it concludes — and the answer the client receives is
 decided entirely by the resolver, whatever Daddybound says. A bogus verdict is
 a row in a table, not a refused query.
 
@@ -128,7 +128,15 @@ the blocklist, the query log and the store still cannot reach the validator at
 all — only the DNS handler has a door, and only at the point where the answer
 is already final.
 
-Observe mode is **off by default**.
+Learn mode is **on for a new installation** and **unchanged by an upgrade**:
+it is off the answer path but sends its own DNSSEC queries upstream, so it is
+not something to inherit from a version bump. Setting
+`dns.local_dnssec_validation` explicitly always wins.
+
+The dashboard shows the future **Live** mode — Daddybound participating in
+enforcement — as *unavailable* rather than hiding it, so nothing on the page
+can be read as saying Daddybound is protecting traffic today. `enforce` is
+still refused at startup rather than quietly run as Learn.
 
 What exists today: the chain walk, authenticated denial of existence with NSEC
 and NSEC3, CNAME chains, DNAME redirections and QTYPE=ANY, all four RFC 4033
@@ -187,7 +195,7 @@ how likely it is to happen — see [roadmap.md](roadmap.md) for the reasoning.
 
 | | Why it is not done |
 |---|---|
-| **Local DNSSEC *enforcement*** | Validation itself now runs against real traffic in observe mode (Experimental, above), so the engine is no longer the missing piece. What is missing is evidence: a measured disagreement rate against the upstream over real traffic and real time, a false-positive investigation, and a decided answer to what should happen to a client's query when validation fails. Refusing to answer on a verdict from a validator that has never run in production would trade a theoretical attack for a certain outage. |
+| **Local DNSSEC *enforcement*** | Validation itself now runs against real traffic in Learn mode (Experimental, above), so the engine is no longer the missing piece. What is missing is evidence: a measured disagreement rate against the upstream over real traffic and real time, a false-positive investigation, and a decided answer to what should happen to a client's query when validation fails. Refusing to answer on a verdict from a validator that has never run in production would trade a theoretical attack for a certain outage. |
 | **Policy enforcement from behavioural findings** | Needs a measured false-positive rate first. Blocking on a heuristic with an unknown FP rate is not a feature. |
 | **`safeSearch` enforcement** | The flag is accepted by the API and stored on the policy. The resolver does not act on it, and setting it changes nothing about how queries are answered. A known gap since the first release; the field is marked `deprecated` in the OpenAPI schema with that stated in the description, so a generated client cannot present it as a working control. |
 | **Webhook and syslog sinks** | The NDJSON file plus a log shipper covers the same ground today without a bespoke client per vendor. |
