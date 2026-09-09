@@ -95,7 +95,7 @@ Public resolvers like Quad9 and Cloudflare can block known-bad domains. What the
 | **DoH and DoT** | Serves DNS-over-HTTPS and DNS-over-TLS as well as plain DNS. |
 | **Behavioural detection** | Six experimental, alert-only detectors with explainable measurements. |
 | **Self-diagnosis** | `dnsdaddy doctor` explains configuration, listener, ACL, upstream and threat-intelligence problems. |
-| **DNSSEC visibility** | Records the upstream validation verdict per query; DNS Daddy does not locally validate DNSSEC. |
+| **DNSSEC visibility** | Records the upstream validation verdict per query, and optionally what its own experimental validator concludes about the same name. Neither decides whether a query succeeds. |
 | **SIEM-ready** | Versioned NDJSON with integration guidance for Wazuh, Elastic, Splunk and Sentinel. |
 | **Open by construction** | OpenAPI, Prometheus metrics, public threat-feed catalogue and documented design decisions. |
 
@@ -256,7 +256,7 @@ Worth knowing before you rely on DNS Daddy:
 - **No independent professional security review.**
 - **Early software.** Interfaces, deployment behaviour and storage formats may change between releases.
 - **Forwarding, not recursive.** DNS Daddy forwards to upstream resolvers.
-- **No local DNSSEC validation.** It records the upstream's validation verdict. Daddybound, the experimental validation engine, does not change this: it answers no queries and enforces nothing.
+- **No DNSSEC enforcement.** By default it records only the upstream's validation verdict. Daddybound, the experimental validation engine, can additionally validate the same names in observe mode — but it answers no queries and blocks nothing, so a forged answer for a signed zone is recorded rather than refused.
 - **Behavioural detection is experimental and alert-only.** There is no measured production false-positive rate yet.
 - **Browser DoH can bypass network DNS.** Mitigations require network/endpoint configuration.
 - **No clustering or anycast.** One DNS Daddy instance is one server.
