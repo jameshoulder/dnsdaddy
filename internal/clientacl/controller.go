@@ -48,6 +48,11 @@ type Controller struct {
 	// diagnostics keep saying otherwise until a reload succeeds.
 	stale atomic.Bool
 
+	// bootstrap is the operator-configured pool from dns.allowed_client_cidrs,
+	// kept exactly as written. Whether it is currently admitting anyone is
+	// decided by Compute from the Default network, not by editing this list —
+	// every diagnostic reports it as the operator's configuration, and a
+	// filtered copy here would make the product misdescribe its own config.
 	bootstrap   []string
 	allowPublic bool
 	load        Loader
@@ -59,6 +64,11 @@ type Controller struct {
 // The initial set is deliberately usable before the first Reload: startup
 // order should never leave a window where the resolver is answering with no
 // ACL because the database has not been read yet.
+//
+// It is computed with no networks, so the ad-hoc gate does not yet apply and
+// the configured pool is active — the behaviour that predates the Default
+// switch. That window closes at the first Reload, which main performs before
+// any listener opens and treats as a startup error if it fails.
 func NewController(bootstrapCIDRs []string, allowPublicResolver bool, load Loader) *Controller {
 	c := &Controller{
 		bootstrap:   append([]string(nil), bootstrapCIDRs...),

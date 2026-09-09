@@ -1792,7 +1792,7 @@ function localDnssecBadge(v) {
   const map = {
     secure: ['ok', 'secure', 'Daddybound authenticated this answer against the DNSSEC chain of trust.'],
     insecure: ['', 'insecure', 'Daddybound proved this name lies in an unsigned part of the DNS.'],
-    bogus: ['bad', 'bogus', 'Daddybound could not authenticate this answer. Nothing was blocked: observe mode records verdicts only.'],
+    bogus: ['bad', 'bogus', 'Daddybound could not authenticate this answer. Nothing was blocked: Learn mode records verdicts only.'],
     indeterminate: ['', 'indeterminate', 'Daddybound could not decide.'],
     timeout: ['', 'timeout', 'Validation ran out of time. This says nothing about the answer.'],
     resource_limit: ['', 'limit reached', 'Validation hit an internal bound. This says nothing about the answer.'],
@@ -1810,8 +1810,12 @@ function localDnssecBadge(v) {
     ? html` <span class="muted" title="The answer came from the cache, so it may be older than this observation.">(answer was cached)</span>`
     : '';
 
+  // "Learn" is the product name, and "nothing blocked" is the part that must
+  // survive any rewording: this badge sits next to a bogus verdict, and a
+  // reader who takes it as evidence the answer was refused has been misled
+  // about what their resolver did.
   return html`<span class="badge ${cls}" title="${title}">${text}</span>`
-    + html`<span class="muted"> · observe only, nothing blocked</span>`
+    + html`<span class="muted"> · Learn mode, nothing blocked</span>`
     + note + stale;
 }
 
@@ -1862,7 +1866,7 @@ function queryRow(q) {
     ['Category', q.category ? categoryBadge(q.category) : ''],
     ['Source', q.source ? html`${q.source}` : ''],
     ['DNSSEC (upstream)', q.dnssec ? dnssecBadge(q.dnssec) : ''],
-    ['DNSSEC (local)', q.dnssecValidation ? localDnssecBadge(q.dnssecValidation) : ''],
+    ['DNSSEC (local — Daddybound)', q.dnssecValidation ? localDnssecBadge(q.dnssecValidation) : ''],
     ['Answered from', q.cached ? 'the local cache' : 'an upstream resolver'],
     ['Took', typeof q.elapsedMs === 'number' ? html`${q.elapsedMs} ms` : ''],
     ['Time', q.time ? html`${new Date(q.time).toLocaleString('en-GB')}` : ''],
@@ -2368,6 +2372,16 @@ async function sendNetwork(method, path, payload) {
 // which is the failure this branch exists to end, and the Setup page is where
 // an operator acts on it. Measured from the ACL in force, not from a count of
 // permissions.
+// resolverAccessNote tells someone about to point a device here whether it
+// will actually be answered.
+//
+// Two settings decide that and they are deliberately described separately.
+// dns.allowed_client_cidrs says which addresses are *eligible*; ad-hoc access
+// on the Default network says whether an eligible client that matches no
+// Network may actually resolve. Collapsing them into one sentence — "these
+// ranges work" — is wrong in the case that matters most: ad-hoc access off,
+// which is what a fresh install ships with, where an address inside the
+// configured pool is still answered REFUSED until a Network covers it.
 function resolverAccessNote(access) {
   if (!access) return '';
   if (access.unrestricted) {
@@ -2375,6 +2389,29 @@ function resolverAccessNote(access) {
       Every address may query this resolver: no client ACL is configured. Anything you
       point here will be answered.</p>`;
   }
+
+  const dohNote = html` The DNS-over-HTTPS and DNS-over-TLS URLs below are identified by
+    their network token instead of by address, so they work from anywhere regardless of
+    this setting.`;
+
+  // Gated off: the eligible pool is not what will be served, and saying it is
+  // sends the reader to check the wrong thing.
+  if (access.adHocAccessGated && !access.adHocAccess) {
+    const eligible = access.bootstrapCidrs || [];
+    const granted = access.dashboardCidrs || [];
+    return html`<p class="muted small note-tight">
+      <strong>Before you point anything here:</strong> ad-hoc access is off, so a client is
+      answered over ordinary DNS only if a Network you added covers its address —
+      currently ${raw(granted.length
+        ? html`<span class="mono">${granted.join(', ')}</span>`
+        : html`<strong>none</strong>`)}. Everything else is answered <code>REFUSED</code>,
+      including addresses inside <span class="mono">${eligible.join(', ')}</span>, which are
+      eligible to be served but not currently being served. Add the client's network under
+      <em>Networks</em> and tick <em>Allow this network to use DNS Daddy</em>, or turn on
+      <em>Ad-hoc DNS access</em> on the Default row to serve every eligible address without
+      naming each one.${raw(dohNote)}</p>`;
+  }
+
   const effective = access.effectiveCidrs || [];
   if (!effective.length) {
     return '';
@@ -2383,12 +2420,118 @@ function resolverAccessNote(access) {
     <strong>Before you point anything here:</strong> only these ranges may query over
     ordinary DNS — <span class="mono">${effective.join(', ')}</span>. A client outside
     them is answered <code>REFUSED</code> however you configure it. Add its network under
-    <em>Networks</em> and tick <em>Allow this network to use DNS Daddy</em>. The
-    DNS-over-HTTPS URLs below are identified by token instead, so they work from
-    anywhere.</p>`;
+    <em>Networks</em> and tick <em>Allow this network to use DNS Daddy</em>.${raw(dohNote)}</p>`;
+}
+
+// The seeded catch-all. It is the only network whose access control means
+// something other than "permit these ranges", so it is the only one the
+// dashboard has to render differently.
+const DEFAULT_NETWORK_ID = 'n_default';
+
+function isDefaultNetwork(n) {
+  return !!n && n.id === DEFAULT_NETWORK_ID;
+}
+
+// adHocBadge describes the Default row's ad-hoc access state.
+//
+// Kept apart from accessBadge's catch-all branch because the two say different
+// things. A user-created catch-all really does grant nothing when permitted —
+// it has no ranges — and "Grants nothing" is the honest answer there. The
+// Default row's bit is not a grant at all: it decides whether unmatched
+// clients inside the configured ACL may resolve, which is a real effect and
+// was being reported as a no-op.
+function adHocBadge(n) {
+  if (n.enabled === false) {
+    return html`<span class="badge"
+      title="The Default network is disabled, so it applies no policy and admits no unmatched clients.">Disabled</span>`;
+  }
+  if (n.allowResolver) {
+    return html`<span class="badge ok"
+      title="Unmatched clients whose address is already inside the configured resolver ACL may use DNS Daddy and receive the Default policy. This does not widen that ACL and does not expose DNS Daddy to arbitrary internet clients.">Ad-hoc access on</span>`;
+  }
+  return html`<span class="badge"
+    title="Unmatched clients are refused. Networks you have added and permitted are unaffected, and the resolver stays usable from this machine.">Ad-hoc access off</span>`;
+}
+
+// networkRow renders one row of the Networks list.
+//
+// A network is a record, not a spreadsheet row: name and ranges are what you
+// scan for, access is the decision, and the traffic figures are context. The
+// eight-column table this replaced gave all of them equal weight and pushed
+// the access tick-box — the only control on the page — into a narrow middle
+// column.
+//
+// The Default row takes the same shape and different words. It has no CIDRs of
+// its own, so a control labelled "Allow" alongside a range list reading
+// "catch-all" invited the reading that permitting it would permit something,
+// which is what produced the old "Grants nothing" badge. What its bit actually
+// does is admit unmatched clients that are already inside the configured
+// resolver ACL, and the row now says that instead.
+function networkRow(n, policy) {
+  const isDefault = isDefaultNetwork(n);
+  const publicRanges = n.publicCidrs || [];
+
+  const ranges = isDefault
+    ? html`<span>every client that matches no other network</span>`
+    : html`<span class="mono">${n.cidrs.length ? n.cidrs.join(', ') : 'catch-all'}</span>`;
+
+  // Off is not an error state — it is the shipped default — so it is muted
+  // rather than warned, and both states say what the operator can do next.
+  const defaultNote = n.allowResolver
+    ? 'Unmatched clients inside the configured resolver ACL may use DNS Daddy and receive the Default policy.'
+    : 'Unmatched clients are refused. Add a Network for managed access, or enable ad-hoc access for clients already inside the configured resolver ACL.';
+
+  return html`
+    <div class="rec">
+      <div class="rec-main">
+        <div class="rec-title">
+          <strong>${n.name}</strong>
+          ${raw(statusBadge(n.status))}
+          ${raw(accessBadge(n))}
+        </div>
+        <div class="rec-meta">
+          ${raw(ranges)}
+          ${raw(n.location ? html`<span>${n.location}</span>` : '')}
+          <span>policy: ${policy ? policy.name : n.policyId}</span>
+          <span>${num(n.queries24h)} queries</span>
+          <span>${num(n.blocked24h)} blocked</span>
+        </div>
+        ${raw(isDefault
+          ? html`<p class="rec-note">${defaultNote} It never widens
+              <span class="mono">dns.allowed_client_cidrs</span>, so it cannot expose DNS Daddy to
+              arbitrary clients on the internet.</p>`
+          : '')}
+        ${raw(publicRanges.length
+          ? html`<p class="rec-note is-warn">Publicly routable: <span class="mono">${publicRanges.join(', ')}</span>. Anyone on the internet at these addresses may use this resolver.</p>`
+          : '')}
+        ${raw(!isDefault && !n.allowResolver && n.resolvesVia
+          ? html`<p class="rec-note">Reachable anyway, inside ${n.resolvesVia} — access permissions add up and nothing here subtracts.</p>`
+          : '')}
+      </div>
+      <div class="rec-actions">
+        <label class="checkline access-cell"
+               title="${isDefault
+                 ? 'Allow unmatched clients that are already inside the configured resolver ACL to use DNS Daddy under the Default policy.'
+                 : 'Allow this network to use DNS Daddy'}">
+          <input type="checkbox" data-access="${n.id}" data-name="${n.name}"
+                 ${raw(isDefault ? 'data-adhoc="1"' : '')}
+                 ${raw(n.allowResolver ? 'checked' : '')}>
+          <span>${isDefault ? 'Ad-hoc DNS access' : 'Allow'}</span>
+        </label>
+        ${raw(isDefault
+          ? ''
+          : html`<button class="btn btn-danger btn-sm" data-delete-network="${n.id}"
+                data-name="${n.name}">Delete</button>`)}
+      </div>
+    </div>`;
 }
 
 function accessBadge(n) {
+  // The Default row first: it is a catch-all, but its permission bit is an
+  // ad-hoc access switch rather than a grant, so none of the reasoning below
+  // applies to it.
+  if (isDefaultNetwork(n)) return adHocBadge(n);
+
   const catchAll = !(n.cidrs || []).length;
   const coverage = n.coverage || 'none';
   const disabled = n.enabled === false;
@@ -2478,45 +2621,7 @@ pages.networks = {
             ? networks.networks
                 .map((n) => {
                   const policy = policies.policies.find((p) => p.id === n.policyId);
-                  const publicRanges = n.publicCidrs || [];
-                  // A network is a record, not a spreadsheet row: name and
-                  // ranges are what you scan for, access is the decision, and
-                  // the traffic figures are context. The eight-column table
-                  // this replaced gave all of them equal weight and pushed the
-                  // access tick-box — the only control on the page — into a
-                  // narrow middle column.
-                  return html`
-                    <div class="rec">
-                      <div class="rec-main">
-                        <div class="rec-title">
-                          <strong>${n.name}</strong>
-                          ${raw(statusBadge(n.status))}
-                          ${raw(accessBadge(n))}
-                        </div>
-                        <div class="rec-meta">
-                          <span class="mono">${n.cidrs.length ? n.cidrs.join(', ') : 'catch-all'}</span>
-                          ${raw(n.location ? html`<span>${n.location}</span>` : '')}
-                          <span>policy: ${policy ? policy.name : n.policyId}</span>
-                          <span>${num(n.queries24h)} queries</span>
-                          <span>${num(n.blocked24h)} blocked</span>
-                        </div>
-                        ${raw(publicRanges.length
-                          ? html`<p class="rec-note is-warn">Publicly routable: <span class="mono">${publicRanges.join(', ')}</span>. Anyone on the internet at these addresses may use this resolver.</p>`
-                          : '')}
-                        ${raw(!n.allowResolver && n.resolvesVia
-                          ? html`<p class="rec-note">Reachable anyway, inside ${n.resolvesVia} — access permissions add up and nothing here subtracts.</p>`
-                          : '')}
-                      </div>
-                      <div class="rec-actions">
-                        <label class="checkline access-cell" title="Allow this network to use DNS Daddy">
-                          <input type="checkbox" data-access="${n.id}" data-name="${n.name}"
-                                 ${raw(n.allowResolver ? 'checked' : '')}>
-                          <span>Allow</span>
-                        </label>
-                        <button class="btn btn-danger btn-sm" data-delete-network="${n.id}"
-                                data-name="${n.name}">Delete</button>
-                      </div>
-                    </div>`;
+                  return networkRow(n, policy);
                 })
                 .join('')
             : emptyState(
@@ -2627,6 +2732,13 @@ pages.networks = {
           // a false success about the security-relevant direction.
           if (updated.warning) {
             toast(updated.warning, 'error');
+          } else if (box.dataset.adhoc) {
+            // The Default row's switch is not a grant to a named network, so
+            // reporting it as one — "Default may now use DNS Daddy" — would
+            // describe the wrong thing entirely.
+            toast(wanted
+              ? 'Unmatched clients inside the configured resolver ACL may now use DNS Daddy'
+              : 'Ad-hoc access is off: unmatched clients are refused');
           } else {
             toast(wanted
               ? `"${box.dataset.name}" may now use DNS Daddy`
@@ -3784,6 +3896,43 @@ function claimChip(tier) {
  * The dropped count sits beside the totals for the same reason. A sample that
  * silently shrank under load would invite conclusions it cannot support.
  */
+// daddyboundModes renders the two modes and which one is running.
+//
+// Live is rendered, disabled, rather than left out. Leaving it out would let a
+// reader assume Learn is all there is and that Daddybound is therefore already
+// protecting them; showing it greyed out with the reason attached is the
+// honest version. It stays disabled until the answer path can actually enforce
+// — there is no configuration that turns it on, because `enforce` is refused
+// at startup rather than quietly run as Learn.
+function daddyboundModes(learn) {
+  return html`
+    <dl class="claim-key">
+      <div class="qfact">
+        <dt>Mode</dt>
+        <dd>
+          ${raw(learn
+            ? html`<span class="badge ok">Learn — active</span>`
+            : html`<span class="badge">Learn — off</span>`)}
+          ${raw(html`<span class="badge" title="Live requires DNSSEC enforcement in the answer path. That is not implemented, so this mode cannot be selected and dns.local_dnssec_validation: enforce is refused at startup rather than run as Learn.">Live — unavailable</span>`)}
+        </dd>
+      </div>
+      <div class="qfact">
+        <dt>Current DNSSEC decision source</dt>
+        <dd><span class="badge">Upstream resolver</span></dd>
+      </div>
+    </dl>
+    <p class="muted small note-tight">
+      <strong>Learn</strong> — Daddybound independently validates the same names your clients
+      ask for and records what it concludes. It does not alter the answer returned to the
+      client.
+    </p>
+    <p class="muted small note-tight">
+      <strong>Live</strong> — will allow Daddybound to participate in DNSSEC enforcement once
+      enforcement has been implemented and validated. It is not implemented today, so no
+      answer is refused, rewritten or delayed on Daddybound's verdict.
+    </p>`;
+}
+
 function localDnssecCard(data) {
   const off = !data || data.mode !== 'observe';
 
@@ -3793,15 +3942,17 @@ function localDnssecCard(data) {
         <div class="card-head">
           <div>
             <div class="card-eyebrow">Experimental</div>
-            <h2>Local DNSSEC validation ${raw(claimChip('experimental'))}</h2>
+            <h2>Daddybound ${raw(claimChip('experimental'))}</h2>
             <p>DNS Daddy can run its own DNSSEC validator, Daddybound, alongside
                resolution and record what it concludes. It is <strong>off</strong>.</p>
           </div>
         </div>
+        ${raw(daddyboundModes(false))}
         <p class="muted small note-tight">
-          When switched on it observes only: it records a verdict per query and never
-          changes the answer a client receives. Enforcement is not implemented.
-          Set <span class="mono">dns.local_dnssec_validation: observe</span> to enable it.
+          Set <span class="mono">dns.local_dnssec_validation: observe</span> and restart to run
+          Learn mode. New installations start in Learn; an upgrade leaves this as it was, because
+          Learn sends its own DNSSEC queries upstream and that is not a change to inherit
+          silently.
         </p>
       </div>`;
   }
@@ -3830,12 +3981,14 @@ function localDnssecCard(data) {
       <div class="card-head">
         <div>
           <div class="card-eyebrow">Experimental</div>
-          <h2>Local DNSSEC validation — observing ${raw(claimChip('experimental'))}</h2>
+          <h2>Daddybound — Learn ${raw(claimChip('experimental'))}</h2>
           <p><strong>Nothing here blocks anything.</strong> Daddybound validates the same
              names your clients ask for and records what it concludes. The answer a client
              receives is decided entirely by the resolver, whatever these verdicts say.</p>
         </div>
       </div>
+
+      ${raw(daddyboundModes(true))}
 
       <dl class="claim-key">
         ${raw(stat('Observed', observed, 'verdicts reached since this instance started'))}
@@ -4481,5 +4634,10 @@ if (typeof module !== 'undefined' && module.exports) {
     REPUTATION_MODES,
     localDnssecBadge,
     localDnssecCard,
+    daddyboundModes,
+    networkRow,
+    adHocBadge,
+    isDefaultNetwork,
+    DEFAULT_NETWORK_ID,
   };
 }

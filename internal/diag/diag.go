@@ -225,8 +225,20 @@ func aclSummary(acl *clientacl.Set) Check {
 	c.Status = StatusPass
 	c.Summary = fmt.Sprintf("%d address range(s) may send queries; everything else is REFUSED.",
 		len(acl.Effective()))
+
+	// The configured pool and the ad-hoc switch are reported as two facts
+	// rather than one, because they fail in different ways and need different
+	// fixes. An operator whose clients are refused while their range is listed
+	// in dns.allowed_client_cidrs has a working configuration file and a
+	// switch turned off; telling them only "these ranges are permitted" would
+	// send them to edit the file, which would not help.
+	configured := orNone(strings.Join(acl.Bootstrap(), ", "))
+	if acl.AdHocAccessGated() && !acl.AdHocAccess() {
+		configured += " — eligible, but not currently serving unmatched clients: " +
+			"ad-hoc access is off on the Default network"
+	}
 	c.Evidence = []string{
-		"from configuration (" + clientacl.SourceBootstrap + "): " + orNone(strings.Join(acl.Bootstrap(), ", ")),
+		"from configuration (" + clientacl.SourceBootstrap + "): " + configured,
 		"from the dashboard: " + orNone(strings.Join(grantCIDRs(acl.Grants()), ", ")),
 	}
 	return c
@@ -393,7 +405,9 @@ func refusedAction(n Network) string {
 	if !n.AllowResolver {
 		return "Adding a network assigns it a policy; it does not by itself permit it to resolve. " +
 			"Open Networks, edit this network and tick \"Allow this network to use DNS Daddy\". " +
-			"It takes effect immediately — no restart."
+			"It takes effect immediately — no restart. If instead you want every client inside " +
+			"dns.allowed_client_cidrs served without naming each network, turn on ad-hoc access " +
+			"on the Default row."
 	}
 	return "This network is marked as permitted, so the effective ACL above should already " +
 		"include it. If it does not, the permission has not been reloaded: check the DNS Daddy " +

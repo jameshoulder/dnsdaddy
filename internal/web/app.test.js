@@ -54,6 +54,10 @@ const {
   decisionRow,
   localDnssecBadge,
   localDnssecCard,
+  daddyboundModes,
+  networkRow,
+  adHocBadge,
+  DEFAULT_NETWORK_ID,
   decisionsCard,
   decisionEvidenceRow,
 } = require('./static/app.js');
@@ -1550,14 +1554,26 @@ test('the configuration pages use the shared record row, not their own tables', 
     const to = src.indexOf('\npages.', from + 1);
     return src.slice(from, to === -1 ? undefined : to);
   };
+  const fn = (name) => {
+    const from = src.indexOf(`function ${name}(`);
+    const to = src.indexOf('\nfunction ', from + 1);
+    return src.slice(from, to === -1 ? undefined : to);
+  };
+
+  // Networks renders each row through networkRow, so the markup is checked
+  // there. The page must still not grow a table of its own.
+  assert.ok(page('networks').includes('networkRow('),
+    'pages.networks no longer renders rows through the shared row function');
+  assert.ok(fn('networkRow').includes('class="rec"'),
+    'networkRow does not use the shared record row');
 
   for (const name of ['networks', 'feeds']) {
     const body = page(name);
-    assert.ok(body.includes('class="rec"'),
-      `pages.${name} does not use the shared record row`);
     assert.ok(!body.includes('<thead>'),
       `pages.${name} still renders a bespoke table`);
   }
+  assert.ok(page('feeds').includes('class="rec"'),
+    'pages.feeds does not use the shared record row');
   assert.ok(page('policies').includes('<details class="card section policy"'),
     'pages.policies no longer collapses each policy');
 });
@@ -2352,7 +2368,9 @@ test('local and upstream DNSSEC are labelled as different measurements', () => {
     dnssecValidation: { status: 'bogus', disagreement: 'local_bogus_upstream_validated' },
   });
   assert.match(row, /DNSSEC \(upstream\)/);
-  assert.match(row, /DNSSEC \(local\)/);
+  // Named for the thing that produced it, so the two rows cannot be read as
+  // one measurement stated twice.
+  assert.match(row, /DNSSEC \(local — Daddybound\)/);
   // And the disagreement is visible rather than something the reader has to
   // spot by comparing two badges.
   assert.match(row, /differs from upstream/);
@@ -2361,7 +2379,7 @@ test('local and upstream DNSSEC are labelled as different measurements', () => {
 test('a query with no local observation shows no local row at all', () => {
   const row = queryRow({ action: 'allowed', domain: 'example.com', qtype: 'A', dnssec: 'validated' });
   assert.match(row, /DNSSEC \(upstream\)/);
-  assert.doesNotMatch(row, /DNSSEC \(local\)/);
+  assert.doesNotMatch(row, /DNSSEC \(local/);
 });
 
 test('an operational outcome is not presented as a DNSSEC state', () => {
@@ -2374,11 +2392,14 @@ test('an operational outcome is not presented as a DNSSEC state', () => {
 
 test('the assurance card explains the feature even when it is off', () => {
   const card = localDnssecCard(null);
-  assert.match(card, /Local DNSSEC validation/);
+  assert.match(card, /Daddybound/);
   assert.match(card, /off/);
   assert.match(card, /local_dnssec_validation/);
   // Off must not render counts that would read as "zero problems found".
   assert.doesNotMatch(card, /Observed/);
+  // Live is shown as unavailable even here, so nobody reads "off" as "the
+  // enforcing mode exists and I simply have not switched it on".
+  assert.match(card, /Live — unavailable/);
 });
 
 test('the assurance card leads with the fact that nothing is blocked', () => {
@@ -2451,4 +2472,210 @@ test('observations lost before storage are shown, not only those never taken', (
   assert.match(card, /Observed but not stored/);
   assert.match(card, /249/);
   assert.match(card, /evidence that went missing/i);
+});
+
+// --- the Default network's ad-hoc access row ------------------------------
+//
+// The Default row is the one network whose access control does not mean
+// "permit these ranges". It has none. Its bit decides whether unmatched
+// clients already inside the configured resolver ACL may resolve, and the old
+// generic Allow control described that as granting nothing — which was
+// confusing when it was off and false when it was on.
+
+function defaultNet(overrides = {}) {
+  return {
+    id: DEFAULT_NETWORK_ID,
+    name: 'Default',
+    status: 'active',
+    cidrs: [],
+    policyId: 'p_standard',
+    queries24h: 1200,
+    blocked24h: 34,
+    allowResolver: false,
+    ...overrides,
+  };
+}
+
+function ordinaryNet(overrides = {}) {
+  return {
+    id: 'n_hq',
+    name: 'HQ',
+    status: 'active',
+    cidrs: ['10.1.0.0/16'],
+    policyId: 'p_standard',
+    queries24h: 10,
+    blocked24h: 1,
+    allowResolver: true,
+    coverage: 'full',
+    ...overrides,
+  };
+}
+
+const STANDARD = { id: 'p_standard', name: 'Standard business' };
+
+test('the Default row states its ad-hoc access rather than claiming to grant nothing', () => {
+  const off = adHocBadge(defaultNet());
+  assert.match(off, /Ad-hoc access off/);
+  assert.doesNotMatch(off, /Grants nothing/);
+  assert.doesNotMatch(off, /Depends on the client/);
+
+  const on = adHocBadge(defaultNet({ allowResolver: true }));
+  assert.match(on, /Ad-hoc access on/);
+  assert.doesNotMatch(on, /Grants nothing/);
+});
+
+test('a disabled Default row reports as disabled rather than as granting access', () => {
+  const out = adHocBadge(defaultNet({ enabled: false, allowResolver: true }));
+  assert.match(out, /Disabled/);
+  assert.doesNotMatch(out, /Ad-hoc access on/);
+});
+
+test('the Default row is not offered a Delete button', () => {
+  // It is the fallback policy and the ad-hoc access switch at once, and
+  // nothing recreates it. The store refuses the delete too; this is the half
+  // that stops an operator being invited to try.
+  const row = networkRow(defaultNet(), STANDARD);
+  assert.doesNotMatch(row, /data-delete-network/);
+
+  // And the guard is specific to it, not a blanket removal of Delete.
+  const ordinary = networkRow(ordinaryNet(), STANDARD);
+  assert.match(ordinary, /data-delete-network="n_hq"/);
+});
+
+test('the Default row labels its control Ad-hoc DNS access, not Allow', () => {
+  const row = networkRow(defaultNet(), STANDARD);
+  assert.match(row, /Ad-hoc DNS access/);
+  assert.match(row, /data-adhoc="1"/);
+
+  const ordinary = networkRow(ordinaryNet(), STANDARD);
+  assert.match(ordinary, /<span>Allow<\/span>/);
+  assert.doesNotMatch(ordinary, /data-adhoc/);
+});
+
+test('the Default row does not imply it has CIDRs of its own', () => {
+  const row = networkRow(defaultNet(), STANDARD);
+  assert.match(row, /every client that matches no other network/);
+  // "catch-all" in a monospace range column read as a range. It is not one.
+  assert.doesNotMatch(row, /class="mono">catch-all/);
+});
+
+test('the Default row explains both states and never claims internet exposure', () => {
+  const off = networkRow(defaultNet(), STANDARD);
+  assert.match(off, /Unmatched clients are refused/);
+  assert.match(off, /Add a Network for managed access/);
+
+  const on = networkRow(defaultNet({ allowResolver: true }), STANDARD);
+  assert.match(on, /inside the configured resolver ACL may use DNS Daddy/);
+  assert.match(on, /receive the Default policy/);
+
+  // Both states must say the switch cannot widen the ACL, because "allow
+  // unmatched clients" is otherwise a frightening thing to read.
+  for (const row of [off, on]) {
+    assert.match(row, /never widens/);
+    assert.match(row, /cannot expose DNS Daddy to\s+arbitrary clients on the internet/);
+  }
+});
+
+test('the Default row keeps its policy and 24-hour counts', () => {
+  const row = networkRow(defaultNet(), STANDARD);
+  assert.match(row, /policy: Standard business/);
+  assert.match(row, /1,200 queries/);
+  assert.match(row, /34 blocked/);
+});
+
+// --- Daddybound Learn / Live ----------------------------------------------
+
+test('Learn is shown as active and Live as unavailable', () => {
+  const out = daddyboundModes(true);
+  assert.match(out, /Learn — active/);
+  assert.match(out, /Live — unavailable/);
+  assert.match(out, /Upstream resolver/);
+});
+
+test('Live is never presented as something already protecting traffic', () => {
+  for (const out of [daddyboundModes(true), daddyboundModes(false)]) {
+    assert.match(out, /Live — unavailable/);
+    assert.match(out, /not implemented/);
+    // The single most important negative: nothing about Live may read as a
+    // capability the operator currently has.
+    assert.doesNotMatch(out, /Live — active/);
+  }
+});
+
+test('Learn never says a bogus answer was blocked', () => {
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: { total: 10, byStatus: { bogus: 3 }, disagreements: {} },
+    runtime: { observed: 10, dropped: 0, panics: 0 },
+  });
+  assert.match(card, /Nothing here blocks anything/i);
+  assert.match(card, /recorded, not blocked/i);
+
+  // Targeted at the claim, not the word. The card legitimately contains "no
+  // answer is refused ... on Daddybound's verdict", which is the denial we
+  // want; what must never appear is an affirmative claim that Daddybound
+  // blocked, refused or protected against something.
+  for (const claim of [
+    /Daddybound blocked/i,
+    /blocked bogus/i,
+    /bogus answers are (blocked|refused)/i,
+    /protects? (you|your|traffic)/i,
+    /\bwas refused\b/i,
+  ]) {
+    assert.doesNotMatch(card, claim, `the card claims enforcement: ${claim}`);
+  }
+
+  // And on the per-query badge, which is where a reader meets a bogus verdict.
+  const badge = localDnssecBadge({ status: 'bogus' });
+  assert.match(badge, /Learn mode, nothing blocked/);
+});
+
+// --- the Setup page's access note -----------------------------------------
+
+test('with ad-hoc access off the setup note does not promise the whole ACL works', () => {
+  const note = resolverAccessNote({
+    unrestricted: false,
+    adHocAccess: false,
+    adHocAccessGated: true,
+    bootstrapCidrs: ['192.168.0.0/16', '10.0.0.0/8'],
+    dashboardCidrs: [],
+    effectiveCidrs: ['127.0.0.0/8', '::1/128'],
+  });
+
+  assert.match(note, /ad-hoc access is off/i);
+  assert.match(note, /eligible to be served but not currently being served/);
+  // The distinction that matters: an address in the configured pool is still
+  // refused, so the note must not list the pool as the ranges that work.
+  assert.match(note, /192\.168\.0\.0\/16/);
+  assert.match(note, /REFUSED/);
+  assert.match(note, /Ad-hoc DNS access/);
+});
+
+test('with ad-hoc access on the setup note lists the ranges that are served', () => {
+  const note = resolverAccessNote({
+    unrestricted: false,
+    adHocAccess: true,
+    adHocAccessGated: true,
+    bootstrapCidrs: ['192.168.0.0/16'],
+    dashboardCidrs: [],
+    effectiveCidrs: ['192.168.0.0/16', '127.0.0.0/8'],
+  });
+  assert.match(note, /only these ranges may query/);
+  assert.match(note, /192\.168\.0\.0\/16/);
+  assert.doesNotMatch(note, /ad-hoc access is off/i);
+});
+
+test('token-based DoH and DoT are described separately from the address ACL', () => {
+  for (const adHoc of [true, false]) {
+    const note = resolverAccessNote({
+      unrestricted: false,
+      adHocAccess: adHoc,
+      adHocAccessGated: true,
+      bootstrapCidrs: ['192.168.0.0/16'],
+      dashboardCidrs: [],
+      effectiveCidrs: ['192.168.0.0/16'],
+    });
+    assert.match(note, /identified by\s+their network token/);
+    assert.match(note, /work from anywhere/);
+  }
 });

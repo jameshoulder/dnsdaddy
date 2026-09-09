@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 )
 
 func permits(t *testing.T, h *harness, addr string) bool {
@@ -195,6 +197,7 @@ func TestNetworkWithoutPermissionGrantsNoAccess(t *testing.T) {
 func TestNetworkListExposesAccessState(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+	h.enableAdHocAccess(t) // the configured pool is what this test measures against
 
 	if _, raw := h.do("POST", "/api/v1/networks", map[string]any{
 		"name":          "VPS client",
@@ -393,6 +396,7 @@ func TestDiagnosticsExplainAnUnpermittedNetwork(t *testing.T) {
 func TestPartiallyPermittedNetworkIsNotReportedAsResolving(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+	h.enableAdHocAccess(t) // the configured pool is what this test measures against
 
 	// The shipped ACL permits 172.16.0.0/12. A /8 over the same base is
 	// therefore permitted at its first address and refused across most of it.
@@ -434,6 +438,7 @@ func TestPartiallyPermittedNetworkIsNotReportedAsResolving(t *testing.T) {
 func TestOverviewReportsMeasuredAccessState(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+	h.enableAdHocAccess(t) // the configured pool is what this test measures against
 
 	var overview struct {
 		PermittedNetworks  int    `json:"permittedNetworks"`
@@ -785,6 +790,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestMixedCoverageIsPartialRatherThanTheWorstRange(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+	h.enableAdHocAccess(t) // the configured pool is what this test measures against
 
 	// 10.10.0.0/16 sits inside the shipped 10.0.0.0/8; 198.18.0.0/15 does not.
 	_, raw := h.do("POST", "/api/v1/networks", map[string]any{
@@ -830,6 +836,7 @@ func TestMixedCoverageIsPartialRatherThanTheWorstRange(t *testing.T) {
 func TestResolvesViaNamesEveryCoveringRange(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+	h.enableAdHocAccess(t) // the configured pool is what this test measures against
 
 	// Both are inside the shipped ACL, but via different entries in it:
 	// 10.10.0.0/16 through 10.0.0.0/8, and 192.168.4.0/24 through
@@ -915,4 +922,37 @@ func TestResolvesViaIsNotCarriedOverToAReplacedRange(t *testing.T) {
 	}
 	h.failACLReload.Store(false)
 	t.Fatal("the network is missing from the list")
+}
+
+// The Default row carries the ad-hoc access control and the fallback policy.
+// The dashboard hides its Delete button, but the API is public, so the refusal
+// has to live here rather than only in the UI.
+func TestTheDefaultNetworkCannotBeDeletedThroughTheAPI(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	// A second network, so "cannot delete the only network" is not what
+	// produces the refusal.
+	resp, raw := h.do("POST", "/api/v1/networks", map[string]any{
+		"name": "HQ", "cidrs": []string{"10.1.0.0/16"},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status %d, body %s", resp.StatusCode, raw)
+	}
+
+	resp, raw = h.do("DELETE", "/api/v1/networks/"+clientacl.DefaultNetworkID, nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("delete Default: status %d, want 409; body %s", resp.StatusCode, raw)
+	}
+
+	var body struct {
+		Networks []map[string]any `json:"networks"`
+	}
+	h.getJSON("/api/v1/networks", &body)
+	for _, n := range body.Networks {
+		if n["id"] == clientacl.DefaultNetworkID {
+			return
+		}
+	}
+	t.Fatal("the Default network is missing after a refused delete")
 }

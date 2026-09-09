@@ -7,10 +7,10 @@ or an authenticated redirection — and is honest about every case where it
 cannot.
 
 **Daddybound is not a production DNSSEC validator and must not be relied upon
-as one.** It enforces no policy. Since v0.4 it can observe real DNS Daddy
-traffic (`dns.local_dnssec_validation: observe`, off by default) and record
-what it concludes, but no verdict it reaches can change, delay or fail the
-answer a client receives — asserted by a test that forces each verdict in turn
+as one.** It enforces no policy. Since v0.4 it can validate real DNS Daddy
+traffic in **Learn** mode (`dns.local_dnssec_validation: observe`; on for new
+installations, unchanged by an upgrade) and record what it concludes, but no
+verdict it reaches can change, delay or fail the answer a client receives — asserted by a test that forces each verdict in turn
 and requires the client's bytes to be identical every time. See
 [security-model.md](security-model.md) and
 [ADR 0002](../decisions/0002-daddybound-observe-mode.md).

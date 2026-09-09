@@ -20,24 +20,52 @@ verifies that chain and refuses to serve data that fails.
 The guarantee is: *this answer is what the domain's owner published, and it has
 not been altered in transit or substituted by anyone along the way.*
 
-## Local validation, in observe mode
+## Local validation: Learn mode
 
 Since v0.4 DNS Daddy can run its own DNSSEC validator, **Daddybound**,
 alongside resolution:
 
 ```yaml
 dns:
-  local_dnssec_validation: observe   # off | observe.  Default off.
+  local_dnssec_validation: observe   # off | observe
 ```
 
-**It does not change any answer.** In observe mode Daddybound validates the
+The dashboard calls this **Learn**. `observe` is the configuration value and
+does not change; Learn is what it is called where a person reads it.
+
+**Which mode you get if you say nothing.** Leave the key out and the
+installation decides, once, on first start:
+
+| Installation | Mode |
+|---|---|
+| A new install (a database that has never run DNS Daddy) | **Learn** |
+| An upgrade of an installation that never configured this | **off** |
+| Anything with `local_dnssec_validation` set | exactly what you set |
+
+The split exists because Learn is off the answer path but is not free: it sends
+its own DNSSEC queries upstream, spends CPU and fills a queue. That is a
+reasonable thing to switch on for someone installing DNS Daddy today, and not a
+reasonable thing to start doing to a machine that has been running for a year
+because somebody pulled a new image. The decision is recorded in the database
+rather than inferred each start, and the startup log names it.
+
+There is a limitation worth stating plainly: configuration alone cannot tell an
+omitted key from one written out, because the config loader unmarshals YAML
+over the built-in defaults and nothing survives to say which happened. The
+database can — a database with no networks has never run DNS Daddy — so that is
+where the question is asked and answered. Set the key explicitly if you want
+the answer to be yours rather than the installation's.
+
+### Learn does not change any answer
+
+**It does not change any answer.** In Learn mode Daddybound validates the
 same names your clients ask for, records what it concludes, and stops there.
 A `bogus` verdict is a row in a table and a number on a dashboard; the client
 receives exactly the response the resolver produced. There is no configuration
 that makes it do otherwise, and `enforce` is refused at startup rather than
 quietly treated as `observe`.
 
-### Why observe before enforce
+### Why Learn before Live
 
 An enforcing validator turns "this answer failed validation" into "this query
 gets no answer". That is the right behaviour when the validator is right, and
@@ -45,7 +73,7 @@ an outage when it is not. DNS Daddy has a validator with a great deal of
 laboratory evidence behind it and almost none from production, and the honest
 order is to measure before deciding.
 
-What observe mode measures is the disagreement between two things you can
+What Learn mode measures is the disagreement between two things you can
 already see side by side in the query log:
 
 - **DNSSEC (upstream)** — the AD bit. Your upstream resolver validated this

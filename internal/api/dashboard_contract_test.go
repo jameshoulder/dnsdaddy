@@ -266,6 +266,7 @@ func TestOverviewMatchesOnboardingContract(t *testing.T) {
 func TestShadowedNetworkReportsResolvesVia(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+	h.enableAdHocAccess(t) // the configured pool is what this test measures against
 
 	// 192.168.4.0/24 sits inside the shipped 192.168.0.0/16, so this network
 	// resolves without a permission of its own.

@@ -143,6 +143,12 @@ func (a *API) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 			// subtraction as nothing, and the network that permitted it would
 			// be shown as contributing no ranges.
 			"dashboardCidrs": acl.GrantedPrefixes(),
+			// Reported so the dashboard can tell "these ranges are eligible"
+			// from "these ranges are being served". They look identical in
+			// effectiveCidrs — a gated-off pool simply is not in it — and the
+			// difference is the whole of what the Default row's switch does.
+			"adHocAccess":      acl.AdHocAccess(),
+			"adHocAccessGated": acl.AdHocAccessGated(),
 		},
 	})
 }

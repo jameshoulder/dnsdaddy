@@ -120,12 +120,19 @@ type DNS struct {
 	// validation engine, does with real traffic. See
 	// docs/decisions/0002-daddybound-observe-mode.md.
 	//
-	//	off      the default. No validator is constructed and no supporting
-	//	         DNSSEC query is sent. Behaviourally identical to a build
-	//	         without the feature.
-	//	observe  validate alongside resolution and record the verdict. The
-	//	         answer a client receives is unchanged, whatever Daddybound
-	//	         concludes.
+	//	off      no validator is constructed and no supporting DNSSEC query is
+	//	         sent. Behaviourally identical to a build without the feature.
+	//	observe  presented as Learn in the dashboard. Daddybound validates
+	//	         alongside resolution and records the verdict. The answer a
+	//	         client receives is unchanged, whatever it concludes.
+	//
+	// Left empty, the installation decides: a fresh install runs Learn, and an
+	// upgrade of an installation that never configured this keeps it off,
+	// because Learn sends extra DNSSEC queries upstream and inheriting that
+	// from a release upgrade would change someone's traffic without them
+	// asking. That decision is recorded in the database on first run — see
+	// store.SettingLocalDNSSECDefault — because it is the only place the
+	// difference between "omitted" and "written out" still exists.
 	//
 	// "enforce" is recognised and refused at startup. Accepting it and
 	// behaving as "observe" would leave an operator believing their resolver
@@ -404,10 +411,13 @@ func Default() Config {
 			AllowedClientCIDRs: append([]string(nil), DefaultAllowedClientCIDRs...),
 			RefuseANY:          true,
 			DNSSECTelemetry:    true,
-			// Off by default. Local validation is experimental, and a
-			// feature that sends extra upstream queries must be something an
-			// operator switched on rather than something they inherited.
-			LocalDNSSECValidation: LocalDNSSECOff,
+			// Deliberately empty rather than a mode. Load unmarshals YAML over
+			// these defaults, so anything chosen here is indistinguishable
+			// afterwards from a value the operator wrote — and the choice
+			// between Learn and off depends on whether this is a new install,
+			// which config cannot see. Resolve() answers it against the
+			// installation record.
+			LocalDNSSECValidation: LocalDNSSECUnset,
 			LocalDNSSECWorkers:    2,
 			LocalDNSSECQueue:      256,
 			LocalDNSSECTimeout:    Duration(2 * time.Second),
@@ -977,10 +987,16 @@ func (c *Config) FindingsFilePath() string {
 // The set is deliberately small and closed. A free-form string here would be
 // a policy decision driven by whatever an operator happened to type.
 const (
+	// LocalDNSSECUnset means the operator expressed no preference, so the
+	// installation's recorded default applies. It is the zero value, which is
+	// what makes an untouched config struct safe: every reader that has not
+	// resolved it against the installation sees off.
+	LocalDNSSECUnset = ""
 	// LocalDNSSECOff: Daddybound is not constructed and sends nothing.
 	LocalDNSSECOff = "off"
 	// LocalDNSSECObserve: Daddybound validates alongside resolution and
-	// records what it concludes. The client's answer is unaffected.
+	// records what it concludes. The client's answer is unaffected. The UI
+	// calls this Learn mode.
 	LocalDNSSECObserve = "observe"
 	// LocalDNSSECEnforce is recognised so that configuring it fails loudly.
 	// It is not implemented. See validateLocalDNSSEC.
@@ -1022,13 +1038,42 @@ func (c *Config) validateLocalDNSSEC() error {
 	return nil
 }
 
-// LocalDNSSECMode returns the effective mode, treating the empty string as
-// off so that an older configuration file keeps its previous behaviour.
+// LocalDNSSECMode returns the effective mode.
+//
+// An unresolved value reads as off. That is the safe direction and it is the
+// reason Resolve exists: a caller that forgets to consult the installation
+// record gets a validator that does nothing, rather than one that starts
+// sending upstream queries nobody asked for.
 func (d DNS) LocalDNSSECMode() string {
-	if d.LocalDNSSECValidation == "" {
+	if d.LocalDNSSECValidation == LocalDNSSECUnset {
 		return LocalDNSSECOff
 	}
 	return d.LocalDNSSECValidation
+}
+
+// LocalDNSSECConfigured reports that the operator chose a mode, in the file or
+// the environment, rather than leaving it to the installation default.
+func (d DNS) LocalDNSSECConfigured() bool {
+	return d.LocalDNSSECValidation != LocalDNSSECUnset
+}
+
+// ResolveLocalDNSSEC applies the installation's recorded default when the
+// operator configured nothing, and reports which way it went.
+//
+// installDefault is store.SettingLocalDNSSECDefault, or empty when it could not
+// be read — in which case off stands, because an unreadable record is not
+// evidence that this is a new install.
+func (c *Config) ResolveLocalDNSSEC(installDefault string) (mode string, fromInstall bool) {
+	if c.DNS.LocalDNSSECConfigured() {
+		return c.DNS.LocalDNSSECMode(), false
+	}
+	switch installDefault {
+	case LocalDNSSECOff, LocalDNSSECObserve:
+		c.DNS.LocalDNSSECValidation = installDefault
+	default:
+		c.DNS.LocalDNSSECValidation = LocalDNSSECOff
+	}
+	return c.DNS.LocalDNSSECMode(), true
 }
 
 // ObserveDNSSEC reports whether Daddybound should observe real traffic.

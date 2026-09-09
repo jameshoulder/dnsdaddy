@@ -43,6 +43,44 @@
 // broader permitted range. Set.Shadowed reports exactly that situation so the
 // product can say so rather than leaving it to be discovered.
 //
+// # The Default network gates the bootstrap pool
+//
+// dns.allowed_client_cidrs is not an unconditional grant. It names the
+// addresses that are *eligible* to be served; the built-in n_default row
+// decides whether an unmatched client inside that boundary may actually
+// resolve. The two questions are different, and the product previously had no
+// way to express the second:
+//
+//	allowed_client_cidrs     which addresses could ever be served
+//	n_default.AllowResolver  whether unmatched clients inside them are served
+//	network permissions      which ranges are served regardless of the above
+//
+// So the union is no longer unconditional, and it is deliberately not
+// described as one anywhere. An explicit Network permission still grants its
+// own ranges whatever the Default row says: a managed network is a decision
+// about specific addresses, and ad-hoc access is a decision about everyone
+// else.
+//
+// While the gate is closed, the loopback ranges the operator configured stay
+// admitted, so the resolver remains usable from the machine it runs on. Only
+// the ranges they configured: this adds nothing that dns.allowed_client_cidrs
+// does not already name, because an operator who left loopback out of that
+// list did so deliberately and admitting it back would widen the one list that
+// decides who may query at all. The shipped default names both loopback
+// ranges, so a stock install keeps localhost with ad-hoc access off.
+//
+// A pool that gates down to nothing stays restricted rather than becoming
+// unrestricted: that flag is settled from the configured list, before the
+// gate, so an empty result refuses everyone instead of admitting them.
+//
+// A networks list with no n_default row at all leaves the gate out of the
+// picture and the bootstrap pool active, which is the behaviour that predates
+// this feature. That is the right reading for callers that are not
+// dashboard-managed, and for a hand-edited database it fails to the old
+// behaviour rather than to no DNS at all. The row's existence is an invariant
+// maintained at the other end: seed creates it and the store refuses to delete
+// it.
+//
 // # An empty bootstrap ACL stays unrestricted
 //
 // An empty dns.allowed_client_cidrs means "refuse nothing", and config
@@ -53,6 +91,13 @@
 // unrelated click. So an unrestricted set stays unrestricted, permissions are
 // recorded for when the ACL is populated, and the diagnostics say what is
 // happening.
+//
+// The ad-hoc gate does not change that, and must not: an operator who
+// configured no ACL has said "refuse nothing", and config validation only
+// accepts that alongside loopback-only listeners or an explicit
+// dns.allow_public_resolver. There is no boundary there for the gate to
+// govern, and manufacturing one would take DNS away from a deliberately public
+// resolver the first time it was upgraded.
 package clientacl
 
 import (
@@ -103,6 +148,35 @@ func (n Network) prefixes() (prefixes []netip.Prefix, invalid []string) {
 		prefixes = append(prefixes, p)
 	}
 	return prefixes, invalid
+}
+
+// DefaultNetworkID is the seeded catch-all row. It is the policy fallback for
+// unmatched clients and, since it has no ranges of its own, the natural place
+// to record whether those clients may resolve at all.
+const DefaultNetworkID = "n_default"
+
+// AdHocAccess reports whether unmatched clients inside the bootstrap pool may
+// use the resolver.
+//
+// Derived from the networks rather than passed in beside them, so that every
+// caller that already builds an ACL from the database — the runtime
+// controller, `dnsdaddy doctor`, the dashboard's own view — reaches the same
+// answer without having to remember to thread a flag through. A doctor that
+// disagreed with the running resolver about who is admitted would be worse
+// than no doctor.
+//
+// The second return value reports whether a Default row was found at all.
+// Absent, the gate does not apply: see the package documentation.
+func AdHocAccess(networks []Network) (enabled, present bool) {
+	for _, n := range networks {
+		if n.ID != DefaultNetworkID {
+			continue
+		}
+		// A disabled Default row applies no policy and grants nothing, on the
+		// same principle as any other disabled network.
+		return n.Enabled && n.AllowResolver, true
+	}
+	return false, false
 }
 
 // Grant is one permitted range, carrying where it came from so a diagnostic
@@ -172,6 +246,13 @@ type Set struct {
 	// invalid holds entries that did not parse, so a typo is reported rather
 	// than silently permitting less than the operator wrote.
 	invalid []string
+	// adHoc records whether the Default row admitted the bootstrap pool, and
+	// adHocGated whether that row existed to decide. Kept so a diagnostic can
+	// tell "you configured these ranges and they are active" from "you
+	// configured these ranges and ad-hoc access is off", which look identical
+	// from the effective list alone and need completely different advice.
+	adHoc      bool
+	adHocGated bool
 	// allowPublic is dns.allow_public_resolver. It changes nothing about who
 	// is admitted — an empty ACL admits everyone either way — but it is the
 	// difference between a deliberate public resolver and a loopback-only
@@ -219,13 +300,43 @@ func Compute(bootstrapCIDRs []string, allowPublicResolver bool, networks []Netwo
 	// resolver. Permissions are still recorded above — they are what the
 	// dashboard shows and what takes effect the moment an ACL is set — but
 	// they must not narrow a deployment that currently refuses nothing.
+	//
+	// Checked before the ad-hoc gate, and that order is the whole of the
+	// safety argument for it: there is no boundary here to gate, so gating it
+	// could only invent one, and inventing one turns a deliberate public
+	// resolver into a loopback-only one on upgrade.
 	if len(s.bootstrap) == 0 {
 		s.unrestricted = true
 		return s
 	}
 
+	s.adHoc, s.adHocGated = AdHocAccess(networks)
+
 	seen := make(map[netip.Prefix]bool, len(s.bootstrap)+len(s.grants))
+
+	// The configured pool is admitted only when unmatched clients are allowed
+	// to use it. s.bootstrap is left intact either way: it is what the
+	// operator wrote, every diagnostic reports it as such, and overwriting it
+	// with the filtered result would make the product misdescribe its own
+	// configuration.
+	//
+	// While the gate is closed, the loopback ranges the operator configured
+	// stay admitted, so the resolver remains usable from the machine it runs
+	// on — health checks, `dig @127.0.0.1`, a local stub resolver. Only the
+	// ranges they configured: nothing is added here that
+	// dns.allowed_client_cidrs does not already name. An operator who left
+	// loopback out did so deliberately, and manufacturing it back would admit
+	// a client they excluded — a silent widening of the one list that decides
+	// who may query at all.
+	//
+	// The empty case needs no invention either. `unrestricted` was settled
+	// above from the *configured* list, so a pool that gates down to nothing
+	// leaves an empty `all` with `unrestricted` false, and Allows refuses
+	// everyone. Fail-closed, which is what "off" has to mean.
 	for _, p := range s.bootstrap {
+		if !s.adHoc && s.adHocGated && !p.Addr().IsLoopback() {
+			continue
+		}
 		if !seen[p] {
 			seen[p] = true
 			s.all = append(s.all, p)
@@ -273,10 +384,17 @@ func findShadowed(s *Set, networks []Network) []Shadow {
 // where it came from. Bootstrap is checked first so the evidence points at the
 // configuration file when both could explain it — that is the source an
 // operator is least likely to be looking at.
+//
+// "Permitted" means currently in force, not merely configured. With ad-hoc
+// access off the bootstrap pool admits nobody, so a network sitting inside it
+// is refused rather than shadowed, and reporting "reachable anyway, inside
+// 192.168.0.0/16" would be the exact opposite of the truth.
 func coveringPrefix(s *Set, p netip.Prefix) (cidr, source string, ok bool) {
-	for _, b := range s.bootstrap {
-		if covers(b, p) {
-			return b.String(), SourceBootstrap, true
+	if s.bootstrapInForce() {
+		for _, b := range s.bootstrap {
+			if covers(b, p) {
+				return b.String(), SourceBootstrap, true
+			}
 		}
 	}
 	for _, g := range s.grants {
@@ -344,6 +462,23 @@ func Normalize(addr netip.Addr) netip.Addr {
 	}
 	return addr.WithZone("")
 }
+
+// bootstrapInForce reports whether the configured pool is currently admitting
+// anyone. False only when a Default row exists and has ad-hoc access off.
+func (s *Set) bootstrapInForce() bool {
+	return s != nil && (s.adHoc || !s.adHocGated)
+}
+
+// AdHocAccess reports whether unmatched clients inside the configured pool may
+// resolve. Always true where no Default row governs the decision, which is the
+// pre-feature behaviour.
+func (s *Set) AdHocAccess() bool { return s.bootstrapInForce() }
+
+// AdHocAccessGated reports whether a Default row was present to decide. It
+// separates "ad-hoc access is on" from "nothing is gating this", which look
+// identical from AdHocAccess alone and mean different things to an operator
+// reading a diagnostic.
+func (s *Set) AdHocAccessGated() bool { return s != nil && s.adHocGated }
 
 // Unrestricted reports whether every source address is accepted.
 func (s *Set) Unrestricted() bool { return s != nil && s.unrestricted }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -515,9 +516,28 @@ func sameStringSet(a, b map[string]bool) bool {
 	return true
 }
 
+// ErrProtectedNetwork is returned when a caller tries to delete the built-in
+// Default row.
+var ErrProtectedNetwork = errors.New("the Default network cannot be deleted")
+
 // DeleteNetwork removes a network. The last remaining network cannot be
 // deleted, because the resolver needs somewhere to attribute unmatched clients.
+//
+// Neither can the built-in Default row, whatever else exists. It is two things
+// at once — the policy applied to every unmatched client, and the switch that
+// decides whether those clients may resolve at all — and nothing recreates it
+// after first run. Deleting it would leave the ad-hoc access control with no
+// row to live on: the ACL would fall back to its pre-feature behaviour and the
+// dashboard would have nowhere to put the control that turns it off again.
+//
+// Refused here rather than only hidden in the dashboard, because the API is
+// public and a UI-only guard is a guard against accidents, not against a
+// script.
 func (s *Store) DeleteNetwork(ctx context.Context, id string) (Network, error) {
+	if id == clientacl.DefaultNetworkID {
+		return Network{}, ErrProtectedNetwork
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Network{}, err

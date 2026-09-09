@@ -53,7 +53,6 @@ func runDoctor(args []string) error {
 	cfg, cfgChecks := doctorConfig(*configPath)
 	checks = append(checks, cfgChecks...)
 	checks = append(checks, doctorDataDir(cfg))
-	checks = append(checks, doctorLocalDNSSEC(ctx, cfg))
 
 	// One read-only handle, shared by every check that needs it. See
 	// openExistingStore for why it is not store.Open: this command promises to
@@ -69,6 +68,19 @@ func runDoctor(args []string) error {
 	// may resolve" quotes this, so the listener probe and the client-access
 	// section cannot disagree with each other or with the running resolver.
 	acl := doctorACL(ctx, st, cfg)
+
+	// Resolve local DNSSEC the way the daemon does, against the installation
+	// record, so this command reports the mode that would actually run. A
+	// doctor that said "off (the default)" about a fresh install destined for
+	// Learn would be disagreeing with the daemon about the one thing it is
+	// here to report. Read-only: the record is written by the daemon's seed,
+	// never here.
+	if !cfg.DNS.LocalDNSSECConfigured() && st != nil {
+		if v, err := st.GetSetting(ctx, store.SettingLocalDNSSECDefault); err == nil {
+			cfg.ResolveLocalDNSSEC(v)
+		}
+	}
+	checks = append(checks, doctorLocalDNSSEC(ctx, cfg))
 
 	// Asked first, rendered last. The dashboard is the only place a failed
 	// client-access reload is visible — it lives in the running daemon's
@@ -663,9 +675,10 @@ func doctorLocalDNSSEC(ctx context.Context, cfg config.Config) diag.Check {
 		c.Status = diag.StatusPass
 		c.Summary = "Off. DNS Daddy records what the upstream concluded and does not validate locally."
 		c.Evidence = []string{
-			"dns.local_dnssec_validation: off (the default)",
+			"dns.local_dnssec_validation: off",
 			"Set it to \"observe\" to have Daddybound validate alongside resolution. " +
-				"Observe mode records verdicts and never changes a DNS answer.",
+				"The dashboard calls that Learn mode; it records verdicts and never " +
+				"changes a DNS answer.",
 		}
 		return c
 	case config.LocalDNSSECObserve:
@@ -678,7 +691,7 @@ func doctorLocalDNSSEC(ctx context.Context, cfg config.Config) diag.Check {
 	}
 
 	c.Status = diag.StatusPass
-	c.Summary = "Observing. Daddybound validates alongside resolution and records what it concludes; " +
+	c.Summary = "Learn mode. Daddybound validates alongside resolution and records what it concludes; " +
 		"DNS answers are unaffected."
 	c.Evidence = []string{
 		fmt.Sprintf("workers %d, queue %d, per-observation timeout %s",

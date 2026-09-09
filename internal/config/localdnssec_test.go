@@ -6,35 +6,126 @@ import (
 	"time"
 )
 
-// TestLocalDNSSECDefaultsToOff pins the default.
+// TestTheShippedConfigLeavesTheModeToTheInstallation.
 //
-// A feature that sends extra upstream queries and runs an experimental
-// validator must be something an operator switched on. Inheriting it from a
-// release upgrade would change an instance's upstream traffic without anyone
-// asking for it.
-func TestLocalDNSSECDefaultsToOff(t *testing.T) {
+// Not a mode, deliberately. Load unmarshals YAML over Default(), so any mode
+// chosen here would be indistinguishable afterwards from one the operator
+// wrote — and the right answer differs between a new install and an upgrade.
+// The config layer therefore expresses "unset" and lets ResolveLocalDNSSEC
+// settle it against the installation record.
+func TestTheShippedConfigLeavesTheModeToTheInstallation(t *testing.T) {
 	cfg := Default()
-	if got := cfg.DNS.LocalDNSSECMode(); got != LocalDNSSECOff {
-		t.Fatalf("default local_dnssec_validation = %q, want %q", got, LocalDNSSECOff)
+	if cfg.DNS.LocalDNSSECConfigured() {
+		t.Fatalf("the shipped config pins a mode (%q); an upgrade could not then tell it from the operator's own choice",
+			cfg.DNS.LocalDNSSECValidation)
 	}
+	// Unresolved reads as off. A caller that forgets to resolve gets a
+	// validator that does nothing rather than one that starts querying.
 	if cfg.DNS.ObserveDNSSEC() {
-		t.Fatal("the default configuration observes DNSSEC")
+		t.Fatal("an unresolved configuration already reports as observing")
 	}
 }
 
-// TestAnAbsentModeIsOffRatherThanAnError is the upgrade path.
+// TestAFreshInstallRunsLearn is the product default.
 //
-// Every configuration file written before this feature existed omits the key.
-// Those instances must keep working exactly as they did, which means the empty
-// string is off rather than invalid.
-func TestAnAbsentModeIsOffRatherThanAnError(t *testing.T) {
+// Learn is safe to switch on for someone who has just installed DNS Daddy:
+// it runs out of band, records what it concludes and can never alter a client
+// response. What it is not safe to do is arrive unannounced on a machine that
+// has been running for a year, which is the case below it.
+func TestAFreshInstallRunsLearn(t *testing.T) {
+	cfg := Default()
+	mode, fromInstall := cfg.ResolveLocalDNSSEC(LocalDNSSECObserve)
+
+	if mode != LocalDNSSECObserve {
+		t.Fatalf("a fresh installation resolved to %q, want %q", mode, LocalDNSSECObserve)
+	}
+	if !fromInstall {
+		t.Fatal("the mode was not reported as coming from the installation record")
+	}
+	if !cfg.DNS.ObserveDNSSEC() {
+		t.Fatal("the resolved configuration does not start Learn mode")
+	}
+}
+
+// TestAnUpgradeThatNeverAskedForItStaysOff is the other half, and the reason
+// this mechanism exists rather than a changed Go default.
+//
+// Learn is off the answer path, but it is not free: it sends its own DNSSEC
+// queries upstream, spends CPU and fills a queue. Turning that on because
+// someone pulled a new image is a change to their traffic that they did not
+// ask for and would have no reason to look for.
+func TestAnUpgradeThatNeverAskedForItStaysOff(t *testing.T) {
+	cfg := Default()
+	mode, fromInstall := cfg.ResolveLocalDNSSEC(LocalDNSSECOff)
+
+	if mode != LocalDNSSECOff {
+		t.Fatalf("an existing installation resolved to %q, want %q", mode, LocalDNSSECOff)
+	}
+	if !fromInstall {
+		t.Fatal("the mode was not reported as coming from the installation record")
+	}
+	if cfg.DNS.ObserveDNSSEC() {
+		t.Fatal("an upgrade started sending DNSSEC queries nobody asked for")
+	}
+}
+
+// An unreadable or absent installation record is not evidence that this is a
+// new install, so it must not be treated as one.
+func TestAnUnreadableInstallationRecordFallsBackToOff(t *testing.T) {
+	for _, record := range []string{"", "learn", "enforce", "yes", "  observe"} {
+		cfg := Default()
+		if mode, _ := cfg.ResolveLocalDNSSEC(record); mode != LocalDNSSECOff {
+			t.Errorf("installation record %q resolved to %q, want %q", record, mode, LocalDNSSECOff)
+		}
+	}
+}
+
+// What the operator wrote always wins, in both directions, and is never
+// reported as an installation decision.
+func TestAnExplicitModeIsNeverOverriddenByTheInstallation(t *testing.T) {
+	for _, tc := range []struct{ configured, record string }{
+		{LocalDNSSECOff, LocalDNSSECObserve},
+		{LocalDNSSECObserve, LocalDNSSECOff},
+	} {
+		cfg := Default()
+		cfg.DNS.LocalDNSSECValidation = tc.configured
+		mode, fromInstall := cfg.ResolveLocalDNSSEC(tc.record)
+		if mode != tc.configured {
+			t.Errorf("configured %q with record %q resolved to %q", tc.configured, tc.record, mode)
+		}
+		if fromInstall {
+			t.Errorf("configured %q was reported as an installation decision", tc.configured)
+		}
+	}
+}
+
+// Resolving twice must not drift: the second call sees a configured value and
+// leaves it alone. Startup does this once, but nothing about the API says it
+// may only be called once, and a resolve that flipped a mode on the second
+// call would be a very unpleasant surprise.
+func TestResolvingIsIdempotent(t *testing.T) {
+	cfg := Default()
+	first, _ := cfg.ResolveLocalDNSSEC(LocalDNSSECObserve)
+	second, fromInstall := cfg.ResolveLocalDNSSEC(LocalDNSSECOff)
+	if second != first {
+		t.Fatalf("a second resolve changed the mode from %q to %q", first, second)
+	}
+	if fromInstall {
+		t.Fatal("a resolved mode was reported as a fresh installation decision")
+	}
+}
+
+// TestAZeroValueModeIsOffRatherThanAnError keeps the DNS type safe to use on
+// its own: an empty mode is valid configuration, not a rejection, and it does
+// not construct a validator.
+func TestAZeroValueModeIsOffRatherThanAnError(t *testing.T) {
 	cfg := Default()
 	cfg.DNS.LocalDNSSECValidation = ""
 	if err := cfg.validateLocalDNSSEC(); err != nil {
-		t.Fatalf("an omitted key was rejected: %v", err)
+		t.Fatalf("an empty mode was rejected: %v", err)
 	}
 	if cfg.DNS.ObserveDNSSEC() {
-		t.Fatal("an omitted key switched observation on")
+		t.Fatal("an empty mode switched observation on")
 	}
 }
 
