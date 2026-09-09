@@ -116,6 +116,40 @@ type DNS struct {
 	// ANY responses are large and are a standard DNS amplification lever.
 	RefuseANY bool `yaml:"refuse_any"`
 
+	// LocalDNSSECValidation selects what Daddybound, DNS Daddy's own DNSSEC
+	// validation engine, does with real traffic. See
+	// docs/decisions/0002-daddybound-observe-mode.md.
+	//
+	//	off      the default. No validator is constructed and no supporting
+	//	         DNSSEC query is sent. Behaviourally identical to a build
+	//	         without the feature.
+	//	observe  validate alongside resolution and record the verdict. The
+	//	         answer a client receives is unchanged, whatever Daddybound
+	//	         concludes.
+	//
+	// "enforce" is recognised and refused at startup. Accepting it and
+	// behaving as "observe" would leave an operator believing their resolver
+	// rejects forged answers when it does not, which is worse than not
+	// offering the word.
+	LocalDNSSECValidation string `yaml:"local_dnssec_validation"`
+
+	// LocalDNSSECWorkers bounds how many observations run at once. This is
+	// the concurrency limit for the whole feature: whatever the query rate,
+	// at most this many chain walks are in progress.
+	LocalDNSSECWorkers int `yaml:"local_dnssec_workers"`
+
+	// LocalDNSSECQueue is how many queries may be waiting to be observed.
+	// Enqueueing is non-blocking and drops when the queue is full, so this
+	// bounds memory and keeps the answer path free of any wait. Drops are
+	// counted and exposed: a sample that silently shrinks under load would
+	// invite conclusions it cannot support.
+	LocalDNSSECQueue int `yaml:"local_dnssec_queue"`
+
+	// LocalDNSSECTimeout bounds one observation, including every supporting
+	// DNSSEC query it makes. On expiry the walk is cancelled and the
+	// observation is recorded as a timeout — never as a DNSSEC state.
+	LocalDNSSECTimeout Duration `yaml:"local_dnssec_timeout"`
+
 	// DNSSECTelemetry sets the AD bit on outgoing queries so a validating
 	// upstream reports whether it authenticated each answer (RFC 6840 §5.7).
 	//
@@ -361,6 +395,13 @@ func Default() Config {
 			AllowedClientCIDRs: append([]string(nil), DefaultAllowedClientCIDRs...),
 			RefuseANY:          true,
 			DNSSECTelemetry:    true,
+			// Off by default. Local validation is experimental, and a
+			// feature that sends extra upstream queries must be something an
+			// operator switched on rather than something they inherited.
+			LocalDNSSECValidation: LocalDNSSECOff,
+			LocalDNSSECWorkers:    2,
+			LocalDNSSECQueue:      256,
+			LocalDNSSECTimeout:    Duration(2 * time.Second),
 		},
 		HTTP: HTTP{
 			// Loopback, deliberately.
@@ -484,6 +525,7 @@ func applyEnv(cfg *Config) error {
 	envStr("DNSDADDY_TLS_CERT_FILE", &cfg.DNS.TLSCertFile)
 	envStr("DNSDADDY_TLS_KEY_FILE", &cfg.DNS.TLSKeyFile)
 	envStr("DNSDADDY_UPSTREAM_MODE", &cfg.DNS.UpstreamMode)
+	envStr("DNSDADDY_LOCAL_DNSSEC_VALIDATION", &cfg.DNS.LocalDNSSECValidation)
 	envStr("DNSDADDY_HTTP_LISTEN", &cfg.HTTP.Listen)
 	envStr("DNSDADDY_ADMIN_PASSWORD", &cfg.HTTP.AdminPassword)
 	envStr("DNSDADDY_BASE_URL", &cfg.HTTP.BaseURL)
@@ -621,6 +663,9 @@ func (c *Config) validate() error {
 	case "failover", "race":
 	default:
 		return fmt.Errorf("upstream_mode must be %q or %q, got %q", "failover", "race", c.DNS.UpstreamMode)
+	}
+	if err := c.validateLocalDNSSEC(); err != nil {
+		return err
 	}
 	if c.DNS.ListenUDP == "" && c.DNS.ListenTCP == "" && c.DNS.ListenDoT == "" {
 		return fmt.Errorf("no DNS listener configured")
@@ -917,3 +962,65 @@ func (c *Config) FindingsFilePath() string {
 	}
 	return filepath.Join(c.DataDir, p)
 }
+
+// Modes for dns.local_dnssec_validation.
+//
+// The set is deliberately small and closed. A free-form string here would be
+// a policy decision driven by whatever an operator happened to type.
+const (
+	// LocalDNSSECOff: Daddybound is not constructed and sends nothing.
+	LocalDNSSECOff = "off"
+	// LocalDNSSECObserve: Daddybound validates alongside resolution and
+	// records what it concludes. The client's answer is unaffected.
+	LocalDNSSECObserve = "observe"
+	// LocalDNSSECEnforce is recognised so that configuring it fails loudly.
+	// It is not implemented. See validateLocalDNSSEC.
+	LocalDNSSECEnforce = "enforce"
+)
+
+// validateLocalDNSSEC checks the local validation mode and its budgets.
+//
+// The "enforce" case is the point of this function. A mode that is understood
+// but unimplemented has to fail startup, because the alternative — accepting
+// it and running in observe — tells an operator their resolver rejects forged
+// answers when it does nothing of the kind. A resolver that silently does less
+// than its configuration says is worse than one that refuses to start.
+func (c *Config) validateLocalDNSSEC() error {
+	switch c.DNS.LocalDNSSECValidation {
+	case "", LocalDNSSECOff, LocalDNSSECObserve:
+	case LocalDNSSECEnforce:
+		return fmt.Errorf(
+			"local_dnssec_validation: %q is not implemented and will not be treated as %q; "+
+				"local DNSSEC validation is experimental and can only observe. Set %q or %q",
+			LocalDNSSECEnforce, LocalDNSSECObserve, LocalDNSSECOff, LocalDNSSECObserve)
+	default:
+		return fmt.Errorf("local_dnssec_validation must be %q or %q, got %q",
+			LocalDNSSECOff, LocalDNSSECObserve, c.DNS.LocalDNSSECValidation)
+	}
+
+	// The budgets are only read in observe mode, but they are validated
+	// unconditionally: a nonsense value that only fails when somebody later
+	// switches the mode on is a trap laid for a future operator.
+	if c.DNS.LocalDNSSECWorkers < 0 {
+		return fmt.Errorf("local_dnssec_workers must not be negative, got %d", c.DNS.LocalDNSSECWorkers)
+	}
+	if c.DNS.LocalDNSSECQueue < 0 {
+		return fmt.Errorf("local_dnssec_queue must not be negative, got %d", c.DNS.LocalDNSSECQueue)
+	}
+	if c.DNS.LocalDNSSECTimeout < 0 {
+		return fmt.Errorf("local_dnssec_timeout must not be negative, got %s", c.DNS.LocalDNSSECTimeout.D())
+	}
+	return nil
+}
+
+// LocalDNSSECMode returns the effective mode, treating the empty string as
+// off so that an older configuration file keeps its previous behaviour.
+func (d DNS) LocalDNSSECMode() string {
+	if d.LocalDNSSECValidation == "" {
+		return LocalDNSSECOff
+	}
+	return d.LocalDNSSECValidation
+}
+
+// ObserveDNSSEC reports whether Daddybound should observe real traffic.
+func (d DNS) ObserveDNSSEC() bool { return d.LocalDNSSECMode() == LocalDNSSECObserve }
