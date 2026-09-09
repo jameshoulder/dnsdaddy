@@ -22,6 +22,52 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Local DNSSEC validation in observe mode
+
+Daddybound can now be pointed at your own traffic:
+
+```yaml
+dns:
+  local_dnssec_validation: observe   # off | observe.  Default off.
+```
+
+It validates the same names your clients ask for and records what it
+concludes. **The answer the client receives is unchanged**, whatever the
+verdict — a `bogus` result is a row in a table and a number on the Assurance
+page, never a refused query. `enforce` is recognised and refused at startup
+rather than quietly treated as `observe`.
+
+That is asserted rather than promised: a test drives the query path with the
+validator forced to return Secure, Insecure, Bogus, Indeterminate, a timeout
+and a panic in turn, and requires the bytes sent to the client to be identical
+in every case and identical to a run with no validator at all.
+
+The query log now shows **DNSSEC (upstream)** and **DNSSEC (local)** as
+separate facts, because they are different measurements — one is "the upstream
+said so", the other is "we checked" — and a disagreement between them is
+flagged rather than left to be spotted. `/api/v1/queries` gains one optional
+object and loses nothing. A new `/api/v1/dnssec/observations` reports the
+counts and the upstream-versus-local matrix, and states `enforcing: false` in
+its own payload.
+
+The first live run, over 612 real names, produced 609 verdicts, four
+disagreements with the upstream, and none in the cell that matters — upstream
+validated, local bogus. It also found that `www.paypal.com` is a signed alias
+into an unsigned CDN zone, where the upstream's AD bit was inconsistent across
+four observations and the local verdict was stable.
+
+Observation happens after the answer is decided, on a bounded worker pool
+behind a queue that drops rather than waits, so nothing on the answer path ever
+waits for a validation. It is not free: each observed query costs a chain walk
+and its own upstream lookups, which on a single-vCPU box competes for CPU with
+resolution. Measured, off versus observing: roughly 28,000 versus 5,000 queries
+per second cache-warm. See
+[docs/dns-security/dnssec.md](docs/dns-security/dnssec.md).
+
+If query logging is off, verdicts are still counted but per-query rows are not
+written. Turning off the query log is a privacy decision and a validator
+enabled for another purpose must not undo it.
+
 ### Daddybound: an experimental DNSSEC validation engine
 
 A DNS resolution and validation engine built from first principles in Go. It

@@ -46,12 +46,6 @@ func (s *stubValidator) Validate(ctx context.Context, qname string, rrtype uint1
 	return s.result
 }
 
-func (s *stubValidator) count() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.calls
-}
-
 type collector struct {
 	mu   sync.Mutex
 	rows []observe.Observation
@@ -103,6 +97,9 @@ func request(name string) observe.Request {
 	return observe.Request{
 		ID: observe.NewID(), Domain: strings.TrimSuffix(name, "."),
 		QName: name, QType: dns.TypeA, UpstreamStatus: "validated",
+		// Store is what the handler sets from the operator's query-log
+		// decision. Most tests here want the sink to see the row.
+		Store: true,
 	}
 }
 
@@ -451,5 +448,34 @@ func TestNewIDsAreDistinct(t *testing.T) {
 			t.Fatalf("duplicate id %q after %d draws", id, i)
 		}
 		seen[id] = true
+	}
+}
+
+// TestAnUnstoredObservationIsStillCounted is the other half of the privacy
+// rule.
+//
+// Withholding the row must not withhold the evidence. The counters and metrics
+// name nothing — they are totals per status — so an operator who switched
+// query logging off still gets the measurement this milestone exists to
+// produce, without a record of which names were asked for.
+func TestAnUnstoredObservationIsStillCounted(t *testing.T) {
+	sink := &collector{}
+	v := &stubValidator{result: dnssec.ValidationResult{
+		Status: dnssec.StatusSecure, Reason: dnssec.ReasonVerified,
+	}}
+	o := run(t, v, sink, observe.Options{Workers: 1})
+
+	req := request("private.test.")
+	req.Store = false
+	o.Observe(req)
+
+	if !waitFor(t, 2*time.Second, func() bool { return o.Stats().Observed == 1 }) {
+		t.Fatal("the observation was not counted")
+	}
+	if got := o.Stats().ByStatus[observe.StatusSecure]; got != 1 {
+		t.Errorf("secure count = %d, want 1: the aggregate must survive the privacy setting", got)
+	}
+	if rows := sink.all(); len(rows) != 0 {
+		t.Fatalf("a row naming %q was stored despite Store=false", rows[0].Domain)
 	}
 }

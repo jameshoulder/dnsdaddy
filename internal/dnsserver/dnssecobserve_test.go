@@ -253,7 +253,7 @@ func TestADroppedObservationLeavesNoCorrelationID(t *testing.T) {
 	// Reach into the handler's own bookkeeping the same way Handle does, so
 	// the assertion is about the value that would be stored.
 	event := store.QueryEvent{Domain: "example.com", DNSSEC: store.DNSSECUnvalidated}
-	got := h.handler.observeDNSSEC(event, dns.Question{Name: "example.com.", Qtype: dns.TypeA})
+	got := h.handler.observeDNSSEC(event, dns.Question{Name: "example.com.", Qtype: dns.TypeA}, true)
 	if got != "" {
 		t.Fatalf("a refused observation still produced a correlation id %q", got)
 	}
@@ -267,7 +267,7 @@ func TestObservationIsOffByDefault(t *testing.T) {
 		t.Fatal("a handler built without the option has an observer attached")
 	}
 	event := store.QueryEvent{Domain: "example.com"}
-	if id := h.handler.observeDNSSEC(event, dns.Question{Name: "example.com.", Qtype: dns.TypeA}); id != "" {
+	if id := h.handler.observeDNSSEC(event, dns.Question{Name: "example.com.", Qtype: dns.TypeA}, true); id != "" {
 		t.Fatalf("observation happened with no observer configured: %q", id)
 	}
 }
@@ -493,4 +493,43 @@ func upstreamAt(t *testing.T, addr string) observe.Exchanger {
 	}
 	t.Cleanup(u.Close)
 	return u
+}
+
+// TestQueryLoggingOffWithholdsTheObservationRow is a privacy defect this
+// milestone introduced and a hostile review of the seam found.
+//
+// An observation row names the queried domain. An operator switches the query
+// log off for exactly one reason — they do not want a record of which names
+// were asked for — and a validator they enabled to measure DNSSEC must not
+// quietly reinstate that record under a different table name.
+//
+// The verdict is still counted, because the counters and metrics are aggregate
+// and name nothing. What is withheld is the row.
+func TestQueryLoggingOffWithholdsTheObservationRow(t *testing.T) {
+	obs := &recordingObserver{accept: true}
+	// The instance-wide query-log switch off, which is the operator's privacy
+	// setting.
+	h := newHarnessWithQueryLog(t, nil, false, withObserver(obs))
+
+	h.handler.Handle(context.Background(), query("private.example.", dns.TypeA), requestMeta{proto: "udp"})
+
+	seen := obs.seen()
+	if len(seen) != 1 {
+		t.Fatalf("observed %d queries, want 1: the verdict should still be counted", len(seen))
+	}
+	if seen[0].Store {
+		t.Fatal("a query the operator asked not to log would have had its domain written to the observations table")
+	}
+
+	// And with logging on, the row is permitted — or the check above passes
+	// because nothing is ever stored.
+	on := newHarnessWithQueryLog(t, nil, true, withObserver(obs))
+	on.handler.Handle(context.Background(), query("logged.example.", dns.TypeA), requestMeta{proto: "udp"})
+	seen = obs.seen()
+	if len(seen) != 2 {
+		t.Fatalf("observed %d queries, want 2", len(seen))
+	}
+	if !seen[1].Store {
+		t.Fatal("query logging is on and the observation row is still withheld")
+	}
 }

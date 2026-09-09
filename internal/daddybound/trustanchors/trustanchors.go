@@ -52,7 +52,11 @@ func Root() (dnssec.TrustAnchors, error) { return parse(IANARootDS) }
 // file with a typo in it should stop a validator starting, not silently
 // configure it to trust less than the operator wrote.
 func FromFile(path string) (dnssec.TrustAnchors, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // an operator-configured path, read at startup
+	// #nosec G304 -- the path comes from the operator's own configuration file
+	// and is read once at startup. There is no request-time input here: a
+	// deployment that can set this can already set the upstreams and the
+	// listeners.
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return dnssec.TrustAnchors{}, fmt.Errorf("trust anchor file: %w", err)
 	}

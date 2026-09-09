@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/dnssecobs"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
@@ -119,10 +118,4 @@ type DNSSECWriterStats interface {
 // default; every reader tolerates that.
 type DNSSECObserverStats interface {
 	Stats() observe.Stats
-}
-
-// localDNSSECEnabled reports whether the mode is anything but off, for
-// settings and diagnostics payloads.
-func (a *API) localDNSSECEnabled() bool {
-	return a.Config.DNS.LocalDNSSECMode() != config.LocalDNSSECOff
 }

@@ -275,14 +275,21 @@ with NSEC and NSEC3; and follows CNAME chains, DNAME redirections and
 QTYPE=ANY answers. A separate opt-in test run compares its verdicts against
 libunbound and BIND's `delv` over several hundred real Internet names.
 
+It can now be run against your own traffic in **observe mode**
+(`dns.local_dnssec_validation: observe`, off by default). It validates the
+same names your clients ask for and records what it concludes; **the answer the
+client receives is unchanged**, whatever the verdict. There is no enforcement,
+and none is planned until the observations say what enforcing would cost.
+
 That is a step, not a finish line. It performs no recursive resolution of its
 own, does not implement aggressive NSEC use or trust anchor rollover, and
 keeps one documented assumption about zone cuts.
 
 **It is experimental and must not be relied upon as a production DNSSEC
-validator.** It answers no queries, enforces no policy, and cannot be pointed
-at the Internet or at a running deployment. A test asserts that no package on
-the resolver's query path can reach it.
+validator.** It enforces no policy: no configuration lets a Daddybound verdict
+change, delay or fail a DNS answer. A test drives the query path with the
+validator forced to return each verdict in turn and requires the client's
+response to be byte-identical every time.
 
 It implements the DNS and DNSSEC protocol and trust logic itself, from the
 standards, using established cryptographic primitives from Go's standard

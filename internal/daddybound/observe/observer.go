@@ -47,6 +47,20 @@ type Request struct {
 	// event. Carried so the observation row is self-contained; never read
 	// while validating.
 	UpstreamStatus string
+
+	// Store reports whether a per-query row may be written for this
+	// observation.
+	//
+	// False when the operator's query-log settings say this query is not to
+	// be recorded — either the instance-wide switch or the policy's own. An
+	// observation row carries the queried domain, so writing one for a query
+	// the operator asked not to log would defeat that setting through a
+	// feature they turned on for a different reason.
+	//
+	// The verdict is still counted either way: the counters and metrics are
+	// aggregate and name nothing, so the evidence this milestone exists to
+	// collect survives a privacy setting that the per-query rows must not.
+	Store bool
 }
 
 // Options configures an Observer.
@@ -246,8 +260,10 @@ func (o *Observer) validate(ctx context.Context, req Request) {
 		Duration:       elapsed,
 	}
 
+	// Counted always; stored only when the operator's query-log settings
+	// permit a row naming this domain. See Request.Store.
 	o.record(obs)
-	if o.sink != nil {
+	if o.sink != nil && req.Store {
 		o.sink.Record(obs)
 	}
 }

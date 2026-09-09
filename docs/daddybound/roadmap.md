@@ -140,6 +140,12 @@ enough for the failure modes that only appear over time — a key rollover
 mid-query, a zone that re-signs while a chain is being walked — to have shown
 up at all.
 
-The next milestone is observe mode: run the engine alongside the resolver, on
-real traffic, deciding nothing. That measures the one thing no test can, which
-is what it says about names nobody chose.
+Observe mode now exists: the engine runs alongside the resolver on real
+traffic, deciding nothing. The first run of it, over 612 real names, produced
+the thing no test could — 609 verdicts about names nobody chose, four
+disagreements with the upstream, and none of them in the cell that matters
+(upstream validated, local bogus).
+
+What is still missing before enforcement is time and volume rather than
+features, plus a decided answer to what a client should receive when
+validation fails. See issue #63 and its successor.

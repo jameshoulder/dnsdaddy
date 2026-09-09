@@ -20,6 +20,90 @@ verifies that chain and refuses to serve data that fails.
 The guarantee is: *this answer is what the domain's owner published, and it has
 not been altered in transit or substituted by anyone along the way.*
 
+## Local validation, in observe mode
+
+Since v0.4 DNS Daddy can run its own DNSSEC validator, **Daddybound**,
+alongside resolution:
+
+```yaml
+dns:
+  local_dnssec_validation: observe   # off | observe.  Default off.
+```
+
+**It does not change any answer.** In observe mode Daddybound validates the
+same names your clients ask for, records what it concludes, and stops there.
+A `bogus` verdict is a row in a table and a number on a dashboard; the client
+receives exactly the response the resolver produced. There is no configuration
+that makes it do otherwise, and `enforce` is refused at startup rather than
+quietly treated as `observe`.
+
+### Why observe before enforce
+
+An enforcing validator turns "this answer failed validation" into "this query
+gets no answer". That is the right behaviour when the validator is right, and
+an outage when it is not. DNS Daddy has a validator with a great deal of
+laboratory evidence behind it and almost none from production, and the honest
+order is to measure before deciding.
+
+What observe mode measures is the disagreement between two things you can
+already see side by side in the query log:
+
+- **DNSSEC (upstream)** — the AD bit. Your upstream resolver validated this
+  answer and said so.
+- **DNSSEC (local)** — what Daddybound concluded, independently, from the root
+  down.
+
+They usually agree. Where they do not, one of them is wrong, and the interesting
+question is which — a question nobody can answer from a single measurement.
+
+### What the local statuses mean
+
+`secure`, `insecure`, `bogus` and `indeterminate` are RFC 4033's four states.
+`insecure` is a *proof* that the name lies in an unsigned part of the DNS, not
+a shrug.
+
+`timeout`, `resource_limit`, `unsupported` and `internal_error` are different:
+they say the validator could not reach a verdict. That distinction is
+load-bearing. If an inability to validate were recorded as `insecure`, anyone
+able to drop a packet could manufacture a DNSSEC state.
+
+### What it costs
+
+Observation happens after the answer is decided, on a fixed pool of background
+workers, behind a bounded queue that drops rather than waits. Nothing on the
+answer path ever waits for a validation.
+
+It is not free, though, and the cost is not on the answer path but next to it:
+each observed query causes a chain walk and its own DNSSEC lookups upstream.
+On a single-vCPU box under sustained load that competes for CPU with
+resolution. Measured on the reference deployment, a cache-warm load test ran at
+roughly 28,000 queries per second with observation off and roughly 5,000 with
+it on and validating everything; with the same seam but the observation queue
+kept full — so the answer path does identical work and almost no validation
+happens — throughput returned to baseline. The cost is the validating, and it
+is bounded by `local_dnssec_workers`.
+
+Three numbers on the Assurance page say how complete the picture is:
+
+- **Not observed** — the queue was full, so these queries were never looked at.
+- **Observed but not stored** — validated, then lost before the database.
+- **Observed** — what the counts are actually based on.
+
+A sample that shrank under load would otherwise invite conclusions it cannot
+support.
+
+### What it does not do
+
+No enforcement. No AD bit of DNS Daddy's own — the AD bit on a response to your
+client still means what it always meant, which is what the upstream said. No
+RFC 5011 automatic trust-anchor rollover: the IANA root keys are compiled in,
+both current ones, and `dns.local_dnssec_trust_anchor_file` overrides them if
+you need to move faster than a release.
+
+If query logging is off, observations are still counted but the per-query rows
+are not written. Turning off the query log is a privacy decision, and a
+validator enabled for a different purpose must not undo it.
+
 ## What DNSSEC does not do
 
 Worth being exact about, because it is routinely overstated.

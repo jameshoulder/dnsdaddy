@@ -167,6 +167,8 @@ func (s *Store) ListDNSSECObservations(ctx context.Context, f DNSSECObservationF
 		limit = 100
 	}
 
+	// #nosec G202 -- every fragment appended below is a string literal
+	// ("AND status = ?"); the filter values are bound as parameters in args.
 	q := `SELECT id, ts, qname, qtype, cached, upstream, status, reason_code, reason,
 	             duration_ms, disagreement
 	      FROM dnssec_observations WHERE 1=1`
@@ -222,6 +224,9 @@ func (s *Store) DNSSECObservationsByID(ctx context.Context, ids []string) (map[s
 		end := min(start+chunk, len(ids))
 		batch := ids[start:end]
 
+		// #nosec G202 -- the only thing concatenated is a run of "?" built
+		// from an integer count by placeholders(); every id is bound as a
+		// parameter in args below. Never append a fragment built from input.
 		q := `SELECT id, ts, qname, qtype, cached, upstream, status, reason_code, reason,
 		             duration_ms, disagreement
 		      FROM dnssec_observations WHERE id IN (` + placeholders(len(batch)) + `)`

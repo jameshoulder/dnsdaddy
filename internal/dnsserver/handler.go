@@ -373,7 +373,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	// and after the response is fully decided so it cannot participate in
 	// deciding it. The call is a non-blocking channel send; res.Msg is already
 	// what this function will return, whatever any of this concludes.
-	event.DNSSECObservationID = h.observeDNSSEC(event, q)
+	event.DNSSECObservationID = h.observeDNSSEC(event, q, persist)
 	h.qlog.Record(event, persist)
 	h.observe(event, meta, res.Rcode, res.MinTTL, res.Validated, false)
 	return res.Msg
@@ -381,6 +381,12 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 
 // observeDNSSEC hands a resolved query to Daddybound and returns the
 // correlation id, or "" when nothing was enqueued.
+//
+// persist carries the operator's query-log decision through to the
+// observation. An observation row names the queried domain, so an operator who
+// switched query logging off — for privacy, which is the only reason anyone
+// does — must not find those names written by a validator they enabled for an
+// unrelated purpose. The verdict is still counted; only the row is withheld.
 //
 // The invariant this function exists to keep is that its return value is used
 // for exactly one thing — labelling a log row — and never for anything that
@@ -393,7 +399,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 // record nothing rather than a status meaning "we tried and could not", since
 // conflating "not attempted" with "attempted and inconclusive" is the
 // confusion the status taxonomy exists to prevent.
-func (h *Handler) observeDNSSEC(event store.QueryEvent, q dns.Question) (id string) {
+func (h *Handler) observeDNSSEC(event store.QueryEvent, q dns.Question, persist bool) (id string) {
 	if h.dnssec == nil {
 		return ""
 	}
@@ -429,13 +435,13 @@ func (h *Handler) observeDNSSEC(event store.QueryEvent, q dns.Question) (id stri
 		// query's verdict to another's log row.
 		h.dnssec.Observe(observe.Request{
 			Domain: event.Domain, QName: q.Name, QType: q.Qtype,
-			Cached: event.Cached, UpstreamStatus: event.DNSSEC,
+			Cached: event.Cached, UpstreamStatus: event.DNSSEC, Store: persist,
 		})
 		return ""
 	}
 	if !h.dnssec.Observe(observe.Request{
 		ID: id, Domain: event.Domain, QName: q.Name, QType: q.Qtype,
-		Cached: event.Cached, UpstreamStatus: event.DNSSEC,
+		Cached: event.Cached, UpstreamStatus: event.DNSSEC, Store: persist,
 	}) {
 		// Dropped because the queue was full. No observation will exist, so
 		// the log row must not claim one.
