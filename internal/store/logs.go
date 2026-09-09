@@ -196,7 +196,7 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 	// ("network_id = ?"); every filter value is bound as a parameter in args.
 	// Never append a fragment built from input here.
 	q := `SELECT id, ts, client_ip, client_name, network_id, qname, qtype, action,
-	             reason, category, source, proto, elapsed_ms, cached, dnssec
+	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs
 	      FROM query_log WHERE ` + strings.Join(where, " AND ") + `
 	      ORDER BY id DESC LIMIT ?`
 
@@ -215,7 +215,7 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 		)
 		if err := rows.Scan(&e.ID, &ts, &e.ClientIP, &e.ClientName, &e.NetworkID, &e.Domain,
 			&e.QType, &e.Action, &e.Reason, &e.Category, &e.Source, &e.Proto, &e.ElapsedMS,
-			&cached, &e.DNSSEC); err != nil {
+			&cached, &e.DNSSEC, &e.DNSSECObservationID); err != nil {
 			return nil, 0, err
 		}
 		e.Time = fromUnixMilli(ts)

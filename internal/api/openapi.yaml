@@ -1261,6 +1261,80 @@ paths:
         "404":
           description: No such finding
 
+  /api/v1/dnssec/observations:
+    get:
+      tags: [Detections]
+      summary: What local DNSSEC validation concluded about real traffic
+      description: |
+        Daddybound, DNS Daddy's own DNSSEC validation engine, can be run
+        alongside resolution in **observe mode**. It validates the same names
+        clients ask for and records what it concludes.
+
+        **These verdicts do not affect DNS answers.** Observe mode is
+        observational: the response a client receives is decided entirely by
+        the resolver, and a `bogus` verdict here changed nothing. The payload
+        says so in its own fields (`enforcing: false`, `experimental: true`)
+        so a consumer cannot read these counts as enforcement.
+
+        Two facts are reported side by side and never merged. `upstream` is
+        what the upstream resolver asserted with the AD bit. `status` is what
+        Daddybound concluded locally. They may disagree, and the disagreement
+        counts are the point of the feature.
+
+        `status` values `secure`, `insecure`, `bogus` and `indeterminate` are
+        RFC 4033 states. `timeout`, `resource_limit`, `unsupported` and
+        `internal_error` say the validator could not reach one, which is a
+        different kind of statement and must not be read as a DNSSEC state.
+      parameters:
+        - name: hours
+          in: query
+          description: Window to summarise, default 24.
+          schema: { type: integer, minimum: 1, maximum: 2160 }
+        - name: status
+          in: query
+          description: Restrict the recent list to one status.
+          schema: { type: string }
+        - name: disagreements
+          in: query
+          description: Set to 1 to list only observations where the local and upstream views differ.
+          schema: { type: string, enum: ["1"] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        "200":
+          description: Observations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { type: string, enum: [off, observe] }
+                  enforcing:
+                    type: boolean
+                    enum: [false]
+                    description: Always false. Observe mode cannot affect a DNS answer.
+                  experimental: { type: boolean }
+                  windowHours: { type: integer }
+                  summary: { $ref: "#/components/schemas/DNSSECObservationSummary" }
+                  recent:
+                    type: array
+                    items: { $ref: "#/components/schemas/DNSSECObservation" }
+                  runtime:
+                    type: object
+                    description: |
+                      Health of the observer itself, which is deliberately
+                      separate from the health of DNS resolution. Dropped
+                      observations are a gap in the sample, not a gap in
+                      service.
+                    properties:
+                      available:  { type: boolean }
+                      observed:   { type: integer, format: int64 }
+                      dropped:    { type: integer, format: int64 }
+                      panics:     { type: integer, format: int64 }
+                      lastAt:     { type: string, format: date-time }
+                      lastStatus: { type: string }
+
   /api/v1/detectors:
     get:
       tags: [Detections]
@@ -2354,6 +2428,72 @@ components:
         written: { type: integer }
         failed: { type: integer }
         queueDepth: { type: integer }
+
+    DNSSECObservation:
+      type: object
+      description: |
+        One local validation of one query. Self-contained: every field needed
+        to interpret it is present, including what the upstream asserted at the
+        same moment.
+      properties:
+        id:
+          type: string
+          description: Correlates with a query-log row's dnssecValidation.
+        time:   { type: string, format: date-time }
+        domain: { type: string }
+        qtype:  { type: string }
+        cached:
+          type: boolean
+          description: |
+            The client's answer came from DNS Daddy's cache, so it may be older
+            than this observation. Observe mode validates the name rather than
+            the exact response bytes.
+        upstream:
+          type: string
+          description: |
+            What the upstream resolver asserted. A separate fact from status,
+            never merged with it and never consulted in reaching it.
+          enum: ["", validated, unvalidated, servfail]
+        status:
+          type: string
+          enum: [secure, insecure, bogus, indeterminate, timeout, resource_limit, unsupported, internal_error]
+        reasonCode: { type: string }
+        reason:
+          type: string
+          description: A sentence for a person to read. Nothing branches on it.
+        durationMs: { type: number, format: double }
+        disagreement:
+          type: string
+          description: How the local and upstream views differ, or empty when consistent or not comparable.
+          enum:
+            - ""
+            - local_secure_upstream_unvalidated
+            - local_bogus_upstream_validated
+            - local_insecure_upstream_validated
+            - local_indeterminate_upstream_validated
+            - local_bogus_upstream_unvalidated
+
+    DNSSECObservationSummary:
+      type: object
+      properties:
+        total:    { type: integer, format: int64 }
+        byStatus:
+          type: object
+          additionalProperties: { type: integer, format: int64 }
+        disagreements:
+          type: object
+          additionalProperties: { type: integer, format: int64 }
+        matrix:
+          type: array
+          description: The upstream assertion cross-tabulated against the local verdict.
+          items:
+            type: object
+            properties:
+              upstream: { type: string }
+              local:    { type: string }
+              count:    { type: integer, format: int64 }
+        avgDurationMs: { type: number, format: double }
+        p95DurationMs: { type: number, format: double }
 
     DetectorInfo:
       type: object

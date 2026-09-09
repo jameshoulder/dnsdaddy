@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/jameshoulder/dnsdaddy/internal/api"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/dnssec"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
@@ -112,6 +113,15 @@ func (d *dnssecObservation) Wait() {
 // interface without handing it a non-nil interface wrapping a nil pointer,
 // which would defeat every `if h.dnssec == nil` in the handler.
 func observerOrNil(d *dnssecObservation) dnsserver.DNSSECObserver {
+	if d == nil || d.observer == nil {
+		return nil
+	}
+	return d.observer
+}
+
+// dnssecStatsOrNil exposes the observer's counters to the API without handing
+// it a non-nil interface wrapping a nil pointer.
+func dnssecStatsOrNil(d *dnssecObservation) api.DNSSECObserverStats {
 	if d == nil || d.observer == nil {
 		return nil
 	}
