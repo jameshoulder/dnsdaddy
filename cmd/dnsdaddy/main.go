@@ -159,6 +159,32 @@ func run() error {
 		log.Info("file:// feeds enabled", "local_feed_dir", cfg.Feeds.LocalFeedDir)
 	}
 
+	// Local DNSSEC validation, when the operator did not say either way.
+	//
+	// This has to happen after the store is open and before anything reads the
+	// mode, because the answer lives in the database rather than the config
+	// file: Load unmarshals YAML over Default(), so by the time the config
+	// struct exists there is no way to tell an omitted key from a written one.
+	// The installation record, written on first run, can tell the difference —
+	// a fresh install runs Learn, an upgrade that never asked for it stays off.
+	//
+	// The resolved value is written back into cfg so that every later reader —
+	// the observer, the API, /metrics, the dashboard — sees one answer instead
+	// of each re-deriving it.
+	if !cfg.DNS.LocalDNSSECConfigured() {
+		installDefault, err := st.GetSetting(context.Background(), store.SettingLocalDNSSECDefault)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("read local DNSSEC installation default: %w", err)
+		}
+		mode, fromInstall := cfg.ResolveLocalDNSSEC(installDefault)
+		if fromInstall {
+			log.Info("local DNSSEC validation mode chosen by this installation",
+				"mode", mode,
+				"reason", "dns.local_dnssec_validation is not set",
+				"set_explicitly_to_override", "off | observe")
+		}
+	}
+
 	// --- blocklists ---------------------------------------------------------
 	lists := blocklist.NewHolder()
 	feeds, err := blocklist.NewManager(st, lists, cfg.Feeds, cfg.DataDir, log)
