@@ -22,6 +22,10 @@ type dnssecObservation struct {
 	observer *observe.Observer
 	writer   *dnssecobs.Writer
 	source   *observe.Source
+
+	// stopWriter cancels the writer, and is deliberately not the process
+	// context. See Wait.
+	stopWriter context.CancelFunc
 }
 
 // startDNSSECObserver builds and starts local DNSSEC observation, or returns
@@ -73,7 +77,16 @@ func startDNSSECObserver(
 	})
 
 	writer := dnssecobs.New(st, dnssecobs.Options{Log: log})
-	go writer.Run(ctx)
+	// The writer outlives the observer on purpose. Given the same context
+	// both stop on the same cancellation, and the writer can drain its queue
+	// and return while a worker is still unwinding a validation in flight —
+	// the row that worker then records is queued with no consumer left, so it
+	// is neither stored nor counted as dropped. Silently losing evidence is
+	// the one failure this package exists to make impossible, so the writer
+	// gets its own cancellation and Wait triggers it only once every producer
+	// has gone.
+	wctx, stopWriter := context.WithCancel(context.WithoutCancel(ctx))
+	go writer.Run(wctx)
 
 	observer := observe.New(validator, writer, observe.Options{
 		Workers: cfg.DNS.LocalDNSSECWorkers,
@@ -83,6 +96,16 @@ func startDNSSECObserver(
 	})
 	go observer.Run(ctx)
 
+	// The process context still has to reach the writer, or a shutdown that
+	// never called Wait would leave it running. Same ordering as Wait, for
+	// the same reason. Wait is deferred in main and is the ordinary path;
+	// this is the backstop, and cancelling twice is harmless.
+	go func() {
+		<-ctx.Done()
+		observer.Wait()
+		stopWriter()
+	}()
+
 	log.Info("local DNSSEC validation is observing",
 		"mode", cfg.DNS.LocalDNSSECMode(),
 		"workers", cfg.DNS.LocalDNSSECWorkers,
@@ -90,7 +113,12 @@ func startDNSSECObserver(
 		"timeout", cfg.DNS.LocalDNSSECTimeout.D(),
 		"enforcing", false)
 
-	return &dnssecObservation{observer: observer, writer: writer, source: source}, nil
+	return &dnssecObservation{
+		observer:   observer,
+		writer:     writer,
+		source:     source,
+		stopWriter: stopWriter,
+	}, nil
 }
 
 func loadTrustAnchors(path string) (dnssec.TrustAnchors, error) {
@@ -101,11 +129,17 @@ func loadTrustAnchors(path string) (dnssec.TrustAnchors, error) {
 }
 
 // Wait blocks until both goroutines have drained.
+//
+// The order is the point. Waiting for the observer first means every worker
+// that could still record an observation has exited before the writer is told
+// to drain, so the last verdicts of a run reach the database instead of being
+// queued into a channel nothing is reading any more.
 func (d *dnssecObservation) Wait() {
 	if d == nil {
 		return
 	}
 	d.observer.Wait()
+	d.stopWriter()
 	d.writer.Wait()
 }
 

@@ -2412,6 +2412,32 @@ test('contained validator panics are surfaced as a defect', () => {
   assert.match(card, /defect in the validator/i);
 });
 
+test('stored rows and reached verdicts are different facts', () => {
+  // The card used to label the stored-row total "Observed". With query
+  // logging off, observation is counted but no row is written — so the card
+  // reported that no validation had happened, with every status at zero and
+  // no stated reason, to exactly the operator most likely to be checking.
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: { total: 0, byStatus: {}, disagreements: {} },
+    runtime: { observed: 4211, dropped: 0, panics: 0 },
+  });
+  assert.match(card, /4211/);
+  assert.match(card, /query logging is off/i);
+  assert.match(card, /names the domain/i);
+});
+
+test('a normal run does not claim rows are being withheld', () => {
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: { total: 900, byStatus: { secure: 900 }, disagreements: {} },
+    runtime: { observed: 950, dropped: 0, panics: 0 },
+  });
+  assert.match(card, /950/);
+  assert.match(card, /900/);
+  assert.doesNotMatch(card, /query logging is off/i);
+});
+
 test('observations lost before storage are shown, not only those never taken', () => {
   const card = localDnssecCard({
     mode: 'observe',

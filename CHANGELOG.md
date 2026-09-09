@@ -66,7 +66,9 @@ per second cache-warm. See
 
 If query logging is off, verdicts are still counted but per-query rows are not
 written. Turning off the query log is a privacy decision and a validator
-enabled for another purpose must not undo it.
+enabled for another purpose must not undo it. Observation rows expire on the
+same `log.retention_days` window as the query log, for the same reason: they
+name the domain they validated, and each one correlates to a query-log row.
 
 ### Daddybound: an experimental DNSSEC validation engine
 

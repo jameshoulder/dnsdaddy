@@ -292,6 +292,16 @@ No free-form string drives anything. The status and reason code are closed
 enumerations; the human-readable reason is stored for a person to read, bounded
 in length and sanitised, and nothing branches on it.
 
+The same distinction applies one layer down, to the supporting lookups. Only
+NOERROR and NXDOMAIN carry DNSSEC evidence; every other rcode is the upstream
+saying it could not answer. Handing a SERVFAIL to the chain walk as though it
+were a reply would present a zone's DNSKEY as absent rather than unobtainable,
+and Daddybound would correctly conclude Bogus from an incorrect premise — so an
+upstream outage or a rate limit would arrive in the disagreement table as a
+security finding. Those rcodes fail over to the next upstream, and with none
+left the walk reports Indeterminate. These queries set CD, so a validating
+upstream has no validation-related reason to SERVFAIL them either.
+
 ## 9. Upstream AD stays a separate fact
 
 `dnssec_telemetry` and the `DNSSEC` field on a query event continue to mean
@@ -336,6 +346,15 @@ does not, which is worse than not offering the word at all.
 `off` is the default and must be indistinguishable from the previous release:
 no observer is constructed, no worker starts, no supporting query is sent, and
 the answer path does not gain a branch that touches Daddybound state.
+
+Observations are not separately configurable, and deliberately so. A row names
+the domain it validated and carries the id of the query-log row it explains, so
+it is governed by the query log's two existing settings rather than by any of
+its own: rows are written only when that query would have been logged, and they
+expire on `log.retention_days`. A diagnostic feature must not be able to keep
+domain names that the operator has told the product not to keep, and an
+observation that outlived the query it explains would be a dangling reference
+into an empty table.
 
 ## 11. What this ADR does not decide
 

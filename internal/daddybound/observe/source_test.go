@@ -280,3 +280,97 @@ func itoa(n int) string {
 	}
 	return string(b[i:])
 }
+
+// TestAnOperationalRcodeIsNotEvidence.
+//
+// An upstream that answers SERVFAIL or REFUSED is saying it could not answer.
+// Passed through as a successful lookup it becomes, to the chain walk, a zone
+// that published no DNSKEY or no DS — which is Bogus. An upstream outage or a
+// rate limit would then be recorded as a security verdict and land in the
+// disagreement table this whole milestone exists to fill.
+//
+// These queries set CD, so a validating upstream must not be failing them on
+// validation grounds either: a SERVFAIL here is a broken upstream, not a
+// broken zone.
+func TestAnOperationalRcodeIsNotEvidence(t *testing.T) {
+	for _, rcode := range []int{
+		dns.RcodeServerFailure,
+		dns.RcodeRefused,
+		dns.RcodeNotImplemented,
+		dns.RcodeFormatError,
+	} {
+		t.Run(dns.RcodeToString[rcode], func(t *testing.T) {
+			up := &fakeUpstream{reply: func(m *dns.Msg) (*dns.Msg, error) {
+				r := new(dns.Msg)
+				r.SetReply(m)
+				r.Rcode = rcode
+				return r, nil
+			}}
+			s := observe.NewSource([]observe.Exchanger{up}, observe.SourceOptions{})
+
+			if _, err := s.Lookup(context.Background(), "example.test.", dns.TypeDNSKEY); err == nil {
+				t.Fatalf("%s was handed to the validator as a usable answer",
+					dns.RcodeToString[rcode])
+			}
+		})
+	}
+}
+
+// TestNXDOMAINIsEvidence is the other half, and the reason the check names two
+// rcodes rather than one. A denial of existence *is* the answer for a NODATA
+// or name-error proof, and rejecting it would make authenticated denial
+// unobservable.
+func TestNXDOMAINIsEvidence(t *testing.T) {
+	up := &fakeUpstream{reply: func(m *dns.Msg) (*dns.Msg, error) {
+		r := new(dns.Msg)
+		r.SetReply(m)
+		r.Rcode = dns.RcodeNameError
+		r.Ns = []dns.RR{&dns.SOA{
+			Hdr: dns.RR_Header{
+				Name: "test.", Rrtype: dns.TypeSOA,
+				Class: dns.ClassINET, Ttl: 300,
+			},
+			Ns: "ns.test.", Mbox: "hostmaster.test.",
+		}}
+		return r, nil
+	}}
+	s := observe.NewSource([]observe.Exchanger{up}, observe.SourceOptions{})
+
+	resp, err := s.Lookup(context.Background(), "absent.test.", dns.TypeA)
+	if err != nil {
+		t.Fatalf("NXDOMAIN was rejected: %v", err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode %d survived as %d", dns.RcodeNameError, resp.Rcode)
+	}
+	if len(resp.Authority) != 1 {
+		t.Fatalf("the denial proof was dropped: %d authority records", len(resp.Authority))
+	}
+}
+
+// TestAFailingUpstreamFailsOverOnRcodeToo.
+//
+// The failover path already existed for transport errors. An rcode failure is
+// the same kind of event and has to reach it, or an instance with a healthy
+// second upstream would stop observing whenever the first one degraded.
+func TestAFailingUpstreamFailsOverOnRcodeToo(t *testing.T) {
+	bad := &fakeUpstream{reply: func(m *dns.Msg) (*dns.Msg, error) {
+		r := new(dns.Msg)
+		r.SetReply(m)
+		r.Rcode = dns.RcodeServerFailure
+		return r, nil
+	}}
+	good := &fakeUpstream{reply: answerWith(300)}
+	s := observe.NewSource([]observe.Exchanger{bad, good}, observe.SourceOptions{})
+
+	resp, err := s.Lookup(context.Background(), "example.test.", dns.TypeA)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("got %d answer records, want 1", len(resp.Answer))
+	}
+	if len(good.questions()) != 1 {
+		t.Fatal("a SERVFAIL from the first upstream did not fail over to the second")
+	}
+}

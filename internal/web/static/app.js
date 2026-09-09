@@ -3812,6 +3812,16 @@ function localDnssecCard(data) {
   const dis = s.disagreements || {};
   const disTotal = Object.values(dis).reduce((a, b) => a + b, 0);
 
+  // Two different populations, and conflating them told a privacy-conscious
+  // operator that no validation had happened. Verdicts are counted whatever
+  // the query-log setting; the row naming the domain is only written when
+  // query logging is on. Reporting the stored count as "observed" therefore
+  // read as "we validated nothing", with every status below it at zero and
+  // no stated reason.
+  const stored = s.total || 0;
+  const observed = runtime.observed;
+  const withheld = (observed || 0) > 0 && stored === 0;
+
   const stat = (label, value, note) => html`
     <div class="qfact"><dt>${label}</dt><dd><span class="mono">${value ?? 0}</span>${note ? html` <span class="muted small">${note}</span>` : ''}</dd></div>`;
 
@@ -3828,7 +3838,8 @@ function localDnssecCard(data) {
       </div>
 
       <dl class="claim-key">
-        ${raw(stat('Observed', s.total, 'in the last 7 days'))}
+        ${raw(stat('Observed', observed, 'verdicts reached since this instance started'))}
+        ${raw(stat('Stored', stored, 'rows in the last 7 days — every count below is drawn from these'))}
         ${raw(stat('Secure', by.secure))}
         ${raw(stat('Insecure', by.insecure, 'provably unsigned'))}
         ${raw(stat('Bogus', by.bogus, 'recorded, not blocked'))}
@@ -3840,6 +3851,11 @@ function localDnssecCard(data) {
         ${raw(stat('Median latency', (s.avgDurationMs || 0).toFixed(1) + ' ms', 'off the answer path'))}
         ${raw(stat('p95 latency', (s.p95DurationMs || 0).toFixed(1) + ' ms'))}
       </dl>
+
+      ${withheld ? html`<p class="muted small">Verdicts are being counted but no rows are being stored, so the
+        counts by status stay at zero. Query logging is off, and an observation row names the domain it
+        validated — recording it anyway would undo that setting through a feature you enabled to measure
+        DNSSEC. The totals here are aggregate and name nothing.</p>` : ''}
 
       ${runtime.panics ? html`<p class="muted small"><span class="badge bad">${runtime.panics}</span>
         validator panics were contained. That is a defect in the validator, not a property of your traffic —

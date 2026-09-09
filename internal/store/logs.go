@@ -453,11 +453,18 @@ func (s *Store) NetworkActivitySince(ctx context.Context, t time.Time) (map[stri
 	return out, rows.Err()
 }
 
+// DefaultRetentionDays is the query-log window used when the operator has not
+// configured one. Named rather than repeated because anything kept alongside a
+// query-log row has to expire with it: an observation that outlives the query
+// it explains is a dangling reference, and one that outlives the operator's
+// retention setting is a promise broken by a diagnostic feature.
+const DefaultRetentionDays = 7
+
 // Prune deletes query-log rows and rollups past their retention windows.
 // It returns the number of query-log rows removed.
 func (s *Store) Prune(ctx context.Context, retentionDays, rollupDays int) (int64, error) {
 	if retentionDays <= 0 {
-		retentionDays = 7
+		retentionDays = DefaultRetentionDays
 	}
 	if rollupDays <= 0 {
 		rollupDays = 90

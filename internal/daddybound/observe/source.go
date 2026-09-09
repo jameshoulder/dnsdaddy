@@ -222,6 +222,23 @@ func (s *Source) exchange(ctx context.Context, q question) (dnssec.Response, tim
 			lastErr = errors.New("empty response")
 			continue
 		}
+		// Only NOERROR and NXDOMAIN carry DNSSEC evidence. Every other rcode
+		// is the upstream saying it could not answer, and handing one to the
+		// validator turns an operational failure into a security verdict: an
+		// empty SERVFAIL for a zone's DNSKEY is indistinguishable, to the
+		// walk, from a zone that publishes no keys, and it would be reported
+		// as Bogus. An upstream outage or a rate limit would then arrive in
+		// the disagreement table this milestone exists to fill. Try the next
+		// upstream instead; with none left the walk sees a lookup error and
+		// reports Indeterminate, which is what "we could not tell" means.
+		//
+		// SERVFAIL is worth stating separately: these queries set CD, so a
+		// validating upstream must not be failing them on validation grounds.
+		// A SERVFAIL here is a broken or overloaded upstream either way.
+		if resp.Rcode != dns.RcodeSuccess && resp.Rcode != dns.RcodeNameError {
+			lastErr = fmt.Errorf("upstream returned %s", dns.RcodeToString[resp.Rcode])
+			continue
+		}
 		return dnssec.Response{
 				Rcode:     resp.Rcode,
 				Answer:    resp.Answer,
