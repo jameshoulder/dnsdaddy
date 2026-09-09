@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
@@ -616,9 +617,19 @@ func round2(f float64) float64 {
 //
 // Disabled networks do not count: "disabled" that still permits traffic would
 // be a worse lie than no switch at all.
+//
+// Neither does the built-in Default row, whose permission bit means something
+// else entirely — it admits unmatched clients inside the configured pool
+// rather than granting ranges of its own, which it has none of. Counting it
+// would make enabling ad-hoc access look like an operator had permitted a
+// network, and "1 permitted network" naming a row with no CIDRs is exactly the
+// kind of statement this figure exists to stop the dashboard making.
 func permittedNetworks(networks []store.Network) int {
 	n := 0
 	for _, net := range networks {
+		if net.ID == clientacl.DefaultNetworkID {
+			continue
+		}
 		if net.Enabled && net.AllowResolver {
 			n++
 		}

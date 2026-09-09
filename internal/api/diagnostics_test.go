@@ -51,9 +51,31 @@ func TestDiagnosticsRequireAuthentication(t *testing.T) {
 
 // A stock install serves the private ranges, so a network inside them is
 // reachable and the endpoint should say so without inventing a problem.
+// A stock install is a fresh database and the shipped configuration. Nothing
+// about it is a misconfiguration, so nothing in it may be reported as one —
+// the whole point of this check is that the product does not greet a working
+// deployment with a page of warnings.
+//
+// "Stock" no longer includes an unpermitted network. Since the Default row
+// became a real ad-hoc access switch, seeded off, a network nobody permitted
+// genuinely is refused; the case below pins that it is reported, with advice
+// naming both ways out.
 func TestDiagnosticsPassOnAStockInstall(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+
+	got := h.diagnostics(t)
+	if got.Status != diag.StatusPass {
+		t.Fatalf("status = %s, want pass; checks: %+v", got.Status, got.Checks)
+	}
+}
+
+// The same install with ad-hoc access turned on and a network added: still
+// nothing wrong, because the configured pool covers it.
+func TestDiagnosticsPassWithAdHocAccessAndANetwork(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	h.enableAdHocAccess(t)
 
 	if _, err := h.store.CreateNetwork(context.Background(), store.NetworkInput{
 		Name: strPtr("Home"), CIDRs: &[]string{"192.168.1.0/24"},
@@ -65,6 +87,64 @@ func TestDiagnosticsPassOnAStockInstall(t *testing.T) {
 	if got.Status != diag.StatusPass {
 		t.Fatalf("status = %s, want pass; checks: %+v", got.Status, got.Checks)
 	}
+}
+
+// A fresh install refuses unmatched clients, so a network the operator added
+// but never permitted really is being refused. Reporting that, with advice
+// naming both remedies, is the product working — silently refusing the
+// clients and passing the diagnostic would not be.
+func TestDiagnosticsReportAnUnpermittedNetworkWhileAdHocAccessIsOff(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	if _, err := h.store.CreateNetwork(context.Background(), store.NetworkInput{
+		Name: strPtr("Home"), CIDRs: &[]string{"192.168.1.0/24"},
+	}); err != nil {
+		t.Fatalf("CreateNetwork: %v", err)
+	}
+
+	got := h.diagnostics(t)
+	if got.Status != diag.StatusFail {
+		t.Fatalf("status = %s, want fail: this network's clients are REFUSED", got.Status)
+	}
+
+	var found bool
+	for _, c := range got.Checks {
+		if c.Name != `Network "Home" can resolve` {
+			continue
+		}
+		found = true
+		if !strings.Contains(c.Action, "Allow this network to use DNS Daddy") {
+			t.Errorf("the advice does not mention permitting the network: %q", c.Action)
+		}
+		if !strings.Contains(c.Action, "ad-hoc access") {
+			t.Errorf("the advice does not mention ad-hoc access, the other way out: %q", c.Action)
+		}
+	}
+	if !found {
+		t.Fatalf("no reachability check named the refused network; checks: %+v", got.Checks)
+	}
+}
+
+// An operator whose range is listed in dns.allowed_client_cidrs and whose
+// clients are still refused must not be sent to edit that file. The evidence
+// has to distinguish "eligible" from "in force".
+func TestTheACLSummarySaysWhenAdHocAccessIsWithholdingThePool(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	got := h.diagnostics(t)
+	for _, c := range got.Checks {
+		if c.Name != "Client ACL configured" {
+			continue
+		}
+		joined := strings.Join(c.Evidence, " | ")
+		if !strings.Contains(joined, "ad-hoc access is off") {
+			t.Fatalf("the ACL summary does not say the pool is being withheld: %q", joined)
+		}
+		return
+	}
+	t.Fatal("no client ACL summary check was produced")
 }
 
 // The reported failure: a network exists in the dashboard but its addresses

@@ -98,9 +98,19 @@ func TestEmptyBootstrapStaysUnrestricted(t *testing.T) {
 // Existing deployments must keep working exactly as they did. A network that
 // predates the feature has allow_resolver false, and the bootstrap list alone
 // has to keep admitting whoever it admitted before.
+// TestLegacyDeploymentIsUnchanged: upgrading must not change who may resolve.
+//
+// The fixture is the post-migration shape of an old install rather than its
+// raw one. Before the Default row became an ad-hoc access switch its
+// AllowResolver bit granted nothing — it has no ranges — so every such
+// deployment served its whole bootstrap pool with the bit clear. Preserving
+// that is now the migration's job: Store.seed turns the bit on once for any
+// database that already contains networks, and store_test's migration cases
+// prove it. What this test pins is the other half — that with the bit on, the
+// ACL is byte for byte what it always was.
 func TestLegacyDeploymentIsUnchanged(t *testing.T) {
 	bootstrap := []string{"127.0.0.0/8", "10.0.0.0/8", "192.168.0.0/16"}
-	legacy := []Network{unpermitted("n_default", "Default"), unpermitted("n1", "HQ", "10.1.0.0/16")}
+	legacy := []Network{permitted("n_default", "Default"), unpermitted("n1", "HQ", "10.1.0.0/16")}
 
 	s := Compute(bootstrap, false, legacy)
 	want := map[string]bool{"127.0.0.1": true, "10.1.2.3": true, "192.168.4.4": true, "203.0.113.1": false}
@@ -109,8 +119,10 @@ func TestLegacyDeploymentIsUnchanged(t *testing.T) {
 			t.Errorf("Allows(%s) = %v, want %v — an upgrade changed who may resolve", addr, !ok, ok)
 		}
 	}
-	if len(s.Effective()) != len(bootstrap) {
-		t.Errorf("effective ACL = %v, want exactly the configured list", s.Effective())
+	// The configured list plus ::1, which is now always admitted and which this
+	// fixture's IPv4-only pool does not name.
+	if got := s.Effective(); len(got) != len(bootstrap)+1 {
+		t.Errorf("effective ACL = %v, want the configured list plus loopback", got)
 	}
 }
 
@@ -357,8 +369,17 @@ func TestEffectiveDeduplicates(t *testing.T) {
 		permitted("n1", "A", "10.0.0.0/8"),
 		permitted("n2", "B", "10.0.0.0/8"),
 	})
-	if got := s.Effective(); len(got) != 1 {
-		t.Errorf("effective = %v, want one entry after deduplication", got)
+	// Counted rather than measured against the whole list: loopback is always
+	// admitted, so a total length would be pinning that instead of the
+	// deduplication this test is about.
+	n := 0
+	for _, cidr := range s.Effective() {
+		if cidr == "10.0.0.0/8" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("effective = %v, want 10.0.0.0/8 exactly once after deduplication", s.Effective())
 	}
 }
 

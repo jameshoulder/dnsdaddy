@@ -268,6 +268,23 @@ func (h *harness) do(method, path string, body any) (*http.Response, []byte) {
 	return resp, raw
 }
 
+// enableAdHocAccess turns on the Default row's ad-hoc resolver access through
+// the real API, so the ACL reload path runs exactly as it does in production.
+//
+// A fresh database seeds this off: unmatched clients inside
+// dns.allowed_client_cidrs are refused until someone says otherwise. Tests
+// whose subject is coverage, shadowing or the measured access state need the
+// configured pool actually in force, and say so by calling this rather than by
+// quietly depending on a default that no longer holds.
+func (h *harness) enableAdHocAccess(t *testing.T) {
+	t.Helper()
+	resp, raw := h.do("PATCH", "/api/v1/networks/"+clientacl.DefaultNetworkID,
+		map[string]any{"allowResolver": true})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("enabling ad-hoc access: status %d, body %s", resp.StatusCode, raw)
+	}
+}
+
 func (h *harness) login() {
 	h.t.Helper()
 	resp, raw := h.do("POST", "/api/v1/auth/login", map[string]string{"password": testPassword})
