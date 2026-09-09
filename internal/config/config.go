@@ -150,6 +150,15 @@ type DNS struct {
 	// observation is recorded as a timeout — never as a DNSSEC state.
 	LocalDNSSECTimeout Duration `yaml:"local_dnssec_timeout"`
 
+	// LocalDNSSECTrustAnchorFile replaces the compiled-in IANA root anchors.
+	//
+	// Empty is the normal case. The escape hatch exists for a root key
+	// rollover that happens before a release ships, and for a deployment
+	// validating against something other than the public root. The anchors
+	// are never fetched over the network: a validator that asked the network
+	// what to trust would be trusting the thing DNSSEC exists to distrust.
+	LocalDNSSECTrustAnchorFile string `yaml:"local_dnssec_trust_anchor_file"`
+
 	// DNSSECTelemetry sets the AD bit on outgoing queries so a validating
 	// upstream reports whether it authenticated each answer (RFC 6840 §5.7).
 	//

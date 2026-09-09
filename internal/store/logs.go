@@ -32,8 +32,8 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO query_log (ts, client_ip, client_name, network_id, qname, qtype,
 			                       action, reason, category, source, proto, elapsed_ms, cached,
-			                       dnssec)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			                       dnssec, dnssec_obs)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return err
 		}
@@ -42,7 +42,7 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		for _, e := range events {
 			if _, err := stmt.ExecContext(ctx, unixMilli(e.Time), e.ClientIP, e.ClientName, e.NetworkID,
 				e.Domain, e.QType, e.Action, e.Reason, e.Category, e.Source, e.Proto,
-				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC); err != nil {
+				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID); err != nil {
 				return err
 			}
 		}

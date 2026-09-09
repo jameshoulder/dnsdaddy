@@ -12,42 +12,110 @@ import (
 
 const modulePath = "github.com/jameshoulder/dnsdaddy"
 
-// Daddybound must not be able to answer a query. That is a claim about the
-// import graph, so it is checked as one.
+// Daddybound may now be reached from the query path, but only through one
+// door and only as far as two packages. This test is what makes that a
+// property of the build rather than a convention.
 //
-// The engine generates keys, signs zones, and reaches verdicts it is not yet
-// entitled to enforce. Every document in this repository says it enforces
-// nothing; this test is what makes that a property of the build rather than a
-// promise in a README. A stray import from the query path would make it
-// possible to wire Daddybound into a real answer, and the first sign would be
-// a resolver acting on a verdict from an engine explicitly labelled
-// experimental.
-func TestTheQueryPathCannotReachDaddybound(t *testing.T) {
+// Until observe mode, the rule was simply "the query path cannot reach
+// Daddybound", enforced here. That rule has served its purpose and could not
+// survive this milestone: dnsserver has to be able to hand a resolved query to
+// the observer. Deleting the test rather than replacing it would have thrown
+// away the part that still matters, which is *which* packages may be reached
+// and by whom.
+//
+// Three things are asserted, and each would let something specific go wrong if
+// it were dropped.
+//
+// The resolver, the policy engine, the blocklist, the query log and the store
+// still cannot reach Daddybound at all. Those are the packages that decide and
+// deliver an answer, and an import from any of them would be the beginning of
+// a verdict influencing one. Only dnsserver has a door, and it is the one
+// place where the answer is already final.
+//
+// Nothing on the query path may reach the laboratory or the differential
+// harness. Those generate keys, sign zones, and shell out to reference
+// validators; they exist to be adversarial and belong nowhere near a process
+// answering real queries.
+//
+// And the door itself is narrow: dnsserver may reach the observer and the
+// validation engine, and nothing else under internal/daddybound.
+func TestTheQueryPathReachesDaddyboundOnlyThroughTheObserver(t *testing.T) {
 	graph, err := importGraph()
 	if err != nil {
 		t.Fatalf("reading the import graph: %v", err)
 	}
 
-	// The packages that decide or deliver an answer to a client.
-	roots := []string{
+	const (
+		daddybound = modulePath + "/internal/daddybound"
+		observe    = daddybound + "/observe"
+		engine     = daddybound + "/dnssec"
+	)
+
+	// Packages that decide or deliver an answer and must stay entirely clear
+	// of the validator.
+	sealed := []string{
 		modulePath + "/internal/resolver",
-		modulePath + "/internal/dnsserver",
 		modulePath + "/internal/policy",
 		modulePath + "/internal/blocklist",
-		modulePath + "/internal/api",
 		modulePath + "/internal/querylog",
 		modulePath + "/internal/store",
 	}
-
-	for _, root := range roots {
+	for _, root := range sealed {
 		if _, ok := graph[root]; !ok {
-			// A renamed or removed package would otherwise make this test
-			// pass by checking nothing.
 			t.Fatalf("root package %s is not in the graph; update this test", root)
 		}
-		if path := reaches(graph, root, modulePath+"/internal/daddybound"); path != nil {
-			t.Errorf("the query path can reach Daddybound:\n  %s", strings.Join(path, "\n    -> "))
+		for pkg := range graph {
+			if !strings.HasPrefix(pkg, daddybound) {
+				continue
+			}
+			if path := reaches(graph, root, pkg); path != nil {
+				t.Errorf("a package that decides an answer can reach Daddybound:\n  %s",
+					strings.Join(path, "\n    -> "))
+			}
 		}
+	}
+
+	// The parts of Daddybound that must never be near production, from
+	// anywhere on the query path — dnsserver included.
+	adversarial := []string{
+		daddybound + "/lab",
+		daddybound + "/differential",
+		daddybound + "/differential/refdelv",
+		daddybound + "/differential/refunbound",
+		daddybound + "/netsource",
+	}
+	queryPath := append([]string{
+		modulePath + "/internal/dnsserver",
+		modulePath + "/internal/api",
+	}, sealed...)
+	for _, root := range queryPath {
+		for _, bad := range adversarial {
+			if _, ok := graph[bad]; !ok {
+				continue // build-tagged out of this graph; nothing to check
+			}
+			if path := reaches(graph, root, bad); path != nil {
+				t.Errorf("the query path can reach a laboratory package:\n  %s",
+					strings.Join(path, "\n    -> "))
+			}
+		}
+	}
+
+	// The door is exactly two packages wide.
+	allowed := map[string]bool{observe: true, engine: true}
+	for pkg := range graph {
+		if !strings.HasPrefix(pkg, daddybound) || allowed[pkg] {
+			continue
+		}
+		if path := reaches(graph, modulePath+"/internal/dnsserver", pkg); path != nil {
+			t.Errorf("dnsserver reaches a Daddybound package outside the observer seam:\n  %s",
+				strings.Join(path, "\n    -> "))
+		}
+	}
+
+	// And the door exists: a test that passed because nothing imports
+	// anything would be worthless.
+	if path := reaches(graph, modulePath+"/internal/dnsserver", observe); path == nil {
+		t.Fatal("dnsserver does not reach the observer at all; this test is checking nothing")
 	}
 }
 

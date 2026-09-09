@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +129,92 @@ func newHarnessWithQueryLog(t *testing.T, lists map[string]string, queryLogEnabl
 	h := NewHandler(engine, res, holder, qlog, log, ho)
 
 	return &testHarness{handler: h, store: st, engine: engine, qlog: qlog}
+}
+
+// newHarnessAgainstUpstream builds a harness pointed at a specific upstream
+// address, so a test can watch what the resolver actually sends.
+func newHarnessAgainstUpstream(t *testing.T, addr string, opts ...func(*HandlerOptions)) *testHarness {
+	t.Helper()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	holder := blocklist.NewHolder()
+	holder.Store(blocklist.NewBuilder(0).Build())
+	engine := policy.NewEngine(st, holder)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatalf("engine.Reload: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	res, err := resolver.New(config.DNS{
+		Upstreams:    []string{"udp://" + addr},
+		UpstreamMode: "failover",
+		Timeout:      config.Duration(2 * time.Second),
+	}, config.Cache{Enabled: false}, log)
+	if err != nil {
+		t.Fatalf("resolver.New: %v", err)
+	}
+	t.Cleanup(res.Close)
+
+	qlog := querylog.New(st, querylog.Options{BufferSize: 128, FlushIntervalMS: 20}, log)
+	ctx, cancel := context.WithCancel(context.Background())
+	go qlog.Run(ctx)
+	t.Cleanup(func() { cancel(); qlog.Wait() })
+
+	ho := HandlerOptions{QueryLogEnabled: true, Timeout: 3 * time.Second}
+	for _, o := range opts {
+		o(&ho)
+	}
+	return &testHarness{
+		handler: NewHandler(engine, res, holder, qlog, log, ho),
+		store:   st, engine: engine, qlog: qlog,
+	}
+}
+
+// recordingUpstream is testUpstream that also keeps every question it was
+// asked, so a test can assert on what left the process.
+func recordingUpstream(t *testing.T, mu *sync.Mutex, seen *[]*dns.Msg) string {
+	t.Helper()
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{
+		PacketConn: pc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+			mu.Lock()
+			*seen = append(*seen, req.Copy())
+			mu.Unlock()
+
+			m := new(dns.Msg)
+			m.SetReply(req)
+			if len(req.Question) > 0 && req.Question[0].Qtype == dns.TypeA {
+				m.Answer = []dns.RR{&dns.A{
+					Hdr: dns.RR_Header{
+						Name: req.Question[0].Name, Rrtype: dns.TypeA,
+						Class: dns.ClassINET, Ttl: 60,
+					},
+					A: net.IPv4(203, 0, 113, 10),
+				}}
+			}
+			_ = w.WriteMsg(m)
+		}),
+	}
+	started := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(started) }
+	go srv.ActivateAndServe()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recording upstream did not start")
+	}
+	t.Cleanup(func() { srv.Shutdown() })
+	return pc.LocalAddr().String()
 }
 
 // newHarnessWithOptions is newHarness with the security-relevant handler

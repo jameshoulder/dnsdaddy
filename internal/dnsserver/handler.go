@@ -14,6 +14,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/decisions"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
@@ -58,9 +59,25 @@ type Handler struct {
 	blocked atomic.Uint64
 	errors  atomic.Uint64
 	refused atomic.Uint64
+	// dnssecPanics counts panics contained at the observer seam. Should be
+	// zero; a non-zero value is a bug report rather than an operational
+	// statistic, which is why it is exposed rather than only logged.
+	dnssecPanics atomic.Uint64
 	// decisions records why, off the resolution path. Nil is the default and
 	// costs one nil comparison per blocked query.
 	decisions DecisionRecorder
+
+	// dnssec observes what Daddybound concludes about answers this resolver
+	// has already produced. Nil unless local validation is set to observe,
+	// which is not the default.
+	//
+	// Deliberately typed as an interface with one method that returns a bool
+	// and cannot fail. There is no error path back into resolution because
+	// there is nothing resolution could do with one: the answer has been
+	// decided by the time this is called, and a validator's opinion of it is
+	// not permitted to matter. See
+	// docs/decisions/0002-daddybound-observe-mode.md.
+	dnssec DNSSECObserver
 }
 
 // DecisionRecorder receives what was decided, so it can be explained later.
@@ -70,6 +87,17 @@ type Handler struct {
 // on. Record must never block: see decisions.Recorder.Record.
 type DecisionRecorder interface {
 	Record(decisions.Event)
+}
+
+// DNSSECObserver receives queries whose answers are already decided.
+//
+// Observe must not block and must not be able to influence anything: it
+// returns only whether the query was accepted for observation, which the
+// handler uses to decide whether to record a correlation id. A false is not an
+// error and needs no handling — it means the observation queue was full and
+// this query will simply not be observed.
+type DNSSECObserver interface {
+	Observe(observe.Request) bool
 }
 
 // HandlerOptions configures a Handler.
@@ -94,6 +122,9 @@ type HandlerOptions struct {
 	// Decisions, when set, receives every enforced or alerted decision so it
 	// can be explained later. Nil unless the operator switched it on.
 	Decisions DecisionRecorder
+	// DNSSEC, when set, observes answers with Daddybound. Nil unless
+	// dns.local_dnssec_validation is "observe".
+	DNSSEC DNSSECObserver
 }
 
 // NewHandler wires the resolution path together.
@@ -121,6 +152,7 @@ func NewHandler(
 		acl:             o.ClientACL,
 		detector:        o.Detector,
 		decisions:       o.Decisions,
+		dnssec:          o.DNSSEC,
 		timeout:         timeout,
 	}
 }
@@ -337,9 +369,79 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	if event.Reason == "" {
 		event.Reason = "Resolved"
 	}
+	// Enqueued before the query log so the row can carry the correlation id,
+	// and after the response is fully decided so it cannot participate in
+	// deciding it. The call is a non-blocking channel send; res.Msg is already
+	// what this function will return, whatever any of this concludes.
+	event.DNSSECObservationID = h.observeDNSSEC(event, q)
 	h.qlog.Record(event, persist)
 	h.observe(event, meta, res.Rcode, res.MinTTL, res.Validated, false)
 	return res.Msg
+}
+
+// observeDNSSEC hands a resolved query to Daddybound and returns the
+// correlation id, or "" when nothing was enqueued.
+//
+// The invariant this function exists to keep is that its return value is used
+// for exactly one thing — labelling a log row — and never for anything that
+// reaches a client. It is called after the response is decided, it cannot
+// block, and it has no way to report a failure that resolution could act on.
+//
+// Only resolved queries are observed. A blocked name has no upstream answer to
+// reason about, and validating it would send queries upstream for a name the
+// operator chose to block; a failed resolution has no answer at all. Both
+// record nothing rather than a status meaning "we tried and could not", since
+// conflating "not attempted" with "attempted and inconclusive" is the
+// confusion the status taxonomy exists to prevent.
+func (h *Handler) observeDNSSEC(event store.QueryEvent, q dns.Question) (id string) {
+	if h.dnssec == nil {
+		return ""
+	}
+
+	// Containment at the integration boundary, and only here.
+	//
+	// The observer already contains panics from the validator, which is where
+	// one could plausibly originate, and a test in that package proves it.
+	// This covers the remaining metre: Observe itself. In the shipped
+	// implementation that is a non-blocking channel send and cannot panic —
+	// but this call runs on the goroutine serving a client's query, and
+	// miekg/dns does not recover per request, so anything that did panic here
+	// would take down every client's DNS rather than one observation. One
+	// deferred function on a path that only exists when the operator switched
+	// observation on is a cheap bound on a very large blast radius.
+	//
+	// It is not licence for a panic to be acceptable. The counter is exposed
+	// so one shows up as a defect rather than being absorbed.
+	defer func() {
+		if r := recover(); r != nil {
+			h.dnssecPanics.Add(1)
+			h.log.Error("the DNSSEC observer panicked at the query-path seam",
+				"domain", event.Domain, "panic", r)
+			id = ""
+		}
+	}()
+
+	id = observe.NewID()
+	if id == "" {
+		// The system random source failed. Observe anyway — the verdict is
+		// still worth counting — but without a correlation id, because a
+		// shared placeholder would collide across queries and attach one
+		// query's verdict to another's log row.
+		h.dnssec.Observe(observe.Request{
+			Domain: event.Domain, QName: q.Name, QType: q.Qtype,
+			Cached: event.Cached, UpstreamStatus: event.DNSSEC,
+		})
+		return ""
+	}
+	if !h.dnssec.Observe(observe.Request{
+		ID: id, Domain: event.Domain, QName: q.Name, QType: q.Qtype,
+		Cached: event.Cached, UpstreamStatus: event.DNSSEC,
+	}) {
+		// Dropped because the queue was full. No observation will exist, so
+		// the log row must not claim one.
+		return ""
+	}
+	return id
 }
 
 // dnssecStatus maps an upstream outcome onto the recorded DNSSEC status.
@@ -393,6 +495,11 @@ func (h *Handler) observe(e store.QueryEvent, meta requestMeta, rcode int, minTT
 func (h *Handler) Stats() (queries, blocked, errs uint64) {
 	return h.queries.Load(), h.blocked.Load(), h.errors.Load()
 }
+
+// DNSSECObserverPanics reports how many panics were contained at the observer
+// seam. Any value above zero is a defect in the observer, not a property of
+// the traffic.
+func (h *Handler) DNSSECObserverPanics() uint64 { return h.dnssecPanics.Load() }
 
 // blockResponse synthesises the answer for a blocked name.
 func blockResponse(req *dns.Msg, mode store.BlockMode) *dns.Msg {

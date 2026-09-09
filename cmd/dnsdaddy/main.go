@@ -270,6 +270,16 @@ func run() error {
 			"retention_days", cfg.Log.DecisionRetentionDays)
 	}
 
+	// Local DNSSEC observation. Off unless the operator asked for it, and
+	// when on it observes without deciding anything: the answer a client
+	// receives is produced entirely by the code above and is not shown to
+	// Daddybound before it is sent. See
+	// docs/decisions/0002-daddybound-observe-mode.md.
+	dnssecObserver, err := startDNSSECObserver(ctx, cfg, res, st, log)
+	if err != nil {
+		return err
+	}
+
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
@@ -278,7 +288,10 @@ func run() error {
 		RefuseANY:       cfg.DNS.RefuseANY,
 		Detector:        detector,
 		Decisions:       recorderOrNil(decisionRecorder),
+		DNSSEC:          observerOrNil(dnssecObserver),
 	})
+
+	defer dnssecObserver.Wait()
 
 	dnsSrv, err := dnsserver.NewServer(cfg.DNS, handler, log)
 	if err != nil {

@@ -130,6 +130,17 @@ type QueryEvent struct {
 	// forwards rather than validating locally, so this is the upstream's
 	// conclusion, not ours. See the DNSSEC* constants.
 	DNSSEC string `json:"dnssec,omitempty"`
+
+	// DNSSECObservationID correlates this query with the local Daddybound
+	// observation of it, or is empty when local validation was off, not
+	// attempted, or dropped because the observation queue was full.
+	//
+	// The correlation exists because the two rows are written by different
+	// writers at different times: the answer is already on its way to the
+	// client before validation starts. Matching them on name and time instead
+	// would silently mis-attribute a verdict whenever the same name was asked
+	// twice in the same instant, which is exactly what a busy resolver does.
+	DNSSECObservationID string `json:"-"`
 }
 
 // DNSSEC validation statuses recorded against a query.
