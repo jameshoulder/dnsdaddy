@@ -2,14 +2,21 @@ package dnsserver
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 
+	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/dnssec"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
+	"github.com/jameshoulder/dnsdaddy/internal/policy"
+	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -531,5 +538,136 @@ func TestQueryLoggingOffWithholdsTheObservationRow(t *testing.T) {
 	}
 	if !seen[1].Store {
 		t.Fatal("query logging is on and the observation row is still withheld")
+	}
+}
+
+// cachingHarnessAgainstUpstream is newHarnessWithQueryLog with the resolver
+// cache on and pointed at an upstream the test can watch, which is the
+// combination the cache properties below need: without the counter there is no
+// way to tell a served cache entry from a silently repeated upstream query.
+func cachingHarnessAgainstUpstream(t *testing.T, addr string, opts ...func(*HandlerOptions)) *testHarness {
+	t.Helper()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	holder := blocklist.NewHolder()
+	holder.Store(blocklist.NewBuilder(0).Build())
+	engine := policy.NewEngine(st, holder)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatalf("engine.Reload: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	res, err := resolver.New(config.DNS{
+		Upstreams:    []string{"udp://" + addr},
+		UpstreamMode: "failover",
+		Timeout:      config.Duration(2 * time.Second),
+	}, config.Cache{Enabled: true, MaxEntries: 100, MinTTL: 1, MaxTTL: 60, NegativeTTL: 10}, log)
+	if err != nil {
+		t.Fatalf("resolver.New: %v", err)
+	}
+	t.Cleanup(res.Close)
+
+	qlog := querylog.New(st, querylog.Options{BufferSize: 128, FlushIntervalMS: 20}, log)
+	ctx, cancel := context.WithCancel(context.Background())
+	go qlog.Run(ctx)
+	t.Cleanup(func() { cancel(); qlog.Wait() })
+
+	ho := HandlerOptions{QueryLogEnabled: true, Timeout: 3 * time.Second}
+	for _, o := range opts {
+		o(&ho)
+	}
+	return &testHarness{
+		handler: NewHandler(engine, res, holder, qlog, log, ho),
+		store:   st, engine: engine, qlog: qlog,
+	}
+}
+
+// TestAVerdictCannotPoisonOrEvictTheResolverCache.
+//
+// Observe mode's whole safety argument is that a verdict is a row in a table.
+// The cache is where that argument is easiest to break by accident, and in the
+// most damaging direction: an implementation that "helpfully" dropped a cache
+// entry on Bogus would hand any attacker who can make validation fail — a
+// truncated response, a slow signer, a zone mid-rollover — a way to force
+// every subsequent query for that name back to the upstream. That is a
+// behaviour change caused by a verdict, which is the one thing this milestone
+// forbids, and it is also a request amplifier.
+//
+// So: ask twice, with each verdict in turn, and require both the cached answer
+// and the number of questions that left the process to match a run with no
+// observer attached at all.
+func TestAVerdictCannotPoisonOrEvictTheResolverCache(t *testing.T) {
+	// One request, copied: two separately built queries differ in their random
+	// message id, and the response echoes it.
+	req := query("example.com.", dns.TypeA)
+
+	ask := func(t *testing.T, verdict string) (second []byte, ttl uint32, upstreamQuestions int) {
+		t.Helper()
+
+		var (
+			mu   sync.Mutex
+			seen []*dns.Msg
+		)
+		addr := recordingUpstream(t, &mu, &seen)
+
+		opts := []func(*HandlerOptions){}
+		if verdict != "" {
+			o := observe.New(verdictValidator(verdict), nil,
+				observe.Options{Workers: 1, Timeout: 50 * time.Millisecond})
+			ctx, cancel := context.WithCancel(context.Background())
+			go o.Run(ctx)
+			t.Cleanup(func() { cancel(); o.Wait() })
+			opts = append(opts, withObserver(o))
+		}
+
+		h := cachingHarnessAgainstUpstream(t, addr, opts...)
+
+		h.handler.Handle(context.Background(), req.Copy(), requestMeta{proto: "udp"})
+		resp := h.handler.Handle(context.Background(), req.Copy(), requestMeta{proto: "udp"})
+		if resp == nil || len(resp.Answer) == 0 {
+			t.Fatal("the second query produced no answer record")
+		}
+
+		// The remaining TTL of a cached entry counts down in real time, so it
+		// is checked as a number below rather than compared as bytes — which
+		// would fail whenever a run straddled a second boundary and would say
+		// nothing about verdicts. Everything else, flags included, is compared
+		// exactly.
+		got := resp.Copy()
+		ttl = got.Answer[0].Header().Ttl
+		for _, rr := range append(append([]dns.RR{}, got.Answer...), got.Ns...) {
+			rr.Header().Ttl = 0
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		return answerBytes(t, got), ttl, len(seen)
+	}
+
+	wantBytes, wantTTL, wantQuestions := ask(t, "")
+	if wantQuestions != 1 {
+		t.Fatalf("the baseline sent %d questions upstream for two identical queries; "+
+			"without a cache hit here this test proves nothing", wantQuestions)
+	}
+
+	for _, verdict := range []string{"secure", "insecure", "bogus", "indeterminate", "timeout", "panic"} {
+		t.Run(verdict, func(t *testing.T) {
+			got, ttl, questions := ask(t, verdict)
+			if questions != wantQuestions {
+				t.Errorf("a %s verdict sent %d questions upstream, want %d: the cache entry did not survive it",
+					verdict, questions, wantQuestions)
+			}
+			if string(got) != string(wantBytes) {
+				t.Errorf("a %s verdict changed the answer served from cache", verdict)
+			}
+			if ttl+1 < wantTTL || ttl > wantTTL+1 {
+				t.Errorf("a %s verdict changed the cached TTL: %d, want about %d", verdict, ttl, wantTTL)
+			}
+		})
 	}
 }
