@@ -100,6 +100,31 @@ dns:
   # you, and why "unvalidated" is not the same as "insecure".
   dnssec_telemetry: true
 
+  # Local DNSSEC validation with DNS Daddy's own engine, Daddybound.
+  #
+  #   off      the default. Nothing is constructed and no extra query is sent.
+  #   observe  validate alongside resolution and record what it concludes.
+  #
+  # Observe mode does NOT change any answer. A bogus verdict is recorded and
+  # reported; the client still receives the response the resolver produced.
+  # There is no enforcement, and "enforce" is refused at startup rather than
+  # quietly treated as "observe".
+  #
+  # It is not free. Each observed query causes its own DNSSEC lookups upstream
+  # and a chain walk on a background worker, which on a single-vCPU box
+  # competes with resolution for CPU. Nothing on the answer path waits for it.
+  # See docs/dns-security/dnssec.md.
+  local_dnssec_validation: off
+
+  # Only read in observe mode.
+  local_dnssec_workers: 2      # concurrent validations
+  local_dnssec_queue: 256      # queries waiting to be observed; drops when full
+  local_dnssec_timeout: 2s     # per observation, including its lookups
+
+  # Replaces the compiled-in IANA root anchors. Normally empty. Anchors are
+  # never fetched over the network.
+  # local_dnssec_trust_anchor_file: /etc/dnsdaddy/root.key
+
 http:
   # Dashboard and management API.
   #

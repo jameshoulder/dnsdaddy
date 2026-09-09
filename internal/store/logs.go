@@ -32,8 +32,8 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO query_log (ts, client_ip, client_name, network_id, qname, qtype,
 			                       action, reason, category, source, proto, elapsed_ms, cached,
-			                       dnssec)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			                       dnssec, dnssec_obs)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return err
 		}
@@ -42,7 +42,7 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		for _, e := range events {
 			if _, err := stmt.ExecContext(ctx, unixMilli(e.Time), e.ClientIP, e.ClientName, e.NetworkID,
 				e.Domain, e.QType, e.Action, e.Reason, e.Category, e.Source, e.Proto,
-				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC); err != nil {
+				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID); err != nil {
 				return err
 			}
 		}
@@ -196,7 +196,7 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 	// ("network_id = ?"); every filter value is bound as a parameter in args.
 	// Never append a fragment built from input here.
 	q := `SELECT id, ts, client_ip, client_name, network_id, qname, qtype, action,
-	             reason, category, source, proto, elapsed_ms, cached, dnssec
+	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs
 	      FROM query_log WHERE ` + strings.Join(where, " AND ") + `
 	      ORDER BY id DESC LIMIT ?`
 
@@ -215,7 +215,7 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 		)
 		if err := rows.Scan(&e.ID, &ts, &e.ClientIP, &e.ClientName, &e.NetworkID, &e.Domain,
 			&e.QType, &e.Action, &e.Reason, &e.Category, &e.Source, &e.Proto, &e.ElapsedMS,
-			&cached, &e.DNSSEC); err != nil {
+			&cached, &e.DNSSEC, &e.DNSSECObservationID); err != nil {
 			return nil, 0, err
 		}
 		e.Time = fromUnixMilli(ts)
@@ -453,11 +453,18 @@ func (s *Store) NetworkActivitySince(ctx context.Context, t time.Time) (map[stri
 	return out, rows.Err()
 }
 
+// DefaultRetentionDays is the query-log window used when the operator has not
+// configured one. Named rather than repeated because anything kept alongside a
+// query-log row has to expire with it: an observation that outlives the query
+// it explains is a dangling reference, and one that outlives the operator's
+// retention setting is a promise broken by a diagnostic feature.
+const DefaultRetentionDays = 7
+
 // Prune deletes query-log rows and rollups past their retention windows.
 // It returns the number of query-log rows removed.
 func (s *Store) Prune(ctx context.Context, retentionDays, rollupDays int) (int64, error) {
 	if retentionDays <= 0 {
-		retentionDays = 7
+		retentionDays = DefaultRetentionDays
 	}
 	if rollupDays <= 0 {
 		rollupDays = 90

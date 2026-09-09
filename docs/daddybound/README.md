@@ -7,9 +7,13 @@ or an authenticated redirection — and is honest about every case where it
 cannot.
 
 **Daddybound is not a production DNSSEC validator and must not be relied upon
-as one.** It answers no queries. It enforces no policy. The DNS Daddy resolver
-does not import it, and a test asserts that the query path cannot reach it —
-see [security-model.md](security-model.md).
+as one.** It enforces no policy. Since v0.4 it can observe real DNS Daddy
+traffic (`dns.local_dnssec_validation: observe`, off by default) and record
+what it concludes, but no verdict it reaches can change, delay or fail the
+answer a client receives — asserted by a test that forces each verdict in turn
+and requires the client's bytes to be identical every time. See
+[security-model.md](security-model.md) and
+[ADR 0002](../decisions/0002-daddybound-observe-mode.md).
 
 ## What "first principles" means here
 

@@ -382,9 +382,58 @@ func (a *API) handleQueryLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"queries":    events,
+		"queries":    a.withDNSSECObservations(r.Context(), events),
 		"nextCursor": next,
 	})
+}
+
+// queryRow is a query-log row plus the local DNSSEC observation of it.
+//
+// The event is embedded, so every field an existing /api/v1/queries consumer
+// reads keeps its name and position and one optional object is added beside
+// them. A nested rename would have been tidier and would have broken every
+// client.
+type queryRow struct {
+	store.QueryEvent
+	// DNSSECValidation is what Daddybound concluded locally, or absent.
+	//
+	// Absent is the normal case: local validation is off by default, is not
+	// attempted for blocked or failed queries, and is skipped when the
+	// observation queue is full. A consumer must treat its absence as "not
+	// observed" rather than as any kind of verdict.
+	DNSSECValidation *store.DNSSECObservation `json:"dnssecValidation,omitempty"`
+}
+
+// withDNSSECObservations attaches local verdicts to a page of query rows.
+//
+// One extra query for the whole page rather than one per row, and a failure
+// returns the rows without verdicts rather than failing the request: the query
+// log is the primary thing here and an experimental annotation must not be
+// able to take it down.
+func (a *API) withDNSSECObservations(ctx context.Context, events []store.QueryEvent) []queryRow {
+	rows := make([]queryRow, len(events))
+	ids := make([]string, 0, len(events))
+	for i, e := range events {
+		rows[i] = queryRow{QueryEvent: e}
+		if e.DNSSECObservationID != "" {
+			ids = append(ids, e.DNSSECObservationID)
+		}
+	}
+	if len(ids) == 0 {
+		return rows
+	}
+	found, err := a.Store.DNSSECObservationsByID(ctx, ids)
+	if err != nil {
+		a.Log.Warn("reading DNSSEC observations for the query log failed", "error", err)
+		return rows
+	}
+	for i := range rows {
+		if o, ok := found[rows[i].DNSSECObservationID]; ok {
+			obs := o
+			rows[i].DNSSECValidation = &obs
+		}
+	}
+	return rows
 }
 
 func (a *API) handleCategories(w http.ResponseWriter, r *http.Request) {

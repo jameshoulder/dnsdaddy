@@ -52,6 +52,15 @@ type Deps struct {
 	Providers *apiprovider.Engine
 	Intel     *intel.Source
 
+	// DNSSEC reports what local validation has observed, or nil when local
+	// validation is off — which is the default. Read-only: the API reports
+	// observations, it never makes or acts on one.
+	DNSSEC DNSSECObserverStats
+
+	// DNSSECWriter reports what became of completed observations. Nil
+	// whenever local validation is off.
+	DNSSECWriter DNSSECWriterStats
+
 	// Decisions is the decision recorder, or nil when decision records are
 	// switched off. Read-only here: the API never records a decision, it only
 	// reports what the resolver already decided.
@@ -150,6 +159,7 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/findings/export", a.handleExportFindings)
 	api.HandleFunc("GET /api/v1/findings/{id}", a.handleGetFinding)
 	api.HandleFunc("GET /api/v1/detectors", a.handleDetectors)
+	api.HandleFunc("GET /api/v1/dnssec/observations", a.handleDNSSECObservations)
 
 	api.HandleFunc("GET /api/v1/networks", a.handleListNetworks)
 	api.HandleFunc("POST /api/v1/networks", a.handleCreateNetwork)

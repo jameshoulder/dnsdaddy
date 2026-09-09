@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
+	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
 
@@ -105,6 +106,15 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("dnsdaddy_querylog_rollup_only_total %d", rollups))
 	metric(&b, "dnsdaddy_querylog_dropped_total", "Events dropped because the buffer was full", "counter",
 		fmt.Sprintf("dnsdaddy_querylog_dropped_total %d", dropped))
+
+	// Local DNSSEC observation. Every series here has a closed label set:
+	// the statuses and disagreement classes are constants in
+	// internal/daddybound/observe, never anything read off a query. A metric
+	// labelled with a domain name or a reason string would grow one series
+	// per name an attacker chose to ask about.
+	for _, line := range a.dnssecMetricLines() {
+		b.WriteString(line)
+	}
 
 	// Detection engine. dnsdaddy_detection_dropped_total is the one to alert
 	// on: it counts observations the engine never saw because its queue was
@@ -291,4 +301,72 @@ func escapeLabel(v string) string {
 	}
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 	return r.Replace(v)
+}
+
+// dnssecMetricLines renders the local DNSSEC observation metrics.
+//
+// Emitted only when observation is switched on. A counter that is always zero
+// invites an operator to build an alert on a feature nobody enabled, and the
+// absence of the series is a clearer statement than a zero.
+func (a *API) dnssecMetricLines() []string {
+	if a.DNSSEC == nil {
+		return nil
+	}
+	st := a.DNSSEC.Stats()
+
+	var b strings.Builder
+
+	// Every status appears, including at zero, so a dashboard has a stable
+	// set of series from the first scrape rather than growing one the first
+	// time something goes wrong.
+	status := make([]string, 0, len(observe.Statuses()))
+	for _, s := range observe.Statuses() {
+		status = append(status, fmt.Sprintf("dnsdaddy_dnssec_local_validation_total{status=%q} %d",
+			string(s), st.ByStatus[s]))
+	}
+	metric(&b, "dnsdaddy_dnssec_local_validation_total",
+		"Local DNSSEC observations completed, by outcome. Observational only: these verdicts do not affect DNS answers",
+		"counter", status...)
+
+	disagree := make([]string, 0, len(observe.DisagreementClasses()))
+	for _, c := range observe.DisagreementClasses() {
+		disagree = append(disagree, fmt.Sprintf("dnsdaddy_dnssec_local_disagreement_total{class=%q} %d",
+			c, st.Disagreements[c]))
+	}
+	metric(&b, "dnsdaddy_dnssec_local_disagreement_total",
+		"Observations where the local verdict and the upstream's assertion differ",
+		"counter", disagree...)
+
+	// The one to alert on. Dropped observations are a gap in the sample, not
+	// a gap in DNS service — and reading the counts above without this one
+	// invites a conclusion the sample cannot support.
+	metric(&b, "dnsdaddy_dnssec_local_dropped_total",
+		"Queries not observed because the observation queue was full",
+		"counter", fmt.Sprintf("dnsdaddy_dnssec_local_dropped_total %d", st.Dropped))
+
+	// Should be zero. Anything else is a defect in the validator rather than
+	// a property of the traffic, which is why it is a metric and not a log
+	// line nobody reads.
+	metric(&b, "dnsdaddy_dnssec_local_panics_total",
+		"Validator panics contained by the observer. Any value above zero is a defect",
+		"counter", fmt.Sprintf("dnsdaddy_dnssec_local_panics_total %d", st.Panics))
+
+	// The second way evidence goes missing, and the one that is invisible
+	// without a counter: a validation that completed and then failed to reach
+	// the database because the write queue was full behind the query log.
+	// dropped_total says "we did not look"; this says "we looked and lost it".
+	if a.DNSSECWriter != nil {
+		w := a.DNSSECWriter.Stats()
+		metric(&b, "dnsdaddy_dnssec_local_stored_total",
+			"Observations written to the database", "counter",
+			fmt.Sprintf("dnsdaddy_dnssec_local_stored_total %d", w.Written))
+		metric(&b, "dnsdaddy_dnssec_local_unrecorded_total",
+			"Completed observations discarded before storage because the write queue was full",
+			"counter", fmt.Sprintf("dnsdaddy_dnssec_local_unrecorded_total %d", w.Dropped))
+		metric(&b, "dnsdaddy_dnssec_local_write_errors_total",
+			"Batches of observations that failed to write", "counter",
+			fmt.Sprintf("dnsdaddy_dnssec_local_write_errors_total %d", w.Errors))
+	}
+
+	return []string{b.String()}
 }

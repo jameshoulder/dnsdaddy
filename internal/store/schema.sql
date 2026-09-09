@@ -127,13 +127,64 @@ CREATE TABLE IF NOT EXISTS query_log (
     -- 'validated', 'unvalidated', 'servfail', or '' where no upstream was
     -- consulted. DNS Daddy forwards rather than validating locally, so this
     -- records what the upstream concluded. See docs/dnssec.md.
-    dnssec      TEXT    NOT NULL DEFAULT ''
+    dnssec      TEXT    NOT NULL DEFAULT '',
+    -- Correlation id for the local Daddybound observation of this query, or
+    -- '' when local validation was off, not attempted, or dropped because the
+    -- observation queue was full. Deliberately not a foreign key: the two rows
+    -- are written independently and asynchronously, and neither may wait for
+    -- the other. A dangling id means "no observation", not an error.
+    dnssec_obs  TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS query_log_ts_idx        ON query_log (ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_action_ts_idx ON query_log (action, ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_network_idx   ON query_log (network_id, ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_qname_idx     ON query_log (qname);
+
+-- Local DNSSEC validation observations, one row per query Daddybound looked
+-- at. Separate from query_log because the two are written independently: the
+-- answer is already on its way to the client before validation starts, and
+-- neither write may wait for the other.
+--
+-- Deliberately self-contained. Every field needed to interpret a row is in the
+-- row, including what the upstream asserted at the same moment, so the
+-- disagreement matrix is a query over one table rather than a join whose
+-- correctness depends on two asynchronous writers agreeing about time.
+--
+-- Nothing here affects a DNS answer. Observe mode records what Daddybound
+-- concluded; it does not act on it. See
+-- docs/decisions/0002-daddybound-observe-mode.md.
+CREATE TABLE IF NOT EXISTS dnssec_observations (
+    id          TEXT    PRIMARY KEY,
+    ts          INTEGER NOT NULL,
+    qname       TEXT    NOT NULL,
+    qtype       TEXT    NOT NULL,
+    -- The client's answer came from DNS Daddy's cache, so it may be older than
+    -- this observation. Observe mode validates the name rather than the exact
+    -- response bytes, and this is what keeps the two populations separable.
+    cached      INTEGER NOT NULL DEFAULT 0,
+    -- What the upstream asserted: 'validated', 'unvalidated', 'servfail', ''.
+    -- Never overwritten by the local verdict, and never consulted in reaching
+    -- it.
+    upstream    TEXT    NOT NULL DEFAULT '',
+    -- The local verdict, or an operational outcome. 'secure', 'insecure',
+    -- 'bogus' and 'indeterminate' are RFC 4033 states; 'timeout',
+    -- 'resource_limit', 'unsupported' and 'internal_error' say the validator
+    -- could not reach one, which is a different kind of statement.
+    status      TEXT    NOT NULL,
+    reason_code TEXT    NOT NULL DEFAULT '',
+    reason      TEXT    NOT NULL DEFAULT '',
+    duration_ms REAL    NOT NULL DEFAULT 0,
+    -- The disagreement class, or '' when the local and upstream views are
+    -- consistent or not comparable. Stored rather than recomputed so a report
+    -- cannot drift from the metric.
+    disagreement TEXT   NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS dnssec_obs_ts_idx     ON dnssec_observations (ts DESC);
+CREATE INDEX IF NOT EXISTS dnssec_obs_status_idx ON dnssec_observations (status, ts DESC);
+CREATE INDEX IF NOT EXISTS dnssec_obs_disagree_idx
+    ON dnssec_observations (disagreement, ts DESC) WHERE disagreement <> '';
 
 -- Hourly rollups survive query-log pruning, so charts keep their history
 -- even with a short log retention window.

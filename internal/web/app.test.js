@@ -52,6 +52,8 @@ const {
   availableAdaptersCard,
   REPUTATION_MODES,
   decisionRow,
+  localDnssecBadge,
+  localDnssecCard,
   decisionsCard,
   decisionEvidenceRow,
 } = require('./static/app.js');
@@ -2329,4 +2331,124 @@ test('the card lists decisions when there are some', () => {
   const out = decisionsCard({ recording: true, decisions: [decision(), decision({ id: 'dec_2' })] });
   assert.ok(out.includes('data-decision="dec_1"'), out);
   assert.ok(out.includes('data-decision="dec_2"'), out);
+});
+
+// --- local DNSSEC observation --------------------------------------------
+
+test('a bogus local verdict says nothing was blocked', () => {
+  const out = localDnssecBadge({ status: 'bogus' });
+  assert.match(out, /bogus/);
+  // The load-bearing fact. A reader who sees "bogus" and does not also see
+  // that nothing was blocked has been misled by the interface.
+  assert.match(out, /nothing blocked/i);
+});
+
+test('local and upstream DNSSEC are labelled as different measurements', () => {
+  const row = queryRow({
+    action: 'allowed',
+    domain: 'example.com',
+    qtype: 'A',
+    dnssec: 'validated',
+    dnssecValidation: { status: 'bogus', disagreement: 'local_bogus_upstream_validated' },
+  });
+  assert.match(row, /DNSSEC \(upstream\)/);
+  assert.match(row, /DNSSEC \(local\)/);
+  // And the disagreement is visible rather than something the reader has to
+  // spot by comparing two badges.
+  assert.match(row, /differs from upstream/);
+});
+
+test('a query with no local observation shows no local row at all', () => {
+  const row = queryRow({ action: 'allowed', domain: 'example.com', qtype: 'A', dnssec: 'validated' });
+  assert.match(row, /DNSSEC \(upstream\)/);
+  assert.doesNotMatch(row, /DNSSEC \(local\)/);
+});
+
+test('an operational outcome is not presented as a DNSSEC state', () => {
+  for (const status of ['timeout', 'resource_limit', 'unsupported']) {
+    const out = localDnssecBadge({ status });
+    assert.doesNotMatch(out, /\binsecure\b/, `${status} was rendered as insecure`);
+    assert.doesNotMatch(out, /\bsecure\b/, `${status} was rendered as secure`);
+  }
+});
+
+test('the assurance card explains the feature even when it is off', () => {
+  const card = localDnssecCard(null);
+  assert.match(card, /Local DNSSEC validation/);
+  assert.match(card, /off/);
+  assert.match(card, /local_dnssec_validation/);
+  // Off must not render counts that would read as "zero problems found".
+  assert.doesNotMatch(card, /Observed/);
+});
+
+test('the assurance card leads with the fact that nothing is blocked', () => {
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: {
+      total: 100,
+      byStatus: { secure: 60, insecure: 30, bogus: 8, indeterminate: 2 },
+      disagreements: { local_bogus_upstream_validated: 3 },
+      avgDurationMs: 1.25,
+      p95DurationMs: 4.5,
+    },
+    runtime: { dropped: 12, panics: 0 },
+  });
+  assert.match(card, /Nothing here blocks anything/i);
+  assert.match(card, /recorded, not blocked/i);
+  assert.match(card, /8/);
+  // The dropped count must be visible next to the totals, or the numbers
+  // invite a conclusion the sample cannot support.
+  assert.match(card, /12/);
+  assert.match(card, /sample is smaller than your traffic/i);
+});
+
+test('contained validator panics are surfaced as a defect', () => {
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: { total: 1, byStatus: {}, disagreements: {} },
+    runtime: { dropped: 0, panics: 4 },
+  });
+  assert.match(card, /4/);
+  assert.match(card, /defect in the validator/i);
+});
+
+test('stored rows and reached verdicts are different facts', () => {
+  // The card used to label the stored-row total "Observed". With query
+  // logging off, observation is counted but no row is written — so the card
+  // reported that no validation had happened, with every status at zero and
+  // no stated reason, to exactly the operator most likely to be checking.
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: { total: 0, byStatus: {}, disagreements: {} },
+    runtime: { observed: 4211, dropped: 0, panics: 0 },
+  });
+  assert.match(card, /4211/);
+  assert.match(card, /query logging is off/i);
+  assert.match(card, /names the domain/i);
+});
+
+test('a normal run does not claim rows are being withheld', () => {
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: { total: 900, byStatus: { secure: 900 }, disagreements: {} },
+    runtime: { observed: 950, dropped: 0, panics: 0 },
+  });
+  assert.match(card, /950/);
+  assert.match(card, /900/);
+  assert.doesNotMatch(card, /query logging is off/i);
+});
+
+test('observations lost before storage are shown, not only those never taken', () => {
+  const card = localDnssecCard({
+    mode: 'observe',
+    summary: { total: 1088, byStatus: {}, disagreements: {} },
+    runtime: { dropped: 19463, unrecorded: 249, panics: 0 },
+  });
+  // Two different ways the dataset shrinks, and they mean different things:
+  // "we did not look" versus "we looked and lost it". A reader shown only the
+  // first would misread the second as quieter traffic.
+  assert.match(card, /Not observed/);
+  assert.match(card, /Observed but not stored/);
+  assert.match(card, /249/);
+  assert.match(card, /evidence that went missing/i);
 });

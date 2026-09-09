@@ -270,6 +270,16 @@ func run() error {
 			"retention_days", cfg.Log.DecisionRetentionDays)
 	}
 
+	// Local DNSSEC observation. Off unless the operator asked for it, and
+	// when on it observes without deciding anything: the answer a client
+	// receives is produced entirely by the code above and is not shown to
+	// Daddybound before it is sent. See
+	// docs/decisions/0002-daddybound-observe-mode.md.
+	dnssecObserver, err := startDNSSECObserver(ctx, cfg, res, st, log)
+	if err != nil {
+		return err
+	}
+
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
@@ -278,7 +288,20 @@ func run() error {
 		RefuseANY:       cfg.DNS.RefuseANY,
 		Detector:        detector,
 		Decisions:       recorderOrNil(decisionRecorder),
+		DNSSEC:          observerOrNil(dnssecObserver),
 	})
+
+	// Defers run last-in-first-out, so a wait for ctx-driven goroutines has to
+	// cancel before it waits. `defer stop()` above is registered earlier and
+	// therefore runs later, which means an error returned by any startup step
+	// below — a DNS port already in use is the ordinary one — would otherwise
+	// reach this wait with the process context still live, and hang on workers
+	// nothing had told to stop. Cancelling here first is what turns that into
+	// the error being reported. Calling stop twice is harmless.
+	defer func() {
+		stop()
+		dnssecObserver.Wait()
+	}()
 
 	dnsSrv, err := dnsserver.NewServer(cfg.DNS, handler, log)
 	if err != nil {
@@ -350,6 +373,8 @@ func run() error {
 		Providers:      providers,
 		Intel:          intelSource,
 		Decisions:      decisionRecorder,
+		DNSSEC:         dnssecStatsOrNil(dnssecObserver),
+		DNSSECWriter:   dnssecWriterOrNil(dnssecObserver),
 	})
 
 	httpSrv := &http.Server{
@@ -679,74 +704,7 @@ func startIntel(
 // runRetention prunes the query log on a timer, honouring the configured
 // retention window.
 func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) {
-	prune := func() {
-		pctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		defer cancel()
-
-		removed, err := st.Prune(pctx, cfg.Log.RetentionDays, cfg.Log.RollupDays)
-		if err != nil {
-			log.Error("retention prune failed", "error", err)
-			return
-		}
-		if removed > 0 {
-			log.Info("pruned expired query-log rows",
-				"rows", removed, "retention_days", cfg.Log.RetentionDays)
-		}
-
-		// Findings have their own, longer retention: they are small, and the
-		// question they answer is a months-scale one.
-		findings, err := st.PruneFindings(pctx, cfg.Detection.RetentionDays)
-		if err != nil {
-			log.Error("findings prune failed", "error", err)
-			return
-		}
-		if findings > 0 {
-			log.Info("pruned expired findings",
-				"rows", findings, "retention_days", cfg.Detection.RetentionDays)
-		}
-
-		// Decision records, on their own window. Longer than the query log by
-		// default: the log answers "what happened", and this answers "why",
-		// which is the question asked weeks later.
-		if days := cfg.Log.DecisionRetentionDays; days > 0 {
-			if n, err := st.PruneDecisions(pctx, time.Now().AddDate(0, 0, -days)); err != nil {
-				log.Error("decision prune failed", "error", err)
-			} else if n > 0 {
-				log.Info("pruned expired decision records", "rows", n, "retention_days", days)
-			}
-		}
-
-		// Evidence past its own stated expiry. Not "old evidence" — evidence
-		// its own source no longer stands behind. Claims with no expiry
-		// (operator decisions, local first-seen observations) are facts about
-		// the past and are kept.
-		if ev, err := st.PruneEvidence(pctx, time.Now()); err != nil {
-			log.Error("evidence prune failed", "error", err)
-		} else if ev > 0 {
-			log.Debug("pruned expired evidence", "rows", ev)
-		}
-
-		// Cached verdicts and enrichment from external providers. Pruned on
-		// their own expiry rather than on a retention window: they are a cache
-		// with a per-row TTL the provider chose, and a stale verdict is worse
-		// than no verdict — it would block a name on evidence nobody would
-		// stand behind today.
-		if intelRows, err := st.PruneIntel(pctx, time.Now()); err != nil {
-			log.Error("external intelligence prune failed", "error", err)
-		} else if intelRows > 0 {
-			log.Debug("pruned expired external intelligence", "rows", intelRows)
-		}
-
-		// Expired sessions are already refused by the lookup, which enforces
-		// the expiry in the query itself — this only stops the table growing
-		// on a dashboard that is opened every day for a year. Nothing security
-		// relevant depends on it running.
-		if sessions, err := st.PurgeExpiredSessions(pctx); err != nil {
-			log.Error("session purge failed", "error", err)
-		} else if sessions > 0 {
-			log.Debug("purged expired sessions", "rows", sessions)
-		}
-	}
+	prune := func() { pruneOnce(ctx, st, cfg, log) }
 
 	// Prune shortly after boot so an install that has been off for a while
 	// reclaims disk before it starts writing again.
@@ -766,6 +724,97 @@ func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *
 		case <-t.C:
 			prune()
 		}
+	}
+}
+
+// pruneOnce is one pass of the retention job.
+//
+// A named function rather than a closure so a test can run the whole pass and
+// check that everything with a retention window is actually in it. A store
+// method that exists and is never called looks identical to one that works.
+func pruneOnce(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) {
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	removed, err := st.Prune(pctx, cfg.Log.RetentionDays, cfg.Log.RollupDays)
+	if err != nil {
+		log.Error("retention prune failed", "error", err)
+		return
+	}
+	if removed > 0 {
+		log.Info("pruned expired query-log rows",
+			"rows", removed, "retention_days", cfg.Log.RetentionDays)
+	}
+
+	// Local DNSSEC observations share the query log's window, and must:
+	// each row names the domain it validated, exactly as a query-log row
+	// does, and each one correlates to a query-log row by id. Left
+	// unpruned they would ignore `log.retention_days` entirely and grow
+	// without bound — a diagnostic feature quietly keeping domain names
+	// for longer than the operator agreed to keep them.
+	obsDays := cfg.Log.RetentionDays
+	if obsDays <= 0 {
+		obsDays = store.DefaultRetentionDays
+	}
+	if obs, err := st.PruneDNSSECObservations(pctx, time.Now().AddDate(0, 0, -obsDays)); err != nil {
+		log.Error("DNSSEC observation prune failed", "error", err)
+	} else if obs > 0 {
+		log.Info("pruned expired DNSSEC observations",
+			"rows", obs, "retention_days", obsDays)
+	}
+
+	// Findings have their own, longer retention: they are small, and the
+	// question they answer is a months-scale one.
+	findings, err := st.PruneFindings(pctx, cfg.Detection.RetentionDays)
+	if err != nil {
+		log.Error("findings prune failed", "error", err)
+		return
+	}
+	if findings > 0 {
+		log.Info("pruned expired findings",
+			"rows", findings, "retention_days", cfg.Detection.RetentionDays)
+	}
+
+	// Decision records, on their own window. Longer than the query log by
+	// default: the log answers "what happened", and this answers "why",
+	// which is the question asked weeks later.
+	if days := cfg.Log.DecisionRetentionDays; days > 0 {
+		if n, err := st.PruneDecisions(pctx, time.Now().AddDate(0, 0, -days)); err != nil {
+			log.Error("decision prune failed", "error", err)
+		} else if n > 0 {
+			log.Info("pruned expired decision records", "rows", n, "retention_days", days)
+		}
+	}
+
+	// Evidence past its own stated expiry. Not "old evidence" — evidence
+	// its own source no longer stands behind. Claims with no expiry
+	// (operator decisions, local first-seen observations) are facts about
+	// the past and are kept.
+	if ev, err := st.PruneEvidence(pctx, time.Now()); err != nil {
+		log.Error("evidence prune failed", "error", err)
+	} else if ev > 0 {
+		log.Debug("pruned expired evidence", "rows", ev)
+	}
+
+	// Cached verdicts and enrichment from external providers. Pruned on
+	// their own expiry rather than on a retention window: they are a cache
+	// with a per-row TTL the provider chose, and a stale verdict is worse
+	// than no verdict — it would block a name on evidence nobody would
+	// stand behind today.
+	if intelRows, err := st.PruneIntel(pctx, time.Now()); err != nil {
+		log.Error("external intelligence prune failed", "error", err)
+	} else if intelRows > 0 {
+		log.Debug("pruned expired external intelligence", "rows", intelRows)
+	}
+
+	// Expired sessions are already refused by the lookup, which enforces
+	// the expiry in the query itself — this only stops the table growing
+	// on a dashboard that is opened every day for a year. Nothing security
+	// relevant depends on it running.
+	if sessions, err := st.PurgeExpiredSessions(pctx); err != nil {
+		log.Error("session purge failed", "error", err)
+	} else if sessions > 0 {
+		log.Debug("purged expired sessions", "rows", sessions)
 	}
 }
 

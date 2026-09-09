@@ -184,6 +184,12 @@ var addedColumns = []struct{ table, column, definition string }{
 	// The operator's affirmation that a specific publicly routable range may
 	// reach the resolver.
 	{"network_cidrs", "public_ack", "INTEGER NOT NULL DEFAULT 0"},
+	// Correlation id for the local DNSSEC observation of a query. Empty on
+	// every existing row and on every query when local validation is off,
+	// which is the default — so an upgrade adds a column nobody's data uses
+	// until they switch the feature on, and a downgrade still reads the
+	// table.
+	{"query_log", "dnssec_obs", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func migrate(db *sql.DB) error {

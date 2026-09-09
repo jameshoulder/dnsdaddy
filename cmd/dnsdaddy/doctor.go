@@ -53,6 +53,7 @@ func runDoctor(args []string) error {
 	cfg, cfgChecks := doctorConfig(*configPath)
 	checks = append(checks, cfgChecks...)
 	checks = append(checks, doctorDataDir(cfg))
+	checks = append(checks, doctorLocalDNSSEC(ctx, cfg))
 
 	// One read-only handle, shared by every check that needs it. See
 	// openExistingStore for why it is not store.Open: this command promises to
@@ -644,4 +645,67 @@ func wrap(s string, width int) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+// doctorLocalDNSSEC reports the local DNSSEC validation mode and whether it
+// can start.
+//
+// Deliberately never fails. A validator that cannot observe is not a resolver
+// that cannot answer, and conflating the two would have an operator paging
+// someone at 3am because an experimental, non-enforcing feature is unhappy.
+// The worst this reports is a warning, and the summary always says what the
+// mode does rather than only naming it.
+func doctorLocalDNSSEC(ctx context.Context, cfg config.Config) diag.Check {
+	c := diag.Check{Section: "DNS", Name: "Local DNSSEC validation"}
+
+	switch cfg.DNS.LocalDNSSECMode() {
+	case config.LocalDNSSECOff:
+		c.Status = diag.StatusPass
+		c.Summary = "Off. DNS Daddy records what the upstream concluded and does not validate locally."
+		c.Evidence = []string{
+			"dns.local_dnssec_validation: off (the default)",
+			"Set it to \"observe\" to have Daddybound validate alongside resolution. " +
+				"Observe mode records verdicts and never changes a DNS answer.",
+		}
+		return c
+	case config.LocalDNSSECObserve:
+	default:
+		// validate() refuses to start on anything else, so reaching here means
+		// the config was not loaded through the normal path.
+		c.Status = diag.StatusWarn
+		c.Summary = "Unrecognised mode " + cfg.DNS.LocalDNSSECMode() + "."
+		return c
+	}
+
+	c.Status = diag.StatusPass
+	c.Summary = "Observing. Daddybound validates alongside resolution and records what it concludes; " +
+		"DNS answers are unaffected."
+	c.Evidence = []string{
+		fmt.Sprintf("workers %d, queue %d, per-observation timeout %s",
+			cfg.DNS.LocalDNSSECWorkers, cfg.DNS.LocalDNSSECQueue, cfg.DNS.LocalDNSSECTimeout.D()),
+		"Enforcement is not implemented. A bogus verdict is recorded, not acted on.",
+	}
+
+	anchors, err := loadTrustAnchors(cfg.DNS.LocalDNSSECTrustAnchorFile)
+	switch {
+	case err != nil:
+		// The daemon refuses to start in this state, so a warning here is the
+		// diagnosis for a start-up failure rather than a live problem.
+		c.Status = diag.StatusWarn
+		c.Summary = "Observe mode is configured but the trust anchors cannot be loaded, so the daemon will not start."
+		c.Evidence = append(c.Evidence, err.Error())
+		c.Action = "Fix or remove dns.local_dnssec_trust_anchor_file."
+	case anchors.Empty():
+		c.Status = diag.StatusWarn
+		c.Summary = "Observe mode is configured but no trust anchors are available."
+		c.Action = "Remove dns.local_dnssec_trust_anchor_file to use the built-in IANA root anchors."
+	case cfg.DNS.LocalDNSSECTrustAnchorFile != "":
+		c.Evidence = append(c.Evidence,
+			"trust anchors from "+cfg.DNS.LocalDNSSECTrustAnchorFile+" (replacing the built-in IANA root anchors)")
+	default:
+		c.Evidence = append(c.Evidence, "trust anchors: the built-in IANA root anchors")
+	}
+
+	_ = ctx
+	return c
 }

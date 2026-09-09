@@ -208,14 +208,21 @@ case. A malicious or compromised upstream can poison at will; see T11.
 
 **Mitigations.** The AD bit is requested on every upstream query so the
 upstream's verdict is recorded per query. The `resolution_failure` detector
-reports domains persistently returning SERVFAIL.
+reports domains persistently returning SERVFAIL. Optionally, **observe mode**
+runs DNS Daddy's own validator over the same names and records what it
+concludes independently.
 
-**Residual risk. DNS Daddy does not validate DNSSEC.** It relies entirely on
-the upstream to do so, and a forwarder cannot distinguish "unsigned zone" from
-"upstream does not validate" — both appear as `unvalidated`. Neither can it
-distinguish a bogus signature from an unreachable nameserver, which is why the
-finding is called `resolution_failure_burst` and carries no ATT&CK mapping. See
-[dns-security/dnssec.md](dns-security/dnssec.md).
+**Residual risk. DNS Daddy does not *enforce* DNSSEC.** Observe mode changes
+what is measured, not what is served: an answer that fails local validation is
+still returned to the client. So a stripped signature is now visible in the
+data — as a `bogus` local verdict against an upstream that said `validated` —
+but nothing acts on it.
+
+Without observe mode the older limits apply in full: a forwarder cannot
+distinguish "unsigned zone" from "upstream does not validate", both appearing
+as `unvalidated`, nor a bogus signature from an unreachable nameserver, which
+is why the finding is called `resolution_failure_burst` and carries no ATT&CK
+mapping. See [dns-security/dnssec.md](dns-security/dnssec.md).
 
 ### T11 — Compromised upstream infrastructure
 
@@ -225,12 +232,23 @@ finding is called `resolution_failure_burst` and carries no ATT&CK mapping. See
 Multiple upstreams can be configured. `race` mode queries several at once.
 
 **Residual risk. This is the weakest assumption in the model.** A genuinely
-malicious upstream can return whatever it likes, and without local DNSSEC
-validation DNS Daddy has no way to tell. The AD bit is *self-reported by the
-upstream* and a lying upstream will happily set it. The mitigation available
-today is choosing an upstream you have reason to trust and watching for
-unexpected `unvalidated` transitions on domains you know are signed. Local
-validation is the real fix and is not implemented.
+malicious upstream can return whatever it likes, and DNS Daddy still serves
+whatever comes back. The AD bit is *self-reported by the upstream* and a lying
+upstream will happily set it.
+
+Observe mode narrows the *detection* gap without closing the enforcement one,
+and does so in a way worth being precise about. Its supporting queries carry
+CD, so the upstream's own validator is disabled for them and the signatures are
+checked locally against the root trust anchor — a lying upstream cannot forge
+those. So an upstream substituting data for a signed zone now shows up as a
+local `bogus` against an upstream `validated`, which is a cell an operator can
+alert on.
+
+It does not help for unsigned zones, which is most of the DNS, and it does not
+stop the substituted answer being served. The mitigation remains choosing an
+upstream you have reason to trust; observe mode makes it possible to check that
+choice rather than assume it. Enforcement is the real fix and is not
+implemented.
 
 ### T12 — DoH/DoT bypass
 
@@ -402,7 +420,10 @@ against any of them, and no compliance claim should be built on it.
 
 The things most likely to matter, in order:
 
-1. **No local DNSSEC validation.** Upstream trust is unverifiable.
+1. **No local DNSSEC enforcement.** Observe mode can now check the upstream's
+   claims for signed zones and record where they disagree, but an answer that
+   fails validation is still served. For unsigned zones — most of the DNS —
+   upstream trust remains unverifiable either way.
 2. **Encrypted-DNS bypass cannot be prevented** by DNS Daddy alone.
 3. **Behavioural detection is experimental, alert-only, and unmeasured** against
    real traffic.
