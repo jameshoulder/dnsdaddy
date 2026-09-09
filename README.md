@@ -256,7 +256,7 @@ Worth knowing before you rely on DNS Daddy:
 - **No independent professional security review.**
 - **Early software.** Interfaces, deployment behaviour and storage formats may change between releases.
 - **Forwarding, not recursive.** DNS Daddy forwards to upstream resolvers.
-- **No DNSSEC enforcement.** By default it records only the upstream's validation verdict. Daddybound, the experimental validation engine, can additionally validate the same names in observe mode — but it answers no queries and blocks nothing, so a forged answer for a signed zone is recorded rather than refused.
+- **No DNSSEC enforcement.** It records the upstream's validation verdict, and — in Learn mode, which new installations start in — what its own experimental validator, Daddybound, concludes about the same name. Neither blocks anything: a forged answer for a signed zone is recorded rather than refused.
 - **Behavioural detection is experimental and alert-only.** There is no measured production false-positive rate yet.
 - **Browser DoH can bypass network DNS.** Mitigations require network/endpoint configuration.
 - **No clustering or anycast.** One DNS Daddy instance is one server.
@@ -275,11 +275,14 @@ with NSEC and NSEC3; and follows CNAME chains, DNAME redirections and
 QTYPE=ANY answers. A separate opt-in test run compares its verdicts against
 libunbound and BIND's `delv` over several hundred real Internet names.
 
-It can now be run against your own traffic in **observe mode**
-(`dns.local_dnssec_validation: observe`, off by default). It validates the
-same names your clients ask for and records what it concludes; **the answer the
-client receives is unchanged**, whatever the verdict. There is no enforcement,
-and none is planned until the observations say what enforcing would cost.
+It can now be run against your own traffic in **Learn mode**
+(`dns.local_dnssec_validation: observe`) — on for new installations, and left
+as it was when you upgrade. It validates the same names your clients ask for
+and records what it concludes; **the answer the client receives is unchanged**,
+whatever the verdict. There is no enforcement, and none is planned until the
+observations say what enforcing would cost. The dashboard shows the future
+**Live** mode as unavailable rather than hiding it, so nothing implies
+Daddybound is protecting traffic today.
 
 That is a step, not a finish line. It performs no recursive resolution of its
 own, does not implement aggressive NSEC use or trust anchor rollover, and

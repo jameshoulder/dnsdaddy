@@ -22,6 +22,62 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Ad-hoc resolver access, on the Default network
+
+The system **Default** row now carries a real control — *Ad-hoc DNS access* —
+instead of a generic *Allow* checkbox that the dashboard itself had to badge
+*Grants nothing*. It decides whether a client that matches no other Network,
+and whose address is already inside `dns.allowed_client_cidrs`, may use the
+resolver and receive the Default policy.
+
+This makes the model explicit rather than changing what the two settings mean:
+
+- `dns.allowed_client_cidrs` says which addresses are **eligible** to be served.
+- **Ad-hoc DNS access** says whether eligible clients that match no Network are
+  **actually** served.
+- A Network permission serves its own ranges regardless of both.
+
+So the effective ACL is no longer a plain union, and the documentation no
+longer describes it as one. Turning ad-hoc access on never adds an address to
+the configured list, so it cannot create an open resolver; `allow_public_resolver`
+remains the only way to run one, unchanged. Loopback is served in either state,
+so the resolver stays usable from the machine it runs on.
+
+**A new installation starts with ad-hoc access off**, which means a fresh
+install refuses a client it has never been told about — including one inside
+the configured pool. The diagnostics say so, and name both ways to fix it.
+
+**Upgrades keep the access they had.** Before this switch existed, the Default
+row's permission bit granted nothing (a catch-all has no ranges), so every
+existing installation served its whole configured pool with that bit clear.
+On the first start after upgrading, a database that already contains networks
+has ad-hoc access turned on once, reproducing exactly the previous behaviour.
+The decision is recorded, so turning it off afterwards sticks.
+
+The Default row can no longer be deleted. It is the policy applied to every
+unmatched client and the ad-hoc access switch at once, and nothing recreates
+it; the API answers `409` rather than leaving the dashboard with nowhere to put
+the control.
+
+### Daddybound Learn and Live
+
+The dashboard now names Daddybound's modes: **Learn**, which is what
+`local_dnssec_validation: observe` has always done, and **Live**, which is
+enforcement and is shown as *unavailable*. Live is rendered rather than hidden
+so that nothing implies Daddybound is protecting traffic today; `enforce` is
+still refused at startup rather than quietly run as Learn. The query log keeps
+*DNSSEC (upstream)* and *DNSSEC (local — Daddybound)* as separate facts, and a
+bogus local verdict still says, on the badge, that nothing was blocked.
+
+The configuration value is unchanged: `observe` is still `observe`.
+
+**Learn is now on for new installations.** Omitting `local_dnssec_validation`
+leaves the choice to the installation: a new database runs Learn, and upgrading
+an installation that never set the key leaves it off. Learn is off the answer
+path but sends its own DNSSEC queries upstream and spends CPU, and that is not
+a change to inherit from a version bump. Setting the key explicitly always
+wins. The startup log names which way it went.
+
 ### Local DNSSEC validation in observe mode
 
 Daddybound can now be pointed at your own traffic:

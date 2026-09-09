@@ -326,7 +326,7 @@ Three rules follow, and all three are tested:
 
 ```yaml
 dns:
-  # off | observe.  Default off.
+  # off | observe.  Omit to let the installation decide.
   local_dnssec_validation: off
 
   # Tuning, only read in observe mode.
@@ -337,6 +337,27 @@ dns:
   # Unchanged, and not the same thing.
   dnssec_telemetry: true
 ```
+
+`observe` is presented in the dashboard as **Learn**. The configuration value
+is not renamed: it is persisted, documented and already deployed, and renaming
+it for presentation would break existing files for no gain. Live is the name
+reserved for enforcement, and it is deliberately unavailable rather than
+absent, so the dashboard cannot be read as saying Daddybound protects traffic
+today.
+
+**Which mode applies when the key is omitted** is decided once per
+installation, not by the config layer. A new database runs Learn; an upgrade of
+an installation that never set the key stays off. Learn is off the answer path
+but does send its own upstream queries and consume CPU, and inheriting that
+from a version bump would change someone's traffic without them asking.
+
+The decision cannot be made in config, and that is a limitation rather than a
+preference: `Load` unmarshals YAML over `Default()`, so by the time a `Config`
+exists there is no difference between a key that was omitted and one that was
+written. The database has the evidence config lacks — a database with no
+networks has never run DNS Daddy — so the question is asked there, in the same
+transaction that records the answer, and the resolved mode is written back into
+the config so every later reader sees one value.
 
 `enforce` is recognised by the parser and **refused at startup** with a message
 saying it is not implemented. Accepting it and quietly behaving as `observe`

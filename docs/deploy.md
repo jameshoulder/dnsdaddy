@@ -117,12 +117,31 @@ That is deliberately redundant with the firewall: an open resolver gets found
 and abused within days, and "the operator was told to firewall it" is not a
 control.
 
-The **effective ACL** is built from two sources, combined by union:
+Three settings decide it, and they answer different questions. It is worth
+being precise about which, because the most common confusion is reading the
+first as though it were the whole answer:
 
-| Source | Where | Changing it |
-|---|---|---|
-| **Bootstrap** | `dns.allowed_client_cidrs`, or `DNSDADDY_ALLOWED_CLIENT_CIDRS` | needs a restart |
-| **Dashboard** | **Networks →** *Allow this network to use DNS Daddy* | on the next query, no restart |
+| Setting | Where | Question it answers | Changing it |
+|---|---|---|---|
+| **`dns.allowed_client_cidrs`** | config, or `DNSDADDY_ALLOWED_CLIENT_CIDRS` | which addresses are *eligible* to be served | needs a restart |
+| **Ad-hoc DNS access** | **Networks →** the **Default** row | whether an eligible client that matches no other Network is actually served | on the next query, no restart |
+| **Network permissions** | **Networks →** *Allow this network to use DNS Daddy* | which specific ranges are served regardless of the above | on the next query, no restart |
+
+So the effective ACL is **not** a plain union of the first and the third. The
+configured pool contributes only while ad-hoc access is on; a Network
+permission contributes always. Loopback is served in either state, so the
+resolver stays usable from the machine it runs on.
+
+Ad-hoc access is **off on a new installation**. A fresh install therefore
+refuses a client it has never been told about, even one inside
+`dns.allowed_client_cidrs` — which is the point: the list says who *may* be
+served, not who *is*. Turning ad-hoc access on adds no address to that list, so
+it cannot turn DNS Daddy into an open resolver; it only stops it refusing the
+addresses already named there.
+
+If you upgraded from a version before this switch existed, it was turned **on**
+once during the upgrade, because that is what your installation was already
+doing. See *Upgrading* at the end of this section.
 
 A permission grants; nothing else revokes it. Both sources are listed
 separately by `dnsdaddy doctor`, at `GET /api/v1/diagnostics`, and on the
@@ -163,13 +182,19 @@ carve a hole in a broader permitted range. If `10.0.0.0/8` is permitted, a
 wider already permits it. Diagnostics report exactly this case rather than
 leaving you to find it; to stop those clients, narrow the wider range.
 
-**Permitting the catch-all grants nothing.** A network with no ranges has no
-addresses of its own, so ticking *Allow this network to use DNS Daddy* on it
-adds nothing to the ACL — the permission is stored and contributes no range.
-Whether a client the catch-all matches is served depends entirely on that
-client's own address, which is why the Networks page badges it *Depends on the
-client* rather than allowed or refused. To permit a client, permit a network
-that actually lists its address.
+**Permitting a catch-all you created grants nothing.** A network with no ranges
+has no addresses of its own, so ticking *Allow this network to use DNS Daddy*
+on it adds nothing to the ACL. Whether a client it matches is served depends
+entirely on that client's own address, which is why the Networks page badges it
+*Depends on the client*. To permit a client, permit a network that actually
+lists its address.
+
+The built-in **Default** row is the exception, and is the reason it is shown
+differently. It has no ranges either, but its control is not a grant — it is
+the ad-hoc access switch described above, badged *Ad-hoc access on* or *Ad-hoc
+access off*. It cannot be deleted: it is the policy applied to every unmatched
+client as well as that switch, and the API refuses the request rather than
+leaving the dashboard with nowhere to put the control.
 
 **A public range needs an explicit acknowledgement, and `0.0.0.0/0` is
 refused outright.** Permitting a publicly routable range means DNS Daddy will
@@ -194,10 +219,25 @@ profile, and why the token in the URL is a credential. Such a client keeps
 resolving whether or not the network's addresses are permitted. To cut one off,
 disable the network or rotate its token.
 
-**Upgrading from an earlier version?** Nothing changes. Every network that
-predates this feature starts unpermitted, so your bootstrap ACL alone keeps
-admitting exactly who it admitted before. DoH and DoT tokens are unaffected for
-the same reason: they never depended on the client ACL.
+**Upgrading from an earlier version?** Who may resolve does not change.
+
+Networks that predate per-network permissions start unpermitted, so your
+configured pool keeps admitting exactly who it admitted before. That is what
+the one-off ad-hoc access migration preserves: before the Default row became a
+switch, its permission bit granted nothing — a catch-all has no ranges — so
+every existing installation served its whole configured pool with that bit
+clear. On the first start after upgrading, DNS Daddy turns ad-hoc access on for
+any database that already contains networks, which reproduces exactly the
+previous behaviour. It happens once and is recorded, so if you then turn it off
+it stays off.
+
+A genuinely fresh database gets ad-hoc access off instead. The two cases are
+told apart by whether the database has ever had networks in it, decided in the
+same transaction that records the decision — not by inspecting configuration,
+which cannot distinguish them.
+
+DoH and DoT tokens are unaffected throughout: they identify a client by token
+rather than by address, and never depended on the client ACL.
 
 ## 5. Put TLS in front of the dashboard
 
