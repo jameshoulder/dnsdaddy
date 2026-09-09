@@ -1775,6 +1775,46 @@ function dnssecBadge(status) {
   return html`<span class="badge ${cls}" title="${title}">${text}</span>`;
 }
 
+/*
+ * What DNS Daddy's own validator concluded, as distinct from what the upstream
+ * asserted.
+ *
+ * Kept visually and verbally separate from dnssecBadge on purpose. They are
+ * different measurements — one is "the upstream said so", the other is "we
+ * checked" — and merging them into a single "DNSSEC: secure" would claim an
+ * assurance neither alone supports.
+ *
+ * Every label carries "observe", because that is the load-bearing fact. A
+ * reader who sees "bogus" and does not also see that nothing was blocked has
+ * been misled by the interface.
+ */
+function localDnssecBadge(v) {
+  const map = {
+    secure: ['ok', 'secure', 'Daddybound authenticated this answer against the DNSSEC chain of trust.'],
+    insecure: ['', 'insecure', 'Daddybound proved this name lies in an unsigned part of the DNS.'],
+    bogus: ['bad', 'bogus', 'Daddybound could not authenticate this answer. Nothing was blocked: observe mode records verdicts only.'],
+    indeterminate: ['', 'indeterminate', 'Daddybound could not decide.'],
+    timeout: ['', 'timeout', 'Validation ran out of time. This says nothing about the answer.'],
+    resource_limit: ['', 'limit reached', 'Validation hit an internal bound. This says nothing about the answer.'],
+    unsupported: ['', 'unsupported', 'This build cannot evaluate the algorithm or shape used here.'],
+    internal_error: ['bad', 'error', 'The validator failed. This is a defect, not a property of the zone.'],
+  };
+  const entry = map[v.status];
+  if (!entry) return html`<span class="muted">—</span>`;
+  const [cls, text, title] = entry;
+
+  const note = v.disagreement
+    ? html` <span class="badge warn" title="The local verdict and the upstream's assertion differ. Recorded, not acted on.">differs from upstream</span>`
+    : '';
+  const stale = v.cached
+    ? html` <span class="muted" title="The answer came from the cache, so it may be older than this observation.">(answer was cached)</span>`
+    : '';
+
+  return html`<span class="badge ${cls}" title="${title}">${text}</span>`
+    + html`<span class="muted"> · observe only, nothing blocked</span>`
+    + note + stale;
+}
+
 /**
  * The query log, as a telemetry stream rather than a spreadsheet.
  *
@@ -1821,7 +1861,8 @@ function queryRow(q) {
     ['Reason', q.reason ? html`${q.reason}` : ''],
     ['Category', q.category ? categoryBadge(q.category) : ''],
     ['Source', q.source ? html`${q.source}` : ''],
-    ['DNSSEC', q.dnssec ? dnssecBadge(q.dnssec) : ''],
+    ['DNSSEC (upstream)', q.dnssec ? dnssecBadge(q.dnssec) : ''],
+    ['DNSSEC (local)', q.dnssecValidation ? localDnssecBadge(q.dnssecValidation) : ''],
     ['Answered from', q.cached ? 'the local cache' : 'an upstream resolver'],
     ['Took', typeof q.elapsedMs === 'number' ? html`${q.elapsedMs} ms` : ''],
     ['Time', q.time ? html`${new Date(q.time).toLocaleString('en-GB')}` : ''],
@@ -3729,11 +3770,97 @@ function claimChip(tier) {
   return html`<span class="badge ${cls} claim" title="${meaning}">${label}</span>`;
 }
 
+/*
+ * Local DNSSEC observation, on the page whose subject is "what is checked and
+ * what that does not prove".
+ *
+ * The hardest thing to get right here is not the numbers. It is that a reader
+ * who sees "bogus: 12" must not come away believing twelve queries were
+ * refused. So the non-enforcing fact is stated before any count, in the
+ * heading, in the prose and again next to the bogus figure — repetition being
+ * the correct trade when the alternative is a reader drawing a false
+ * conclusion about their own resolver.
+ *
+ * The dropped count sits beside the totals for the same reason. A sample that
+ * silently shrank under load would invite conclusions it cannot support.
+ */
+function localDnssecCard(data) {
+  const off = !data || data.mode !== 'observe';
+
+  if (off) {
+    return html`
+      <div class="card section">
+        <div class="card-head">
+          <div>
+            <div class="card-eyebrow">Experimental</div>
+            <h2>Local DNSSEC validation ${raw(claimChip('experimental'))}</h2>
+            <p>DNS Daddy can run its own DNSSEC validator, Daddybound, alongside
+               resolution and record what it concludes. It is <strong>off</strong>.</p>
+          </div>
+        </div>
+        <p class="muted small note-tight">
+          When switched on it observes only: it records a verdict per query and never
+          changes the answer a client receives. Enforcement is not implemented.
+          Set <span class="mono">dns.local_dnssec_validation: observe</span> to enable it.
+        </p>
+      </div>`;
+  }
+
+  const s = data.summary || {};
+  const by = s.byStatus || {};
+  const runtime = data.runtime || {};
+  const dis = s.disagreements || {};
+  const disTotal = Object.values(dis).reduce((a, b) => a + b, 0);
+
+  const stat = (label, value, note) => html`
+    <div class="qfact"><dt>${label}</dt><dd><span class="mono">${value ?? 0}</span>${note ? html` <span class="muted small">${note}</span>` : ''}</dd></div>`;
+
+  return html`
+    <div class="card section">
+      <div class="card-head">
+        <div>
+          <div class="card-eyebrow">Experimental</div>
+          <h2>Local DNSSEC validation — observing ${raw(claimChip('experimental'))}</h2>
+          <p><strong>Nothing here blocks anything.</strong> Daddybound validates the same
+             names your clients ask for and records what it concludes. The answer a client
+             receives is decided entirely by the resolver, whatever these verdicts say.</p>
+        </div>
+      </div>
+
+      <dl class="claim-key">
+        ${raw(stat('Observed', s.total, 'in the last 7 days'))}
+        ${raw(stat('Secure', by.secure))}
+        ${raw(stat('Insecure', by.insecure, 'provably unsigned'))}
+        ${raw(stat('Bogus', by.bogus, 'recorded, not blocked'))}
+        ${raw(stat('Indeterminate', by.indeterminate))}
+        ${raw(stat('Could not validate', (by.timeout || 0) + (by.resource_limit || 0) + (by.unsupported || 0) + (by.internal_error || 0), 'timeout, limit or unsupported — not a DNSSEC state'))}
+        ${raw(stat('Differs from upstream', disTotal, 'the point of the exercise'))}
+        ${raw(stat('Not observed', runtime.dropped, 'queue was full — the sample is smaller than your traffic'))}
+        ${raw(stat('Median latency', (s.avgDurationMs || 0).toFixed(1) + ' ms', 'off the answer path'))}
+        ${raw(stat('p95 latency', (s.p95DurationMs || 0).toFixed(1) + ' ms'))}
+      </dl>
+
+      ${runtime.panics ? html`<p class="muted small"><span class="badge bad">${runtime.panics}</span>
+        validator panics were contained. That is a defect in the validator, not a property of your traffic —
+        please report it.</p>` : ''}
+
+      <p class="muted small note-tight">
+        "Differs from upstream" is not a fault in either side. Your upstream and Daddybound
+        answer slightly different questions — the upstream validated the answer it sent,
+        Daddybound validated the name shortly afterwards — and the disagreements are the
+        evidence that decides whether local validation could ever be trusted to enforce.
+      </p>
+    </div>`;
+}
+
 pages.assurance = {
   title: 'Assurance',
   subtitle: 'What is checked, by what, and what that does not prove.',
   async render() {
     const settings = await apiGet('/settings').catch(() => ({ version: 'unknown' }));
+    // Best-effort: the Assurance page must render even when local DNSSEC
+    // observation is off, unreachable, or has never recorded anything.
+    const dnssec = await apiGet('/dnssec/observations?hours=168').catch(() => null);
 
     return html`
       <div class="card lead section">
@@ -3755,6 +3882,8 @@ pages.assurance = {
           <a class="btn btn-ghost" href="${REPO}/docs/security-testing.md" target="_blank" rel="noopener noreferrer">Security testing</a>
         </div>
       </div>
+
+      ${raw(localDnssecCard(dnssec))}
 
       <div class="card section">
         <div class="card-head">
@@ -4333,5 +4462,7 @@ if (typeof module !== 'undefined' && module.exports) {
     templateFields,
     availableAdaptersCard,
     REPUTATION_MODES,
+    localDnssecBadge,
+    localDnssecCard,
   };
 }
