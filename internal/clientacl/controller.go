@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 )
 
+const defaultNetworkID = "n_default"
+
 // Loader supplies the dashboard-managed networks.
 //
 // A function rather than a *store.Store so this package stays independent of
@@ -48,6 +50,12 @@ type Controller struct {
 	// diagnostics keep saying otherwise until a reload succeeds.
 	stale atomic.Bool
 
+	// bootstrap is the operator-configured pool from dns.allowed_client_cidrs.
+	//
+	// With dashboard-managed networks this is deliberately a *candidate* pool,
+	// not an unconditional grant. The built-in n_default row decides whether
+	// unmatched clients may consume it. Explicit Networks still contribute
+	// their own ranges independently through Compute.
 	bootstrap   []string
 	allowPublic bool
 	load        Loader
@@ -58,7 +66,9 @@ type Controller struct {
 //
 // The initial set is deliberately usable before the first Reload: startup
 // order should never leave a window where the resolver is answering with no
-// ACL because the database has not been read yet.
+// ACL because the database has not been read yet. Once a dashboard-backed
+// loader publishes its first snapshot, n_default becomes the switch that
+// decides whether the bootstrap pool is active for unmatched clients.
 func NewController(bootstrapCIDRs []string, allowPublicResolver bool, load Loader) *Controller {
 	c := &Controller{
 		bootstrap:   append([]string(nil), bootstrapCIDRs...),
@@ -124,11 +134,61 @@ func (c *Controller) publish(ctx context.Context) error {
 			return err
 		}
 	}
-	c.snap.Store(Compute(c.bootstrap, c.allowPublic, networks))
+
+	bootstrap := c.bootstrapForNetworks(networks)
+	c.snap.Store(Compute(bootstrap, c.allowPublic, networks))
 	// Cleared on any successful publish: whatever went wrong before, the
 	// snapshot now in force was built from the current database.
 	c.stale.Store(false)
 	return nil
+}
+
+// bootstrapForNetworks turns dns.allowed_client_cidrs into the ad-hoc access
+// pool for a dashboard-managed resolver.
+//
+// The system Default network is special: it has no CIDRs because it is the
+// policy catch-all. Its AllowResolver bit therefore means "may unmatched
+// clients that are already inside the configured bootstrap boundary resolve?"
+// rather than trying to manufacture a CIDR out of a catch-all.
+//
+// OFF fails closed to loopback plus explicit Network grants. ON returns the
+// configured bootstrap pool unchanged. A non-dashboard/headless controller
+// (load == nil) keeps the historical behaviour and uses the bootstrap ACL
+// directly, so this UI feature does not change config-only deployments.
+func (c *Controller) bootstrapForNetworks(networks []Network) []string {
+	if c == nil {
+		return nil
+	}
+	if c.load == nil {
+		return append([]string(nil), c.bootstrap...)
+	}
+
+	for _, n := range networks {
+		if n.ID == defaultNetworkID && n.Enabled && n.AllowResolver {
+			return append([]string(nil), c.bootstrap...)
+		}
+	}
+
+	return loopbackBootstrap(c.bootstrap)
+}
+
+// loopbackBootstrap keeps local health checks and same-host DNS working while
+// Default ad-hoc access is off. If the configured pool did not name loopback
+// explicitly, add the two loopback ranges rather than passing an empty ACL to
+// Compute — an empty ACL intentionally means unrestricted there.
+func loopbackBootstrap(cidrs []string) []string {
+	out := make([]string, 0, 2)
+	for _, raw := range cidrs {
+		p, err := ParsePrefix(raw)
+		if err != nil || !p.Addr().IsLoopback() {
+			continue
+		}
+		out = append(out, raw)
+	}
+	if len(out) == 0 {
+		return []string{"127.0.0.0/8", "::1/128"}
+	}
+	return out
 }
 
 // Stale reports that the last reload failed, so the ACL being enforced may not
