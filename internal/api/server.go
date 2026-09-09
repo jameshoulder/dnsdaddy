@@ -335,6 +335,10 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, store.ErrProtectedNetwork):
+		// 409 rather than 400: the request is perfectly well-formed, and
+		// nothing the caller changes about it will make this row deletable.
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.As(err, &needAck):
 		// 409, not 400: the request is well-formed and the caller may resend
 		// it verbatim with publicAck set. A dashboard needs the ranges
