@@ -426,7 +426,11 @@ paths:
     delete:
       tags: [Networks]
       summary: Delete a network
-      description: The last remaining network cannot be deleted.
+      description: >-
+        The last remaining network cannot be deleted, and neither can the
+        built-in Default network (`n_default`) — it is the policy applied to
+        every unmatched client and the ad-hoc resolver access switch at once,
+        and nothing recreates it.
       responses:
         "204":
           description: >-
@@ -454,6 +458,14 @@ paths:
                   warning: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >-
+            Refused permanently: this is the last remaining network, or the
+            built-in Default network. The request is well-formed and resending
+            it will not succeed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/v1/networks/{id}/rotate-token:
     post:
@@ -1678,8 +1690,12 @@ components:
     ClientAccess:
       type: object
       description: >-
-        The effective client ACL: the bootstrap list from configuration unioned
-        with the networks the dashboard permits.
+        The effective client ACL. Not a plain union: bootstrapCidrs names the
+        addresses eligible to be served, and the built-in Default network's
+        ad-hoc access switch decides whether unmatched clients inside them are
+        actually served. A permitted network contributes its own ranges
+        regardless of that switch, and loopback is admitted whenever the ACL is
+        restricted.
       properties:
         unrestricted:
           type: boolean
@@ -1691,13 +1707,31 @@ components:
         bootstrapCidrs:
           type: array
           items: { type: string }
-          description: dns.allowed_client_cidrs, as configured. Changing it needs a restart.
+          description: >-
+            dns.allowed_client_cidrs, exactly as configured — which addresses
+            are eligible to be served, not necessarily which are being served.
+            Compare adHocAccess. Changing it needs a restart.
+        adHocAccess:
+          type: boolean
+          description: >-
+            Whether unmatched clients inside bootstrapCidrs may resolve. False
+            means those ranges are eligible but currently withheld, and only
+            explicitly permitted networks (plus loopback) are served. True where
+            no Default network governs the decision, which is the behaviour that
+            predates the switch.
+        adHocAccessGated:
+          type: boolean
+          description: >-
+            Whether a Default network was present to make that decision. It
+            separates "ad-hoc access is on" from "nothing is gating this", which
+            are indistinguishable from adHocAccess alone.
         effectiveCidrs:
           type: array
           items: { type: string }
           description: >-
-            The union actually enforced. Empty when unrestricted is true, which
-            means everything is accepted rather than nothing.
+            What is actually enforced, after the ad-hoc switch is applied. Empty
+            when unrestricted is true, which means everything is accepted rather
+            than nothing.
         dashboardCidrs:
           type: array
           items: { type: string }
