@@ -6,35 +6,33 @@ import (
 	"time"
 )
 
-// TestLocalDNSSECDefaultsToOff pins the default.
+// TestLocalDNSSECDefaultsToLearn pins the shipped behaviour.
 //
-// A feature that sends extra upstream queries and runs an experimental
-// validator must be something an operator switched on. Inheriting it from a
-// release upgrade would change an instance's upstream traffic without anyone
-// asking for it.
-func TestLocalDNSSECDefaultsToOff(t *testing.T) {
+// Learn is the product name for observe: Daddybound validates independently in
+// the background and records what it concludes, but there is no path from that
+// verdict back to the client response. The worker, queue and timeout budgets
+// keep the extra work bounded on the reference 1 vCPU deployment.
+func TestLocalDNSSECDefaultsToLearn(t *testing.T) {
 	cfg := Default()
-	if got := cfg.DNS.LocalDNSSECMode(); got != LocalDNSSECOff {
-		t.Fatalf("default local_dnssec_validation = %q, want %q", got, LocalDNSSECOff)
+	if got := cfg.DNS.LocalDNSSECMode(); got != LocalDNSSECObserve {
+		t.Fatalf("default local_dnssec_validation = %q, want %q", got, LocalDNSSECObserve)
 	}
-	if cfg.DNS.ObserveDNSSEC() {
-		t.Fatal("the default configuration observes DNSSEC")
+	if !cfg.DNS.ObserveDNSSEC() {
+		t.Fatal("the default configuration does not start Daddybound Learn mode")
 	}
 }
 
-// TestAnAbsentModeIsOffRatherThanAnError is the upgrade path.
-//
-// Every configuration file written before this feature existed omits the key.
-// Those instances must keep working exactly as they did, which means the empty
-// string is off rather than invalid.
-func TestAnAbsentModeIsOffRatherThanAnError(t *testing.T) {
+// TestAZeroValueModeIsOffRatherThanAnError keeps the DNS type safe to use on
+// its own. Default() explicitly chooses observe, but a deliberately empty or
+// zero-value DNS struct must not unexpectedly construct a background validator.
+func TestAZeroValueModeIsOffRatherThanAnError(t *testing.T) {
 	cfg := Default()
 	cfg.DNS.LocalDNSSECValidation = ""
 	if err := cfg.validateLocalDNSSEC(); err != nil {
-		t.Fatalf("an omitted key was rejected: %v", err)
+		t.Fatalf("an empty mode was rejected: %v", err)
 	}
 	if cfg.DNS.ObserveDNSSEC() {
-		t.Fatal("an omitted key switched observation on")
+		t.Fatal("an empty mode switched observation on")
 	}
 }
 
