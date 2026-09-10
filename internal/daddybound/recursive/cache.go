@@ -226,6 +226,41 @@ func (c *Cache) BestDelegation(name string) (string, []netip.AddrPort, bool) {
 	}
 }
 
+// KnownCuts returns the names at or above name that the cache holds a live
+// delegation for, deepest first.
+//
+// This is what the cache knows about the shape of the tree, as distinct from
+// what any one resolution happened to walk. The difference is the whole point.
+// A resolution that starts from a cached delegation crosses no zone cuts and
+// therefore observes none — and reading that silence as "there are no zone
+// cuts here" is how a validator ends up authenticating a child zone's records
+// against its parent's keys. See Source.ZoneCutsFor.
+func (c *Cache) KnownCuts(name string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := c.opt.Now()
+	var out []string
+	for n := dns.CanonicalName(name); ; {
+		if e, ok := c.dels[n]; ok {
+			if now.Before(e.expires) {
+				out = append(out, n)
+			} else {
+				delete(c.dels, n)
+				c.stats.Expired++
+			}
+		}
+		if n == "." {
+			return out
+		}
+		i := strings.IndexByte(n, '.')
+		if i < 0 || i+1 >= len(n) {
+			return out
+		}
+		n = n[i+1:]
+	}
+}
+
 // GetAddrs returns cached addresses for a nameserver name.
 func (c *Cache) GetAddrs(name string) ([]netip.Addr, bool) {
 	c.mu.Lock()

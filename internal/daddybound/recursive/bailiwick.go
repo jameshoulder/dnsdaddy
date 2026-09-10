@@ -247,11 +247,21 @@ func scrub(zone string, msg *dns.Msg) (*dns.Msg, int) {
 // (RFC 6672 §3.2): it rewrites the suffix of a descendant, and the CNAME it
 // synthesises is the next link. A DNAME anywhere else in the reply is not part
 // of this chain.
+//
+// The RRSIGs covering those aliases come with them. Leaving them behind would
+// hand a validator a signed zone's CNAME with no signature over it, which is
+// indistinguishable from a stripped one — so a correctly signed alias chain
+// would be reported Bogus, and the splice itself would be the forgery. See
+// TestASignedAliasKeepsTheSignatureThatCoversIt.
 func aliasChain(msg *dns.Msg, qname string) []dns.RR {
 	var (
 		out     []dns.RR
 		at      = dns.CanonicalName(qname)
 		visited = map[string]bool{}
+		// onChain remembers which owner names the chain passed through, so
+		// the signature sweep below can tell a signature over this chain
+		// from one over an alias the client never asked about.
+		onChain = map[string]bool{}
 	)
 	// Each pass consumes one owner name and a name already visited stops the
 	// walk, so a reply whose CNAMEs form a cycle terminates here rather than
@@ -268,6 +278,7 @@ func aliasChain(msg *dns.Msg, qname string) []dns.RR {
 					continue
 				}
 				out = append(out, rr)
+				onChain[owner] = true
 				next = dns.CanonicalName(v.Target)
 			case *dns.DNAME:
 				if !strictlyBelow(owner, at) {
@@ -277,15 +288,33 @@ func aliasChain(msg *dns.Msg, qname string) []dns.RR {
 				// if the server sent one, is picked up by the CNAME case on
 				// the next pass.
 				out = append(out, rr)
+				onChain[owner] = true
 			}
 			if next != "" {
 				break
 			}
 		}
 		if next == "" {
-			return out
+			break
 		}
 		at = next
+	}
+	if len(out) == 0 {
+		return out
+	}
+
+	for _, rr := range msg.Answer {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok {
+			continue
+		}
+		if sig.TypeCovered != dns.TypeCNAME && sig.TypeCovered != dns.TypeDNAME {
+			continue
+		}
+		if !onChain[dns.CanonicalName(sig.Hdr.Name)] {
+			continue
+		}
+		out = append(out, rr)
 	}
 	return out
 }

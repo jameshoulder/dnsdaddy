@@ -58,6 +58,35 @@ type Zone struct {
 	// Rewrite lets a test corrupt an outgoing reply after it is built —
 	// wrong question, wrong ID, poisoned Additional section.
 	Rewrite func(req, reply *dns.Msg)
+
+	// Answer, when set, decides the reply's contents instead of Records.
+	//
+	// It exists so a zone's data can come from somewhere that already knows
+	// how to build a signed one. This package can construct referrals and
+	// NODATA and NXDOMAIN, and deliberately cannot construct an RRSIG, an
+	// NSEC chain or a signed DS — internal/daddybound/lab does all of that,
+	// and duplicating it here would mean a resolver tested against zones
+	// signed by a second implementation of the same rules.
+	//
+	// Glue is still this package's business: lab knows nameserver names and
+	// has no idea what address anything listens on, so the addresses are
+	// filled in afterwards from Delegations. See Signed.
+	Answer func(qname string, qtype uint16, do bool) Reply
+}
+
+// Reply is what a Zone.Answer callback produces.
+//
+// Authoritative is carried explicitly rather than inferred. A referral and a
+// NODATA both have an empty answer section and differ in exactly this bit,
+// and guessing it from the authority section's contents would make the
+// laboratory's idea of a referral disagree with the resolver's on precisely
+// the cases worth testing.
+type Reply struct {
+	Rcode         int
+	Answer        []dns.RR
+	Authority     []dns.RR
+	Extra         []dns.RR
+	Authoritative bool
 }
 
 // Hierarchy is a running set of authoritative servers.
@@ -341,9 +370,30 @@ func (s *server) answer(req *dns.Msg, name string, qtype uint16) *dns.Msg {
 	reply := new(dns.Msg)
 	reply.SetReply(req)
 	reply.RecursionAvailable = false
+	// Signed answers carry keys and signatures and do not fit in 512 octets.
+	// Without echoing an OPT record the library truncates every one of them,
+	// which reads as a broken zone rather than as a missing EDNS option.
+	if opt := req.IsEdns0(); opt != nil {
+		reply.SetEdns0(4096, opt.Do())
+	}
 
 	if s.zone.Lame {
 		reply.Rcode = dns.RcodeRefused
+		return reply
+	}
+
+	if s.zone.Answer != nil {
+		do := false
+		if opt := req.IsEdns0(); opt != nil {
+			do = opt.Do()
+		}
+		r := s.zone.Answer(name, qtype, do)
+		reply.Rcode = r.Rcode
+		reply.Answer = r.Answer
+		reply.Ns = r.Authority
+		reply.Extra = append(reply.Extra, r.Extra...)
+		reply.Authoritative = r.Authoritative
+		s.attachGlue(reply)
 		return reply
 	}
 
@@ -412,6 +462,37 @@ func (s *server) answer(req *dns.Msg, name string, qtype uint16) *dns.Msg {
 	}
 	reply.Ns = append(reply.Ns, soa(s.zone.Name))
 	return reply
+}
+
+// attachGlue fills in the addresses for nameservers this zone refers to.
+//
+// A referral built from zone data names its nameservers and cannot know where
+// they listen: an address belongs to a running server, and the zone was
+// written before one existed. This is the join, and it is the same in-bailiwick
+// glue a real parent publishes — an address for a name inside the child being
+// delegated, because nothing else could supply it.
+func (s *server) attachGlue(reply *dns.Msg) {
+	have := map[string]bool{}
+	for _, rr := range reply.Extra {
+		switch rr.(type) {
+		case *dns.A, *dns.AAAA:
+			have[dns.CanonicalName(rr.Header().Name)] = true
+		}
+	}
+	for _, rr := range reply.Ns {
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		target := dns.CanonicalName(ns.Ns)
+		if have[target] {
+			continue
+		}
+		for _, ap := range s.zone.Glue[target] {
+			reply.Extra = append(reply.Extra, glueRR(target, ap.Addr()))
+			have[target] = true
+		}
+	}
 }
 
 // delegationFor finds the deepest delegation covering name.

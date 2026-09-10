@@ -228,3 +228,97 @@ func formatQueries(qs []reclab.Query) string {
 	}
 	return b.String()
 }
+
+// A signed alias must keep the signature that covers it.
+//
+// The splice that builds an aliased answer originally took only CNAME and
+// DNAME records, which quietly dropped the RRSIGs over them. A validator
+// handed that message sees a CNAME in a signed zone with no signature — the
+// exact shape of a stripped one — so a correctly signed chain would be
+// reported Bogus and the resolver's own splice would be the forgery.
+//
+// The signature here does not have to verify. What is being tested is whether
+// the record survives the journey from the authoritative reply to the answer.
+func TestASignedAliasKeepsTheSignatureThatCoversIt(t *testing.T) {
+	sig, err := dns.NewRR("alias.example.com. 3600 IN RRSIG CNAME 13 3 3600 " +
+		"20990101000000 20200101000000 12345 example.com. " +
+		"aGVsbG8gdGhpcyBpcyBub3QgYSByZWFsIHNpZ25hdHVyZQ==")
+	if err != nil {
+		t.Fatalf("build the signature: %v", err)
+	}
+
+	r, _ := hierarchy(t, func(z *[]reclab.Zone) {
+		for i := range *z {
+			if (*z)[i].Name == "example.com." {
+				(*z)[i].Records = append((*z)[i].Records,
+					reclab.CNAME("alias.example.com.", "www.example.com."))
+				(*z)[i].Rewrite = func(req, reply *dns.Msg) {
+					if len(req.Question) == 0 || req.Question[0].Name != "alias.example.com." {
+						return
+					}
+					reply.Answer = append(reply.Answer, sig)
+				}
+			}
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	res, err := r.Resolve(ctx, "alias.example.com.", dns.TypeA)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	var kept bool
+	for _, rr := range res.Msg.Answer {
+		if s, ok := rr.(*dns.RRSIG); ok && s.TypeCovered == dns.TypeCNAME {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Errorf("the RRSIG over the alias was dropped by the splice; answer was:\n%v", res.Msg.Answer)
+	}
+}
+
+// The chain records which servers answered which link, because the splice
+// destroys that. Live mode needs it to prove the message it returns is the
+// message that was validated rather than a second fetch that agreed.
+func TestAnAliasedAnswerRecordsEveryHopItWasBuiltFrom(t *testing.T) {
+	r, _ := hierarchy(t, func(z *[]reclab.Zone) {
+		for i := range *z {
+			if (*z)[i].Name == "example.com." {
+				(*z)[i].Records = append((*z)[i].Records,
+					reclab.CNAME("alias.example.com.", "www.example.com."))
+			}
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	res, err := r.Resolve(ctx, "alias.example.com.", dns.TypeA)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(res.Chain) != 2 {
+		t.Fatalf("want one hop per link of alias -> www, got %d: %+v", len(res.Chain), res.Chain)
+	}
+	if res.Chain[0].QName != "alias.example.com." || res.Chain[1].QName != "www.example.com." {
+		t.Errorf("chain is %s then %s, want alias.example.com. then www.example.com.",
+			res.Chain[0].QName, res.Chain[1].QName)
+	}
+	for i, hop := range res.Chain {
+		if hop.Msg == nil {
+			t.Errorf("hop %d (%s) carries no reply", i, hop.QName)
+		}
+	}
+
+	// An unaliased name is one hop, not zero: every answer has a provenance.
+	plain, err := r.Resolve(ctx, "other.example.com.", dns.TypeA)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(plain.Chain) != 1 {
+		t.Errorf("an unaliased answer has %d hops, want exactly 1", len(plain.Chain))
+	}
+}

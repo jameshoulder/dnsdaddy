@@ -201,6 +201,30 @@ type Delegation struct {
 	NS []string
 }
 
+// Hop is one link of a resolution: a question, and the reply the servers for
+// its zone gave.
+//
+// A resolution for an aliased name is several resolutions — the alias, then
+// its target, then the target's target — and each is answered by a different
+// set of authoritative servers. Result.Msg splices them into the single answer
+// a client asked for, which is right for a client and lossy for anything that
+// needs to know which server said what.
+//
+// The chain exists for the one caller that must not lose it: Live mode has to
+// be able to prove that the message it returns is the message that was
+// validated, and it does that by handing the validator these exact replies
+// rather than re-asking and hoping the second answer matches the first. See
+// internal/daddybound/native.
+type Hop struct {
+	// QName and QType are the question this hop answered.
+	QName string
+	QType uint16
+	// Zone is the zone the reply came from.
+	Zone string
+	// Msg is the reply, after scrubbing, exactly as it will be used.
+	Msg *dns.Msg
+}
+
 // Result is one completed resolution.
 type Result struct {
 	// Msg is the response as received from the authoritative server. The
@@ -210,8 +234,19 @@ type Result struct {
 	Msg *dns.Msg
 	// Zone is the zone the answer came from: the deepest zone cut traversed.
 	Zone string
+	// StartZone is the zone the walk began in — the root on a cold cache, and
+	// a cached delegation otherwise.
+	//
+	// It bounds what Delegations is evidence about. A resolution that started
+	// below the root crossed no cut above its starting point and observed
+	// nothing there, which is not the same as observing that there is nothing
+	// there.
+	StartZone string
 	// Delegations lists every zone cut crossed, parent first.
 	Delegations []Delegation
+	// Chain is the per-hop replies behind Msg, in order. One entry for a name
+	// that is not aliased. See Hop.
+	Chain []Hop
 	// Trace is what the resolver did, in order.
 	Trace []Step
 	// Queries is how many questions left the process.
@@ -286,7 +321,12 @@ type resolution struct {
 	trace   []Step
 	queries int
 	dels    []Delegation
+	hops    []Hop
 	start   time.Time
+	// from is the shallowest zone any hop of this resolution began in. The
+	// shallowest rather than the first, because a CNAME chain restarts and a
+	// later hop may begin further up the tree than an earlier one.
+	from string
 }
 
 // Resolve answers one question by iterative resolution from the root.
@@ -302,6 +342,8 @@ func (r *Resolver) Resolve(ctx context.Context, name string, rrtype uint16) (*Re
 		Msg:         msg,
 		Zone:        zone,
 		Delegations: rs.dels,
+		StartZone:   rs.from,
+		Chain:       rs.hops,
 		Trace:       rs.trace,
 		Queries:     rs.queries,
 		Elapsed:     r.now().Sub(rs.start),
@@ -323,6 +365,10 @@ func (rs *resolution) resolveWithAliases(qname string, rrtype uint16, hop int) (
 	if err != nil {
 		return nil, "", err
 	}
+	// Recorded before the splice, because the splice is where provenance is
+	// lost: after it there is one message and no way to say which servers
+	// contributed which records.
+	rs.hops = append(rs.hops, Hop{QName: qname, QType: rrtype, Zone: zone, Msg: msg})
 
 	// A CNAME that answers the question asked is the answer; only a CNAME
 	// for a different type needs following.
@@ -382,10 +428,11 @@ func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string
 	}
 	rs.r.stats.cacheMiss.Add(1)
 
-	zone, servers, err := rs.startingPoint(qname)
+	zone, servers, err := rs.startingPoint(qname, rrtype)
 	if err != nil {
 		return nil, "", err
 	}
+	rs.noteStart(zone)
 
 	for depth := 0; depth <= rs.r.cfg.Limits.MaxDelegations; depth++ {
 		msg, err := rs.askZone(zone, servers, qname, rrtype)
@@ -394,6 +441,25 @@ func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string
 		}
 
 		child, ns, glue, isReferral := rs.classifyReferral(zone, qname, msg)
+		if isReferral && rrtype == dns.TypeDS && child == qname {
+			// The parent has referred us to the child for the child's own DS.
+			// Following that would ask the one zone guaranteed not to publish
+			// it. The DS sits on the parent side of the cut (RFC 4035 §2.4),
+			// so the answer has to come from here — ask this zone the full
+			// question rather than descending.
+			//
+			// The referral is still evidence that the cut exists, so it is
+			// recorded before the retry.
+			rs.dels = append(rs.dels, Delegation{Parent: zone, Child: child, NS: ns})
+			rs.r.cache.PutDelegation(child, ns, glue)
+
+			direct, derr := rs.askZoneDirect(zone, servers, qname, rrtype)
+			if derr != nil {
+				return nil, "", derr
+			}
+			rs.r.cache.PutMsg(qname, rrtype, direct)
+			return direct, zone, nil
+		}
 		if !isReferral {
 			// The reply may be the answer to a *minimised* probe rather than
 			// to the caller's question: an NXDOMAIN for an intermediate name
@@ -422,10 +488,40 @@ func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string
 		ErrLimit, rs.r.cfg.Limits.MaxDelegations, qname)
 }
 
+// parentOf returns the name one label up, or "." at the top.
+func parentOf(name string) string {
+	name = dns.CanonicalName(name)
+	if name == "." {
+		return "."
+	}
+	i := strings.IndexByte(name, '.')
+	if i < 0 || i+1 >= len(name) {
+		return "."
+	}
+	return name[i+1:]
+}
+
+// noteStart records the shallowest zone this resolution began in.
+func (rs *resolution) noteStart(zone string) {
+	if rs.from == "" || strictlyBelow(zone, rs.from) {
+		rs.from = zone
+	}
+}
+
 // startingPoint returns the deepest zone cut already known for qname, so a
 // resolution does not walk from the root every time.
-func (rs *resolution) startingPoint(qname string) (string, []netip.AddrPort, error) {
-	if zone, addrs, ok := rs.r.cache.BestDelegation(qname); ok && len(addrs) > 0 {
+func (rs *resolution) startingPoint(qname string, rrtype uint16) (string, []netip.AddrPort, error) {
+	// A DS RRset lives in the parent zone, never in the child. Starting from a
+	// cached delegation for the name itself would send the question to the
+	// very servers that do not hold the answer, and they would honestly
+	// answer NODATA with their own signed denial — which reads, from the
+	// parent's zone, as an unsigned delegation. Every signed zone in the
+	// cache would go Indeterminate on the second query for it.
+	lookup := qname
+	if rrtype == dns.TypeDS {
+		lookup = parentOf(qname)
+	}
+	if zone, addrs, ok := rs.r.cache.BestDelegation(lookup); ok && len(addrs) > 0 {
 		return zone, addrs, nil
 	}
 	addrs, err := rs.r.rootServers(rs.ctx)
@@ -441,12 +537,27 @@ func (rs *resolution) startingPoint(qname string) (string, []netip.AddrPort, err
 // permanently the first choice, and a server that fails is not retried within
 // the same resolution.
 func (rs *resolution) askZone(zone string, servers []netip.AddrPort, qname string, rrtype uint16) (*dns.Msg, error) {
+	return rs.ask(zone, servers, qname, rrtype, *rs.r.cfg.QnameMinimisation)
+}
+
+// askZoneDirect puts the caller's exact question to a zone's servers, without
+// minimisation.
+//
+// Used where the name being asked about is the point of the question rather
+// than a step on the way to it — a DS at a delegation, where the parent is the
+// only zone that holds the answer and probing for the next label down would
+// walk past it.
+func (rs *resolution) askZoneDirect(zone string, servers []netip.AddrPort, qname string, rrtype uint16) (*dns.Msg, error) {
+	return rs.ask(zone, servers, qname, rrtype, false)
+}
+
+func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, rrtype uint16, minimise bool) (*dns.Msg, error) {
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("%w: no servers for %s", ErrNoReachableServer, zone)
 	}
 
 	askName, askType := qname, rrtype
-	if *rs.r.cfg.QnameMinimisation {
+	if minimise {
 		askName, askType = minimisedQuestion(zone, qname, rrtype)
 	}
 
@@ -766,3 +877,7 @@ func (r *Resolver) Stats() Stats { return r.stats.snapshot() }
 
 // CacheStats exposes the cache's own counters.
 func (r *Resolver) CacheStats() CacheStats { return r.cache.Stats() }
+
+// KnownCuts returns the zone cuts the resolver already knows along name,
+// deepest first. See Cache.KnownCuts.
+func (r *Resolver) KnownCuts(name string) []string { return r.cache.KnownCuts(name) }

@@ -519,7 +519,20 @@ func (h *Hierarchy) respond(name string, rrtype uint16, wantDNSSEC bool) dnssec.
 // rather than a resolver: it stops and returns what it has, which is what a
 // real one does.
 func (h *Hierarchy) chaseAliases(qname string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
-	out := h.assemble(qname, rrtype, wantDNSSEC)
+	return h.chaseAliasesWith(qname, rrtype, wantDNSSEC, h.assemble)
+}
+
+// chaseAliasesWith is chaseAliases over a chosen assembler.
+//
+// A server serving one zone chases an alias only as far as its own data goes;
+// the whole-hierarchy source chases it as far as the hierarchy does. The
+// difference lives in the assembler, and everything else about following a
+// chain — the hop bound, the loop guard, the splicing — is the same.
+func (h *Hierarchy) chaseAliasesWith(
+	qname string, rrtype uint16, wantDNSSEC bool,
+	assemble func(string, uint16, bool) dnssec.Response,
+) dnssec.Response {
+	out := assemble(qname, rrtype, wantDNSSEC)
 	if rrtype == dns.TypeCNAME {
 		return out
 	}
@@ -538,7 +551,7 @@ func (h *Hierarchy) chaseAliases(qname string, rrtype uint16, wantDNSSEC bool) d
 		}
 		seen[target] = true
 
-		next := h.assemble(target, rrtype, wantDNSSEC)
+		next := assemble(target, rrtype, wantDNSSEC)
 		out.Rcode = next.Rcode
 		out.Answer = append(out.Answer, next.Answer...)
 		// Every hop's authority section is kept, not just the last.
@@ -583,13 +596,25 @@ func lastCNAME(answer []dns.RR) *dns.CNAME {
 
 // assemble builds the response an honest authoritative server would send.
 func (h *Hierarchy) assemble(qname string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
-	out := dnssec.Response{Rcode: dns.RcodeSuccess}
-
 	zone := h.authoritativeZone(qname, rrtype)
 	if zone == nil {
-		out.Rcode = dns.RcodeNameError
-		return out
+		return dnssec.Response{Rcode: dns.RcodeNameError}
 	}
+	return h.assembleFrom(zone, qname, rrtype, wantDNSSEC)
+}
+
+// assembleFrom is assemble once the zone has been chosen.
+//
+// Split out because "which zone answers this?" and "what does that zone say?"
+// are separate questions, and only the second one has a single answer. A
+// forwarder-shaped source picks the deepest zone holding the name; a hierarchy
+// of real servers has each zone answer only for itself and refer for the rest,
+// and the difference between those two is precisely what iterative resolution
+// is. Serving the same signed records both ways is what lets one set of zones
+// test a validator reading from memory and a resolver walking delegations over
+// the wire. See RespondFrom.
+func (h *Hierarchy) assembleFrom(zone *Zone, qname string, rrtype uint16, wantDNSSEC bool) dnssec.Response {
+	out := dnssec.Response{Rcode: dns.RcodeSuccess}
 
 	// Below a delegation this zone does not answer for: it refers, and the
 	// referral carries either the DS or the proof that none exists.
@@ -672,6 +697,91 @@ func (h *Hierarchy) assemble(qname string, rrtype uint16, wantDNSSEC bool) dnsse
 	}
 	if wantDNSSEC {
 		out.Authority = append(out.Authority, h.denialFor(zone, qname, rrtype, out.Rcode)...)
+	}
+	return out
+}
+
+// RespondFrom answers a question the way the authoritative servers for one
+// zone would: from that zone's own data, or with a referral, and never by
+// reaching into a zone below the cut.
+//
+// This is what lets one built hierarchy be served two ways. Hierarchy.Lookup
+// answers as a forwarder does — it finds the zone holding the name and returns
+// the data — which is the right shape for validating records in memory. A
+// resolver has to be *referred* from the root downwards, and a source that
+// short-circuits that never exercises a delegation. Both read the same signed
+// records, so a disagreement between the two is a disagreement about
+// resolution rather than about the zones.
+//
+// ok is false when this zone has no business answering: it does not exist, or
+// the name is outside it. A server in that position answers REFUSED, and
+// saying so here rather than returning an empty response keeps "I do not serve
+// this" distinct from "there is nothing here", which is the difference between
+// a lame delegation and a NODATA.
+func (h *Hierarchy) RespondFrom(zoneName, qname string, rrtype uint16, wantDNSSEC bool) (dnssec.Response, bool) {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return dnssec.Response{}, false
+	}
+	name := dns.CanonicalName(qname)
+	if !dns.IsSubDomain(z.Name, name) {
+		return dnssec.Response{}, false
+	}
+
+	from := func(n string, t uint16, do bool) dnssec.Response {
+		// An alias target outside this zone is not this server's to answer.
+		// A real one stops at its own boundary and lets the resolver go and
+		// ask whoever owns the target.
+		if !dns.IsSubDomain(z.Name, dns.CanonicalName(n)) {
+			return dnssec.Response{Rcode: dns.RcodeSuccess}
+		}
+		return h.assembleFrom(z, dns.CanonicalName(n), t, do)
+	}
+	out := from(name, rrtype, wantDNSSEC)
+	if rrtype != dns.TypeCNAME {
+		out = h.chaseAliasesWith(name, rrtype, wantDNSSEC, from)
+	}
+
+	// The overrides an attacker-simulating test installs apply here too:
+	// they represent tampering between the server deciding what to send and
+	// the validator seeing it, and that is just as true when the message
+	// crosses a socket.
+	if o := h.overrides[setKey{name: name, rrtype: rrtype}]; o != nil {
+		if o.rcode != nil {
+			out.Rcode = *o.rcode
+		}
+		if o.set {
+			out.Authority = o.authority
+		}
+		if o.answerSet {
+			out.Answer = o.answer
+		}
+	}
+	return out, true
+}
+
+// Delegations returns the child zones this zone delegates, with the
+// nameserver names it publishes for each.
+//
+// Exported so a hierarchy of real servers can be wired from a built one: the
+// server for each zone needs to know which names it refers for and where those
+// referrals point. Without it a caller would have to guess the tree from zone
+// names, which gets a sibling delegation wrong the first time it meets one.
+func (h *Hierarchy) Delegations(zoneName string) map[string][]string {
+	z := h.Zone(zoneName)
+	if z == nil {
+		return nil
+	}
+	out := map[string][]string{}
+	for child := range z.delegations {
+		var names []string
+		for _, rr := range z.sets[setKey{name: child, rrtype: dns.TypeNS}] {
+			if ns, ok := rr.(*dns.NS); ok {
+				names = append(names, dns.CanonicalName(ns.Ns))
+			}
+		}
+		sort.Strings(names)
+		out[child] = names
 	}
 	return out
 }
