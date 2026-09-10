@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -119,7 +120,7 @@ type Resolver struct {
 	now   func() time.Time
 
 	root  rootState
-	stats Stats
+	stats counters
 }
 
 // New builds a Resolver.
@@ -218,7 +219,8 @@ type Result struct {
 	Elapsed time.Duration
 }
 
-// Stats are cumulative counters for observability.
+// Stats are cumulative counters for observability. A snapshot, taken by
+// Resolver.Stats.
 type Stats struct {
 	Queries    uint64
 	Failures   uint64
@@ -226,6 +228,41 @@ type Stats struct {
 	CacheMiss  uint64
 	Truncated  uint64
 	Mismatched uint64
+	// Scrubbed counts records discarded because the server that sent them
+	// had no authority over the name they described. See scrub. Not an
+	// error count: sloppy servers exist. A number that climbs against one
+	// zone is worth looking at.
+	Scrubbed uint64
+}
+
+// counters is the live counter set behind Stats.
+//
+// Atomic rather than plain fields, because a Resolver is shared. Learn mode
+// runs several observation workers against one resolver by design — that is
+// how a shared cache and a single priming state are possible — so every write
+// here happens on an arbitrary goroutine. Plain `uint64++` from two workers is
+// a data race, and the race detector says so; found by running Resolve from
+// eight goroutines before this existed.
+type counters struct {
+	queries    atomic.Uint64
+	failures   atomic.Uint64
+	cacheHits  atomic.Uint64
+	cacheMiss  atomic.Uint64
+	truncated  atomic.Uint64
+	mismatched atomic.Uint64
+	scrubbed   atomic.Uint64
+}
+
+func (c *counters) snapshot() Stats {
+	return Stats{
+		Queries:    c.queries.Load(),
+		Failures:   c.failures.Load(),
+		CacheHits:  c.cacheHits.Load(),
+		CacheMiss:  c.cacheMiss.Load(),
+		Truncated:  c.truncated.Load(),
+		Mismatched: c.mismatched.Load(),
+		Scrubbed:   c.scrubbed.Load(),
+	}
 }
 
 var (
@@ -309,7 +346,7 @@ func (rs *resolution) resolveWithAliases(qname string, rrtype uint16, hop int) (
 	// leads to the answer, not just its final hop.
 	out := next.Copy()
 	out.Question = []dns.Question{{Name: qname, Qtype: rrtype, Qclass: dns.ClassINET}}
-	out.Answer = append(append([]dns.RR{}, aliasRecords(msg, qname)...), next.Answer...)
+	out.Answer = append(append([]dns.RR{}, aliasChain(msg, qname)...), next.Answer...)
 	return out, nextZone, nil
 }
 
@@ -335,30 +372,15 @@ func cnameTarget(msg *dns.Msg, qname string, rrtype uint16) string {
 	return ""
 }
 
-// aliasRecords returns the CNAME (and any DNAME) records for qname.
-func aliasRecords(msg *dns.Msg, qname string) []dns.RR {
-	var out []dns.RR
-	for _, rr := range msg.Answer {
-		switch rr.(type) {
-		case *dns.CNAME, *dns.DNAME:
-			out = append(out, rr)
-		default:
-			_ = rr
-		}
-	}
-	_ = qname
-	return out
-}
-
 // resolveOnce walks delegations from the root to the servers for qname and
 // returns their answer. It does not follow CNAMEs.
 func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string, error) {
 	if cached, ok := rs.r.cache.GetMsg(qname, rrtype); ok {
-		rs.r.stats.CacheHits++
+		rs.r.stats.cacheHits.Add(1)
 		rs.step(Step{Zone: "", QName: qname, QType: rrtype, Kind: "cached"})
 		return cached, "", nil
 	}
-	rs.r.stats.CacheMiss++
+	rs.r.stats.cacheMiss.Add(1)
 
 	zone, servers, err := rs.startingPoint(qname)
 	if err != nil {
@@ -443,13 +465,20 @@ func (rs *resolution) askZone(zone string, servers []netip.AddrPort, qname strin
 
 		started := rs.r.now()
 		rs.queries++
-		rs.r.stats.Queries++
+		rs.r.stats.queries.Add(1)
 		msg, err := rs.r.ex.Exchange(rs.ctx, server, query(askName, askType, rs.r.cfg.UDPSize))
 		elapsed := rs.r.now().Sub(started)
+		if msg != nil {
+			// Before anything reads it. Every later step — referral
+			// classification, glue acceptance, caching, the answer handed to
+			// the validator and, in Live mode, to a client — sees only what
+			// this server was entitled to say. See scrub.
+			msg, _ = rs.scrub(zone, server, msg)
+		}
 		if err != nil {
-			rs.r.stats.Failures++
+			rs.r.stats.failures.Add(1)
 			if errors.Is(err, ErrMismatchedReply) {
-				rs.r.stats.Mismatched++
+				rs.r.stats.mismatched.Add(1)
 			}
 			lastErr = err
 			rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
@@ -477,12 +506,13 @@ func (rs *resolution) askZone(zone string, servers []netip.AddrPort, qname strin
 			rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
 				Kind: "nodata", Detail: "minimised probe: descending", Elapsed: elapsed})
 			rs.queries++
-			rs.r.stats.Queries++
+			rs.r.stats.queries.Add(1)
 			full, ferr := rs.r.ex.Exchange(rs.ctx, server, query(qname, rrtype, rs.r.cfg.UDPSize))
 			if ferr != nil {
 				lastErr = ferr
 				continue
 			}
+			full, _ = rs.scrub(zone, server, full)
 			msg = full
 		}
 
@@ -495,6 +525,24 @@ func (rs *resolution) askZone(zone string, servers []netip.AddrPort, qname strin
 		lastErr = fmt.Errorf("%w: %s", ErrNoReachableServer, zone)
 	}
 	return nil, lastErr
+}
+
+// scrub applies the bailiwick rule to a whole reply and records what it took
+// out.
+//
+// The removal is silent to the resolution — a scrubbed reply is handled
+// exactly like a well-behaved one — but it is not silent to an operator. The
+// counter and the trace step are how "this server keeps trying to tell us
+// about other people's names" becomes visible, which is the difference between
+// a defence that works and a defence nobody knows fired.
+func (rs *resolution) scrub(zone string, server netip.AddrPort, msg *dns.Msg) (*dns.Msg, int) {
+	msg, removed := scrub(zone, msg)
+	if removed > 0 {
+		rs.r.stats.scrubbed.Add(uint64(removed))
+		rs.step(Step{Zone: zone, Server: server.String(), Kind: "scrubbed",
+			Detail: fmt.Sprintf("%d record(s) outside %s discarded", removed, zone)})
+	}
+	return msg, removed
 }
 
 // classifyReferral decides whether msg is a referral, and if so to where.
@@ -714,7 +762,7 @@ func summarise(msg *dns.Msg) string {
 }
 
 // Stats returns a snapshot of the counters.
-func (r *Resolver) Stats() Stats { return r.stats }
+func (r *Resolver) Stats() Stats { return r.stats.snapshot() }
 
 // CacheStats exposes the cache's own counters.
 func (r *Resolver) CacheStats() CacheStats { return r.cache.Stats() }

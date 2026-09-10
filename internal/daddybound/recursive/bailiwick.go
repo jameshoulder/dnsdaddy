@@ -169,3 +169,123 @@ func usableTarget(addr netip.Addr) bool {
 	}
 	return true
 }
+
+// scrub removes from a reply every record the answering server had no
+// authority to assert.
+//
+// This is the same question inBailiwick answers, asked of the whole message
+// rather than of one name, and it closes the oldest hole in DNS. A server
+// authoritative for one zone controls every byte of its replies. Nothing in
+// the protocol stops the nameserver for a throwaway domain answering a query
+// about one of its own names and attaching, in the same message:
+//
+//	bank.example.  A  6.6.6.6
+//
+// A resolver that keeps that record has been poisoned by a server it chose to
+// talk to, no spoofing required. Doing this at the message level is what makes
+// the rule impossible to forget: whatever a section is for, a record in it
+// that names something outside the answering zone is discarded, counted, and
+// never reaches the cache, the validator or a client.
+//
+// It also withdraws a subtler licence. resolveOnce stops chasing a CNAME when
+// the reply already carries the requested type for the target — a sensible
+// shortcut when the target is in the same zone, and a forgery when it is not,
+// because the record is then one operator's claim about another's data.
+// Scrubbing before the shortcut is evaluated means it can only fire on records
+// the answering zone was entitled to publish; an out-of-zone target is
+// resolved by asking the servers that own it. Removing the scrub makes
+// TestAnOutOfZoneCNAMETargetIsResolvedRatherThanBelieved fail with
+// example.com's server deciding what a name under bank.co.uk resolves to.
+//
+// The OPT pseudo-record is kept. It carries no zone data — it is the
+// transport's own metadata about buffer sizes and flags, its owner is the root
+// by construction, and dropping it would take the extended rcode and any EDE
+// with it.
+//
+// Returns the message and how many records were removed. A non-zero count is
+// not an error: plenty of real servers are merely sloppy. It is counted so
+// that "this zone keeps trying to tell us about other people's names" is
+// visible rather than inferred.
+func scrub(zone string, msg *dns.Msg) (*dns.Msg, int) {
+	removed := 0
+	keep := func(rrs []dns.RR) []dns.RR {
+		if len(rrs) == 0 {
+			return rrs
+		}
+		out := make([]dns.RR, 0, len(rrs))
+		for _, rr := range rrs {
+			if _, isOPT := rr.(*dns.OPT); isOPT {
+				out = append(out, rr)
+				continue
+			}
+			if !inBailiwick(zone, dns.CanonicalName(rr.Header().Name)) {
+				removed++
+				continue
+			}
+			out = append(out, rr)
+		}
+		return out
+	}
+
+	msg.Answer = keep(msg.Answer)
+	msg.Ns = keep(msg.Ns)
+	msg.Extra = keep(msg.Extra)
+	return msg, removed
+}
+
+// aliasChain returns the alias records in msg that lead away from qname, in
+// chain order.
+//
+// Only the records on the chain. A zone is entitled to publish aliases for
+// every name it holds and a reply may legitimately carry several; splicing all
+// of them into one resolution's answer hands a client CNAMEs for names it
+// never asked about, presented as part of its own answer. What the client
+// asked for is the chain from qname, so that is what is returned.
+//
+// DNAME is included when its owner is a proper ancestor of the name being
+// followed, because that is exactly the condition under which a DNAME applies
+// (RFC 6672 §3.2): it rewrites the suffix of a descendant, and the CNAME it
+// synthesises is the next link. A DNAME anywhere else in the reply is not part
+// of this chain.
+func aliasChain(msg *dns.Msg, qname string) []dns.RR {
+	var (
+		out     []dns.RR
+		at      = dns.CanonicalName(qname)
+		visited = map[string]bool{}
+	)
+	// Each pass consumes one owner name and a name already visited stops the
+	// walk, so a reply whose CNAMEs form a cycle terminates here rather than
+	// spinning.
+	for !visited[at] {
+		visited[at] = true
+
+		var next string
+		for _, rr := range msg.Answer {
+			owner := dns.CanonicalName(rr.Header().Name)
+			switch v := rr.(type) {
+			case *dns.CNAME:
+				if owner != at {
+					continue
+				}
+				out = append(out, rr)
+				next = dns.CanonicalName(v.Target)
+			case *dns.DNAME:
+				if !strictlyBelow(owner, at) {
+					continue
+				}
+				// The DNAME belongs in the answer; the CNAME it synthesises,
+				// if the server sent one, is picked up by the CNAME case on
+				// the next pass.
+				out = append(out, rr)
+			}
+			if next != "" {
+				break
+			}
+		}
+		if next == "" {
+			return out
+		}
+		at = next
+	}
+	return out
+}
