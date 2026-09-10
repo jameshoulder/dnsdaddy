@@ -352,13 +352,53 @@ func TestUnrestrictedDistinguishesPublicResolverFromLoopbackOnly(t *testing.T) {
 	}
 }
 
-// An invalid address is admitted: that only happens on transports where the
-// peer is identified another way, and failing them closed would break roaming
-// clients for no security gain.
-func TestInvalidAddressIsAdmitted(t *testing.T) {
+// An address that could not be read is refused.
+//
+// This test asserted the opposite until the open-resolver work, and the
+// reasoning it carried was right when it was written: an invalid address only
+// arrived on transports where the peer was identified another way — a DoH or
+// DoT token — and failing those closed would have broken roaming clients for
+// no security gain.
+//
+// The exemption then moved and this did not follow it. The DNS handler now
+// checks whether the peer was identified by token *before* consulting the ACL,
+// so a token-identified client never reaches this function. What was left was a
+// primitive that admitted anything whose source address could not be read, on
+// the one path where the source address is the whole of the check.
+//
+// "We could not tell who this is" must not resolve to "then anyone", on a
+// resolver whose entire job includes not being open.
+func TestAnUnreadableAddressIsRefused(t *testing.T) {
 	s := Compute([]string{"127.0.0.0/8"}, false, nil)
+	if s.Allows(netip.Addr{}) {
+		t.Error("a peer whose address could not be read was admitted; " +
+			"on a public deployment that is an open resolver for anything that " +
+			"can make its source address unreadable")
+	}
+	// And the ACL still works for addresses that can be read, so this is not
+	// passing because everything is refused.
+	if !s.Allows(netip.MustParseAddr("127.0.0.1")) {
+		t.Error("a permitted address was refused")
+	}
+	if s.Allows(netip.MustParseAddr("203.0.113.9")) {
+		t.Error("an address outside the permitted ranges was admitted")
+	}
+}
+
+// An unrestricted ACL still admits everything, including an unreadable
+// address.
+//
+// Unrestricted is the operator's explicit decision to run without a client
+// ACL — it requires allow_public_resolver or a loopback-only listener — and it
+// means what it says. Refusing an unreadable address there would be refusing
+// something the operator asked to permit.
+func TestAnUnrestrictedSetStillAdmitsEverything(t *testing.T) {
+	s := Compute(nil, true, nil)
 	if !s.Allows(netip.Addr{}) {
-		t.Error("an unparsed peer address was refused")
+		t.Error("an unrestricted ACL refused an unreadable address")
+	}
+	if !s.Allows(netip.MustParseAddr("203.0.113.9")) {
+		t.Error("an unrestricted ACL refused a public address")
 	}
 }
 

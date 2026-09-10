@@ -423,12 +423,29 @@ func covers(outer, inner netip.Prefix) bool {
 
 // Allows reports whether addr may use this resolver.
 //
-// An address we could not parse is allowed through: that only happens for
-// transports where the peer is identified some other way (a DoH token), and
-// failing those closed would break roaming clients for no security gain.
+// An address that could not be parsed is refused. That is a change, and the
+// reasoning it replaces is worth recording because it was right once.
+//
+// This used to admit an invalid address, on the grounds that it only happened
+// for transports where the peer is identified some other way — a DoH or DoT
+// token — and failing those closed would break roaming clients for no security
+// gain. The exemption then moved: the handler now checks `networkID == ""`
+// before consulting the ACL at all, so a token-identified peer never reaches
+// here. What was left was a primitive that admits anything whose source
+// address could not be read, on a path where the source address is the only
+// thing being checked.
+//
+// Reachable or not — a Unix-domain listener, a proxied socket, anything whose
+// RemoteAddr does not parse as host:port — "we could not tell who this is" must
+// not mean "then anyone". Found by the open-resolver test in
+// internal/dnsserver, which asks not only whether an unauthorised client is
+// refused but whether the resolver did any work on its behalf.
 func (s *Set) Allows(addr netip.Addr) bool {
-	if s == nil || s.unrestricted || !addr.IsValid() {
+	if s == nil || s.unrestricted {
 		return true
+	}
+	if !addr.IsValid() {
+		return false
 	}
 	addr = Normalize(addr)
 	for _, p := range s.all {
