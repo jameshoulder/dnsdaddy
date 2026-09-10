@@ -10,6 +10,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
+	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
@@ -496,7 +497,9 @@ func (a *API) handleResolvers(w http.ResponseWriter, r *http.Request) {
 		DoHURL:    base + "/dns-query",
 	}
 
-	for _, u := range a.Resolver.Upstreams() {
+	// Empty in native mode, where there are no upstreams. An empty table is
+	// the truth; a row of zeroes would be an invention.
+	for _, u := range forwarderUpstreams(a.Forwarder) {
 		q, e, avg := u.Stats()
 		info.Upstreams = append(info.Upstreams, UpstreamStatus{
 			Spec:         u.Spec,
@@ -551,20 +554,36 @@ type Settings struct {
 	// saw, or it has not seen any — and without the denominator the dashboard
 	// cannot tell them apart, so it displayed an unmeasured 0% as though it
 	// had been measured.
-	CacheLookups  uint64  `json:"cacheLookups"`
-	FeedRefresh   string  `json:"feedRefreshInterval"`
-	UpstreamMode  string  `json:"upstreamMode"`
-	QueryLogRows  int64   `json:"queryLogRows"`
-	MemoryMB      float64 `json:"memoryMb"`
-	Goroutines    int     `json:"goroutines"`
-	UptimeSeconds int64   `json:"uptimeSeconds"`
+	CacheLookups uint64 `json:"cacheLookups"`
+	FeedRefresh  string `json:"feedRefreshInterval"`
+	UpstreamMode string `json:"upstreamMode"`
+	// ResolutionMode is "native" or "forward"; ResolverEngine names the
+	// backend actually serving. Two fields rather than one because the second
+	// is what is running and the first is what was asked for, and a
+	// deployment where they disagree is one worth being able to see.
+	ResolutionMode string  `json:"resolutionMode"`
+	ResolverEngine string  `json:"resolverEngine"`
+	QueryLogRows   int64   `json:"queryLogRows"`
+	MemoryMB       float64 `json:"memoryMb"`
+	Goroutines     int     `json:"goroutines"`
+	UptimeSeconds  int64   `json:"uptimeSeconds"`
 }
 
 func (a *API) handleSettings(w http.ResponseWriter, r *http.Request) {
-	size, hits, misses := a.Resolver.Cache().Stats()
-	var hitRate float64
-	if total := hits + misses; total > 0 {
-		hitRate = float64(hits) / float64(total) * 100
+	// The forwarding cache's lifetime figures. Nil in native mode, where the
+	// cache lives inside the recursive resolver — the rolling window on the
+	// backend's Health is the comparable measure there, and mixing the two
+	// would be exactly the incoherent-window problem this milestone fixes.
+	var (
+		size         int
+		hits, misses uint64
+		hitRate      float64
+	)
+	if a.Forwarder != nil {
+		size, hits, misses = a.Forwarder.Cache().Stats()
+		if total := hits + misses; total > 0 {
+			hitRate = float64(hits) / float64(total) * 100
+		}
 	}
 
 	rows, err := a.Store.CountQueryLogRows(r.Context())
@@ -590,6 +609,8 @@ func (a *API) handleSettings(w http.ResponseWriter, r *http.Request) {
 		CacheLookups:    hits + misses,
 		FeedRefresh:     a.Config.Feeds.RefreshInterval.String(),
 		UpstreamMode:    a.Config.DNS.UpstreamMode,
+		ResolutionMode:  a.Config.DNS.EffectiveResolutionMode(),
+		ResolverEngine:  a.Backend.Name(),
 		QueryLogRows:    rows,
 		MemoryMB:        round2(float64(ms.Sys) / (1 << 20)),
 		Goroutines:      runtime.NumGoroutine(),
@@ -635,4 +656,13 @@ func permittedNetworks(networks []store.Network) int {
 		}
 	}
 	return n
+}
+
+// forwarderUpstreams lists the configured forwarders, or nothing in native
+// mode where there are none.
+func forwarderUpstreams(r *resolver.Resolver) []*resolver.Upstream {
+	if r == nil {
+		return nil
+	}
+	return r.Upstreams()
 }

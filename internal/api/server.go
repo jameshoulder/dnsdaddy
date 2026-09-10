@@ -23,6 +23,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
+	"github.com/jameshoulder/dnsdaddy/internal/resolution"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/web"
@@ -30,15 +31,26 @@ import (
 
 // Deps are everything the API needs to serve.
 type Deps struct {
-	Config   config.Config
-	Store    *store.Store
-	Engine   *policy.Engine
-	Feeds    *blocklist.Manager
-	Lists    *blocklist.Holder
-	Resolver *resolver.Resolver
-	DNS      *dnsserver.Handler
-	DoH      *dnsserver.DoHHandler
-	QueryLog *querylog.Logger
+	Config config.Config
+	Store  *store.Store
+	Engine *policy.Engine
+	Feeds  *blocklist.Manager
+	Lists  *blocklist.Holder
+	// Backend is whatever is answering DNS: Daddybound resolving natively, or
+	// the forwarding resolver. Every surface that reports on resolution reads
+	// this rather than assuming a forwarder.
+	Backend resolution.Backend
+	// Forwarder is the forwarding resolver, or nil in native mode.
+	//
+	// For the surfaces that legitimately want forwarder-specific detail:
+	// per-upstream latency, the in-flight limit, the answer cache's size.
+	// Every one of them must tolerate nil, because in native mode there is no
+	// forwarder and no honest figure to show for one — an empty upstream table
+	// is the truth, and a zero would be an invention.
+	Forwarder *resolver.Resolver
+	DNS       *dnsserver.Handler
+	DoH       *dnsserver.DoHHandler
+	QueryLog  *querylog.Logger
 	// Detector is the behavioural detection engine, or nil when detection is
 	// switched off. Every handler that touches it must tolerate nil.
 	Detector *detect.Engine

@@ -17,6 +17,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
+	"github.com/jameshoulder/dnsdaddy/internal/resolution"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -582,7 +583,7 @@ func cachingHarnessAgainstUpstream(t *testing.T, addr string, opts ...func(*Hand
 		o(&ho)
 	}
 	return &testHarness{
-		handler: NewHandler(engine, res, holder, qlog, log, ho),
+		handler: NewHandler(engine, resolution.NewForward(res, nil), holder, qlog, log, ho),
 		store:   st, engine: engine, qlog: qlog,
 	}
 }

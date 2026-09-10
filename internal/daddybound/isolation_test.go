@@ -12,34 +12,47 @@ import (
 
 const modulePath = "github.com/jameshoulder/dnsdaddy"
 
-// Daddybound may now be reached from the query path, but only through one
-// door and only as far as two packages. This test is what makes that a
-// property of the build rather than a convention.
+// Daddybound is now what answers a DNS question in native mode, and this test
+// is what keeps that from meaning "anything may reach anything".
 //
-// Until observe mode, the rule was simply "the query path cannot reach
-// Daddybound", enforced here. That rule has served its purpose and could not
-// survive this milestone: dnsserver has to be able to hand a resolved query to
-// the observer. Deleting the test rather than replacing it would have thrown
-// away the part that still matters, which is *which* packages may be reached
-// and by whom.
+// The rule has been rewritten twice, because twice a milestone has changed what
+// the right rule is, and both times the honest move was to replace the
+// assertion rather than delete the test.
 //
-// Three things are asserted, and each would let something specific go wrong if
-// it were dropped.
+// It began as "the query path cannot reach Daddybound at all", which was right
+// while Daddybound was a validator that could not affect an answer. Observe
+// mode needed a door, so it became "only through the observer, and only two
+// packages wide". This milestone makes Daddybound a resolution backend: the
+// answer a client receives in native mode is the one Daddybound resolved, so a
+// rule forbidding dnsserver from reaching it is a rule against the
+// architecture. What survives is the part that was always the point — *which*
+// packages may be reached, by whom, and through how narrow a seam.
 //
-// The resolver, the policy engine, the blocklist, the query log and the store
-// still cannot reach Daddybound at all. Those are the packages that decide and
-// deliver an answer, and an import from any of them would be the beginning of
-// a verdict influencing one. Only dnsserver has a door, and it is the one
-// place where the answer is already final.
+// Four things are asserted, and each would let something specific go wrong.
 //
-// Nothing on the query path may reach the laboratory or the differential
-// harness. Those generate keys, sign zones, and shell out to reference
-// validators; they exist to be adversarial and belong nowhere near a process
-// answering real queries.
+// The forwarding resolver, the policy engine, the blocklist, the query log and
+// the store still cannot reach Daddybound at all. Those decide and deliver an
+// answer by a route that has nothing to do with validation, and an import from
+// any of them would be the beginning of a verdict leaking into a decision it
+// has no business in. internal/resolver in particular: it is the forwarding
+// backend, and it must stay a forwarder.
 //
-// And the door itself is narrow: dnsserver may reach the observer and the
-// validation engine, and nothing else under internal/daddybound.
-func TestTheQueryPathReachesDaddyboundOnlyThroughTheObserver(t *testing.T) {
+// Nothing on the query path may reach the laboratory, the differential harness
+// or netsource. Those generate keys, sign zones, shell out to reference
+// validators and query public resolvers; they exist to be adversarial and
+// belong nowhere near a process answering real queries.
+//
+// dnsserver may not import a Daddybound package directly. It goes through
+// internal/resolution, which is the seam, and that is what keeps the DNS
+// handler unable to tell which backend it has — the architectural claim of this
+// milestone. A handler that could reach into the validator could special-case
+// it, and then "the server does not know where the answer came from" would stop
+// being true.
+//
+// And internal/resolution itself is bounded: it may reach the recursive
+// resolver, the native engine, the validator and the observer's vocabulary, and
+// nothing else.
+func TestTheQueryPathReachesDaddyboundThroughOneSeamOnly(t *testing.T) {
 	graph, err := importGraph()
 	if err != nil {
 		t.Fatalf("reading the import graph: %v", err)
@@ -100,22 +113,58 @@ func TestTheQueryPathReachesDaddyboundOnlyThroughTheObserver(t *testing.T) {
 		}
 	}
 
-	// The door is exactly two packages wide.
-	allowed := map[string]bool{observe: true, engine: true}
+	// dnsserver imports no Daddybound package directly. Everything it needs
+	// comes through internal/resolution.
+	//
+	// Direct imports rather than reachability, because reachability through
+	// the seam is the architecture: dnsserver -> resolution -> native is
+	// exactly what native mode is. What must not exist is dnsserver ->
+	// daddybound/anything, which would let the handler tell one backend from
+	// the other and special-case it.
+	// One exception, and it is a different concern rather than a hole.
+	// internal/daddybound/observe is the *shadow* seam: in forward mode with
+	// Learn on, the handler hands an already-decided query to an observer that
+	// cannot affect it. That is not resolution and routing it through the
+	// resolution seam would misdescribe it — the observer's whole property is
+	// that it sits outside the path that produces the answer.
+	const server = modulePath + "/internal/dnsserver"
+	for _, imported := range graph[server] {
+		if !strings.HasPrefix(imported, daddybound) || imported == observe {
+			continue
+		}
+		t.Errorf("dnsserver imports %s directly; internal/resolution is the seam "+
+			"for resolution and internal/daddybound/observe for shadow observation, "+
+			"and there is no third", imported)
+	}
+
+	// The seam is bounded. resolution may reach the parts of Daddybound that
+	// resolve and validate, and nothing else.
+	const resolution = modulePath + "/internal/resolution"
+	allowed := map[string]bool{
+		daddybound + "/native":           true,
+		daddybound + "/recursive":        true,
+		daddybound + "/recursive/reclab": true,
+		daddybound + "/trustanchors":     true,
+		engine:                           true,
+		observe:                          true,
+	}
 	for pkg := range graph {
 		if !strings.HasPrefix(pkg, daddybound) || allowed[pkg] {
 			continue
 		}
-		if path := reaches(graph, modulePath+"/internal/dnsserver", pkg); path != nil {
-			t.Errorf("dnsserver reaches a Daddybound package outside the observer seam:\n  %s",
+		if path := reaches(graph, resolution, pkg); path != nil {
+			t.Errorf("the resolution seam reaches a Daddybound package it has no business in:\n  %s",
 				strings.Join(path, "\n    -> "))
 		}
 	}
 
-	// And the door exists: a test that passed because nothing imports
-	// anything would be worthless.
-	if path := reaches(graph, modulePath+"/internal/dnsserver", observe); path == nil {
-		t.Fatal("dnsserver does not reach the observer at all; this test is checking nothing")
+	// And the seam exists in both directions: a test that passed because
+	// nothing imports anything would be worthless.
+	if path := reaches(graph, server, resolution); path == nil {
+		t.Fatal("dnsserver does not reach internal/resolution at all; this test is checking nothing")
+	}
+	if path := reaches(graph, resolution, daddybound+"/native"); path == nil {
+		t.Fatal("internal/resolution does not reach the native engine; native mode cannot work")
 	}
 }
 

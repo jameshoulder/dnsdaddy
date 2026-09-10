@@ -40,7 +40,6 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
-	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/secrets"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
@@ -208,20 +207,6 @@ func run() error {
 		return fmt.Errorf("load policies: %w", err)
 	}
 
-	// --- resolver -----------------------------------------------------------
-	res, err := resolver.New(cfg.DNS, cfg.Cache, log)
-	if err != nil {
-		return err
-	}
-	defer res.Close()
-
-	for _, u := range res.Upstreams() {
-		if u.Protocol == "udp" || u.Protocol == "tcp" {
-			log.Warn("upstream uses unencrypted DNS; anyone on the path can see and alter your lookups",
-				"upstream", u.Spec)
-		}
-	}
-
 	// --- query log ----------------------------------------------------------
 	qlog := querylog.New(st, querylog.Options{
 		BufferSize:      cfg.Log.BufferSize,
@@ -230,6 +215,28 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// --- Daddybound -----------------------------------------------------------
+	//
+	// Built before the backend, because in native mode the backend is built
+	// over it. Nil when neither native resolution nor Learn observation needs
+	// it, which is the default.
+	daddybound, err := startDaddybound(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+
+	// --- resolver backend -----------------------------------------------------
+	//
+	// One of two implementations of the same interface, chosen here and
+	// nowhere else. Everything downstream — the DNS handler, the query log,
+	// the API — works the same way whichever this is; what differs comes back
+	// on each Result.
+	backend, forwarder, err := buildBackend(cfg, daddybound, log)
+	if err != nil {
+		return err
+	}
+	defer backend.Close()
 
 	go qlog.Run(ctx)
 
@@ -301,12 +308,12 @@ func run() error {
 	// receives is produced entirely by the code above and is not shown to
 	// Daddybound before it is sent. See
 	// docs/decisions/0002-daddybound-observe-mode.md.
-	dnssecObserver, err := startDNSSECObserver(ctx, cfg, st, log)
+	dnssecObserver, err := startDNSSECObserver(ctx, cfg, daddybound, st, log)
 	if err != nil {
 		return err
 	}
 
-	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
+	handler := dnsserver.NewHandler(engine, backend, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
 		Timeout:         cfg.DNS.Timeout.D() + time.Second,
@@ -386,7 +393,8 @@ func run() error {
 		Engine:         engine,
 		Feeds:          feeds,
 		Lists:          lists,
-		Resolver:       res,
+		Backend:        backend,
+		Forwarder:      forwarder,
 		DNS:            handler,
 		DoH:            doh,
 		QueryLog:       qlog,

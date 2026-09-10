@@ -20,7 +20,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
-	"github.com/jameshoulder/dnsdaddy/internal/resolver"
+	"github.com/jameshoulder/dnsdaddy/internal/resolution"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -28,11 +28,17 @@ import (
 // that network's policy, and either synthesises a block response or forwards
 // the question upstream.
 type Handler struct {
-	engine   *policy.Engine
-	resolver *resolver.Resolver
-	lists    *blocklist.Holder
-	qlog     *querylog.Logger
-	log      *slog.Logger
+	engine *policy.Engine
+	// backend answers the question, and the handler does not know which one it
+	// is. Forwarding to an upstream and resolving from the root are two
+	// implementations of resolution.Backend; everything that differs between
+	// them — how the answer was obtained, whether DNSSEC was checked here or
+	// merely claimed upstream, what it cost — comes back on the Result rather
+	// than being implied by which code path ran.
+	backend resolution.Backend
+	lists   *blocklist.Holder
+	qlog    *querylog.Logger
+	log     *slog.Logger
 
 	// detector receives a copy of every query for behavioural analysis. It is
 	// nil-safe and never blocks: detect.Engine drops observations rather than
@@ -130,7 +136,7 @@ type HandlerOptions struct {
 // NewHandler wires the resolution path together.
 func NewHandler(
 	engine *policy.Engine,
-	res *resolver.Resolver,
+	backend resolution.Backend,
 	lists *blocklist.Holder,
 	qlog *querylog.Logger,
 	log *slog.Logger,
@@ -142,7 +148,7 @@ func NewHandler(
 	}
 	return &Handler{
 		engine:          engine,
-		resolver:        res,
+		backend:         backend,
 		lists:           lists,
 		qlog:            qlog,
 		log:             log,
@@ -346,26 +352,30 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	rctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
 
-	res, err := h.resolver.Resolve(rctx, req, h.lists.Generation())
+	res, err := h.backend.Resolve(rctx, req, h.lists.Generation())
 	event.ElapsedMS = int(time.Since(start).Milliseconds())
 
 	if err != nil {
 		h.errors.Add(1)
 		event.Action = store.ActionError
-		event.Reason = "Upstream resolution failed: " + err.Error()
-		// Every upstream failing is not the same event as an upstream saying
-		// SERVFAIL, but from a client's seat the two are indistinguishable and
-		// the resolution-failure detector wants to see both.
+		event.Reason = "Resolution failed: " + err.Error()
+		event.Resolver = h.backend.Name()
+		// Failing to obtain an answer is not the same event as a server
+		// saying SERVFAIL, but from a client's seat the two are
+		// indistinguishable and the resolution-failure detector wants both.
 		event.DNSSEC = store.DNSSECServfail
 		h.qlog.Record(event, persist)
 		h.observe(event, meta, dns.RcodeServerFailure, 0, false, false)
-		h.log.Debug("resolution failed", "domain", normalized, "error", err)
+		h.log.Debug("resolution failed", "domain", normalized,
+			"backend", h.backend.Name(), "error", err)
 		return errorResponse(req, dns.RcodeServerFailure)
 	}
 
 	event.Action = store.ActionAllowed
 	event.Cached = res.Cached
-	event.DNSSEC = dnssecStatus(res.Rcode, res.Validated)
+	event.Resolver = res.Backend
+	event.DNSSEC = storedDNSSEC(res)
+	event.DNSSECReason = res.DNSSECReason
 	if event.Reason == "" {
 		event.Reason = "Resolved"
 	}
@@ -375,8 +385,32 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	// what this function will return, whatever any of this concludes.
 	event.DNSSECObservationID = h.observeDNSSEC(event, q, persist)
 	h.qlog.Record(event, persist)
-	h.observe(event, meta, res.Rcode, res.MinTTL, res.Validated, false)
+	h.observe(event, meta, res.Rcode, res.MinTTL, res.DNSSEC == resolution.StatusSecure, false)
 	return res.Msg
+}
+
+// storedDNSSEC maps a resolution's security state onto the vocabulary the
+// query log has always used, keeping the two kinds of claim apart.
+//
+// The store's words were coined for a forwarder and mean what a forwarder can
+// observe: "validated" is "the upstream set AD". A locally validated answer is
+// a stronger statement and gets its own words, so a row cannot be read as
+// claiming an upstream's opinion was this deployment's verdict, nor the other
+// way round.
+func storedDNSSEC(res resolution.Result) string {
+	if res.Authority == resolution.AuthorityLocal {
+		switch res.DNSSEC {
+		case resolution.StatusSecure:
+			return store.DNSSECSecureLocal
+		case resolution.StatusInsecure:
+			return store.DNSSECInsecureLocal
+		case resolution.StatusBogus:
+			return store.DNSSECBogusLocal
+		default:
+			return store.DNSSECIndeterminateLocal
+		}
+	}
+	return dnssecStatus(res.Rcode, res.DNSSECReason != "")
 }
 
 // observeDNSSEC hands a resolved query to Daddybound and returns the

@@ -133,7 +133,15 @@ CREATE TABLE IF NOT EXISTS query_log (
     -- observation queue was full. Deliberately not a foreign key: the two rows
     -- are written independently and asynchronously, and neither may wait for
     -- the other. A dangling id means "no observation", not an error.
-    dnssec_obs  TEXT    NOT NULL DEFAULT ''
+    dnssec_obs  TEXT    NOT NULL DEFAULT '',
+    -- Which backend answered: 'daddybound-native' when DNS Daddy resolved the
+    -- question itself from the root and validated it, 'forward' when it was
+    -- sent to a configured upstream. Empty on rows written before DNS Daddy
+    -- could resolve for itself.
+    resolver    TEXT    NOT NULL DEFAULT '',
+    -- The typed reason behind a locally reached DNSSEC verdict, empty when the
+    -- verdict was an upstream's AD bit.
+    dnssec_reason TEXT  NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS query_log_ts_idx        ON query_log (ts DESC);

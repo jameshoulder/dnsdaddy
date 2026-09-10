@@ -32,8 +32,8 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO query_log (ts, client_ip, client_name, network_id, qname, qtype,
 			                       action, reason, category, source, proto, elapsed_ms, cached,
-			                       dnssec, dnssec_obs)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			                       dnssec, dnssec_obs, resolver, dnssec_reason)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return err
 		}
@@ -42,7 +42,8 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		for _, e := range events {
 			if _, err := stmt.ExecContext(ctx, unixMilli(e.Time), e.ClientIP, e.ClientName, e.NetworkID,
 				e.Domain, e.QType, e.Action, e.Reason, e.Category, e.Source, e.Proto,
-				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID); err != nil {
+				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID,
+				e.Resolver, e.DNSSECReason); err != nil {
 				return err
 			}
 		}
@@ -196,7 +197,8 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 	// ("network_id = ?"); every filter value is bound as a parameter in args.
 	// Never append a fragment built from input here.
 	q := `SELECT id, ts, client_ip, client_name, network_id, qname, qtype, action,
-	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs
+	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs,
+	             resolver, dnssec_reason
 	      FROM query_log WHERE ` + strings.Join(where, " AND ") + `
 	      ORDER BY id DESC LIMIT ?`
 
@@ -215,7 +217,8 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 		)
 		if err := rows.Scan(&e.ID, &ts, &e.ClientIP, &e.ClientName, &e.NetworkID, &e.Domain,
 			&e.QType, &e.Action, &e.Reason, &e.Category, &e.Source, &e.Proto, &e.ElapsedMS,
-			&cached, &e.DNSSEC, &e.DNSSECObservationID); err != nil {
+			&cached, &e.DNSSEC, &e.DNSSECObservationID,
+			&e.Resolver, &e.DNSSECReason); err != nil {
 			return nil, 0, err
 		}
 		e.Time = fromUnixMilli(ts)

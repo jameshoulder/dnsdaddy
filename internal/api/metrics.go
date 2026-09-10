@@ -22,8 +22,6 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 
 	queries, blocked, errs := a.DNS.Stats()
-	collapsed, upstreamFailures := a.Resolver.Stats()
-	cacheSize, hits, misses := a.Resolver.Cache().Stats()
 	written, rollups, dropped := a.QueryLog.Stats()
 
 	metric(&b, "dnsdaddy_build_info", "Build metadata", "gauge",
@@ -56,38 +54,16 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// nothing, when in fact they have none.
 	a.writeIntelMetrics(&b)
 
-	metric(&b, "dnsdaddy_cache_entries", "Answers currently cached", "gauge",
-		fmt.Sprintf("dnsdaddy_cache_entries %d", cacheSize))
-	metric(&b, "dnsdaddy_cache_hits_total", "Cache hits", "counter",
-		fmt.Sprintf("dnsdaddy_cache_hits_total %d", hits))
-	metric(&b, "dnsdaddy_cache_misses_total", "Cache misses", "counter",
-		fmt.Sprintf("dnsdaddy_cache_misses_total %d", misses))
+	// Which backend is answering, as a labelled gauge rather than free text,
+	// so an alert can fire on a deployment that fell back to forwarding.
+	metric(&b, "dnsdaddy_resolver_backend", "Which backend is answering DNS", "gauge",
+		fmt.Sprintf("dnsdaddy_resolver_backend{backend=%q} 1", a.Backend.Name()))
+	a.writeBackendHealthMetrics(&b)
 
-	metric(&b, "dnsdaddy_inflight_collapsed_total", "Duplicate concurrent queries served from a single upstream flight", "counter",
-		fmt.Sprintf("dnsdaddy_inflight_collapsed_total %d", collapsed))
-	metric(&b, "dnsdaddy_upstream_failures_total", "Queries where every upstream failed", "counter",
-		fmt.Sprintf("dnsdaddy_upstream_failures_total %d", upstreamFailures))
-
-	inflightNow, inflightPeak, limitTimeouts := a.Resolver.InflightStats()
-	metric(&b, "dnsdaddy_upstream_inflight_current", "Upstream exchanges running right now, bounded by dns.max_inflight", "gauge",
-		fmt.Sprintf("dnsdaddy_upstream_inflight_current %d", inflightNow))
-	metric(&b, "dnsdaddy_upstream_inflight_peak", "Highest concurrent upstream exchanges observed since start", "gauge",
-		fmt.Sprintf("dnsdaddy_upstream_inflight_peak %d", inflightPeak))
-	metric(&b, "dnsdaddy_upstream_inflight_limit_timeouts_total", "Requests that gave up waiting for a free upstream concurrency slot", "counter",
-		fmt.Sprintf("dnsdaddy_upstream_inflight_limit_timeouts_total %d", limitTimeouts))
-
-	var upstreamLines []string
-	for _, u := range a.Resolver.Upstreams() {
-		q, e, avg := u.Stats()
-		upstreamLines = append(upstreamLines,
-			fmt.Sprintf("dnsdaddy_upstream_queries_total{upstream=%q} %d", u.Spec, q),
-			fmt.Sprintf("dnsdaddy_upstream_errors_total{upstream=%q} %d", u.Spec, e),
-			fmt.Sprintf("dnsdaddy_upstream_latency_ms_avg{upstream=%q} %.2f", u.Spec, avg))
-	}
-	if len(upstreamLines) > 0 {
-		metric(&b, "dnsdaddy_upstream_queries_total", "Queries sent to each upstream", "counter",
-			upstreamLines...)
-	}
+	// The forwarder's own series. Emitted only when there is a forwarder: in
+	// native mode a series that existed and read zero would tell an operator
+	// their upstream cache is empty, when in fact they have no upstreams.
+	a.writeForwarderMetrics(&b)
 
 	metric(&b, "dnsdaddy_blocklist_domains", "Domains in the active blocklist index", "gauge",
 		fmt.Sprintf("dnsdaddy_blocklist_domains %d", a.Lists.Load().Len()))
@@ -207,13 +183,6 @@ func (a *API) writeAccessMetrics(ctx context.Context, b *strings.Builder) {
 	}
 	metric(b, "dnsdaddy_networks_total", "Networks configured in the dashboard", "gauge",
 		fmt.Sprintf("dnsdaddy_networks_total %d", len(networks)))
-}
-
-func boolGauge(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // writeIntelMetrics exports the external-intelligence engine's counters.
@@ -369,4 +338,121 @@ func (a *API) dnssecMetricLines() []string {
 	}
 
 	return []string{b.String()}
+}
+
+// writeForwarderMetrics emits the series that only exist when DNS Daddy is
+// forwarding: the answer cache, the in-flight limiter and the per-upstream
+// table.
+//
+// Nothing is emitted in native mode. There is no forwarder, so there is no
+// upstream latency and no upstream cache — and a zero would not be a
+// measurement of those, it would be an invention of them.
+func (a *API) writeForwarderMetrics(b *strings.Builder) {
+	if a.Forwarder == nil {
+		return
+	}
+	collapsed, upstreamFailures := a.Forwarder.Stats()
+	cacheSize, hits, misses := a.Forwarder.Cache().Stats()
+
+	metric(b, "dnsdaddy_cache_entries", "Answers currently cached", "gauge",
+		fmt.Sprintf("dnsdaddy_cache_entries %d", cacheSize))
+	metric(b, "dnsdaddy_cache_hits_total", "Cache hits", "counter",
+		fmt.Sprintf("dnsdaddy_cache_hits_total %d", hits))
+	metric(b, "dnsdaddy_cache_misses_total", "Cache misses", "counter",
+		fmt.Sprintf("dnsdaddy_cache_misses_total %d", misses))
+
+	metric(b, "dnsdaddy_inflight_collapsed_total", "Duplicate concurrent queries served from a single upstream flight", "counter",
+		fmt.Sprintf("dnsdaddy_inflight_collapsed_total %d", collapsed))
+	metric(b, "dnsdaddy_upstream_failures_total", "Queries where every upstream failed", "counter",
+		fmt.Sprintf("dnsdaddy_upstream_failures_total %d", upstreamFailures))
+
+	inflightNow, inflightPeak, limitTimeouts := a.Forwarder.InflightStats()
+	metric(b, "dnsdaddy_upstream_inflight_current", "Upstream exchanges running right now, bounded by dns.max_inflight", "gauge",
+		fmt.Sprintf("dnsdaddy_upstream_inflight_current %d", inflightNow))
+	metric(b, "dnsdaddy_upstream_inflight_peak", "Highest concurrent upstream exchanges observed since start", "gauge",
+		fmt.Sprintf("dnsdaddy_upstream_inflight_peak %d", inflightPeak))
+	metric(b, "dnsdaddy_upstream_inflight_limit_timeouts_total", "Requests that gave up waiting for a free upstream concurrency slot", "counter",
+		fmt.Sprintf("dnsdaddy_upstream_inflight_limit_timeouts_total %d", limitTimeouts))
+
+	var upstreamLines []string
+	for _, u := range a.Forwarder.Upstreams() {
+		q, e, avg := u.Stats()
+		upstreamLines = append(upstreamLines,
+			fmt.Sprintf("dnsdaddy_upstream_queries_total{upstream=%q} %d", u.Spec, q),
+			fmt.Sprintf("dnsdaddy_upstream_errors_total{upstream=%q} %d", u.Spec, e),
+			fmt.Sprintf("dnsdaddy_upstream_latency_ms_avg{upstream=%q} %.2f", u.Spec, avg))
+	}
+	if len(upstreamLines) > 0 {
+		metric(b, "dnsdaddy_upstream_queries_total", "Queries sent to each upstream", "counter",
+			upstreamLines...)
+	}
+
+}
+
+// writeBackendHealthMetrics emits the resolver's rolling health.
+//
+// Every figure here comes from one window covering one period, and the period
+// is emitted alongside them as dnsdaddy_resolver_window_seconds. That is the
+// point of the series rather than a nicety: the numbers this replaces were an
+// error count accumulated since process start divided by a query count over a
+// different period, which is not a rate of anything and cannot go down.
+//
+// Bogus answers are counted and are deliberately not part of the error rate. A
+// resolver refusing a forged or misconfigured signed answer is working; a
+// deployment whose users visit one broken signed domain must not read as ill.
+// An alert wanting to know about bogus answers should watch that series
+// directly, where it means what it says.
+func (a *API) writeBackendHealthMetrics(b *strings.Builder) {
+	h := a.Backend.Health()
+
+	metric(b, "dnsdaddy_resolver_window_seconds",
+		"The period every rolling resolver figure below covers", "gauge",
+		fmt.Sprintf("dnsdaddy_resolver_window_seconds %d", int(h.Window.Seconds())))
+	metric(b, "dnsdaddy_resolver_healthy",
+		"1 when the resolver is obtaining answers, 0 when it is not", "gauge",
+		fmt.Sprintf("dnsdaddy_resolver_healthy %d", boolGauge(h.OK)))
+	metric(b, "dnsdaddy_resolver_window_queries",
+		"Queries answered in the rolling window", "gauge",
+		fmt.Sprintf("dnsdaddy_resolver_window_queries %d", h.Queries))
+	metric(b, "dnsdaddy_resolver_window_errors",
+		"Queries in the rolling window where no answer could be obtained. "+
+			"An internal or network failure, never a security decision", "gauge",
+		fmt.Sprintf("dnsdaddy_resolver_window_errors %d", h.Errors))
+	metric(b, "dnsdaddy_resolver_window_servfail",
+		"Queries in the rolling window answered SERVFAIL, for any reason", "gauge",
+		fmt.Sprintf("dnsdaddy_resolver_window_servfail %d", h.Servfail))
+	metric(b, "dnsdaddy_resolver_window_dnssec_bogus",
+		"Answers in the rolling window refused because they did not authenticate. "+
+			"This is the resolver working, not failing", "gauge",
+		fmt.Sprintf("dnsdaddy_resolver_window_dnssec_bogus %d", h.Bogus))
+	metric(b, "dnsdaddy_resolver_window_authoritative_timeouts",
+		"Authoritative servers in the rolling window that did not answer. "+
+			"Native mode only", "gauge",
+		fmt.Sprintf("dnsdaddy_resolver_window_authoritative_timeouts %d", h.AuthoritativeTimeouts))
+
+	// Omitted rather than zero when nothing was measured. A hit rate of zero
+	// and no lookups at all are different facts, and this deployment has
+	// already displayed the second as the first once.
+	if h.CacheHitRate >= 0 {
+		metric(b, "dnsdaddy_resolver_window_cache_hit_ratio",
+			"Cache hit ratio over the rolling window, 0 to 1", "gauge",
+			fmt.Sprintf("dnsdaddy_resolver_window_cache_hit_ratio %.4f", h.CacheHitRate))
+	}
+
+	if h.Queries > 0 {
+		metric(b, "dnsdaddy_resolver_latency_seconds",
+			"Resolution latency over the rolling window. Bucketed, so each value is "+
+				"the upper edge of the bucket the percentile falls in", "gauge",
+			fmt.Sprintf("dnsdaddy_resolver_latency_seconds{quantile=\"0.5\"} %.4f", h.P50.Seconds()),
+			fmt.Sprintf("dnsdaddy_resolver_latency_seconds{quantile=\"0.95\"} %.4f", h.P95.Seconds()),
+			fmt.Sprintf("dnsdaddy_resolver_latency_seconds{quantile=\"0.99\"} %.4f", h.P99.Seconds()))
+	}
+}
+
+// boolGauge renders a boolean as the 1/0 a Prometheus gauge wants.
+func boolGauge(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

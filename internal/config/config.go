@@ -87,15 +87,41 @@ type Integrations struct {
 
 // DNS holds the resolver-side settings: what we listen on and where we forward.
 type DNS struct {
-	ListenUDP    string   `yaml:"listen_udp"`
-	ListenTCP    string   `yaml:"listen_tcp"`
-	ListenDoT    string   `yaml:"listen_dot"`
-	TLSCertFile  string   `yaml:"tls_cert_file"`
-	TLSKeyFile   string   `yaml:"tls_key_file"`
-	Upstreams    []string `yaml:"upstreams"`
-	UpstreamMode string   `yaml:"upstream_mode"` // "failover" or "race"
-	Timeout      Duration `yaml:"timeout"`
-	MaxInflight  int      `yaml:"max_inflight"`
+	ListenUDP   string `yaml:"listen_udp"`
+	ListenTCP   string `yaml:"listen_tcp"`
+	ListenDoT   string `yaml:"listen_dot"`
+	TLSCertFile string `yaml:"tls_cert_file"`
+	TLSKeyFile  string `yaml:"tls_key_file"`
+	// ResolutionMode selects which backend answers client queries.
+	//
+	//	forward  DNS Daddy sends each question to the configured upstream
+	//	         recursive resolvers. This is what every deployment before
+	//	         this release did, and it remains the default.
+	//	native   Daddybound resolves the question itself: root hints, then
+	//	         the TLD, then the authoritative servers, and it validates
+	//	         the records it fetched against a local trust anchor. No
+	//	         upstream resolver is contacted and none needs configuring.
+	//
+	// Empty means forward, and that is deliberate rather than an oversight —
+	// see resolveResolutionMode. An existing installation must not change how
+	// it resolves DNS because it was upgraded.
+	ResolutionMode string   `yaml:"resolution_mode"`
+	Upstreams      []string `yaml:"upstreams"`
+	UpstreamMode   string   `yaml:"upstream_mode"` // "failover" or "race"
+
+	// AdvertisedAddresses are the addresses clients should be pointed at.
+	//
+	// The operator's answer to "what do I type into my router?", and the only
+	// reliable one on a machine that cannot see its own public address. A VPS
+	// commonly has an RFC 1918 address on its NIC and a public address
+	// applied by the provider's NAT; the interface says one thing and the
+	// world sees another, and nothing on the box can tell the difference.
+	//
+	// Empty means the addresses are discovered from the interfaces, which is
+	// right on a LAN and wrong behind NAT. See internal/resolveraddr.
+	AdvertisedAddresses []string `yaml:"advertised_addresses"`
+	Timeout             Duration `yaml:"timeout"`
+	MaxInflight         int      `yaml:"max_inflight"`
 
 	// AllowedClientCIDRs restricts which source addresses may resolve.
 	// Queries from anywhere else are REFUSED before any upstream work.
@@ -556,6 +582,8 @@ func applyEnv(cfg *Config) error {
 	envStr("DNSDADDY_TLS_CERT_FILE", &cfg.DNS.TLSCertFile)
 	envStr("DNSDADDY_TLS_KEY_FILE", &cfg.DNS.TLSKeyFile)
 	envStr("DNSDADDY_UPSTREAM_MODE", &cfg.DNS.UpstreamMode)
+	envStr("DNSDADDY_RESOLUTION_MODE", &cfg.DNS.ResolutionMode)
+	envList("DNSDADDY_ADVERTISED_ADDRESSES", &cfg.DNS.AdvertisedAddresses)
 	envStr("DNSDADDY_LOCAL_DNSSEC_VALIDATION", &cfg.DNS.LocalDNSSECValidation)
 	envStr("DNSDADDY_HTTP_LISTEN", &cfg.HTTP.Listen)
 	envStr("DNSDADDY_ADMIN_PASSWORD", &cfg.HTTP.AdminPassword)
@@ -687,8 +715,8 @@ func (c *Config) validate() error {
 	if c.DataDir == "" {
 		return fmt.Errorf("data_dir must not be empty")
 	}
-	if len(c.DNS.Upstreams) == 0 {
-		return fmt.Errorf("at least one upstream resolver is required")
+	if err := c.validateResolution(); err != nil {
+		return err
 	}
 	switch c.DNS.UpstreamMode {
 	case "failover", "race":
@@ -1103,3 +1131,63 @@ func (c *Config) ResolveLocalDNSSEC(installDefault string) (mode string, fromIns
 
 // ObserveDNSSEC reports whether Daddybound should observe real traffic.
 func (d DNS) ObserveDNSSEC() bool { return d.LocalDNSSECMode() == LocalDNSSECObserve }
+
+// The resolution modes. See DNS.ResolutionMode.
+const (
+	// ResolutionUnset means the operator expressed no preference. It resolves
+	// to forward. See ResolveResolutionMode.
+	ResolutionUnset = ""
+	// ResolutionForward sends each question to the configured upstreams.
+	ResolutionForward = "forward"
+	// ResolutionNative has Daddybound resolve and validate the question
+	// itself.
+	ResolutionNative = "native"
+)
+
+// ResolutionMode returns the effective mode.
+//
+// An unset value reads as forward. That is the conservative direction and the
+// reason this is a function rather than a field read: a caller that forgets to
+// resolve the value gets the behaviour every existing deployment already has,
+// rather than one that silently starts talking to the root servers.
+func (d DNS) EffectiveResolutionMode() string {
+	if d.ResolutionMode == ResolutionNative {
+		return ResolutionNative
+	}
+	return ResolutionForward
+}
+
+// Native reports whether Daddybound is answering client queries.
+func (d DNS) Native() bool { return d.EffectiveResolutionMode() == ResolutionNative }
+
+// validateResolution checks the mode and the upstreams it implies.
+//
+// The rule the milestone asks for: upstreams are not mandatory in native mode.
+// They were unconditionally required before, which is right for a forwarder and
+// nonsense for a resolver that never contacts one — an operator switching to
+// native should not have to keep a Quad9 address in their configuration to
+// satisfy a check that no longer applies to them.
+//
+// They are still permitted in native mode, and still validated, because a
+// deployment may keep them in the file while trying native out. What is refused
+// is forward mode with nothing to forward to, which would be a resolver that
+// cannot answer anything.
+func (c *Config) validateResolution() error {
+	switch c.DNS.ResolutionMode {
+	case ResolutionUnset, ResolutionForward, ResolutionNative:
+	default:
+		return fmt.Errorf("resolution_mode must be %q or %q, got %q",
+			ResolutionForward, ResolutionNative, c.DNS.ResolutionMode)
+	}
+	if c.DNS.Native() {
+		return nil
+	}
+	if len(c.DNS.Upstreams) == 0 {
+		return fmt.Errorf(
+			"at least one upstream resolver is required in %q mode; "+
+				"set dns.upstreams, or set dns.resolution_mode: %s to have Daddybound "+
+				"resolve DNS itself",
+			ResolutionForward, ResolutionNative)
+	}
+	return nil
+}

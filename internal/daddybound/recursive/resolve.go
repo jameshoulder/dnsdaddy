@@ -881,3 +881,11 @@ func (r *Resolver) CacheStats() CacheStats { return r.cache.Stats() }
 // KnownCuts returns the zone cuts the resolver already knows along name,
 // deepest first. See Cache.KnownCuts.
 func (r *Resolver) KnownCuts(name string) []string { return r.cache.KnownCuts(name) }
+
+// Flush empties the cache: answers, delegations and addresses.
+//
+// For the operator's "purge cache" action, which has to mean the same thing
+// whichever backend is serving. A resolver that kept its delegations through a
+// flush would go on using nameserver addresses the operator was trying to
+// discard.
+func (r *Resolver) Flush() { r.cache.Flush() }

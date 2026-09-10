@@ -422,7 +422,7 @@ func (a *API) handleUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	// A policy change can flip a name from blocked to allowed. Purging the
 	// cache makes that take effect on the next query rather than after a TTL,
 	// which is what someone unblocking a supplier's website at 4pm expects.
-	a.Resolver.Cache().Purge()
+	a.Backend.Purge()
 	writeJSON(w, http.StatusOK, p)
 }
 
@@ -451,7 +451,7 @@ func (a *API) handleAddRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	a.Resolver.Cache().Purge()
+	a.Backend.Purge()
 
 	p, err := a.Store.GetPolicy(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -472,7 +472,7 @@ func (a *API) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.reloadEngine(r)
-	a.Resolver.Cache().Purge()
+	a.Backend.Purge()
 	w.WriteHeader(http.StatusNoContent)
 }
 

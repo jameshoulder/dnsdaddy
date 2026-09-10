@@ -17,6 +17,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
+	"github.com/jameshoulder/dnsdaddy/internal/resolution"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -126,7 +127,7 @@ func newHarnessWithQueryLog(t *testing.T, lists map[string]string, queryLogEnabl
 	for _, o := range opts {
 		o(&ho)
 	}
-	h := NewHandler(engine, res, holder, qlog, log, ho)
+	h := NewHandler(engine, resolution.NewForward(res, nil), holder, qlog, log, ho)
 
 	return &testHarness{handler: h, store: st, engine: engine, qlog: qlog}
 }
@@ -170,7 +171,7 @@ func newHarnessAgainstUpstream(t *testing.T, addr string, opts ...func(*HandlerO
 		o(&ho)
 	}
 	return &testHarness{
-		handler: NewHandler(engine, res, holder, qlog, log, ho),
+		handler: NewHandler(engine, resolution.NewForward(res, nil), holder, qlog, log, ho),
 		store:   st, engine: engine, qlog: qlog,
 	}
 }

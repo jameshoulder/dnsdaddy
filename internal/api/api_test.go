@@ -26,6 +26,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
+	"github.com/jameshoulder/dnsdaddy/internal/resolution"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -153,7 +154,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("clientacl.Reload: %v", err)
 	}
 
-	dnsHandler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
+	dnsHandler := dnsserver.NewHandler(engine, resolution.NewForward(res, nil), lists, qlog, log, dnsserver.HandlerOptions{
 		QueryLogEnabled: true,
 		ClientACL:       acl,
 		Detector:        detector,
@@ -168,13 +169,14 @@ func newHarness(t *testing.T) *harness {
 	}
 
 	api := New(Deps{
-		Config:   cfg,
-		Store:    st,
-		Engine:   engine,
-		Feeds:    feeds,
-		Lists:    lists,
-		Resolver: res,
-		DNS:      dnsHandler,
+		Config:    cfg,
+		Store:     st,
+		Engine:    engine,
+		Feeds:     feeds,
+		Lists:     lists,
+		Backend:   resolution.NewForward(res, nil),
+		Forwarder: res,
+		DNS:       dnsHandler,
 		DoH: dnsserver.NewDoHHandler(dnsHandler, st, log, dnsserver.DoHOptions{
 			// Tests exercise the bare /dns-query path directly; the
 			// token-required default is covered by its own test below.

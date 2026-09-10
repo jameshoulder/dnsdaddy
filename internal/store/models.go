@@ -126,10 +126,31 @@ type QueryEvent struct {
 	Proto      string    `json:"proto"`
 	ElapsedMS  int       `json:"elapsedMs"`
 	Cached     bool      `json:"cached"`
-	// DNSSEC is the validation status the upstream reported. DNS Daddy
-	// forwards rather than validating locally, so this is the upstream's
-	// conclusion, not ours. See the DNSSEC* constants.
+	// DNSSEC is the security state recorded for this answer.
+	//
+	// Which vocabulary it uses depends on who reached the verdict, and the two
+	// are deliberately different words. "validated" and "unvalidated" describe
+	// what a *forwarder* observed: an upstream set the AD bit, or it did not.
+	// "secure", "insecure", "bogus" and "indeterminate" are this deployment's
+	// own conclusions, reached by Daddybound authenticating the records
+	// against a local trust anchor.
+	//
+	// Keeping them apart is the point. A row that used one word for both would
+	// let a claim by a machine somebody else runs be read, later, as something
+	// this resolver established. See the DNSSEC* constants.
 	DNSSEC string `json:"dnssec,omitempty"`
+	// DNSSECReason is the typed reason behind DNSSEC where the verdict was
+	// local, empty otherwise. Daddybound's own taxonomy; nothing branches on
+	// it, it is there so an operator can ask why.
+	DNSSECReason string `json:"dnssecReason,omitempty"`
+
+	// Resolver names the backend that answered: "daddybound-native" or
+	// "forward". Empty on rows written before the distinction existed.
+	//
+	// Part of what makes a query explainable. "How did DNS Daddy resolve
+	// this?" is a question an operator should be able to answer from the row
+	// rather than by remembering what the configuration said at the time.
+	Resolver string `json:"resolver,omitempty"`
 
 	// DNSSECObservationID correlates this query with the local Daddybound
 	// observation of it, or is empty when local validation was off, not
@@ -159,7 +180,36 @@ const (
 	// DNSSECServfail: the upstream returned SERVFAIL. A failed DNSSEC
 	// validation is one cause among several; see internal/detect.
 	DNSSECServfail = "servfail"
+
+	// The states below are this deployment's own verdicts, reached by
+	// Daddybound authenticating records it fetched itself. They are spelled
+	// differently from the three above on purpose: those describe what an
+	// upstream claimed, these describe what this resolver established, and a
+	// shared word would let the first be mistaken for the second.
+	//
+	// DNSSECSecureLocal: the records authenticate to a configured trust
+	// anchor.
+	DNSSECSecureLocal = "secure"
+	// DNSSECInsecureLocal: an authenticated proof shows the data lies in an
+	// unsigned part of the namespace. A proof, not an absence of one.
+	DNSSECInsecureLocal = "insecure"
+	// DNSSECBogusLocal: a secure delegation was established and the data
+	// failed to validate under it. The client received SERVFAIL.
+	DNSSECBogusLocal = "bogus"
+	// DNSSECIndeterminateLocal: Daddybound could not decide, for a reason
+	// about itself rather than about the data — no trust anchor covering the
+	// name, an algorithm this build cannot read, a limit reached. The answer
+	// was served with AD clear.
+	DNSSECIndeterminateLocal = "indeterminate"
 )
+
+// LocalDNSSECStatuses are the states only local validation can produce.
+func LocalDNSSECStatuses() []string {
+	return []string{
+		DNSSECSecureLocal, DNSSECInsecureLocal,
+		DNSSECBogusLocal, DNSSECIndeterminateLocal,
+	}
+}
 
 // Client is an operator-assigned friendly name for a device IP.
 type Client struct {

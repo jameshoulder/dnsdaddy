@@ -203,6 +203,15 @@ var addedColumns = []struct{ table, column, definition string }{
 	// verdict, and zero on every pre-existing row.
 	{"dnssec_observations", "queries", "INTEGER NOT NULL DEFAULT 0"},
 	{"dnssec_observations", "delegations", "INTEGER NOT NULL DEFAULT 0"},
+	// Which backend answered a query: "daddybound-native" or "forward".
+	// Empty on every row written before DNS Daddy could resolve for itself,
+	// and deliberately not backfilled — those rows were forwarded, but
+	// asserting that retrospectively would be recording something the row
+	// never captured.
+	{"query_log", "resolver", "TEXT NOT NULL DEFAULT ''"},
+	// The typed reason behind a locally reached DNSSEC verdict. Empty when the
+	// verdict was an upstream's AD bit, which has no reason to give.
+	{"query_log", "dnssec_reason", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func migrate(db *sql.DB) error {
