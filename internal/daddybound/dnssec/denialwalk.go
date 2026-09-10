@@ -62,9 +62,45 @@ func (w *walk) noDSAtDelegation(zone *zoneState, child string, resp Response) (*
 		return nil, w.rec.verdict(w.rec.fail(step, ReasonDenialContradicted)), true
 
 	default:
-		// No usable proof either way. The walk assumes "not a zone cut" and
-		// continues in the same zone, which is v0.1's behaviour and is kept
-		// deliberately.
+		// No usable proof either way in the response. Before assuming, ask
+		// the source: one that resolves iteratively crossed the zone cuts on
+		// the way here and can say whether this name is one, which is an
+		// observation rather than a guess. See issue #64 and standards.md
+		// §5.5.
+		if known, ok := w.delegationKnown(child); ok {
+			if known {
+				// A real zone cut, and no DS we could read — but this must
+				// NOT become Insecure, and the reason is the whole of why
+				// Insecure is hard to reach in this validator.
+				//
+				// Insecure is a claim that the parent *proved* no DS exists,
+				// and the proof is a signed NSEC. A referral is not a proof:
+				// it arrives unauthenticated, and an attacker who strips a
+				// DS RRset from a response produces exactly this shape. Were
+				// this branch to return Insecure, stripping the DS would
+				// downgrade any signed zone to unsigned — the classic DNSSEC
+				// downgrade, delivered by the very evidence that was meant to
+				// improve matters.
+				//
+				// So the honest verdict is Indeterminate with a reason that
+				// says which of the two situations could not be told apart.
+				// It is strictly more informative than the Bogus the
+				// assumption produced here, and an enforcing resolver reads
+				// it as "could not establish validation" and fails safe
+				// rather than as an accusation against the data.
+				step.Note = "the resolver followed a referral here, but the parent published no readable DS and no authenticated denial: a stripped DS and an insecure delegation are indistinguishable"
+				return nil, w.rec.indeterminate(w.rec.fail(step, ReasonDelegationUnprovable)), true
+			}
+			// Positively not a zone cut: the resolver passed through this
+			// name without being referred at it. Continue in the same zone,
+			// now on evidence rather than on an assumption.
+			step.Note = "the resolver crossed no delegation here, so this name is not a zone cut"
+			w.rec.ok(step)
+			return nil, ValidationResult{}, false
+		}
+
+		// The source cannot say. Fall back to the assumption, which is
+		// v0.1's behaviour and is kept deliberately.
 		//
 		// The bias is one-sided, and that is the whole argument for it. If
 		// the assumption is wrong — this really was an insecure delegation
@@ -88,6 +124,29 @@ func (w *walk) noDSAtDelegation(zone *zoneState, child string, resp Response) (*
 		w.rec.skip(step, proof.unreadOverReported(proof.denialUnavailable()))
 		return nil, ValidationResult{}, false
 	}
+}
+
+// delegationKnown asks the source whether child is a zone cut.
+//
+// Only a DelegationSource can answer, and only about names it has actually
+// resolved through. The two return values are deliberately separate: "not a
+// zone cut" and "I have no idea" lead to different behaviour, and collapsing
+// them into one boolean is how a validator ends up treating ignorance as
+// evidence.
+func (w *walk) delegationKnown(child string) (isCut bool, known bool) {
+	ds, ok := w.v.src.(DelegationSource)
+	if !ok {
+		return false, false
+	}
+	cuts, ok := ds.ZoneCutsFor(w.ctx, child)
+	if !ok {
+		return false, false
+	}
+	v, present := cuts[dns.CanonicalName(child)]
+	if !present {
+		return false, false
+	}
+	return v, true
 }
 
 // validateDenial authenticates a response that answers with an absence.

@@ -29,6 +29,18 @@ type DNSSECObservation struct {
 	// Disagreement names how the local and upstream views differ, or is empty
 	// when they are consistent or not comparable.
 	Disagreement string `json:"disagreement,omitempty"`
+
+	// Resolution says how the records behind this verdict were obtained:
+	// "native" or "forwarded". A Secure reached through somebody else's
+	// recursive resolver and a Secure reached by asking the authoritative
+	// servers are not the same claim, so a row that did not say which could
+	// not be interpreted at all.
+	Resolution string `json:"resolution,omitempty"`
+	// Queries and Delegations are what native resolution cost: questions sent
+	// to authoritative servers, and zone cuts crossed. Zero for a forwarded
+	// verdict.
+	Queries     int `json:"queries,omitempty"`
+	Delegations int `json:"delegations,omitempty"`
 }
 
 // InsertDNSSECObservations writes a batch.
@@ -49,8 +61,8 @@ func (s *Store) InsertDNSSECObservations(ctx context.Context, rows []DNSSECObser
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO dnssec_observations
 		    (id, ts, qname, qtype, cached, upstream, status, reason_code, reason,
-		     duration_ms, disagreement)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		     duration_ms, disagreement, resolution, queries, delegations)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING`)
 	if err != nil {
 		return err
@@ -60,7 +72,7 @@ func (s *Store) InsertDNSSECObservations(ctx context.Context, rows []DNSSECObser
 	for _, o := range rows {
 		if _, err := stmt.ExecContext(ctx, o.ID, unixMilli(o.Time), o.Domain, o.QType,
 			boolToInt(o.Cached), o.Upstream, o.Status, o.ReasonCode, o.Reason,
-			o.DurationMS, o.Disagreement); err != nil {
+			o.DurationMS, o.Disagreement, o.Resolution, o.Queries, o.Delegations); err != nil {
 			return err
 		}
 	}
@@ -170,7 +182,7 @@ func (s *Store) ListDNSSECObservations(ctx context.Context, f DNSSECObservationF
 	// #nosec G202 -- every fragment appended below is a string literal
 	// ("AND status = ?"); the filter values are bound as parameters in args.
 	q := `SELECT id, ts, qname, qtype, cached, upstream, status, reason_code, reason,
-	             duration_ms, disagreement
+	             duration_ms, disagreement, resolution, queries, delegations
 	      FROM dnssec_observations WHERE 1=1`
 	var args []any
 	if f.Status != "" {
@@ -197,7 +209,8 @@ func (s *Store) ListDNSSECObservations(ctx context.Context, f DNSSECObservationF
 			cached int
 		)
 		if err := rows.Scan(&o.ID, &ts, &o.Domain, &o.QType, &cached, &o.Upstream,
-			&o.Status, &o.ReasonCode, &o.Reason, &o.DurationMS, &o.Disagreement); err != nil {
+			&o.Status, &o.ReasonCode, &o.Reason, &o.DurationMS, &o.Disagreement,
+			&o.Resolution, &o.Queries, &o.Delegations); err != nil {
 			return nil, err
 		}
 		o.Time = time.UnixMilli(ts).UTC()
@@ -228,7 +241,7 @@ func (s *Store) DNSSECObservationsByID(ctx context.Context, ids []string) (map[s
 		// from an integer count by placeholders(); every id is bound as a
 		// parameter in args below. Never append a fragment built from input.
 		q := `SELECT id, ts, qname, qtype, cached, upstream, status, reason_code, reason,
-		             duration_ms, disagreement
+		             duration_ms, disagreement, resolution, queries, delegations
 		      FROM dnssec_observations WHERE id IN (` + placeholders(len(batch)) + `)`
 		args := make([]any, len(batch))
 		for i, id := range batch {
@@ -245,7 +258,8 @@ func (s *Store) DNSSECObservationsByID(ctx context.Context, ids []string) (map[s
 				cached int
 			)
 			if err := rows.Scan(&o.ID, &ts, &o.Domain, &o.QType, &cached, &o.Upstream,
-				&o.Status, &o.ReasonCode, &o.Reason, &o.DurationMS, &o.Disagreement); err != nil {
+				&o.Status, &o.ReasonCode, &o.Reason, &o.DurationMS, &o.Disagreement,
+				&o.Resolution, &o.Queries, &o.Delegations); err != nil {
 				rows.Close()
 				return nil, err
 			}

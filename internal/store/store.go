@@ -190,6 +190,19 @@ var addedColumns = []struct{ table, column, definition string }{
 	// until they switch the feature on, and a downgrade still reads the
 	// table.
 	{"query_log", "dnssec_obs", "TEXT NOT NULL DEFAULT ''"},
+	// How the records behind a Daddybound verdict were obtained: 'native'
+	// when Daddybound walked from the root to the authoritative servers,
+	// 'forwarded' when it checked signatures on records an upstream resolver
+	// handed over. Empty on rows written before the distinction existed, and
+	// deliberately not backfilled: those rows came from the forwarding path,
+	// but saying so retrospectively would be asserting something the row
+	// never recorded.
+	{"dnssec_observations", "resolution", "TEXT NOT NULL DEFAULT ''"},
+	// What native resolution cost this observation: questions sent to
+	// authoritative servers, and zone cuts crossed. Zero for a forwarded
+	// verdict, and zero on every pre-existing row.
+	{"dnssec_observations", "queries", "INTEGER NOT NULL DEFAULT 0"},
+	{"dnssec_observations", "delegations", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func migrate(db *sql.DB) error {

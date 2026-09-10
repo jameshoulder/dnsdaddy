@@ -152,9 +152,11 @@ type DNS struct {
 	// invite conclusions it cannot support.
 	LocalDNSSECQueue int `yaml:"local_dnssec_queue"`
 
-	// LocalDNSSECTimeout bounds one observation, including every supporting
-	// DNSSEC query it makes. On expiry the walk is cancelled and the
-	// observation is recorded as a timeout — never as a DNSSEC state.
+	// LocalDNSSECTimeout bounds one observation: the whole native resolution
+	// from the root plus every supporting DNSSEC query. On expiry the walk is
+	// cancelled and the observation is recorded as a timeout — never as a
+	// DNSSEC state, because an attacker who can cause a timeout must not be
+	// able to manufacture one.
 	LocalDNSSECTimeout Duration `yaml:"local_dnssec_timeout"`
 
 	// LocalDNSSECTrustAnchorFile replaces the compiled-in IANA root anchors.
@@ -420,7 +422,17 @@ func Default() Config {
 			LocalDNSSECValidation: LocalDNSSECUnset,
 			LocalDNSSECWorkers:    2,
 			LocalDNSSECQueue:      256,
-			LocalDNSSECTimeout:    Duration(2 * time.Second),
+			// Sized for native recursion rather than for a forwarder.
+			//
+			// A forwarded observation is one round trip to an upstream that
+			// already has the answer. Native recursion is a sequence: root,
+			// then TLD, then the authoritative servers, and a DNSKEY and DS
+			// at each level on the way down. A cold cache therefore costs
+			// several round trips in series, and the 2s that was generous for
+			// the forwarding path would have recorded a large share of
+			// perfectly good names as timeouts — evidence that says nothing
+			// about DNSSEC and everything about the budget.
+			LocalDNSSECTimeout: Duration(5 * time.Second),
 		},
 		HTTP: HTTP{
 			// Loopback, deliberately.
@@ -964,6 +976,19 @@ func (c *Config) AllowedClientPrefixes() []netip.Prefix {
 
 // DBPath returns the location of the SQLite database.
 func (c *Config) DBPath() string { return filepath.Join(c.DataDir, "dnsdaddy.db") }
+
+// TrustAnchorStatePath returns where Daddybound keeps its managed DNSSEC trust
+// anchors.
+//
+// Beside the database rather than inside it, and deliberately. This file is
+// what the resolver trusts, and an operator has to be able to read it, copy it
+// to a new host, or delete it to force a re-seed from the configured anchors —
+// all of which are harder through a database. It is also the one piece of state
+// that must survive a database rebuild: losing it costs thirty days of
+// hold-down progress on any key still waiting.
+func (c *Config) TrustAnchorStatePath() string {
+	return filepath.Join(c.DataDir, "daddybound-anchors.json")
+}
 
 // SecretPath returns the location of the generated cookie-signing secret.
 func (c *Config) SecretPath() string { return filepath.Join(c.DataDir, "session.key") }

@@ -24,6 +24,64 @@ type Validator interface {
 	Validate(ctx context.Context, qname string, rrtype uint16) dnssec.ValidationResult
 }
 
+// Resolver is a Daddybound that fetches the records it validates.
+//
+// The capability Learn mode exists to exercise. A Validator reads records from
+// wherever its source gets them, which in the forwarding arrangement means the
+// operator's upstream resolvers — so a Secure verdict says the signatures on
+// the records Cloudflare or Quad9 chose to hand over check out. A Resolver
+// walks from the root to the authoritative servers and validates what it
+// fetched itself, which is a different and much stronger sentence, and is the
+// code path Live mode runs.
+//
+// Learn drives this one where it is available, because evidence collected
+// through a forwarder would be evidence about a code path nobody is proposing
+// to switch on. Which one produced a row is recorded on the row: see
+// Observation.Resolution.
+//
+// A resolution failure comes back in Outcome.Failure and is never a verdict.
+// "I could not reach the servers for this zone" and "this zone's data does not
+// authenticate" are statements about different things, and folding the first
+// into the second would let anyone manufacture a security state by dropping
+// packets.
+type Resolver interface {
+	ResolveAndValidate(ctx context.Context, qname string, rrtype uint16) Outcome
+}
+
+// Outcome is one native resolve-and-validate, and what it cost.
+//
+// A failure is reported here rather than as an error because it is a result:
+// "the authoritative servers for this zone could not be reached" is one of the
+// things Learn mode exists to measure, and a deployment that cannot reach them
+// is a deployment for which Live mode would answer nothing at all. Losing that
+// down an error return would leave the readiness evidence quietly incomplete.
+type Outcome struct {
+	// Result is what Daddybound concluded about the records it fetched.
+	// Meaningless when Failure is set.
+	Result dnssec.ValidationResult
+	// Queries is how many questions went to authoritative servers.
+	Queries int
+	// Delegations is how many zone cuts were crossed.
+	Delegations int
+	// Lookups is how many record lookups validation asked for.
+	Lookups int
+
+	// Failure, when set, says the resolution did not complete and what kind
+	// of failure it was. Always operational — StatusTimeout,
+	// StatusResourceLimit, StatusUnreachable — and never one of RFC 4033's
+	// four.
+	//
+	// Classifying it is the implementation's job rather than this package's,
+	// because the sentinels belong to the resolver and this package does not
+	// import it. See the package comment. What this package does enforce is
+	// that whatever comes back is not read as a verdict: see validate.
+	Failure Status
+	// FailureReason is a sentence for a person, and a typed code for a
+	// metric.
+	FailureReason string
+	FailureCode   string
+}
+
 // Sink receives completed observations.
 //
 // Implementations must not block: this runs on a worker whose only other job
@@ -82,7 +140,11 @@ func (o Options) withDefaults() Options {
 		o.Queue = 256
 	}
 	if o.Timeout <= 0 {
-		o.Timeout = 2 * time.Second
+		// Long enough for a cold native resolution, which is root, then TLD,
+		// then the authoritative servers, with a DNSKEY and a DS at each
+		// level: several round trips in series rather than one to a forwarder
+		// that already has the answer.
+		o.Timeout = 5 * time.Second
 	}
 	if o.Log == nil {
 		o.Log = slog.Default()
@@ -111,11 +173,27 @@ type Stats struct {
 	// LastAt and LastStatus describe the most recent observation.
 	LastAt     time.Time
 	LastStatus Status
+
+	// Resolution is how this observer obtains records: ResolutionNative or
+	// ResolutionForwarded. On the summary rather than only on the rows,
+	// because the first question to ask of any of these numbers is which
+	// code path produced them.
+	Resolution string
+	// Queries is how many questions native resolution has sent to
+	// authoritative servers across every observation, and Delegations how
+	// many zone cuts it has crossed. Both zero when forwarding.
+	//
+	// The cost of Learn, stated plainly. Learn sends real DNS traffic that
+	// the deployment would not otherwise send, and an operator deciding
+	// whether to leave it on is entitled to see how much.
+	Queries     uint64
+	Delegations uint64
 }
 
 // Observer validates real queries off the answer path.
 type Observer struct {
 	v    Validator
+	r    Resolver
 	sink Sink
 	opts Options
 
@@ -128,6 +206,8 @@ type Observer struct {
 	observed atomic.Uint64
 	dropped  atomic.Uint64
 	panics   atomic.Uint64
+	queries  atomic.Uint64
+	delegs   atomic.Uint64
 
 	mu            sync.Mutex
 	byStatus      map[Status]uint64
@@ -136,11 +216,34 @@ type Observer struct {
 	lastStatus    Status
 }
 
-// New builds an Observer. It does no work until Run is called.
+// New builds an Observer over a validator that reads records from wherever its
+// source supplies them. It does no work until Run is called.
+//
+// NewNative is the arrangement Learn mode actually ships; this one remains for
+// the forwarding path and for tests that need a validator whose behaviour they
+// choose.
 func New(v Validator, sink Sink, o Options) *Observer {
+	return newObserver(v, nil, sink, o)
+}
+
+// NewNative builds an Observer over a Daddybound that fetches what it
+// validates.
+//
+// The difference is the whole of Learn mode. Through New, a Secure verdict says
+// the signatures on records the operator's upstream chose to hand over check
+// out. Through NewNative, it says Daddybound walked from the root to the
+// authoritative servers and authenticated what it read there — which is the
+// code path Live mode runs, and therefore the only path whose evidence is
+// evidence about Live.
+func NewNative(r Resolver, sink Sink, o Options) *Observer {
+	return newObserver(nil, r, sink, o)
+}
+
+func newObserver(v Validator, r Resolver, sink Sink, o Options) *Observer {
 	o = o.withDefaults()
 	return &Observer{
 		v:             v,
+		r:             r,
 		sink:          sink,
 		opts:          o,
 		queue:         make(chan Request, o.Queue),
@@ -148,6 +251,14 @@ func New(v Validator, sink Sink, o Options) *Observer {
 		byStatus:      map[Status]uint64{},
 		disagreements: map[string]uint64{},
 	}
+}
+
+// Resolution reports how this observer obtains the records it validates.
+func (o *Observer) Resolution() string {
+	if o.r != nil {
+		return ResolutionNative
+	}
+	return ResolutionForwarded
 }
 
 // NewID returns a correlation identifier for one query.
@@ -230,7 +341,7 @@ func (o *Observer) validate(ctx context.Context, req Request) {
 	defer cancel()
 
 	start := time.Now()
-	res, panicked := o.runValidator(vctx, req)
+	out, panicked := o.runEngine(vctx, req)
 	elapsed := time.Since(start)
 
 	var (
@@ -242,9 +353,25 @@ func (o *Observer) validate(ctx context.Context, req Request) {
 	case panicked:
 		status, reason = StatusInternalError, "validator_panic"
 		text = "the validator aborted; this is a defect, not a property of the zone"
+	case out.Failure != "":
+		// A failure to obtain the records is never a verdict about them. The
+		// implementation has already said which operational kind it was; this
+		// only refuses to promote whatever is in out.Result, which for a
+		// failed resolution describes nothing.
+		//
+		// The guard is here rather than trusted to the caller because it is
+		// the one mistake that would be invisible: a Bogus manufactured by an
+		// unreachable server looks exactly like a Bogus earned by a forged
+		// signature, and an attacker who can drop packets could condemn any
+		// zone in the operator's report.
+		status, reason = out.Failure, out.FailureCode
+		if status.IsSecurityState() {
+			status, reason = StatusInternalError, "failure_misclassified"
+		}
+		text = out.FailureReason
 	default:
-		status, reason = classify(res)
-		text = res.Reason.Explain()
+		status, reason = classify(out.Result)
+		text = out.Result.Reason.Explain()
 	}
 
 	obs := Observation{
@@ -258,6 +385,10 @@ func (o *Observer) validate(ctx context.Context, req Request) {
 		ReasonCode:     reason,
 		Reason:         sanitiseReason(text),
 		Duration:       elapsed,
+		Lookups:        out.Lookups,
+		Resolution:     o.Resolution(),
+		Queries:        out.Queries,
+		Delegations:    out.Delegations,
 	}
 
 	// Counted always; stored only when the operator's query-log settings
@@ -281,7 +412,7 @@ func (o *Observer) validate(ctx context.Context, req Request) {
 // validator defect would be every client's DNS, not one observation. That is
 // exactly the coupling this milestone exists to prevent, and it is worth one
 // deferred function to make it impossible.
-func (o *Observer) runValidator(ctx context.Context, req Request) (res dnssec.ValidationResult, panicked bool) {
+func (o *Observer) runEngine(ctx context.Context, req Request) (out Outcome, panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -292,11 +423,20 @@ func (o *Observer) runValidator(ctx context.Context, req Request) (res dnssec.Va
 				"panic", fmt.Sprint(r))
 		}
 	}()
-	return o.v.Validate(ctx, req.QName, req.QType), false
+	if o.r != nil {
+		return o.r.ResolveAndValidate(ctx, req.QName, req.QType), false
+	}
+	return Outcome{Result: o.v.Validate(ctx, req.QName, req.QType)}, false
 }
 
 func (o *Observer) record(obs Observation) {
 	o.observed.Add(1)
+	if obs.Queries > 0 {
+		o.queries.Add(uint64(obs.Queries))
+	}
+	if obs.Delegations > 0 {
+		o.delegs.Add(uint64(obs.Delegations))
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.byStatus[obs.Status]++
@@ -319,6 +459,9 @@ func (o *Observer) Stats() Stats {
 		Disagreements: make(map[string]uint64, len(o.disagreements)),
 		LastAt:        o.lastAt,
 		LastStatus:    o.lastStatus,
+		Resolution:    o.Resolution(),
+		Queries:       o.queries.Load(),
+		Delegations:   o.delegs.Load(),
 	}
 	for k, v := range o.byStatus {
 		s.ByStatus[k] = v

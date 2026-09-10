@@ -14,10 +14,17 @@ than as intended. Where the two would have differed, a note says so.
 
 **Proved:** nothing. A trust anchor is an axiom.
 
-**Assumed:** that the configured anchors are the right ones. Daddybound never
-fetches an anchor, never follows RFC 5011 rollover, and never promotes an
-observed DNSKEY into a trust anchor. Anchors are code and configuration,
-reviewed as changes.
+**Assumed:** that the configured anchors are the right ones, and that a key
+those anchors later attest to is one the zone's operators meant to publish.
+
+Daddybound never fetches an anchor and never promotes an observed DNSKEY into a
+trust anchor on its own word. It does follow RFC 5011 rollover, which is a
+narrower thing: a key becomes an anchor only after appearing, continuously for
+thirty days, in DNSKEY RRsets signed by a key that was already an anchor. The
+compiled-in digests are the root of that and are never discarded. So the
+assumption moves from "these anchors" to "these anchors, and whatever they
+attest to for thirty uninterrupted days" — which is the window the zone's
+operators have to notice a key they did not publish.
 
 A validator with no anchor covering a name returns Indeterminate with
 `no_trust_anchor`, which RFC 4033 §5 calls the default operation mode. It does
@@ -192,8 +199,6 @@ grow without bound. Reproduce with `go test ./internal/daddybound/dnssec/
 - Aggressive use of NSEC and NSEC3 (RFC 8198) would let a proof answer a
   question that was not asked, which is a new proof obligation rather than a
   new capability.
-- RFC 5011 rollover would move §1's assumption from "these anchors" to "these
-  anchors and whatever they later attest".
 - More real signed zones. The live corpus put several hundred names signed by
   people outside this repository through §3, §4 and §4a, and found a defect in
   §4's denial reasoning that no laboratory scenario could have reached — a

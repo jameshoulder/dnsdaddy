@@ -7,6 +7,12 @@
 // thing DNSSEC exists to stop needing. Every validating resolver ships these
 // values the same way.
 //
+// RFC 5011 rollover, in managed.go, does not weaken that. It never adopts a key
+// because the network offered one: a key becomes an anchor only after being
+// announced, continuously for thirty days, in DNSKEY RRsets signed by a key
+// that was already an anchor — a chain that begins at the digests below and
+// never leaves them behind.
+//
 // They are public data, published by IANA and reproducible by anyone: take the
 // root DNSKEY RRset, keep the keys with the SEP bit, and compute the SHA-256
 // digest RFC 4034 §5.1.4 defines. The two below were derived that way from the
@@ -29,9 +35,13 @@ import (
 //
 // Both are listed so that the rollover between them does not need a new
 // release: a validator holding both accepts whichever the root is currently
-// signing with. That is the whole of DNS Daddy's trust-anchor lifecycle today
-// — there is no RFC 5011 automatic rollover, and the limitation is documented
-// rather than implied.
+// signing with.
+//
+// They are the seed rather than the whole lifecycle. Manager (managed.go)
+// follows RFC 5011, so a key the root announces and signs for can become an
+// anchor after its hold-down and a revoked one stops being used — but it starts
+// from these digests, it never replaces them, and a deployment that loses its
+// managed state falls back to exactly this set.
 var IANARootDS = []string{
 	". 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D",
 	". 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16",
