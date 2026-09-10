@@ -91,6 +91,9 @@ func (w *Writer) Record(o observe.Observation) {
 		Reason:       o.Reason,
 		DurationMS:   float64(o.Duration.Microseconds()) / 1000,
 		Disagreement: observe.DisagreementClass(o.UpstreamStatus, o.Status),
+		Resolution:   o.Resolution,
+		Queries:      o.Queries,
+		Delegations:  o.Delegations,
 	}
 	select {
 	case w.ch <- row:

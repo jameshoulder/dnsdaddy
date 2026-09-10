@@ -178,7 +178,17 @@ CREATE TABLE IF NOT EXISTS dnssec_observations (
     -- The disagreement class, or '' when the local and upstream views are
     -- consistent or not comparable. Stored rather than recomputed so a report
     -- cannot drift from the metric.
-    disagreement TEXT   NOT NULL DEFAULT ''
+    disagreement TEXT   NOT NULL DEFAULT '',
+    -- How the records behind this verdict were obtained: 'native' when
+    -- Daddybound walked from the root to the authoritative servers itself,
+    -- 'forwarded' when it checked signatures on records an upstream resolver
+    -- handed over. Those are different claims and a row that did not say which
+    -- could not be interpreted.
+    resolution  TEXT    NOT NULL DEFAULT '',
+    -- What native resolution cost: questions sent to authoritative servers,
+    -- and zone cuts crossed. Zero for a forwarded verdict.
+    queries     INTEGER NOT NULL DEFAULT 0,
+    delegations INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS dnssec_obs_ts_idx     ON dnssec_observations (ts DESC);

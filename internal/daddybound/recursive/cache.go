@@ -413,13 +413,3 @@ func decrementTTL(msg *dns.Msg, by uint32) {
 		}
 	}
 }
-
-// strings_IndexByte finds the first label separator.
-func strings_IndexByte(s string) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '.' {
-			return i
-		}
-	}
-	return -1
-}

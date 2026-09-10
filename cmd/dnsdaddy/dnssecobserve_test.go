@@ -39,7 +39,7 @@ func TestOffModeConstructsNothing(t *testing.T) {
 			// loading happened.
 			cfg.DNS.LocalDNSSECTrustAnchorFile = "/nonexistent/anchors"
 
-			got, err := startDNSSECObserver(context.Background(), cfg, nil, nil, log)
+			got, err := startDNSSECObserver(context.Background(), cfg, nil, log)
 			if err != nil {
 				t.Fatalf("off mode returned an error: %v", err)
 			}
@@ -79,7 +79,7 @@ func TestObserveModeRefusesToStartWithoutUsableAnchors(t *testing.T) {
 	cfg.DNS.LocalDNSSECValidation = config.LocalDNSSECObserve
 	cfg.DNS.LocalDNSSECTrustAnchorFile = "/nonexistent/anchors"
 
-	if _, err := startDNSSECObserver(context.Background(), cfg, nil, nil, log); err == nil {
+	if _, err := startDNSSECObserver(context.Background(), cfg, nil, log); err == nil {
 		t.Fatal("observe mode started with an unreadable trust anchor file")
 	}
 }

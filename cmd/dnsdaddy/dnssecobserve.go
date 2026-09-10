@@ -8,11 +8,12 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/api"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/dnssec"
+	"github.com/jameshoulder/dnsdaddy/internal/daddybound/native"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
+	"github.com/jameshoulder/dnsdaddy/internal/daddybound/recursive"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/trustanchors"
 	"github.com/jameshoulder/dnsdaddy/internal/dnssecobs"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
-	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -21,7 +22,10 @@ import (
 type dnssecObservation struct {
 	observer *observe.Observer
 	writer   *dnssecobs.Writer
-	source   *observe.Source
+	// resolver is the native recursive resolver behind Learn mode, for the
+	// status surface. Nil would mean the forwarding path, which Learn no
+	// longer uses.
+	resolver *recursive.Resolver
 
 	// stopWriter cancels the writer, and is deliberately not the process
 	// context. See Wait.
@@ -39,10 +43,15 @@ type dnssecObservation struct {
 // A failure to start is a startup error rather than a warning. An operator who
 // configured observe mode and got a silently disabled validator would draw
 // conclusions from an empty dataset, which is worse than not starting.
+//
+// The resolver is deliberately not a parameter. Learn used to read records
+// through the operator's configured upstreams and needed them; it now resolves
+// from the root itself, and taking a *resolver.Resolver here would imply a
+// coupling that no longer exists — the coupling
+// TestDaddyboundDoesNotReachIntoTheResolver exists to keep absent.
 func startDNSSECObserver(
 	ctx context.Context,
 	cfg config.Config,
-	res *resolver.Resolver,
 	st *store.Store,
 	log *slog.Logger,
 ) (*dnssecObservation, error) {
@@ -55,26 +64,39 @@ func startDNSSECObserver(
 		return nil, fmt.Errorf("local DNSSEC validation: %w", err)
 	}
 
-	// The operator's own upstreams, so switching validation on does not send
-	// DNSSEC traffic somewhere they did not choose — and in particular does
-	// not fall back to plaintext for an instance configured with DoT.
-	ups := res.Upstreams()
-	exchangers := make([]observe.Exchanger, 0, len(ups))
-	for _, u := range ups {
-		exchangers = append(exchangers, u)
-	}
-	if len(exchangers) == 0 {
-		return nil, fmt.Errorf("local DNSSEC validation: no upstreams to validate against")
-	}
-
-	source := observe.NewSource(exchangers, observe.SourceOptions{})
-	validator := dnssec.New(source, dnssec.Config{
+	// Learn mode resolves for itself, from the root hints to the
+	// authoritative servers, and validates the records it fetched. It does
+	// not read them through the operator's upstreams.
+	//
+	// That is a deliberate change of behaviour and it has a cost worth being
+	// plain about. Native recursion talks to authoritative servers over
+	// ordinary port 53, in the clear: there is no DoT or DoH to the root or
+	// to a TLD, and pretending otherwise would be pretending. An operator who
+	// configured DNS-over-TLS upstreams for privacy is, in Learn, sending
+	// query names to authoritative servers as well. QNAME minimisation limits
+	// what each one learns to the labels it needs — the root sees only the
+	// TLD — but it does not remove the exposure, and Learn mode is on by
+	// default for a fresh install. It is documented in docs/daddybound/ and
+	// stated in the startup log below rather than buried.
+	//
+	// The alternative is worse. Evidence collected through a forwarder would
+	// be evidence about a code path nobody is proposing to switch on: Live
+	// mode returns what Daddybound resolved, so Learn has to exercise
+	// Daddybound resolving.
+	resolver := recursive.New(recursive.Config{
+		Timeout: cfg.DNS.LocalDNSSECTimeout.D(),
+	})
+	engine, err := native.New(native.Config{
+		Resolver: resolver,
 		Anchors:  anchors,
 		Policy:   dnssec.DefaultPolicy(),
 		Clock:    dnssec.SystemClock{},
 		Verifier: dnssec.StdVerifier(),
 		Limits:   dnssec.DefaultLimits(),
 	})
+	if err != nil {
+		return nil, fmt.Errorf("local DNSSEC validation: %w", err)
+	}
 
 	writer := dnssecobs.New(st, dnssecobs.Options{Log: log})
 	// The writer outlives the observer on purpose. Given the same context
@@ -88,7 +110,7 @@ func startDNSSECObserver(
 	wctx, stopWriter := context.WithCancel(context.WithoutCancel(ctx))
 	go writer.Run(wctx)
 
-	observer := observe.New(validator, writer, observe.Options{
+	observer := observe.NewNative(native.NewLearn(engine), writer, observe.Options{
 		Workers: cfg.DNS.LocalDNSSECWorkers,
 		Queue:   cfg.DNS.LocalDNSSECQueue,
 		Timeout: cfg.DNS.LocalDNSSECTimeout.D(),
@@ -108,15 +130,19 @@ func startDNSSECObserver(
 
 	log.Info("local DNSSEC validation is observing",
 		"mode", cfg.DNS.LocalDNSSECMode(),
+		"resolution", observer.Resolution(),
 		"workers", cfg.DNS.LocalDNSSECWorkers,
 		"queue", cfg.DNS.LocalDNSSECQueue,
 		"timeout", cfg.DNS.LocalDNSSECTimeout.D(),
-		"enforcing", false)
+		"enforcing", false,
+		"note", "Daddybound resolves from the root itself; these queries reach "+
+			"authoritative servers over plaintext port 53 and do not use the "+
+			"configured upstreams")
 
 	return &dnssecObservation{
 		observer:   observer,
 		writer:     writer,
-		source:     source,
+		resolver:   resolver,
 		stopWriter: stopWriter,
 	}, nil
 }

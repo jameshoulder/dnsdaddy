@@ -59,6 +59,18 @@ const (
 	StatusUnsupported Status = "unsupported"
 	// StatusInternalError: the observer itself failed.
 	StatusInternalError Status = "internal_error"
+	// StatusUnreachable: no authoritative server for the name could be
+	// reached, so no records were obtained and nothing was concluded.
+	//
+	// Only native resolution can produce this, and it is the single most
+	// important operational number Learn mode collects. Live mode returns
+	// what Daddybound resolved; a deployment whose Daddybound cannot reach
+	// the authoritative Internet — a network that blocks outbound port 53 to
+	// anywhere but its ISP's resolvers, a middlebox that rewrites DNS — would
+	// answer nothing at all in Live. Learn exists to find that out before
+	// anybody switches over, so it must not be folded into timeout or
+	// indeterminate, both of which say something else.
+	StatusUnreachable Status = "unreachable"
 )
 
 // Statuses is every status, in report order. Used by metrics so a counter
@@ -67,6 +79,7 @@ func Statuses() []Status {
 	return []Status{
 		StatusSecure, StatusInsecure, StatusBogus, StatusIndeterminate,
 		StatusTimeout, StatusResourceLimit, StatusUnsupported, StatusInternalError,
+		StatusUnreachable,
 	}
 }
 
@@ -119,7 +132,35 @@ type Observation struct {
 	Duration time.Duration
 	// Lookups is how many supporting DNSSEC queries it needed.
 	Lookups int
+
+	// Resolution says how the records behind this verdict were obtained:
+	// ResolutionNative or ResolutionForwarded.
+	//
+	// Recorded on every row because a Secure reached through somebody else's
+	// recursive resolver and a Secure reached by asking the authoritative
+	// servers are not the same claim, and a dataset that mixed them without
+	// saying which was which could not be read at all. An operator looking at
+	// readiness for Live needs to know that the evidence came from the code
+	// path Live would run.
+	Resolution string
+	// Queries is how many questions native resolution sent to authoritative
+	// servers. Zero when the records were forwarded.
+	Queries int
+	// Delegations is how many zone cuts native resolution crossed reaching
+	// the answer. Zero when the records were forwarded.
+	Delegations int
 }
+
+// How the records behind a verdict were obtained.
+const (
+	// ResolutionNative: Daddybound walked from the root to the authoritative
+	// servers and read the records from them.
+	ResolutionNative = "native"
+	// ResolutionForwarded: the records came from the operator's configured
+	// upstream resolvers. Daddybound checked the signatures on records
+	// somebody else chose to hand over.
+	ResolutionForwarded = "forwarded"
+)
 
 // maxReasonLen bounds the stored sentence.
 //

@@ -301,7 +301,7 @@ func run() error {
 	// receives is produced entirely by the code above and is not shown to
 	// Daddybound before it is sent. See
 	// docs/decisions/0002-daddybound-observe-mode.md.
-	dnssecObserver, err := startDNSSECObserver(ctx, cfg, res, st, log)
+	dnssecObserver, err := startDNSSECObserver(ctx, cfg, st, log)
 	if err != nil {
 		return err
 	}

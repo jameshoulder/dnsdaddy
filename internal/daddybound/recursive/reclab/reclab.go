@@ -303,20 +303,12 @@ func (h *Hierarchy) Stop() {
 func (s *server) start(t *testing.T) {
 	t.Helper()
 
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reclab: listen udp: %v", err)
-	}
-	ap, err := netip.ParseAddrPort(pc.LocalAddr().String())
+	pc, ln := bindPair(t)
+	ap, err := netip.ParseAddrPort(ln.Addr().String())
 	if err != nil {
 		t.Fatalf("reclab: parse addr: %v", err)
 	}
 	s.addr = ap
-
-	ln, err := net.Listen("tcp", pc.LocalAddr().String())
-	if err != nil {
-		t.Fatalf("reclab: listen tcp: %v", err)
-	}
 
 	started := make(chan struct{}, 2)
 	s.udp = &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(s.serve("udp")),
@@ -327,6 +319,46 @@ func (s *server) start(t *testing.T) {
 	go func() { _ = s.tcp.ActivateAndServe() }()
 	<-started
 	<-started
+}
+
+// bindPair takes the same ephemeral port number on TCP and UDP.
+//
+// A DNS server listens on one port over both protocols, and a resolver retries
+// over TCP when an answer is truncated — which signed answers carrying keys and
+// signatures do routinely. So the two have to match.
+//
+// The retry is not defensive padding. TCP and UDP have separate port spaces:
+// asking the kernel for an ephemeral port on one says nothing about whether the
+// same number is free on the other, so binding one and then the other is a race
+// against everything else on the machine. It lost, as "bind: address already in
+// use" inside a resolution test that reads like a resolver fault rather than a
+// harness one. internal/daddybound/lab hit the same thing and solved it the
+// same way; this is that fix, here.
+//
+// TCP first because it is the scarcer of the two — listening sockets linger in
+// TIME_WAIT, and far more software on a shared runner wants a TCP port than a
+// UDP one. Choosing the number from the scarcer space makes the second bind the
+// one likely to succeed.
+func bindPair(t *testing.T) (net.PacketConn, net.Listener) {
+	t.Helper()
+
+	const attempts = 16
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reclab: listen tcp: %v", err)
+		}
+		pc, err := net.ListenPacket("udp", ln.Addr().String())
+		if err == nil {
+			return pc, ln
+		}
+		lastErr = err
+		_ = ln.Close()
+	}
+	t.Fatalf("reclab: could not bind udp and tcp on one loopback port in %d attempts: %v",
+		attempts, lastErr)
+	return nil, nil
 }
 
 func (s *server) serve(proto string) func(dns.ResponseWriter, *dns.Msg) {
