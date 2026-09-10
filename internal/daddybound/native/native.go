@@ -48,7 +48,24 @@ type Config struct {
 	// Anchors are the trust anchors validation starts from. An Engine with
 	// none returns Indeterminate for everything, which is the honest answer
 	// and is why no anchor is invented here.
-	Anchors  dnssec.TrustAnchors
+	//
+	// Ignored when AnchorSource is set.
+	Anchors dnssec.TrustAnchors
+
+	// AnchorSource supplies the anchors afresh for every question.
+	//
+	// It exists because a trust anchor set is not a constant. RFC 5011 lets a
+	// zone roll its keys and a resolver follow, so the set in force can change
+	// while the process runs — a key completing its hold-down, or a revoked
+	// key being withdrawn. Reading it per question means a revocation takes
+	// effect on the next query rather than at the next restart, which for a
+	// revocation is the whole point: a key the zone has withdrawn must stop
+	// being trusted now, not in a fortnight when somebody reboots.
+	//
+	// Cheap by construction: internal/daddybound/trustanchors prepares the set
+	// on each state change and this is a read of it.
+	AnchorSource func() dnssec.TrustAnchors
+
 	Policy   dnssec.Policy
 	Clock    dnssec.Clock
 	Verifier dnssec.SignatureVerifier
@@ -150,7 +167,7 @@ func (e *Engine) Resolve(ctx context.Context, name string, rrtype uint16) (*Answ
 	// again — the second fetch usually agrees, and "usually" is not a
 	// guarantee anybody should build a resolver on.
 	p := newPin(res).bind(e.src)
-	v := dnssec.New(p, e.dnssecCfg)
+	v := dnssec.New(p, e.configFor())
 	verdict := v.Validate(ctx, name, rrtype)
 
 	lookups, pinned := p.counts()
@@ -170,6 +187,22 @@ func (e *Engine) Resolve(ctx context.Context, name string, rrtype uint16) (*Answ
 
 // Resolver exposes the underlying resolver, for status and diagnostics.
 func (e *Engine) Resolver() *recursive.Resolver { return e.cfg.Resolver }
+
+// Anchors returns the trust anchors in force right now.
+func (e *Engine) Anchors() dnssec.TrustAnchors {
+	if e.cfg.AnchorSource != nil {
+		return e.cfg.AnchorSource()
+	}
+	return e.cfg.Anchors
+}
+
+// configFor is the validator configuration for one question, with the anchors
+// read at the moment the question is asked.
+func (e *Engine) configFor() dnssec.Config {
+	cfg := e.dnssecCfg
+	cfg.Anchors = e.Anchors()
+	return cfg
+}
 
 // question is a pin key.
 type question struct {

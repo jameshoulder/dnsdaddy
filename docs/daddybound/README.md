@@ -93,19 +93,31 @@ being complete:
 - **No aggressive use of NSEC or NSEC3** (RFC 8198). Denial proofs are checked
   when a response carries them; they are never used to answer a question that
   was not asked.
-- **One remaining zone-cut assumption.** Where a delegation supplies no proof
-  either way, the walk assumes the name is not a zone cut. That can cost a
-  false Bogus and cannot produce a false Secure — argued in standards.md §5.5
-  and measured by a property test that strips every delegation proof and
-  checks no verdict strengthens.
-- **No recursive resolution.** It validates records something else supplies.
-  The live corpus points it at a recursive resolver with CD set; that is a
-  test harness reading records, not Daddybound discovering them.
-- **No trust anchor rollover** (RFC 5011). Anchors are configuration.
-- **No encrypted transports** as part of the engine.
+- **One remaining zone-cut assumption, and only where the resolver cannot
+  see.** Reading through the native resolver, zone cuts are established from
+  referrals actually followed. Reading through a forwarder, which cannot see
+  the path, the walk still assumes a name with no proof either way is not a
+  zone cut. That can cost a false Bogus and cannot produce a false Secure —
+  argued in standards.md §5.5 and measured by a property test that strips every
+  delegation proof and checks no verdict strengthens.
+- **No encrypted transport to authoritative servers.** Native recursion speaks
+  ordinary DNS over port 53. There is no DoT or DoH to the root or to a TLD,
+  because authoritative servers do not offer it; QNAME minimisation limits what
+  each server on the path learns, and does not remove the exposure.
 - **No enforcement.** There is no configuration that makes Daddybound decide a
-  real answer for a real client.
+  real answer for a real client. Learn mode resolves and validates alongside
+  the forwarding resolver and records what it found; the answer a client
+  receives is unchanged, whatever Daddybound concludes.
 - **No ENS, no CCIP Read, no blockchain naming.**
+
+What it does do that this list used to deny: it resolves for itself, from root
+hints to the authoritative servers, and validates the records it fetched — see
+`internal/daddybound/recursive` and `internal/daddybound/native`. And it
+follows RFC 5011 trust-anchor rollover over a persisted trust point, so a key
+the root announces and signs for can become an anchor after a thirty-day
+hold-down, and a self-signed revocation withdraws one. The compiled-in digests
+seed that and are never discarded: a lost state file costs hold-down progress,
+not the ability to validate.
 
 ## Trying it
 

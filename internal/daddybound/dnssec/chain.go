@@ -276,12 +276,26 @@ type walk struct {
 // not a soft yes and not a soft no.
 func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) ValidationResult {
 	qname := dns.CanonicalName(name)
-	now := v.cfg.Clock.Now()
-	w := &walk{
+	w := v.newWalk(ctx, qname, rrtype, v.cfg.Clock.Now())
+	return w.chase(qname, rrtype)
+}
+
+// newWalk begins one validation.
+//
+// The single place a walk — and with it the NSEC3 hash budget — is
+// constructed, which is what TestOnlyAValidationMayCreateAHashBudget pins. The
+// budget is per validation rather than per response, and a second construction
+// site anywhere would quietly turn it into the latter: see the field's comment
+// on the factor of hundreds involved.
+//
+// AuthenticateRRset begins a walk here too. It never computes an NSEC3 hash,
+// so the budget it is handed goes unused — which is the right trade for having
+// one construction site instead of an exception.
+func (v *Validator) newWalk(ctx context.Context, qname string, rrtype uint16, now time.Time) *walk {
+	return &walk{
 		v: v, ctx: ctx, rec: newRecorder(qname, rrtype, now), now: now,
 		hashes: &hashBudget{remaining: v.cfg.Limits.MaxNSEC3Hashes},
 	}
-	return w.chase(qname, rrtype)
 }
 
 // chase resolves a name, following CNAMEs, and combines what it finds.

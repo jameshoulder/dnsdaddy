@@ -977,6 +977,19 @@ func (c *Config) AllowedClientPrefixes() []netip.Prefix {
 // DBPath returns the location of the SQLite database.
 func (c *Config) DBPath() string { return filepath.Join(c.DataDir, "dnsdaddy.db") }
 
+// TrustAnchorStatePath returns where Daddybound keeps its managed DNSSEC trust
+// anchors.
+//
+// Beside the database rather than inside it, and deliberately. This file is
+// what the resolver trusts, and an operator has to be able to read it, copy it
+// to a new host, or delete it to force a re-seed from the configured anchors —
+// all of which are harder through a database. It is also the one piece of state
+// that must survive a database rebuild: losing it costs thirty days of
+// hold-down progress on any key still waiting.
+func (c *Config) TrustAnchorStatePath() string {
+	return filepath.Join(c.DataDir, "daddybound-anchors.json")
+}
+
 // SecretPath returns the location of the generated cookie-signing secret.
 func (c *Config) SecretPath() string { return filepath.Join(c.DataDir, "session.key") }
 

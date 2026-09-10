@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/api"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -26,6 +27,9 @@ type dnssecObservation struct {
 	// status surface. Nil would mean the forwarding path, which Learn no
 	// longer uses.
 	resolver *recursive.Resolver
+	// anchors maintains the trust anchors under RFC 5011, for the status
+	// surface. Never nil when the observation is running.
+	anchors *trustanchors.Manager
 
 	// stopWriter cancels the writer, and is deliberately not the process
 	// context. See Wait.
@@ -86,17 +90,51 @@ func startDNSSECObserver(
 	resolver := recursive.New(recursive.Config{
 		Timeout: cfg.DNS.LocalDNSSECTimeout.D(),
 	})
-	engine, err := native.New(native.Config{
-		Resolver: resolver,
-		Anchors:  anchors,
-		Policy:   dnssec.DefaultPolicy(),
-		Clock:    dnssec.SystemClock{},
-		Verifier: dnssec.StdVerifier(),
-		Limits:   dnssec.DefaultLimits(),
+
+	// The anchors are maintained rather than fixed. The root's key rolls, and
+	// a resolver holding only what its binary shipped stops validating when it
+	// does — or, worse, keeps validating against a key nobody signs with and
+	// reports the whole Internet Bogus. RFC 5011 lets the zone announce its own
+	// key changes and lets this resolver follow them, provided every
+	// announcement is signed by a key it already trusts and every addition
+	// waits out a thirty-day hold-down.
+	//
+	// The configured anchors are never discarded: the managed set is what has
+	// been learned in addition to them, so a lost or unwritable state file
+	// leaves this resolver validating with what it shipped rather than with
+	// nothing.
+	manager, err := trustanchors.NewManager(trustanchors.ManagerConfig{
+		Zone:       ".",
+		Configured: anchors,
+		Store:      trustanchors.FileStore{Path: cfg.TrustAnchorStatePath()},
+		Source:     native.NewKeySource(resolver),
+		Policy:     dnssec.DefaultPolicy(),
+		Verifier:   dnssec.StdVerifier(),
+		Limits:     dnssec.DefaultLimits(),
+		Log:        log,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("local DNSSEC validation: %w", err)
 	}
+
+	engine, err := native.New(native.Config{
+		Resolver: resolver,
+		// Read per question, so a revocation takes effect on the next query
+		// rather than at the next restart.
+		AnchorSource: manager.Anchors,
+		Policy:       dnssec.DefaultPolicy(),
+		Clock:        dnssec.SystemClock{},
+		Verifier:     dnssec.StdVerifier(),
+		Limits:       dnssec.DefaultLimits(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("local DNSSEC validation: %w", err)
+	}
+
+	// Refreshing runs on its own goroutine and never blocks a query. A refresh
+	// that fails leaves the anchors in force untouched; see
+	// trustanchors.Manager.Refresh.
+	go native.RunAnchorRefresh(ctx, manager, time.Now, log)
 
 	writer := dnssecobs.New(st, dnssecobs.Options{Log: log})
 	// The writer outlives the observer on purpose. Given the same context
@@ -143,6 +181,7 @@ func startDNSSECObserver(
 		observer:   observer,
 		writer:     writer,
 		resolver:   resolver,
+		anchors:    manager,
 		stopWriter: stopWriter,
 	}, nil
 }

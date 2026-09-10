@@ -969,7 +969,17 @@ being complete and blunt.
 - **No YXDOMAIN handling.** A DNAME substitution that would overflow the legal
   name length is refused (`R-DNAME-06`) rather than reported as the RCODE
   RFC 6672 §2.2 has a *server* return.
-- **No RFC 5011 trust anchor rollover.** Trust anchors are configuration.
+- **RFC 5011 trust anchor rollover is implemented**, over a persisted trust
+  point. A DNSKEY RRset that does not authenticate against a currently trusted
+  key changes nothing; an addition waits out §2.4.1's thirty-day hold-down,
+  served continuously; a revocation is honoured only when §2.2's self-signature
+  is present, so one stolen key cannot withdraw the others. One deliberate
+  deviation: §5 deletes a trust point whose keys are all revoked, after which
+  data below it reads as Insecure. This resolver keeps the trust point, empties
+  the anchor set and reports Indeterminate instead — "cannot tell" rather than
+  "provably unsigned" — because Live mode's premise is that its answers were
+  validated. §8.2 agrees about what follows either way: an out-of-band update
+  is required.
 - **No encrypted transports** as part of the validation engine.
 - **No production enforcement.** Daddybound cannot be configured to decide a
   real DNS answer for a real client. That is a deliberate structural property,
