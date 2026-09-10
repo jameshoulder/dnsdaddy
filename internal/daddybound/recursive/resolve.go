@@ -373,6 +373,17 @@ func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string
 
 		child, ns, glue, isReferral := rs.classifyReferral(zone, qname, msg)
 		if !isReferral {
+			// The reply may be the answer to a *minimised* probe rather than
+			// to the caller's question: an NXDOMAIN for an intermediate name
+			// is a valid answer for everything beneath it (RFC 8020), and
+			// that is how a nonexistent branch terminates the walk early.
+			//
+			// It must not be handed back with the probe's question still on
+			// it. A caller — in Live mode, a client — comparing the question
+			// it asked against the question echoed would see a mismatch, and
+			// would be right to: the message would be answering something
+			// nobody asked.
+			msg = withQuestion(msg, qname, rrtype)
 			rs.r.cache.PutMsg(qname, rrtype, msg)
 			return msg, zone, nil
 		}
@@ -621,6 +632,24 @@ func (r *Resolver) targetAllowed(addr netip.Addr) bool {
 		return addr.IsValid()
 	}
 	return usableTarget(addr)
+}
+
+// withQuestion restates a reply as an answer to the question the caller asked.
+//
+// Only the question section is rewritten. The records are left exactly as the
+// authoritative server sent them, because those are what a validator will
+// check signatures over and what a client will receive — rewriting either
+// would break the correspondence between what was validated and what is
+// returned.
+func withQuestion(msg *dns.Msg, qname string, rrtype uint16) *dns.Msg {
+	if len(msg.Question) == 1 &&
+		dns.CanonicalName(msg.Question[0].Name) == qname &&
+		msg.Question[0].Qtype == rrtype {
+		return msg
+	}
+	out := msg.Copy()
+	out.Question = []dns.Question{{Name: qname, Qtype: rrtype, Qclass: dns.ClassINET}}
+	return out
 }
 
 func addrFromRR(rr dns.RR) (netip.Addr, bool) {
