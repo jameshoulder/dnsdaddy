@@ -250,6 +250,13 @@ const (
 	// docs/daddybound/standards.md §5.3.
 	ReasonDenialNotImplemented Reason = "denial_not_implemented"
 
+	// ReasonDelegationUnprovable: the resolver observed a referral at this
+	// name, but the parent supplied neither a DS RRset nor an authenticated
+	// denial of one. A stripped DS and a genuinely insecure delegation look
+	// identical from here, and they mean opposite things — so this is
+	// Indeterminate rather than a verdict either way.
+	ReasonDelegationUnprovable Reason = "delegation_unprovable"
+
 	// ReasonResourceLimit: validation stopped because it hit a configured
 	// bound on work — chain depth, records considered, signatures verified.
 	// Stopping is the correct behaviour; claiming a verdict afterwards is

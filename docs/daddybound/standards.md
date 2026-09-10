@@ -111,10 +111,11 @@ return:
   returned for a missing signature, an unsupported algorithm, a failed
   validation, an absent DNSKEY, a timeout, malformed records, or any other
   flavour of "we could not prove Secure". Each of those is Bogus or
-  Indeterminate. Where a delegation supplies no proof either way, the walk
-  assumes the name is not a zone cut and continues — a one-sided assumption
-  that can cost a false Bogus and cannot manufacture a false Secure. §5.5 has
-  the argument.
+  Indeterminate. Where a delegation supplies no proof either way, a source that
+  resolves iteratively is asked whether it crossed a referral there, so the zone
+  cut is established from an observation; a forwarding source cannot answer, and
+  the walk keeps its one-sided assumption, which can cost a false Bogus and
+  cannot manufacture a false Secure. §5.5 has both.
 - **Bogus requires a secure delegation.** Returning Bogus for a name Daddybound
   never established a secure delegation to would be a fabricated verdict. The
   chain walk therefore tracks whether it is still under a secure delegation,
@@ -634,7 +635,7 @@ RFC 9905 §2 also says of DS records:
 Same shape, same reasoning as §5.3: Daddybound reports Indeterminate with
 a specific reason where a complete validator would report Insecure.
 
-## 5.5 The delegation Daddybound still cannot prove, and the direction it errs in
+## 5.5 Establishing zone cuts, and the direction the fallback errs in
 
 A chain walk descends from the trust anchor towards the answer, asking at each
 name whether a DS exists there. When none comes back, two situations have to be
@@ -650,10 +651,49 @@ is an insecure delegation and produces Insecure; neither bit set means the name
 is not a cut and the walk continues; a DS bit set while the DS is absent is a
 contradiction and produces Bogus.
 
-**What remains is the case where the response supplies no proof either way.**
-The walk then keeps the assumption it made before any of this existed: treat
-the name as not a zone cut, continue in the same zone, and record a step saying
-where the assumption was made.
+**What remains is the case where the response supplies no proof either way**,
+and how that is handled now depends on whether the record source can see the
+delegation structure for itself.
+
+### When the source resolves iteratively
+
+`internal/daddybound/recursive` follows referrals from the root, so it crosses
+zone cuts on the way to an answer and can report them as observations rather
+than guesses. It satisfies `dnssec.DelegationSource`, and the walk asks it
+before assuming anything:
+
+| The resolver observed | Walk's conclusion | Why |
+|---|---|---|
+| No referral at this name | Not a zone cut; continue in the same zone | The walk passed through the name without being referred at it. That is an observation, and it replaces the assumption with the same outcome and a truthful reason. |
+| A referral at this name, no readable DS, no authenticated denial | **Indeterminate**, `delegation_unprovable` | See below. |
+
+The second row is the one that matters, and it is deliberately *not* Insecure.
+
+Insecure is a claim that the parent **proved** no DS exists, and the proof is a
+signed NSEC or NSEC3 (§4.7, §4.8). A referral is not a proof: it arrives
+unauthenticated, and an attacker who strips a DS RRset from a response produces
+exactly this shape — a real delegation with no DS visible. Reading it as
+Insecure would let anyone downgrade a signed zone to unsigned by removing one
+RRset in transit, which is the classic DNSSEC downgrade delivered by the very
+evidence meant to improve matters.
+
+So the honest verdict is Indeterminate with a reason naming the two situations
+that could not be told apart. It is strictly more informative than the Bogus
+the assumption produced there, and an enforcing resolver reads it as "could not
+establish validation" and fails safe rather than as an accusation against the
+data. `TestAnObservedDelegationWithNoProvableDSIsIndeterminateNotInsecure`
+strips a DS and requires exactly this.
+
+### When the source cannot see delegations
+
+A forwarding source — `netsource`, or any source reading records through
+somebody else's recursive resolver — sees the answer and not the path, so it
+cannot answer the question. The walk then keeps the assumption it made before
+any of this existed: treat the name as not a zone cut, continue in the same
+zone, and record a step saying where the assumption was made.
+
+The rest of this section describes that fallback, which remains in force for
+every source that is not a `DelegationSource`.
 
 The choice of which way to be wrong is the whole decision, and it is one-sided:
 
@@ -668,6 +708,9 @@ The choice of which way to be wrong is the whole decision, and it is one-sided:
 
 So the cost of the remaining gap is paid in refusals and never in false
 Secures, which is the only direction this engine is willing to be wrong in.
+`TestSuppressingDelegationProofsNeverProducesSecure` measures that rather than
+arguing it, and it still passes unchanged: the delegation-aware path added
+above cannot strengthen a verdict either, because Indeterminate is not Secure.
 
 Returning Indeterminate instead would be worse rather than more cautious.
 Almost no name a walk passes through is a zone cut, so it would turn ordinary

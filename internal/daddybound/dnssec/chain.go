@@ -59,6 +59,28 @@ type Source interface {
 	Lookup(ctx context.Context, name string, rrtype uint16) (Response, error)
 }
 
+// DelegationSource is a Source that knows where the zone cuts are.
+//
+// A source that resolves iteratively crosses zone cuts on the way to an
+// answer, so it can report them as observations. A source that forwards to
+// somebody else's recursive resolver cannot: it sees the answer and not the
+// path, which is why this is an optional capability rather than part of
+// Source.
+//
+// ZoneCutsFor returns a map from candidate name to whether it is a zone cut.
+// A name present with false is a positive statement that it is *not* one —
+// the walk passed through it without being referred — which is the half that
+// removes the assumption in noDSAtDelegation. A name absent from the map is
+// simply unknown.
+//
+// The bool reports whether the source has any opinion. False means fall back
+// to the assumption; an empty map with true means "none of these are zone
+// cuts", and those are very different statements.
+type DelegationSource interface {
+	Source
+	ZoneCutsFor(ctx context.Context, name string) (map[string]bool, bool)
+}
+
 // Limits bound the work one validation may do.
 //
 // Every input to a validator arrives from the network, so every loop over it
