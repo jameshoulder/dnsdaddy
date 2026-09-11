@@ -10,7 +10,6 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
-	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
@@ -499,17 +498,7 @@ func (a *API) handleResolvers(w http.ResponseWriter, r *http.Request) {
 
 	// Empty in native mode, where there are no upstreams. An empty table is
 	// the truth; a row of zeroes would be an invention.
-	for _, u := range forwarderUpstreams(a.Forwarder) {
-		q, e, avg := u.Stats()
-		info.Upstreams = append(info.Upstreams, UpstreamStatus{
-			Spec:         u.Spec,
-			Protocol:     u.Protocol,
-			Address:      u.Address,
-			Queries:      q,
-			Errors:       e,
-			AvgLatencyMS: round2(avg),
-		})
-	}
+	info.Upstreams = upstreamStatuses(a.Forwarder)
 
 	networks, err := a.Store.ListNetworks(r.Context())
 	if err != nil {
@@ -656,13 +645,4 @@ func permittedNetworks(networks []store.Network) int {
 		}
 	}
 	return n
-}
-
-// forwarderUpstreams lists the configured forwarders, or nothing in native
-// mode where there are none.
-func forwarderUpstreams(r *resolver.Resolver) []*resolver.Upstream {
-	if r == nil {
-		return nil
-	}
-	return r.Upstreams()
 }
