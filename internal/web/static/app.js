@@ -1177,6 +1177,127 @@ function toneBadgeClass(tone) {
  * Nothing here relies on colour: every state that has a colour also has a word
  * beside it, and the dot's shape changes with severity.
  */
+// The resolver card: what an operator needs before anything else on this page.
+//
+// Four questions, in the order somebody actually asks them. Am I protected.
+// What address do I put into my router. What is resolving my DNS. Is DNSSEC
+// being checked. Everything else on the dashboard is about what happened; this
+// is about whether the thing is set up at all, and it goes first because a
+// deployment nobody has pointed a device at has no activity to show.
+//
+// Null when the endpoint could not be reached. A card that rendered zeroes
+// would say "no queries, no clients, cache empty" about a resolver it had
+// simply failed to ask.
+function resolverCard(status) {
+  if (!status) {
+    return html`
+      <section class="section card">
+        <div class="card-head"><div><h2>Resolver</h2></div></div>
+        ${raw(emptyState('Resolver status unavailable',
+          'The dashboard could not read the resolver status. The resolver itself may still be answering queries — this panel could not be filled, which is not the same thing.',
+          { icon: '?' }))}
+      </section>`;
+  }
+
+  const health = status.health || {};
+  const recommended = (status.addresses || []).find((a) => a.recommended);
+  const others = (status.addresses || []).filter((a) => a !== recommended);
+
+  // The address block. A recommended address gets a copy button, because the
+  // operator is about to type it somewhere; no recommendation means nothing on
+  // this machine is usable from a network, and the honest thing is to ask.
+  const addressBlock = recommended
+    ? html`
+        <div class="resolver-address">
+          <code class="resolver-ip">${recommended.address}</code>
+          <button class="btn btn-ghost btn-sm" data-copy="${recommended.address}" type="button">Copy</button>
+        </div>
+        ${recommended.note ? html`<p class="muted small">${recommended.note}</p>` : ''}`
+    : html`
+        <p class="muted">No address on this machine can be used by a client on your network.
+        Set <code>dns.advertised_addresses</code> to the address clients reach this host by.</p>`;
+
+  const otherAddresses = others.length
+    ? html`<details class="resolver-more">
+             <summary>Other addresses (${others.length})</summary>
+             <ul class="resolver-addr-list">
+               ${raw(others.map((a) => html`<li><code>${a.address}</code>
+                 <span class="badge">${a.kind}</span>
+                 <span class="muted small">${a.source === 'configured' ? 'configured' : 'discovered'}</span>
+               </li>`).join(''))}
+             </ul>
+           </details>`
+    : '';
+
+  // Health reads from one window and says which. The figures it replaces were
+  // a counter since process start divided by a count over a different period,
+  // which is not a rate of anything.
+  const windowLabel = health.windowSeconds ? `last ${Math.round(health.windowSeconds / 60)} min` : '';
+  const healthTone = health.ok === false ? 'bad' : 'good';
+  const cacheRate = health.cacheHitRate === null || health.cacheHitRate === undefined
+    ? '—'
+    : `${rate(health.cacheHitRate)}%`;
+
+  return html`
+    <section class="section card resolver-card">
+      <div class="card-head">
+        <div>
+          <h2>Resolver</h2>
+          <p>What clients should point at, and what is answering them.</p>
+        </div>
+        <div class="row-end">
+          <span class="badge ${status.protecting ? 'ok' : 'bad'}">
+            ${status.protecting ? 'Active' : 'Not answering'}
+          </span>
+        </div>
+      </div>
+
+      <div class="resolver-grid">
+        <div class="resolver-cell">
+          <span class="resolver-k">DNS resolver address</span>
+          ${raw(addressBlock)}
+          <p class="muted small">
+            UDP ${status.udpPort || '—'} · TCP ${status.tcpPort || '—'}${status.dotPort ? ` · DoT ${status.dotPort}` : ''}
+          </p>
+          ${raw(otherAddresses)}
+        </div>
+
+        <div class="resolver-cell">
+          <span class="resolver-k">Resolver engine</span>
+          <p class="resolver-v">${status.engine}${status.beta ? raw(html` <span class="badge">Beta</span>`) : ''}</p>
+          <p class="muted small">
+            <span class="badge ${toneBadgeClass(healthTone)}">${health.ok === false ? 'Degraded' : 'Healthy'}</span>
+            ${health.detail ? html`<span> ${health.detail}</span>` : ''}
+          </p>
+          ${status.note ? html`<p class="muted small">${status.note}</p>` : ''}
+        </div>
+
+        <div class="resolver-cell">
+          <span class="resolver-k">DNSSEC</span>
+          <p class="resolver-v">${status.dnssec}</p>
+          <p class="muted small">${status.dnssecDetail}</p>
+        </div>
+      </div>
+
+      <div class="resolver-stats">
+        <div class="resolver-stat"><span class="n">${num(health.queries || 0)}</span><span class="k">Queries (${windowLabel})</span></div>
+        <div class="resolver-stat"><span class="n">${cacheRate}</span><span class="k">Cache hit rate</span></div>
+        <div class="resolver-stat"><span class="n">${health.queries ? `${rate(health.p50Ms)} ms` : '—'}</span><span class="k">Median latency</span></div>
+        <div class="resolver-stat"><span class="n">${health.queries ? `${rate(health.p99Ms)} ms` : '—'}</span><span class="k">p99 latency</span></div>
+        <!--
+          Errors and refused-bogus answers are separate figures and must stay
+          separate. An error is this resolver failing to obtain an answer; a
+          bogus refusal is this resolver working exactly as intended. Showing
+          them as one number would make a deployment whose users visit one
+          misconfigured signed domain look broken.
+        -->
+        <div class="resolver-stat"><span class="n">${num(health.errors || 0)}</span><span class="k">Resolution errors</span></div>
+        <div class="resolver-stat"><span class="n">${num(health.dnssecBogus || 0)}</span><span class="k">Refused (DNSSEC)</span></div>
+      </div>
+    </section>
+  `;
+}
+
 function statusHero(overview, feedsData, detections) {
   const state = protectionState(overview.protectionStatus);
   const intel = feedHealth(feedsData);
@@ -1463,7 +1584,7 @@ pages.dashboard = {
   title: 'Dashboard',
   subtitle: 'Protection status, recent activity, and anything that needs you.',
   async render() {
-    const [overview, activity, categories, recent, feeds, diagnostics, detections] = await Promise.all([
+    const [overview, activity, categories, recent, feeds, diagnostics, detections, resolverStatus] = await Promise.all([
       apiGet('/overview'),
       apiGet('/activity/queries?hours=24'),
       apiGet('/threats/categories?hours=24'),
@@ -1478,6 +1599,7 @@ pages.dashboard = {
       // rather than rendering an unearned zero.
       apiGet('/diagnostics').catch(() => null),
       apiGet('/findings/summary?days=1').catch(() => null),
+      apiGet('/resolver/status').catch(() => null),
     ]);
     this.feeds = feeds;
 
@@ -1493,6 +1615,7 @@ pages.dashboard = {
     return html`
       ${raw(statusHero(overview, feeds, detections))}
       ${raw(attentionPanel(attentionItems(diagnostics, feeds)))}
+      ${raw(resolverCard(resolverStatus))}
       ${raw(firstClientCard(overview))}
 
       <div class="section card">
@@ -4590,6 +4713,7 @@ if (typeof document !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     esc,
+    resolverCard,
     ApiError,
     claimRefresh,
     observatoryState,

@@ -2679,3 +2679,116 @@ test('token-based DoH and DoT are described separately from the address ACL', ()
     assert.match(note, /work from anywhere/);
   }
 });
+
+/* ---------------------------------------------------------------------------
+ * The resolver card
+ * ---------------------------------------------------------------------------
+ * The first thing on the dashboard and the one an operator reads before
+ * anything else means much: what do I point at this, what is answering, is
+ * DNSSEC being checked.
+ *
+ * Three of these tests are about not saying something untrue, which is the
+ * failure mode this card is most exposed to. It renders numbers about a
+ * resolver, and every one of them has a state in which the honest output is
+ * not a number.
+ * ------------------------------------------------------------------------ */
+
+const { resolverCard } = require('./static/app.js');
+
+function status(over) {
+  return Object.assign({
+    protecting: true,
+    mode: 'forward',
+    engine: 'External forwarder',
+    engineId: 'forward',
+    addresses: [
+      { address: '192.168.1.10', family: 'ipv4', kind: 'private', source: 'interface', recommended: true, note: 'found on this machine’s own interface.' },
+      { address: '127.0.0.1', family: 'ipv4', kind: 'loopback', source: 'interface', recommended: false },
+    ],
+    udpPort: 53,
+    tcpPort: 53,
+    dnssec: 'Upstream',
+    dnssecDetail: 'DNS is answered by the configured upstream resolvers.',
+    health: {
+      ok: true, windowSeconds: 300, queries: 120, errors: 0, servfail: 0,
+      dnssecBogus: 0, authoritativeTimeouts: 0, collapsed: 0,
+      cacheHitRate: 42.5, p50Ms: 1.2, p95Ms: 8, p99Ms: 24,
+    },
+    upstreams: [],
+    beta: false,
+  }, over || {});
+}
+
+test('the resolver card shows the address an operator should configure', () => {
+  const out = resolverCard(status());
+  assert.match(out, /192\.168\.1\.10/, 'the recommended address is not shown');
+  assert.match(out, /data-copy="192\.168\.1\.10"/, 'there is no way to copy the address');
+  assert.match(out, /UDP 53/, 'the port is not shown');
+});
+
+test('a machine with no usable address asks for one rather than inventing one', () => {
+  const out = resolverCard(status({
+    addresses: [{ address: '127.0.0.1', family: 'ipv4', kind: 'loopback', source: 'interface', recommended: false }],
+  }));
+  assert.match(out, /advertised_addresses/,
+    'a deployment with nothing a client can reach must ask the operator for an address');
+  assert.doesNotMatch(out, /data-copy="127\.0\.0\.1"/,
+    'loopback was offered as the address to configure on clients');
+});
+
+test('an unmeasured cache rate is a dash, not nought per cent', () => {
+  // A cache that answered none of the lookups it saw and a cache that has seen
+  // none are different facts, and this deployment has already shown the second
+  // as the first once. Asserted positively: a doesNotMatch alone would pass on
+  // a card that failed to render the figure at all.
+  const out = resolverCard(status({
+    health: Object.assign(status().health, { cacheHitRate: null, queries: 0 }),
+  }));
+  const cell = out.match(/<span class="n">([^<]*)<\/span><span class="k">Cache hit rate/);
+  assert.ok(cell, 'the cache hit rate cell is missing entirely');
+  assert.strictEqual(cell[1], '\u2014',
+    `unmeasured cache rate rendered as ${JSON.stringify(cell[1])}, want an em dash`);
+
+  // And a measured rate is still a number, so the dash is not simply always
+  // there.
+  const measured = resolverCard(status());
+  const got = measured.match(/<span class="n">([^<]*)<\/span><span class="k">Cache hit rate/);
+  assert.ok(got, 'the cache hit rate cell is missing when measured');
+  assert.match(got[1], /^[\d.]+%$/, `measured rate rendered as ${JSON.stringify(got[1])}`);
+});
+
+test('resolution errors and refused-bogus answers are separate figures', () => {
+  const out = resolverCard(status({
+    health: Object.assign(status().health, { errors: 0, dnssecBogus: 7 }),
+  }));
+  assert.match(out, /Resolution errors/, 'resolution errors are not shown');
+  assert.match(out, /Refused \(DNSSEC\)/, 'refused answers are not shown separately');
+  // Seven refusals must not read as seven faults. The card shows them apart
+  // because refusing a forged answer is the resolver working.
+  assert.match(out, /Healthy/, 'a resolver that refused bogus answers was called degraded');
+});
+
+test('native mode is labelled a beta rather than presented as finished', () => {
+  const out = resolverCard(status({
+    mode: 'native', engine: 'Daddybound Native', engineId: 'daddybound-native',
+    beta: true, note: 'offered as a production beta',
+    dnssec: 'Enforcing', dnssecDetail: 'Daddybound validates every answer it resolves.',
+  }));
+  assert.match(out, /Daddybound Native/);
+  assert.match(out, /Beta/, 'native mode is not marked as a beta');
+  assert.match(out, /Enforcing/);
+});
+
+test('an unreachable status endpoint says so rather than rendering zeroes', () => {
+  const out = resolverCard(null);
+  assert.match(out, /unavailable/i);
+  assert.doesNotMatch(out, /Cache hit rate/,
+    'the card rendered statistics about a resolver it had failed to ask');
+});
+
+test('the health window states the period it covers', () => {
+  const out = resolverCard(status());
+  assert.match(out, /last 5 min/,
+    'the figures do not say what period they cover, so they could be read as ' +
+    'counters since process start');
+});

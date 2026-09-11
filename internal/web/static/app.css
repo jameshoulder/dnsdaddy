@@ -1955,3 +1955,97 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .decision > summary { flex-wrap: wrap; }
   .decision-body { padding-left: 0; }
 }
+
+/* ---------------------------------------------------------------------------
+   Resolver card
+   ---------------------------------------------------------------------------
+   The first thing on the dashboard, because it answers the questions an
+   operator has before any of the activity panels mean anything: what do I
+   point at this, what is answering, and is DNSSEC being checked.
+
+   Three cells that collapse to one column on a phone, and a stat row that
+   wraps. Nothing here is fixed-width: the resolver address is the widest
+   thing on the card and an IPv6 address is 39 characters.
+   ------------------------------------------------------------------------ */
+
+.resolver-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: var(--s5);
+  padding: var(--s5);
+}
+
+.resolver-cell { min-width: 0; }
+
+.resolver-k {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  margin-bottom: var(--s2);
+}
+
+.resolver-v {
+  margin: 0 0 var(--s2);
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.resolver-address {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  margin-bottom: var(--s2);
+}
+
+/* The number the operator is about to type somewhere. Bigger than the body
+   text and monospaced, because a mistyped digit is a resolver that does not
+   answer and an afternoon of confusion. */
+.resolver-ip {
+  font-family: var(--font-mono);
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--foreground);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--s2) var(--s3);
+  word-break: break-all;
+}
+
+.resolver-more { margin-top: var(--s3); }
+.resolver-more summary { cursor: pointer; color: var(--muted-foreground); font-size: 0.85rem; }
+
+.resolver-addr-list {
+  list-style: none;
+  margin: var(--s3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.resolver-addr-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.resolver-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: var(--s4);
+  padding: var(--s5);
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.resolver-stat { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+.resolver-stat .n { font-size: 1.3rem; font-weight: 650; color: var(--foreground); }
+.resolver-stat .k { font-size: 0.75rem; color: var(--muted-foreground); }
