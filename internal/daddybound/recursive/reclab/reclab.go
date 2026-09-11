@@ -147,7 +147,7 @@ type server struct {
 }
 
 // Start brings up one server per zone and returns the hierarchy.
-func Start(t *testing.T, zones ...Zone) *Hierarchy {
+func Start(t testing.TB, zones ...Zone) *Hierarchy {
 	t.Helper()
 
 	h := &Hierarchy{
@@ -300,7 +300,7 @@ func (h *Hierarchy) Stop() {
 	}
 }
 
-func (s *server) start(t *testing.T) {
+func (s *server) start(t testing.TB) {
 	t.Helper()
 
 	pc, ln := bindPair(t)
@@ -339,7 +339,7 @@ func (s *server) start(t *testing.T) {
 // TIME_WAIT, and far more software on a shared runner wants a TCP port than a
 // UDP one. Choosing the number from the scarcer space makes the second bind the
 // one likely to succeed.
-func bindPair(t *testing.T) (net.PacketConn, net.Listener) {
+func bindPair(t testing.TB) (net.PacketConn, net.Listener) {
 	t.Helper()
 
 	const attempts = 16

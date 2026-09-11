@@ -137,7 +137,7 @@ Two examples worth pointing at, because they show the rule biting:
 
 The `resolution_failure` detector reports domains persistently returning
 SERVFAIL. Failed DNSSEC validation is one cause. It is *not* called
-`dnssec_validation_failure`, because DNS Daddy forwards rather than validating
+`dnssec_validation_failure`, because in forward mode DNS Daddy forwards rather than validating
 and cannot tell a bogus signature from an unreachable nameserver. It lists the
 alternative causes in its evidence and carries **no ATT&CK mapping at all**.
 

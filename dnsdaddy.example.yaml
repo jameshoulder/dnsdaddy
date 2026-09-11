@@ -31,9 +31,41 @@ dns:
   # The "#name" suffix on a tls:// upstream is the certificate name to verify.
   # Without it, a connection to a bare IP cannot be verified and the encryption
   # buys you nothing.
+  # How DNS is resolved.
+  #
+  #   forward  Send each question to the upstreams below and return what they
+  #            say. Nothing is validated here: an upstream's AD bit is recorded
+  #            as that upstream's claim, not as this deployment's verdict.
+  #            The default, and what every installation before this release did.
+  #
+  #   native   Daddybound resolves the question itself — root hints, then the
+  #            TLD, then the zone's own authoritative servers — and validates
+  #            what it fetched against the IANA root trust anchors. No upstream
+  #            is contacted and none needs configuring. An answer that fails
+  #            validation is refused with SERVFAIL; there is no fallback.
+  #
+  # Native mode is a production beta. It needs outbound port 53 to arbitrary
+  # addresses, and it sends query names to authoritative servers in the clear —
+  # there is no DoT to the root. Read docs/daddybound/native-resolution.md, and
+  # consider running Learn mode first to find out whether it would work here.
+  resolution_mode: forward
+
   upstreams:
     - "tls://9.9.9.9:853#dns.quad9.net"
     - "tls://1.1.1.1:853#cloudflare-dns.com"
+
+  # The address clients should be pointed at.
+  #
+  # Leave empty on a home network: the dashboard discovers it from this
+  # machine's interfaces, which is right there and needs no configuration.
+  #
+  # Set it on a VPS or anywhere behind NAT. The interface holds one address and
+  # the world reaches you by another, and nothing on this machine can tell the
+  # difference — so an unset value means the dashboard shows a private address
+  # with a warning rather than confidently telling you to configure something
+  # unreachable.
+  # advertised_addresses:
+  #   - 203.0.113.10
 
   # failover: try upstreams in order (fewer upstream queries).
   # race:     ask all at once, take the first answer (lower latency, more traffic).

@@ -347,6 +347,23 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ResolverInfo" }
 
+  /api/v1/resolver/status:
+    get:
+      tags: [Status]
+      summary: What clients should point at, and what is answering them
+      description: >
+        The four questions an operator has before any activity figure means
+        much: am I protected, which address do I configure on clients, what is
+        resolving my DNS, and is DNSSEC being checked. One endpoint rather than
+        four, because a page assembling this from four requests would show three
+        of them and a spinner.
+      responses:
+        "200":
+          description: Resolver status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolverStatus" }
+
   /api/v1/settings:
     get:
       tags: [Administration]
@@ -1904,6 +1921,93 @@ components:
             secret:
               type: string
               description: Shown once. Store it now; it cannot be read back.
+
+    ResolverStatus:
+      type: object
+      properties:
+        protecting: { type: boolean, description: The resolver is up and answering. }
+        mode:
+          type: string
+          enum: [native, forward]
+          description: >
+            native means Daddybound resolves from the root and validates what it
+            fetched; forward means questions go to the configured upstreams.
+        engine: { type: string, description: "Human name of the backend, e.g. \"Daddybound Native\"." }
+        engineId: { type: string, description: Machine-readable backend name, for branching rather than display. }
+        addresses:
+          type: array
+          items: { $ref: "#/components/schemas/ResolverAddress" }
+          description: Addresses clients could be pointed at, best first.
+        udpPort: { type: integer }
+        tcpPort: { type: integer }
+        dotPort: { type: integer }
+        dohUrl: { type: string }
+        dnssec:
+          type: string
+          description: >
+            One word for what is actually happening. Enforcing means this
+            deployment validates and refuses; Observing means Daddybound records
+            verdicts without changing answers; Upstream means nothing is checked
+            here. None can be read as a stronger claim than the configuration
+            supports.
+        dnssecDetail: { type: string }
+        health: { $ref: "#/components/schemas/ResolverHealth" }
+        upstreams:
+          type: array
+          items: { $ref: "#/components/schemas/UpstreamStatus" }
+          description: Empty in native mode, where there are no upstreams.
+        beta: { type: boolean, description: The mode is not yet recommended as a default. }
+        note: { type: string }
+
+    ResolverAddress:
+      type: object
+      properties:
+        address: { type: string }
+        family: { type: string, enum: [ipv4, ipv6] }
+        kind: { type: string, enum: [private, public, loopback, link-local] }
+        source:
+          type: string
+          enum: [configured, interface]
+          description: >
+            configured is authoritative — the operator said so. interface is
+            what this machine can see, which behind NAT is not how clients
+            reach it.
+        recommended: { type: boolean, description: At most one, and never loopback or link-local. }
+        note: { type: string }
+
+    ResolverHealth:
+      type: object
+      description: >
+        Every figure covers the same rolling window, and the window is reported
+        alongside them so they cannot be read as counters since process start.
+      properties:
+        ok: { type: boolean }
+        detail: { type: string }
+        windowSeconds: { type: integer }
+        queries: { type: integer, format: int64 }
+        errors:
+          type: integer
+          format: int64
+          description: Failures to obtain an answer. Never a security decision.
+        servfail: { type: integer, format: int64 }
+        dnssecBogus:
+          type: integer
+          format: int64
+          description: >
+            Answers refused because they did not authenticate. Counted apart
+            from errors: this is the resolver working, not failing.
+        authoritativeTimeouts: { type: integer, format: int64 }
+        collapsed:
+          type: integer
+          format: int64
+          description: Callers that waited on an identical resolution in flight. Not cache hits.
+        cacheHitRate:
+          type: number
+          nullable: true
+          description: Percentage, or null when nothing was measured in the window.
+        p50Ms: { type: number }
+        p95Ms: { type: number }
+        p99Ms: { type: number }
 
     ResolverInfo:
       type: object

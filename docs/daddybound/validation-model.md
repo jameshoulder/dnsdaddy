@@ -88,7 +88,14 @@ wildcard covered; a NODATA needs the matching record to omit both the queried
 type and CNAME. The records must verify; receiving them proves nothing.
 
 **Assumed:** that the Source returned what an authoritative server would have
-sent. Daddybound does not resolve; it validates what it is handed.
+sent.
+
+Where Daddybound resolves for itself — native mode, and the shadow path in
+Learn — it *is* what handed itself the records, having read them from the
+authoritative servers, and internal/daddybound/native pins the per-hop replies
+so the message validated is the message returned. Where it reads through a
+forwarder, it validates what it is handed and can say nothing about the path
+those records took.
 
 ## 4a. A chain of answers
 

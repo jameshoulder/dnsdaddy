@@ -36,7 +36,7 @@ import (
 // Everything a validator actually checks — DNSKEY, DS, RRSIG, the NSEC and
 // NSEC3 chains, the signed denial that proves an insecure delegation — is
 // served exactly as lab built it.
-func Signed(t *testing.T, h *lab.Hierarchy) *Hierarchy {
+func Signed(t testing.TB, h *lab.Hierarchy) *Hierarchy {
 	t.Helper()
 
 	zones := make([]Zone, 0, len(h.Zones))

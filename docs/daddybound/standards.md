@@ -962,10 +962,14 @@ being complete and blunt.
 - **No aggressive use of NSEC/NSEC3 (RFC 8198).** Denial proofs are validated
   when a response carries them; they are never used to synthesise an answer to
   a question that was not asked.
-- **No recursive resolution.** Daddybound validates responses something else
-  supplies. The live differential corpus points it at a recursive resolver
-  with CD set; that is a harness reading records, not Daddybound discovering
-  them.
+- **Recursive resolution is implemented.** Daddybound walks from the root hints
+  to the authoritative servers and validates the records it fetched itself. In
+  `dns.resolution_mode: native` that is what answers a client's query; in
+  `forward` mode it is the forwarding resolver that answers and Daddybound may
+  run alongside recording what it would have concluded. The live differential
+  corpus still points a validator at a recursive resolver with CD set; that is a
+  harness reading records, and is now one of two ways records reach the
+  validator rather than the only one.
 - **No YXDOMAIN handling.** A DNAME substitution that would overflow the legal
   name length is refused (`R-DNAME-06`) rather than reported as the RCODE
   RFC 6672 §2.2 has a *server* return.

@@ -197,9 +197,13 @@ type DNS struct {
 	// DNSSECTelemetry sets the AD bit on outgoing queries so a validating
 	// upstream reports whether it authenticated each answer (RFC 6840 §5.7).
 	//
-	// This is not DNSSEC validation. DNS Daddy forwards rather than validating
-	// locally, and this records the upstream's verdict — a weaker statement,
-	// made honestly. It does not request DNSSEC records, so response sizes are
+	// This is not DNSSEC validation, and it only applies in forward mode. It
+	// records the upstream's verdict — a statement about a machine somebody
+	// else runs, over a link that may or may not be authenticated, about
+	// records this deployment never saw. In native mode nothing here is used:
+	// Daddybound validates the records it fetched and reaches its own verdict,
+	// which is a different and much stronger claim and is recorded with
+	// different words. See internal/resolution. It does not request DNSSEC records, so response sizes are
 	// unchanged, and the AD bit is stripped again for clients that did not ask
 	// for it. On by default because it costs nothing and turns an untestable
 	// claim about upstream configuration into a measurement.
