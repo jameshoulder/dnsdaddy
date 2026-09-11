@@ -121,6 +121,9 @@ type Resolver struct {
 
 	root  rootState
 	stats counters
+	// servers remembers how each authoritative address has behaved, so a
+	// dead one stops being tried first. See serverstats.go.
+	servers *serverTable
 }
 
 // New builds a Resolver.
@@ -156,7 +159,10 @@ func New(cfg Config) *Resolver {
 	if cache == nil {
 		cache = NewCache(CacheOptions{Now: cfg.Now})
 	}
-	return &Resolver{cfg: cfg, hints: hints, cache: cache, ex: ex, now: cfg.Now}
+	return &Resolver{
+		cfg: cfg, hints: hints, cache: cache, ex: ex, now: cfg.Now,
+		servers: newServerTable(cfg.Now),
+	}
 }
 
 // Step is one thing the resolver did, for a trace.
@@ -440,7 +446,7 @@ func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string
 			return nil, "", err
 		}
 
-		child, ns, glue, isReferral := rs.classifyReferral(zone, qname, msg)
+		child, ns, glue, ttl, isReferral := rs.classifyReferral(zone, qname, msg)
 		if isReferral && rrtype == dns.TypeDS && child == qname {
 			// The parent has referred us to the child for the child's own DS.
 			// Following that would ask the one zone guaranteed not to publish
@@ -451,7 +457,7 @@ func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string
 			// The referral is still evidence that the cut exists, so it is
 			// recorded before the retry.
 			rs.dels = append(rs.dels, Delegation{Parent: zone, Child: child, NS: ns})
-			rs.r.cache.PutDelegation(child, ns, glue)
+			rs.r.cache.PutDelegation(child, ns, glue, ttl)
 
 			direct, derr := rs.askZoneDirect(zone, servers, qname, rrtype)
 			if derr != nil {
@@ -481,7 +487,7 @@ func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string
 			return nil, "", err
 		}
 		rs.dels = append(rs.dels, Delegation{Parent: zone, Child: child, NS: ns})
-		rs.r.cache.PutDelegation(child, ns, glue)
+		rs.r.cache.PutDelegation(child, ns, glue, ttl)
 		zone, servers = child, next
 	}
 	return nil, "", fmt.Errorf("%w: more than %d delegations for %s",
@@ -561,6 +567,12 @@ func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, r
 		askName, askType = minimisedQuestion(zone, qname, rrtype)
 	}
 
+	// Best first: the ones that have been answering, and answering quickly.
+	// Without this a zone with one dead nameserver costs a full timeout on
+	// roughly one query per nameserver, over and over, because nothing
+	// remembered the last one.
+	servers = rs.r.servers.order(servers)
+
 	var lastErr error
 	for _, server := range servers {
 		if err := rs.ctx.Err(); err != nil {
@@ -591,6 +603,7 @@ func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, r
 			if errors.Is(err, ErrMismatchedReply) {
 				rs.r.stats.mismatched.Add(1)
 			}
+			rs.r.servers.failure(server)
 			lastErr = err
 			rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
 				Kind: "error", Detail: err.Error(), Elapsed: elapsed})
@@ -601,6 +614,11 @@ func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, r
 		// delegated is lame. Try the next one rather than reporting the
 		// zone broken on one server's word.
 		if msg.Rcode == dns.RcodeServerFailure || msg.Rcode == dns.RcodeRefused {
+			// A lame server answered, so it is reachable — but it answered
+			// uselessly, which for the purpose of "who should I ask next
+			// time" is the same as not answering. Penalised, not banned:
+			// a server that is lame for one zone may serve another.
+			rs.r.servers.failure(server)
 			lastErr = fmt.Errorf("%w: %s answered %s for %s",
 				ErrLame, server, dns.RcodeToString[msg.Rcode], zone)
 			rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
@@ -627,6 +645,7 @@ func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, r
 			msg = full
 		}
 
+		rs.r.servers.success(server, elapsed)
 		rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
 			Kind: describe(msg), Detail: summarise(msg), Elapsed: elapsed})
 		return msg, nil
@@ -662,9 +681,17 @@ func (rs *resolution) scrub(zone string, server netip.AddrPort, msg *dns.Msg) (*
 // records for a zone strictly below the one asked. Everything else — an
 // answer, a NODATA, an NXDOMAIN, or an authority section pointing sideways or
 // upwards — terminates the walk.
-func (rs *resolution) classifyReferral(zone, qname string, msg *dns.Msg) (child string, ns []string, glue map[string][]netip.Addr, ok bool) {
+//
+// It also reports how long the parent said its referral may be believed: the
+// shortest lifetime among the NS RRset and the glue that came with it. The
+// shortest rather than the NS TTL alone, because a cached delegation holds both
+// and expiring on the longer one would mean using an address after the parent
+// said to stop using it.
+func (rs *resolution) classifyReferral(zone, qname string, msg *dns.Msg) (
+	child string, ns []string, glue map[string][]netip.Addr, ttl uint32, ok bool,
+) {
 	if msg.Rcode != dns.RcodeSuccess || len(msg.Answer) > 0 || msg.Authoritative {
-		return "", nil, nil, false
+		return "", nil, nil, 0, false
 	}
 
 	names := map[string]bool{}
@@ -694,9 +721,12 @@ func (rs *resolution) classifyReferral(zone, qname string, msg *dns.Msg) (child 
 			break
 		}
 		names[dns.CanonicalName(nsrr.Ns)] = true
+		if ttl == 0 || nsrr.Hdr.Ttl < ttl {
+			ttl = nsrr.Hdr.Ttl
+		}
 	}
 	if child0 == "" || len(names) == 0 {
-		return "", nil, nil, false
+		return "", nil, nil, 0, false
 	}
 
 	out := make([]string, 0, len(names))
@@ -704,7 +734,28 @@ func (rs *resolution) classifyReferral(zone, qname string, msg *dns.Msg) (child 
 		out = append(out, n)
 	}
 	sort.Strings(out)
-	return child0, out, acceptableGlue(child0, names, msg.Extra), true
+
+	accepted := acceptableGlue(child0, names, msg.Extra)
+	// The glue's own lifetime, where it is shorter. A parent may publish a
+	// long-lived NS RRset and short-lived addresses for it — which is what a
+	// zone does while it is moving a nameserver — and holding the addresses
+	// for the NS RRset's life would mean sending queries to a machine the
+	// parent has already stopped pointing at.
+	for _, rr := range msg.Extra {
+		switch rr.(type) {
+		case *dns.A, *dns.AAAA:
+		default:
+			continue
+		}
+		owner := dns.CanonicalName(rr.Header().Name)
+		if len(accepted[owner]) == 0 {
+			continue
+		}
+		if t := rr.Header().Ttl; t < ttl {
+			ttl = t
+		}
+	}
+	return child0, out, accepted, ttl, true
 }
 
 // serversFor turns a referral's nameserver names into addresses.

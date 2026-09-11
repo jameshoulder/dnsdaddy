@@ -171,18 +171,47 @@ func (c *Cache) PutMsg(name string, rrtype uint16, msg *dns.Msg) {
 	}
 }
 
-// PutDelegation records a zone cut and the glue that came with it.
-func (c *Cache) PutDelegation(zone string, ns []string, glue map[string][]netip.Addr) {
+// minDelegationTTL is the floor on how long a zone cut is held.
+//
+// A bound against a hostile input rather than a lifetime of our own choosing.
+// A zone that publishes NS records with a TTL of zero — by accident or on
+// purpose — would otherwise make this resolver walk from the root for every
+// single query under it, which is a denial of service the zone gets to aim at
+// us and at the root servers. Five seconds is short enough that a legitimate
+// emergency re-delegation is picked up almost immediately and long enough that
+// a burst of queries for one zone costs one walk.
+const minDelegationTTL = 5 * time.Second
+
+// PutDelegation records a zone cut and the glue that came with it, for as long
+// as the parent said it may be believed.
+//
+// ttl is the shortest lifetime among the records that make up the referral: the
+// NS RRset and any glue. The shortest rather than the NS TTL alone, because the
+// entry holds both and expiring on the longer one would mean using an address
+// after the parent said to stop.
+//
+// This used to be a flat ten minutes for every delegation on the Internet,
+// which was wrong in both directions: a zone with a two-day NS TTL was
+// re-resolved a hundred and forty times more often than it asked to be, and a
+// zone with a sixty-second one — the shape of a zone in the middle of moving
+// its nameservers — was held for ten times too long, pointing at servers that
+// may no longer serve it.
+func (c *Cache) PutDelegation(zone string, ns []string, glue map[string][]netip.Addr, ttl uint32) {
 	if len(ns) == 0 {
 		return
 	}
+	life := c.clamp(ttl)
+	if life < minDelegationTTL {
+		life = minDelegationTTL
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.evictIfNeededLocked(len(c.dels), c.opt.MaxDelegations, func(k string) { delete(c.dels, k) }, c.dels)
 	c.dels[dns.CanonicalName(zone)] = delegationEntry{
 		ns:      append([]string(nil), ns...),
 		glue:    glue,
-		expires: c.opt.Now().Add(c.clamp(600)),
+		expires: c.opt.Now().Add(life),
 	}
 }
 

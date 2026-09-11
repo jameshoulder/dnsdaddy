@@ -28,15 +28,42 @@ func discardLogger() *slog.Logger {
 func freePort(t *testing.T) string {
 	t.Helper()
 
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("probe listen: %v", err)
+	// A port number free on *both* protocols.
+	//
+	// This used to probe UDP alone and hand the number back for a server that
+	// binds UDP and TCP on it. TCP and UDP have separate port spaces, so a
+	// number free on one says nothing about the other — and TCP is far the
+	// busier of the two on a shared machine, both because listening sockets
+	// linger in TIME_WAIT and because far more software wants a TCP port. It
+	// lost as "bind: address already in use" inside a shutdown test, which
+	// reads as a fault in the server rather than in the harness.
+	//
+	// TCP first, from the scarcer space, then UDP on the same number. There is
+	// still a window between closing the probes and the server binding, so the
+	// search is retried; a bound keeps a genuinely exhausted machine from
+	// spinning.
+	const attempts = 16
+	for i := 0; i < attempts; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("probe listen tcp: %v", err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		pc, err := net.ListenPacket("udp", "127.0.0.1:"+strconv.Itoa(port))
+		if err != nil {
+			ln.Close() //nolint:errcheck // discarding a failed probe
+			continue
+		}
+		if err := ln.Close(); err != nil {
+			t.Fatalf("probe close tcp: %v", err)
+		}
+		if err := pc.Close(); err != nil {
+			t.Fatalf("probe close udp: %v", err)
+		}
+		return "127.0.0.1:" + strconv.Itoa(port)
 	}
-	port := pc.LocalAddr().(*net.UDPAddr).Port
-	if err := pc.Close(); err != nil {
-		t.Fatalf("probe close: %v", err)
-	}
-	return "127.0.0.1:" + strconv.Itoa(port)
+	t.Fatalf("no port was free on both tcp and udp in %d attempts", attempts)
+	return ""
 }
 
 // The shutdown path is reached precisely because the parent context was

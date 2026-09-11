@@ -140,7 +140,11 @@ func (r *Resolver) prime(ctx context.Context) ([]netip.AddrPort, error) {
 		for name, as := range r.primingGlue(msg, names) {
 			glue[name] = as
 		}
-		r.cache.PutDelegation(".", names, glue)
+		// The root's own NS RRset TTL, from the priming answer. The root
+		// publishes a multi-day one; priming refreshes on its own schedule
+		// (primeInterval) regardless, so this only decides how long the
+		// cached delegation stands in between.
+		r.cache.PutDelegation(".", names, glue, rootNSTTL(msg))
 		return addrs, nil
 	}
 
@@ -238,4 +242,22 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// rootNSTTL is the shortest TTL among the root's own NS records in a priming
+// answer, or zero when there are none.
+func rootNSTTL(msg *dns.Msg) uint32 {
+	var ttl uint32
+	for _, set := range [][]dns.RR{msg.Answer, msg.Ns} {
+		for _, rr := range set {
+			ns, ok := rr.(*dns.NS)
+			if !ok || dns.CanonicalName(ns.Hdr.Name) != "." {
+				continue
+			}
+			if ttl == 0 || ns.Hdr.Ttl < ttl {
+				ttl = ns.Hdr.Ttl
+			}
+		}
+	}
+	return ttl
 }
