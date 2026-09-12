@@ -261,7 +261,10 @@ Worth knowing before you rely on DNS Daddy:
 - **Browser DoH can bypass network DNS.** Mitigations require network/endpoint configuration.
 - **No clustering or anycast.** One DNS Daddy instance is one server.
 - **No SSO, RBAC or multi-tenancy.** Authentication is currently simpler than enterprise platforms.
-- **No per-client rate limiting.** An authorised client can consume resolver capacity.
+- **Per-client rate limiting is a rate, not a fair share.** Each client is capped
+  independently, so the limiter bounds what any one client can take but does not
+  stop many clients from being busy at once. IPv6 clients are grouped by /64 by
+  default, which on a typical LAN means one allowance for the subnet.
 - **DNS rebinding is not currently mitigated.**
 
 **[docs/capabilities.md](docs/capabilities.md)** is the authoritative capability map: available, experimental and planned.

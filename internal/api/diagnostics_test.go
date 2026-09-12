@@ -243,3 +243,49 @@ func TestOnboardingDoesNotResetAfterAQuietDay(t *testing.T) {
 		t.Error("onboarding reappeared once the query log was pruned; it claims no device has EVER used this resolver")
 	}
 }
+
+// TestMetricsExposeRateLimiting. The rate-limit series are emitted whether or
+// not the limiter is on, at zero when it is off, so that an alert built on
+// "queries are being refused for rate" does not silently stop existing the day
+// somebody disables the feature — which is precisely the day it matters.
+func TestMetricsExposeRateLimiting(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	resp, raw := h.do("GET", "/metrics", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics = %d", resp.StatusCode)
+	}
+	body := string(raw)
+	for _, series := range []string{
+		"dnsdaddy_client_ratelimited_total",
+		"dnsdaddy_ratelimit_enabled",
+		"dnsdaddy_ratelimit_clients_tracked",
+		"dnsdaddy_ratelimit_clients_capacity",
+		"dnsdaddy_ratelimit_clients_evicted_total",
+	} {
+		if !strings.Contains(body, series) {
+			t.Errorf("/metrics does not export %s", series)
+		}
+	}
+}
+
+// TestRateLimitMetricsCarryNoClientLabel. The refusal path deliberately writes
+// no query-log row so that a client sending too fast cannot fill the disk. A
+// label naming the client would put that cardinality straight back, in the
+// monitoring system instead of the database.
+func TestRateLimitMetricsCarryNoClientLabel(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("GET", "/metrics", nil)
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "dnsdaddy_client_ratelimited_total") &&
+			!strings.HasPrefix(line, "dnsdaddy_ratelimit_") {
+			continue
+		}
+		if strings.Contains(line, "{") {
+			t.Errorf("a rate-limit series carries labels: %q", line)
+		}
+	}
+}

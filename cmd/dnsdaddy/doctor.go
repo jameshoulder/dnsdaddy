@@ -19,6 +19,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
+	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
@@ -95,6 +96,16 @@ func runDoctor(args []string) error {
 	checks = append(checks, dbCheck)
 	checks = append(checks, doctorListeners(ctx, cfg, acl, *timeout)...)
 	checks = append(checks, doctorClientAccess(ctx, st, cfg, acl, aclStale)...)
+	// Reported next to the ACL because the two answer halves of one question:
+	// the ACL says who may use this resolver, and this says how much of it any
+	// one of them may take.
+	checks = append(checks, diag.RateLimit(diag.RateLimitInput{
+		Enabled: cfg.DNS.RateLimit.Enabled,
+		// The limiter's own view rather than the file's, so what is reported
+		// is what would be enforced — including any value the limiter falls
+		// back on because the file left it out.
+		Config: ratelimit.New(cfg.DNS.RateLimitConfig()).Config(),
+	}))
 	checks = append(checks, doctorUpstreams(cfg, *timeout)...)
 	checks = append(checks, webChecks...)
 	// What kind of deployment this is, and whether the dashboard is where that

@@ -40,6 +40,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
+	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/secrets"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
@@ -306,12 +307,15 @@ func run() error {
 		return err
 	}
 
+	limiter := buildRateLimiter(cfg, log)
+
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
 		Timeout:         cfg.DNS.Timeout.D() + time.Second,
 		ClientACL:       acl,
 		RefuseANY:       cfg.DNS.RefuseANY,
+		RateLimiter:     limiter,
 		Detector:        detector,
 		Decisions:       recorderOrNil(decisionRecorder),
 		DNSSEC:          observerOrNil(dnssecObserver),
@@ -883,4 +887,32 @@ func recorderOrNil(r *decisions.Recorder) dnsserver.DecisionRecorder {
 		return nil
 	}
 	return r
+}
+
+// buildRateLimiter constructs the per-client rate limiter, or returns nil when
+// the operator has switched it off.
+//
+// Nil rather than a limiter with unreachable limits: the limiter's own nil
+// receiver allows everything, so "off" costs one nil comparison per query and
+// there is no arithmetic to be wrong about when the feature is not in use.
+//
+// The limits are logged at startup because a control that silently refuses
+// traffic is one an operator will otherwise meet for the first time while
+// debugging an outage.
+func buildRateLimiter(cfg config.Config, log *slog.Logger) *ratelimit.Limiter {
+	if !cfg.DNS.RateLimit.Enabled {
+		log.Warn("per-client rate limiting is off; one authorised client can saturate this resolver")
+		return nil
+	}
+	l := ratelimit.New(cfg.DNS.RateLimitConfig())
+	c := l.Config()
+	log.Info("per-client rate limiting active",
+		"rate_per_second", c.Rate,
+		"burst", c.Burst,
+		"ipv4_prefix", c.IPv4PrefixLength,
+		"ipv6_prefix", c.IPv6PrefixLength,
+		"max_clients", l.Capacity(),
+		"overrides", len(c.Overrides),
+	)
+	return l
 }

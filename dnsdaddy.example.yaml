@@ -99,6 +99,66 @@ dns:
   # them. ANY replies are large and are the classic DNS amplification lever.
   refuse_any: true
 
+  # Per-client query rate limiting.
+  #
+  # The client ACL above decides WHO may use this resolver. This decides HOW
+  # MUCH of it any one of them may take. Without it a single authorised client
+  # -- a compromised host, an application stuck in a retry loop -- can saturate
+  # the resolver, which on a 1 vCPU box is not a high bar.
+  #
+  # The shipped numbers are a backstop, not a quota: they sit far above
+  # anything a legitimate host does, so being refused is evidence of a fault
+  # rather than of a busy afternoon. A client over its limit is answered
+  # REFUSED -- it is told no rather than met with silence, so it can back off --
+  # and no query-log row is written for it, so a client sending too fast cannot
+  # turn that into unbounded disk use.
+  rate_limit:
+    enabled: true
+
+    # Sustained queries per second per client, and how far above it a client
+    # may go momentarily. Lower these if you run Daddybound Native: native
+    # resolution is CPU-bound on signature verification and costs three orders
+    # of magnitude more per query than a forwarded cache hit.
+    #
+    # There is no "rate: 0". Set enabled: false to turn the limiter off.
+    rate: 500
+    burst: 1000
+
+    # What counts as one client.
+    #
+    # /32 for IPv4 is one host. /64 for IPv6 is a subnet rather than a host,
+    # and that is deliberate: a host using privacy addressing (RFC 8981) holds
+    # several addresses at once and rotates them, so limiting per /128 would
+    # see a stream of strangers and never accumulate enough state about any of
+    # them to refuse one. The cost is that on a typical LAN, where every host
+    # shares one /64, the IPv6 limit is effectively per-LAN -- which is part of
+    # why the default above is generous. Set 128 for per-host IPv6 limiting and
+    # accept the rotation caveat.
+    ipv4_prefix_length: 32
+    ipv6_prefix_length: 64
+
+    # How many clients hold state at once. This is the memory bound. When the
+    # table is full, clients whose allowance has already recovered are dropped
+    # first, so a client rotating source addresses cannot flush the state of
+    # the client being limited.
+    max_clients: 65536
+
+    # Per-range limits. Longest matching prefix wins, regardless of the order
+    # they are written in. A rate of 0 exempts the range entirely -- that is
+    # how a monitoring host or a downstream resolver is excluded.
+    #
+    # A malformed entry here is a startup error rather than a skipped line: the
+    # only reason to write one is that some range needs different treatment,
+    # and ignoring a typo would silently give that range the treatment you were
+    # trying to avoid.
+    overrides: []
+    # overrides:
+    #   - cidr: 127.0.0.0/8     # this box's own lookups
+    #     rate: 0
+    #   - cidr: 10.20.0.0/16    # a noisy lab segment, kept on a short lead
+    #     rate: 50
+    #     burst: 100
+
   # Set the AD bit on outgoing queries so a validating upstream reports whether
   # it authenticated each answer (RFC 6840 s5.7), recorded per query as
   # validated / unvalidated / servfail.

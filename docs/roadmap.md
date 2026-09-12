@@ -35,18 +35,6 @@ see [CONTRIBUTING.md](../CONTRIBUTING.md).
 **What it unlocks:** promoting a detector from experimental to available, which
 in turn is the precondition for everything in the enforcement section below.
 
-### Per-client query rate limiting
-
-The clearest gap in the [threat model](threat-model.md#t18--denial-of-service-and-resource-exhaustion).
-A single authorised client can saturate the resolver, and on a 1 GB box that is
-not a high bar.
-
-**Why it is not done:** the interesting part is the failure mode. Refusing
-queries from an over-limit client breaks that client's network access, which is
-an outage caused by a threshold — the same objection that keeps behavioural
-detections from blocking. Needs a considered answer on defaults, per-network
-overrides, and what happens to a busy-but-legitimate host.
-
 ### A persistent first-seen index
 
 "This domain has never been resolved on this network before" is one of the more

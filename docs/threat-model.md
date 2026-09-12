@@ -362,11 +362,23 @@ specifically so a client spraying unique names cannot make the resolver
 allocate per name — and the observation queue drops rather than making a lookup
 wait.
 
-**Residual risk.** No per-client query rate limiting. A single authorised
-client can saturate the resolver, and on a 1 GB box that is not a high bar.
-Detection eviction under load is a coverage gap, reported through
-`dnsdaddy_detection_dropped_total` rather than hidden. Rate limiting is on the
-roadmap.
+**Per-client rate limiting**, on by default. Each client may sustain 500
+queries per second with a burst of 1,000; beyond that it is answered REFUSED,
+before policy evaluation and before anything is sent upstream. The refusal
+writes no query-log row, so a client sending faster than it is allowed to
+cannot convert that into unbounded disk use. The tracking table is bounded and
+prefers to evict clients whose allowance has already recovered, so a source
+address flood cannot flush the state of the client being limited. See
+[algorithms.md](algorithms.md#per-client-rate-limiter).
+
+**Residual risk.** The limit is per client, not a fair share of the whole
+resolver: it bounds what any one client can take and does not stop many clients
+from being busy simultaneously. IPv6 clients are grouped by /64 by default, so
+on a typical LAN the IPv6 limit is per-subnet rather than per-host — the
+trade-off is explained in `internal/ratelimit`. A client behind an untrusted
+reverse proxy appears to the limiter as the proxy. Detection eviction under
+load remains a coverage gap, reported through `dnsdaddy_detection_dropped_total`
+rather than hidden.
 
 ### T19 — Supply chain
 
@@ -427,7 +439,9 @@ The things most likely to matter, in order:
 2. **Encrypted-DNS bypass cannot be prevented** by DNS Daddy alone.
 3. **Behavioural detection is experimental, alert-only, and unmeasured** against
    real traffic.
-4. **No per-client rate limiting.** One authorised client can saturate it.
+4. **Rate limiting caps each client, not the total.** Many busy clients can
+   still saturate the resolver, and IPv6 clients share an allowance per /64 by
+   default.
 5. **Single admin credential.** No MFA, no RBAC, no token scoping.
 6. **No independent security review.** This is the one that qualifies all the
    others.

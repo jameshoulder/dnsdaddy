@@ -40,6 +40,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | ANY refusal (RFC 8482) | On by default; ANY is the classic amplification lever. |
 | Client ACL | Source addresses outside the list are REFUSED before any work. |
 | Open-resolver startup refusal | A public listener with no ACL is a startup error, not a warning. |
+| Per-client query rate limiting | On by default. Each client may sustain 500 queries/second with a burst of 1,000; beyond that it is REFUSED and no query-log row is written. "One client" is an IPv4 /32 and an IPv6 /64 — the IPv6 default groups a subnet rather than a host, deliberately, because privacy addressing rotates within a /64. Per-range overrides, including exemptions. The tracking table is bounded and evicts recovered clients first, so a source-address flood cannot flush the state of the client being limited. See [algorithms.md](algorithms.md#per-client-rate-limiter). |
 
 ### Filtering
 

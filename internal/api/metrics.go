@@ -45,6 +45,19 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metric(&b, "dnsdaddy_client_refused_total", "DNS questions refused because the source address is not permitted to use this resolver", "counter",
 		fmt.Sprintf("dnsdaddy_client_refused_total %d", a.DNS.RefusedClients()))
 
+	// Rate limiting. Unlabelled for the same reason as the refusal counter: a
+	// label per client is one series per device on the network, and the
+	// refusal path writes no query-log row precisely so that a client sending
+	// too fast cannot turn that into unbounded storage. A metric label would
+	// put the cardinality straight back.
+	//
+	// Emitted unconditionally, at zero when the limiter is off, so that an
+	// alert on "queries are being refused" does not silently stop existing
+	// when somebody disables the feature.
+	metric(&b, "dnsdaddy_client_ratelimited_total", "DNS questions refused because the client exceeded its query rate limit", "counter",
+		fmt.Sprintf("dnsdaddy_client_ratelimited_total %d", a.DNS.RateLimited()))
+	a.writeRateLimitMetrics(&b)
+
 	// Client-access shape. Counts only: an alert wants to know that the number
 	// of publicly permitted ranges went from nought to one, not which address
 	// it was. A label per client IP would be an unbounded cardinality
@@ -369,4 +382,29 @@ func (a *API) dnssecMetricLines() []string {
 	}
 
 	return []string{b.String()}
+}
+
+// writeRateLimitMetrics reports the shape of the rate limiter's tracking
+// table.
+//
+// Tracked against capacity is the number that matters operationally: a table
+// at capacity is one where clients are being evicted, and an evicted client
+// starts its allowance again. Evictions climbing is either a network with more
+// distinct clients than the table holds — raise max_clients — or a client
+// rotating source addresses to escape the limit, which is worth knowing about
+// and is invisible any other way.
+func (a *API) writeRateLimitMetrics(b *strings.Builder) {
+	l := a.DNS.RateLimiter()
+	enabled := 0
+	if l != nil {
+		enabled = 1
+	}
+	metric(b, "dnsdaddy_ratelimit_enabled", "Whether per-client rate limiting is active (1) or off (0)", "gauge",
+		fmt.Sprintf("dnsdaddy_ratelimit_enabled %d", enabled))
+	metric(b, "dnsdaddy_ratelimit_clients_tracked", "Clients currently holding rate-limit state", "gauge",
+		fmt.Sprintf("dnsdaddy_ratelimit_clients_tracked %d", l.Tracked()))
+	metric(b, "dnsdaddy_ratelimit_clients_capacity", "Maximum clients the rate-limit table holds", "gauge",
+		fmt.Sprintf("dnsdaddy_ratelimit_clients_capacity %d", l.Capacity()))
+	metric(b, "dnsdaddy_ratelimit_clients_evicted_total", "Clients dropped from the rate-limit table to make room", "counter",
+		fmt.Sprintf("dnsdaddy_ratelimit_clients_evicted_total %d", l.Evicted()))
 }

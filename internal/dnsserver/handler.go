@@ -20,6 +20,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
+	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -54,6 +55,15 @@ type Handler struct {
 	// container restart. The implementation is one atomic pointer load — see
 	// clientacl.Controller.
 	acl ClientACL
+
+	// limiter bounds how much of the resolver one client may use. Nil means
+	// no limit, so the feature being off is a nil pointer rather than a
+	// limiter configured to allow everything.
+	//
+	// Checked immediately after the ACL and before any other work, for the
+	// same reason the ACL is: the query a limiter is there to refuse is
+	// precisely the one that must not be allowed to cost anything first.
+	limiter *ratelimit.Limiter
 
 	queries atomic.Uint64
 	blocked atomic.Uint64
@@ -116,6 +126,8 @@ type HandlerOptions struct {
 	// RefuseANY answers ANY queries locally per RFC 8482 rather than
 	// forwarding them.
 	RefuseANY bool
+	// RateLimiter bounds per-client query rates. Nil means unlimited.
+	RateLimiter *ratelimit.Limiter
 	// Detector, when set, receives an observation per query. Alert-only: see
 	// Handler.observe.
 	Detector *detect.Engine
@@ -150,6 +162,7 @@ func NewHandler(
 		queryLogEnabled: o.QueryLogEnabled,
 		refuseANY:       o.RefuseANY,
 		acl:             o.ClientACL,
+		limiter:         o.RateLimiter,
 		detector:        o.Detector,
 		decisions:       o.Decisions,
 		dnssec:          o.DNSSEC,
@@ -180,6 +193,16 @@ func (h *Handler) clientAllowed(addr netip.Addr) bool {
 
 // RefusedClients returns how many queries were rejected by the client ACL.
 func (h *Handler) RefusedClients() uint64 { return h.refused.Load() }
+
+// RateLimited returns how many queries were refused for exceeding a client
+// rate limit. Separate from RefusedClients because the two mean different
+// things to an operator: one says a source is not permitted here at all, the
+// other says a permitted source is asking too fast.
+func (h *Handler) RateLimited() uint64 { return h.limiter.Limited() }
+
+// RateLimiter exposes the limiter for diagnostics and metrics. Nil when the
+// feature is off.
+func (h *Handler) RateLimiter() *ratelimit.Limiter { return h.limiter }
 
 // maxPresentationNameLen bounds the qname we are willing to process. RFC 1035
 // caps a name at 253 bytes on the wire; presentation-form escaping can expand
@@ -257,6 +280,25 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	// refusal is counted for /metrics instead.
 	if meta.networkID == "" && !h.clientAllowed(meta.clientAddr) {
 		h.refused.Add(1)
+		return errorResponse(req, dns.RcodeRefused)
+	}
+
+	// The rate limit is checked next, for the same two reasons as the ACL and
+	// with the same two consequences.
+	//
+	// Next, because a query that is going to be refused must not be allowed to
+	// cost anything first — a limiter that runs after the policy walk has
+	// already spent the work it exists to prevent.
+	//
+	// REFUSED rather than a drop, because a client that is told no can back
+	// off, and silence is indistinguishable from the resolver being broken.
+	// The reply is the question echoed with an rcode, so it is no larger than
+	// what provoked it and gains a spoofer nothing.
+	//
+	// And no query-log row, exactly as for the ACL: a client sending faster
+	// than it is allowed to must not be able to turn that into unbounded disk
+	// writes. The refusal is counted for /metrics instead.
+	if d := h.limiter.Allow(meta.clientAddr); !d.Allowed {
 		return errorResponse(req, dns.RcodeRefused)
 	}
 

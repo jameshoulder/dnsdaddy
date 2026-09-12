@@ -22,6 +22,59 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Per-client query rate limiting
+
+The threat model has carried "a single authorised client can saturate the
+resolver" as a residual risk since the first release. It no longer does.
+
+Each client may now sustain **500 queries per second with a burst of 1,000**.
+Beyond that it is answered REFUSED — before policy evaluation and before
+anything is sent upstream — and no query-log row is written, so a client
+sending faster than it is allowed to cannot convert that into unbounded disk
+use. The refusal is counted in `/metrics` as
+`dnsdaddy_client_ratelimited_total`, unlabelled, alongside gauges for how full
+the tracking table is.
+
+The algorithm is GCRA: one timestamp of state per client, no background refill,
+and a decision anyone can reconstruct on paper from three numbers. It is
+described in full, including the parts that are trade-offs rather than
+improvements, in [docs/algorithms.md](docs/algorithms.md#per-client-rate-limiter).
+
+**This changes behaviour on upgrade, deliberately.** The compatibility note
+above says new options get defaults that preserve existing behaviour, and this
+one does not: an installation where some client was already exceeding 500
+queries per second will start seeing REFUSED for the excess. That is the point
+of the control, and the default is set far above what a legitimate host does
+specifically so that being refused is evidence of a fault rather than of a busy
+afternoon. An operator who has measured their own traffic and disagrees sets
+`dns.rate_limit.enabled: false`, or raises the numbers, or exempts a range with
+an override of `rate: 0`. `dnsdaddy doctor` reports which of those is in force.
+
+Two things worth knowing before the first incident:
+
+- **IPv6 clients are grouped by /64**, not per address. A host using privacy
+  addressing rotates within its /64, so per-address limiting would never
+  accumulate enough state about one host to refuse it. The cost is that on a
+  typical LAN every host shares one /64 and therefore one allowance.
+  `ipv6_prefix_length: 128` reverses the trade.
+- **A client behind an untrusted reverse proxy appears as the proxy**, and
+  shares one allowance with everything else behind it.
+
+### The client ACL no longer admits an address it could not read
+
+`clientacl.Set.Allows` returned true for an unparseable source address, so a
+peer address the listener could not read was a permit against an ACL whose
+entire job is to refuse addresses.
+
+The comment justifying it said the case only arose for transports where a token
+identifies the peer. That was already untrue — the handler consults the ACL
+only when no token named the network, so a token-carrying DoH or DoT client
+never reached the branch. What reached it was a genuinely unreadable address,
+which is exactly the case where "we could not tell" must not mean "yes".
+
+An unrestricted ACL still admits everything; that is a separate and deliberate
+decision.
+
 ### Ad-hoc resolver access, on the Default network
 
 The system **Default** row now carries a real control — *Ad-hoc DNS access* —

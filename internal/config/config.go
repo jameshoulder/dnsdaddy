@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 )
 
 // Config is the fully resolved runtime configuration.
@@ -85,6 +87,59 @@ type Integrations struct {
 	DefaultCacheTTL Duration `yaml:"default_cache_ttl"`
 }
 
+// RateLimit bounds per-client query rates. See internal/ratelimit for the
+// algorithm and docs/algorithms.md for the reasoning behind the defaults.
+type RateLimit struct {
+	// Enabled switches the limiter on. On by default: an authorised client
+	// saturating the resolver is the residual risk the threat model has
+	// carried the longest, and a control nobody turns on is not a control.
+	// Unmarshalling happens over Default(), so omitting the key keeps it on
+	// and `enabled: false` turns it off, exactly as for refuse_any.
+	Enabled bool `yaml:"enabled"`
+
+	// Rate is sustained queries per second per client; Burst is how far above
+	// it a client may go momentarily.
+	//
+	// The shipped values are a backstop against saturation, not a quota: they
+	// sit far above anything a legitimate host does, so that being refused is
+	// evidence of a fault rather than of a busy afternoon. An operator running
+	// Daddybound Native should lower them, because native resolution costs
+	// three orders of magnitude more CPU per query than a forwarded cache hit.
+	Rate  float64 `yaml:"rate"`
+	Burst float64 `yaml:"burst"`
+
+	// IPv4PrefixLength and IPv6PrefixLength decide what counts as one client.
+	// 32 and 64 respectively. The IPv6 default is a subnet rather than a host
+	// on purpose — see ratelimit.Config, which explains the trade-off and the
+	// rotation problem that motivates it.
+	//
+	// Zero means "not set" and falls back to the default. A prefix length of
+	// zero would mask every client to the default route and turn a per-client
+	// limit into one shared allowance for the whole network.
+	IPv4PrefixLength int `yaml:"ipv4_prefix_length"`
+	IPv6PrefixLength int `yaml:"ipv6_prefix_length"`
+
+	// MaxClients bounds the tracking table. Memory on a 1 GB box is the
+	// constraint this exists for.
+	MaxClients int `yaml:"max_clients"`
+
+	// Overrides raise or lower the limit for a range of client addresses.
+	// Longest matching prefix wins. A rate of 0 exempts the range entirely,
+	// which is how a monitoring host or a downstream resolver is excluded
+	// without a special case in the code.
+	Overrides []RateLimitOverride `yaml:"overrides"`
+}
+
+// RateLimitOverride is one per-range limit.
+type RateLimitOverride struct {
+	// CIDR is the range this applies to. Matched by longest prefix, so a /24
+	// entry beats a /8 entry regardless of the order they are written in.
+	CIDR string `yaml:"cidr"`
+	// Rate of 0 means this range is not limited.
+	Rate  float64 `yaml:"rate"`
+	Burst float64 `yaml:"burst"`
+}
+
 // DNS holds the resolver-side settings: what we listen on and where we forward.
 type DNS struct {
 	ListenUDP    string   `yaml:"listen_udp"`
@@ -115,6 +170,9 @@ type DNS struct {
 	// RefuseANY answers ANY queries per RFC 8482 instead of forwarding them.
 	// ANY responses are large and are a standard DNS amplification lever.
 	RefuseANY bool `yaml:"refuse_any"`
+
+	// RateLimit bounds how much of the resolver any one client may use.
+	RateLimit RateLimit `yaml:"rate_limit"`
 
 	// LocalDNSSECValidation selects what Daddybound, DNS Daddy's own DNSSEC
 	// validation engine, does with real traffic. See
@@ -412,7 +470,15 @@ func Default() Config {
 			// Opening it up is a deliberate edit, not the fallback.
 			AllowedClientCIDRs: append([]string(nil), DefaultAllowedClientCIDRs...),
 			RefuseANY:          true,
-			DNSSECTelemetry:    true,
+			RateLimit: RateLimit{
+				Enabled:          true,
+				Rate:             ratelimit.DefaultRate,
+				Burst:            ratelimit.DefaultBurst,
+				IPv4PrefixLength: ratelimit.DefaultIPv4PrefixLength,
+				IPv6PrefixLength: ratelimit.DefaultIPv6PrefixLength,
+				MaxClients:       ratelimit.DefaultMaxClients,
+			},
+			DNSSECTelemetry: true,
 			// Deliberately empty rather than a mode. Load unmarshals YAML over
 			// these defaults, so anything chosen here is indistinguishable
 			// afterwards from a value the operator wrote — and the choice
@@ -583,6 +649,9 @@ func applyEnv(cfg *Config) error {
 	for _, step := range []func() error{
 		func() error { return envBool("DNSDADDY_ALLOW_PUBLIC_RESOLVER", &cfg.DNS.AllowPublicResolver) },
 		func() error { return envBool("DNSDADDY_REFUSE_ANY", &cfg.DNS.RefuseANY) },
+		func() error { return envBool("DNSDADDY_RATE_LIMIT", &cfg.DNS.RateLimit.Enabled) },
+		func() error { return envFloat("DNSDADDY_RATE_LIMIT_RATE", &cfg.DNS.RateLimit.Rate) },
+		func() error { return envFloat("DNSDADDY_RATE_LIMIT_BURST", &cfg.DNS.RateLimit.Burst) },
 		func() error { return envBool("DNSDADDY_DNSSEC_TELEMETRY", &cfg.DNS.DNSSECTelemetry) },
 		func() error { return envBool("DNSDADDY_DETECTION_ENABLED", &cfg.Detection.Enabled) },
 		func() error {
@@ -696,6 +765,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("upstream_mode must be %q or %q, got %q", "failover", "race", c.DNS.UpstreamMode)
 	}
 	if err := c.validateLocalDNSSEC(); err != nil {
+		return err
+	}
+	if err := c.validateRateLimit(); err != nil {
 		return err
 	}
 	if c.DNS.ListenUDP == "" && c.DNS.ListenTCP == "" && c.DNS.ListenDoT == "" {
@@ -1103,3 +1175,88 @@ func (c *Config) ResolveLocalDNSSEC(installDefault string) (mode string, fromIns
 
 // ObserveDNSSEC reports whether Daddybound should observe real traffic.
 func (d DNS) ObserveDNSSEC() bool { return d.LocalDNSSECMode() == LocalDNSSECObserve }
+
+// validateRateLimit refuses a rate limit that does not mean what it says.
+//
+// internal/ratelimit falls back to its defaults rather than refusing traffic
+// on a nonsense value, because a misconfigured limiter must never be an
+// outage. That is the right behaviour at the point of use and the wrong
+// behaviour here: silently correcting a typo at startup leaves an operator
+// believing a limit is in force that is not, and an override they wrote for a
+// monitoring host quietly doing nothing. Both layers are deliberate.
+func (c *Config) validateRateLimit() error {
+	rl := c.DNS.RateLimit
+	if !rl.Enabled {
+		return nil
+	}
+	// Zero is rejected rather than given a meaning. Inside an override it
+	// already means "do not limit this range", and carrying that meaning up to
+	// the global limit would make `rate: 0` silently disable the control while
+	// `enabled: true` still sat above it. Reading it the other way — zero
+	// queries per second — is a whole-network outage from one character. The
+	// operator is told which one they meant instead.
+	if rl.Rate <= 0 {
+		return fmt.Errorf("dns.rate_limit.rate must be greater than 0, got %v; "+
+			"to turn per-client rate limiting off set dns.rate_limit.enabled: false", rl.Rate)
+	}
+	if rl.Burst < 1 {
+		return fmt.Errorf("dns.rate_limit.burst must be at least 1, got %v", rl.Burst)
+	}
+	if rl.IPv4PrefixLength < 0 || rl.IPv4PrefixLength > 32 {
+		return fmt.Errorf("dns.rate_limit.ipv4_prefix_length must be between 1 and 32, got %d", rl.IPv4PrefixLength)
+	}
+	if rl.IPv6PrefixLength < 0 || rl.IPv6PrefixLength > 128 {
+		return fmt.Errorf("dns.rate_limit.ipv6_prefix_length must be between 1 and 128, got %d", rl.IPv6PrefixLength)
+	}
+	if rl.MaxClients < 0 {
+		return fmt.Errorf("dns.rate_limit.max_clients must not be negative, got %d", rl.MaxClients)
+	}
+	for i, o := range rl.Overrides {
+		// A malformed override is an error rather than a skipped entry. The
+		// whole reason to write one is that some range needs different
+		// treatment, and ignoring it gives the operator the treatment they
+		// were trying to avoid without telling them.
+		p, err := netip.ParsePrefix(strings.TrimSpace(o.CIDR))
+		if err != nil {
+			return fmt.Errorf("dns.rate_limit.overrides[%d].cidr %q is not a CIDR: %w", i, o.CIDR, err)
+		}
+		if p.Addr() != p.Masked().Addr() {
+			return fmt.Errorf("dns.rate_limit.overrides[%d].cidr %q has host bits set; write %s", i, o.CIDR, p.Masked())
+		}
+		if o.Rate < 0 {
+			return fmt.Errorf("dns.rate_limit.overrides[%d].rate must not be negative, got %v", i, o.Rate)
+		}
+		if o.Burst < 0 {
+			return fmt.Errorf("dns.rate_limit.overrides[%d].burst must not be negative, got %v", i, o.Burst)
+		}
+	}
+	return nil
+}
+
+// RateLimitConfig translates the configuration into the limiter's own form.
+//
+// Called after validate, so the prefixes parse. A prefix that somehow does not
+// is dropped rather than panicking: this runs at startup on the path to
+// serving DNS, and the limiter treats a missing override as "use the global
+// limit", which is the safe direction.
+func (d DNS) RateLimitConfig() ratelimit.Config {
+	cfg := ratelimit.Config{
+		Rate:             d.RateLimit.Rate,
+		Burst:            d.RateLimit.Burst,
+		IPv4PrefixLength: d.RateLimit.IPv4PrefixLength,
+		IPv6PrefixLength: d.RateLimit.IPv6PrefixLength,
+		MaxClients:       d.RateLimit.MaxClients,
+	}
+	for _, o := range d.RateLimit.Overrides {
+		p, err := netip.ParsePrefix(strings.TrimSpace(o.CIDR))
+		if err != nil {
+			continue
+		}
+		cfg.Overrides = append(cfg.Overrides, ratelimit.Override{
+			Prefix: p.Masked(),
+			Rate:   o.Rate,
+			Burst:  o.Burst,
+		})
+	}
+	return cfg
+}
