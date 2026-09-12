@@ -355,10 +355,27 @@ func TestUnrestrictedDistinguishesPublicResolverFromLoopbackOnly(t *testing.T) {
 // An invalid address is admitted: that only happens on transports where the
 // peer is identified another way, and failing them closed would break roaming
 // clients for no security gain.
-func TestInvalidAddressIsAdmitted(t *testing.T) {
+// TestAnUnknownSourceAddressIsRefused is the inversion of a test that used to
+// assert the opposite. The ACL exists to answer one question — may this source
+// use the resolver — and an address it could not read is not an answer of yes.
+//
+// The old rationale was that DoH and DoT clients identified by token arrive
+// with no parsable peer address. They do not arrive here at all: the handler
+// checks the ACL only when no token named the network. So the branch admitted
+// nothing but genuinely unreadable peer addresses, which is precisely the case
+// where admitting is wrong.
+//
+// An unrestricted ACL still admits it, because an unrestricted ACL admits
+// everything and is a separate, deliberate decision.
+func TestAnUnknownSourceAddressIsRefused(t *testing.T) {
 	s := Compute([]string{"127.0.0.0/8"}, false, nil)
-	if !s.Allows(netip.Addr{}) {
-		t.Error("an unparsed peer address was refused")
+	if s.Allows(netip.Addr{}) {
+		t.Error("an address the listener could not read was treated as permitted")
+	}
+
+	unrestricted := Compute(nil, false, nil)
+	if !unrestricted.Allows(netip.Addr{}) {
+		t.Error("an unrestricted ACL stopped admitting; that is a separate decision and was not the fix")
 	}
 }
 

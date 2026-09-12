@@ -423,12 +423,24 @@ func covers(outer, inner netip.Prefix) bool {
 
 // Allows reports whether addr may use this resolver.
 //
-// An address we could not parse is allowed through: that only happens for
-// transports where the peer is identified some other way (a DoH token), and
-// failing those closed would break roaming clients for no security gain.
+// An address we could not read is refused. It used to be admitted, on the
+// reasoning that it only happens for transports where the peer is identified
+// some other way — a DoH or DoT token — and that failing those closed would
+// break roaming clients. That reasoning was already stale: the handler skips
+// this check entirely when a token has named the network, so a token-carrying
+// client never arrives here. What did arrive here was an address the listener
+// could not parse, and admitting it meant a single unreadable peer address was
+// a permit against an ACL whose entire job is to refuse addresses.
+//
+// An ACL that cannot tell who is asking has not established that the asker is
+// allowed, and that is the only question it is being asked. See
+// TestAnUnknownSourceAddressIsRefused.
 func (s *Set) Allows(addr netip.Addr) bool {
-	if s == nil || s.unrestricted || !addr.IsValid() {
+	if s == nil || s.unrestricted {
 		return true
+	}
+	if !addr.IsValid() {
+		return false
 	}
 	addr = Normalize(addr)
 	for _, p := range s.all {
