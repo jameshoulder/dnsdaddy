@@ -99,6 +99,73 @@ dns:
   # them. ANY replies are large and are the classic DNS amplification lever.
   refuse_any: true
 
+  # DNS rebinding answer filter.
+  #
+  # The threat: a page loaded from https://evil.example is a public origin. If
+  # evil.example answers with 10.0.0.1, the browser lets that page make
+  # requests to a machine on your LAN -- the router's admin page, a database
+  # bound to loopback, a cloud metadata endpoint -- because as far as the
+  # same-origin policy is concerned it is still talking to evil.example.
+  # Nothing about the DNS is malformed, which is why neither DNSSEC nor a
+  # trustworthy upstream prevents it.
+  #
+  # So the upstream may return 10.0.0.1 quite happily; whether it leaves this
+  # resolver is our decision.
+  rebinding:
+    # Commented out on purpose, and this is the one setting in this file whose
+    # absence means something.
+    #
+    # A FRESH INSTALL FILTERS. AN UPGRADE DOES NOT, until you set this to true.
+    # Withholding addresses an installation has been serving for a year is a
+    # change to that network, and not one a release should make on your behalf.
+    # The decision is recorded in the database on first run, the same way
+    # local_dnssec_validation is. `dnsdaddy doctor` reports which is in force.
+    #
+    # enabled: true
+
+    # The ranges that must not reach a client. Setting this REPLACES the list
+    # below rather than extending it: if you have thought about this hard
+    # enough to edit it, you should get the list you wrote.
+    filter_ranges:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16      # link-local, and 169.254.169.254 in particular
+      - 0.0.0.0/8
+      # RFC 6598 carrier-grade NAT. The entry most likely to be questioned:
+      # it is never globally routable, and behind CGNAT -- a home connection
+      # on a modern ISP, or a Tailscale network -- it addresses machines on
+      # your own side of the boundary exactly as 10/8 does.
+      - 100.64.0.0/10
+      - ::1/128
+      - ::/128
+      - fc00::/7            # unique local
+      - fe80::/10           # link-local
+
+    # What a client sees when every address in an answer was filtered:
+    #
+    #   nodata    NOERROR with no records -- "this name exists and has no
+    #             address you may have". True, and the default.
+    #   nxdomain  "this name does not exist". A lie, cached harder by some
+    #             clients, and it hides the filtering from anyone debugging.
+    #   refused   "I will not answer this". The most honest that a decision
+    #             was made; most likely to make a stub try another server.
+    #
+    # Whichever you pick, the answer section is cleared completely -- including
+    # any CNAME -- so a client is never left following an alias to a name whose
+    # addresses were withheld.
+    empty_action: nodata
+
+  # Exemptions are NOT set here. They are per policy, in the dashboard or
+  # through the API (`rebindingExemptions` on a policy), because split-horizon
+  # DNS is a per-network fact: office.example.com resolving to 10.1.2.3 is the
+  # configuration working on the office network and an attack anywhere else.
+  #
+  # A default route (0.0.0.0/0 or ::/0) is refused as an exemption. It would
+  # disable the filter for that policy while every status display still said it
+  # was on.
+
   # Per-client query rate limiting.
   #
   # The client ACL above decides WHO may use this resolver. This decides HOW

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
+	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 )
 
 // ListPolicies returns every policy with its allow/block rules and the number
@@ -54,11 +55,35 @@ func (s *Store) ListPolicies(ctx context.Context) ([]Policy, error) {
 	if err != nil {
 		return nil, err
 	}
+	exemptions, err := s.allRebindingExemptions(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out {
 		out[i].AllowDomains = nonNil(rules[out[i].ID+"|allow"])
 		out[i].BlockDomains = nonNil(rules[out[i].ID+"|block"])
+		out[i].RebindingExemptions = nonNil(exemptions[out[i].ID])
 	}
 	return out, nil
+}
+
+func (s *Store) allRebindingExemptions(ctx context.Context) (map[string][]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT policy_id, cidr FROM policy_rebinding_exemptions ORDER BY cidr")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string][]string{}
+	for rows.Next() {
+		var pid, cidr string
+		if err := rows.Scan(&pid, &cidr); err != nil {
+			return nil, err
+		}
+		out[pid] = append(out[pid], cidr)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) allPolicyRules(ctx context.Context) (map[string][]string, error) {
@@ -105,6 +130,9 @@ type PolicyInput struct {
 	LogQueries   *bool
 	AllowDomains *[]string
 	BlockDomains *[]string
+	// RebindingExemptions replaces the policy's rebinding exemption list.
+	// Nil leaves it unchanged; an empty slice clears it.
+	RebindingExemptions *[]string
 }
 
 // CreatePolicy inserts a new policy.
@@ -147,6 +175,9 @@ func (s *Store) CreatePolicy(ctx context.Context, in PolicyInput) (Policy, error
 	}
 
 	if err := replaceRules(ctx, tx, id, "allow", in.AllowDomains); err != nil {
+		return Policy{}, err
+	}
+	if err := replaceExemptions(ctx, tx, id, in.RebindingExemptions); err != nil {
 		return Policy{}, err
 	}
 	if err := replaceRules(ctx, tx, id, "block", in.BlockDomains); err != nil {
@@ -219,6 +250,9 @@ func (s *Store) UpdatePolicy(ctx context.Context, id string, in PolicyInput) (Po
 		return Policy{}, err
 	}
 	if err := replaceRules(ctx, tx, id, "allow", in.AllowDomains); err != nil {
+		return Policy{}, err
+	}
+	if err := replaceExemptions(ctx, tx, id, in.RebindingExemptions); err != nil {
 		return Policy{}, err
 	}
 	if err := replaceRules(ctx, tx, id, "block", in.BlockDomains); err != nil {
@@ -307,6 +341,42 @@ func replaceRules(ctx context.Context, tx *sql.Tx, policyID, kind string, domain
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO policy_rules (policy_id, kind, domain, created_at) VALUES (?, ?, ?, ?)",
 			policyID, kind, d, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// replaceExemptions rewrites one policy's rebinding exemption list.
+//
+// Validation happens here rather than only at the API, because this is the one
+// path every writer goes through. rebind.ParseExemptions refuses a default
+// route and a CIDR with host bits set, and the error is returned rather than
+// the entry skipped: an operator who wrote an exemption and had it silently
+// dropped would believe a range was reachable when it is filtered.
+func replaceExemptions(ctx context.Context, tx *sql.Tx, policyID string, cidrs *[]string) error {
+	if cidrs == nil {
+		return nil
+	}
+	parsed, err := rebind.ParseExemptions(*cidrs)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM policy_rebinding_exemptions WHERE policy_id = ?", policyID); err != nil {
+		return err
+	}
+	now := unixMilli(time.Now())
+	seen := map[string]bool{}
+	for _, p := range parsed {
+		cidr := p.String()
+		if seen[cidr] {
+			continue
+		}
+		seen[cidr] = true
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO policy_rebinding_exemptions (policy_id, cidr, created_at) VALUES (?, ?, ?)",
+			policyID, cidr, now); err != nil {
 			return err
 		}
 	}

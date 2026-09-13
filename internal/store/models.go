@@ -47,6 +47,15 @@ type Policy struct {
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
 
+	// RebindingExemptions are address ranges this policy is willing to
+	// receive in an answer despite the DNS rebinding filter, in CIDR form.
+	// Split-horizon DNS is the reason they exist: a name that legitimately
+	// resolves to 10.1.2.3 on this network is the configuration working.
+	//
+	// A default route is refused: exempting every address would disable the
+	// filter for this policy while every status display still reported it on.
+	RebindingExemptions []string `json:"rebindingExemptions"`
+
 	// Populated by ListPolicies / GetPolicy.
 	AllowDomains []string `json:"allowDomains"`
 	BlockDomains []string `json:"blockDomains"`

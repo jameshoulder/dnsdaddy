@@ -22,6 +22,39 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### DNS rebinding answer filter
+
+[T8](docs/threat-model.md#t8--dns-rebinding) said, honestly, that DNS Daddy did
+not filter private addresses out of answers and that this was the actual
+control. It does now.
+
+Private, loopback, link-local, ULA, carrier-grade-NAT and unspecified addresses
+are removed from answers before they reach a client, along with the `ipv4hint`
+and `ipv6hint` parameters on SVCB and HTTPS records — browsers query HTTPS
+records and will connect to a hinted address before any A lookup, so leaving
+those would have been a complete bypass. An answer left with no usable address
+becomes NODATA by default, with NXDOMAIN and REFUSED available; the answer
+section is cleared completely, so nobody is left following a CNAME to a name
+whose addresses were withheld.
+
+Exemptions are per policy — `rebindingExemptions`, settable through the policy
+API — because split-horizon DNS is ordinary and a control with no escape hatch
+gets switched off entirely. A default route is refused as an exemption.
+
+**On upgrade, this changes nothing until you turn it on.** A fresh install
+filters; an existing installation does not, until `dns.rebinding.enabled: true`.
+The decision is recorded in the database on first run, the same mechanism
+`local_dnssec_validation` uses, and for the same reason: an installation that
+has been answering with 10.x addresses since last year would otherwise stop the
+moment the binary changed, and its operator would be debugging their intranet
+rather than reading a changelog. `dnsdaddy doctor` reports which state is in
+force, warns when the filter is off, and fails when it is on but filtering
+nothing.
+
+The filter runs on **every** serve, cache hits included. The answer cache is
+keyed by question alone, so one entry is shared by every network; filtering on
+the way in would hand one policy's view to another network's clients.
+
 ### Per-client query rate limiting
 
 The threat model has carried "a single authorised client can saturate the

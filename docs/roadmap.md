@@ -119,16 +119,6 @@ a blanket default, and getting this wrong is worse than not claiming it.
 Realistically this is either a substantial piece of work or a decision to
 integrate a library that already does it correctly.
 
-### DNS rebinding protection
-
-Filtering private addresses out of upstream answers.
-[T8](threat-model.md#t8--dns-rebinding) currently says, honestly, that this is
-not mitigated.
-
-**Needs:** configurable ranges, per-policy exemptions (plenty of legitimate
-internal services resolve to RFC 1918 space through a public zone), and care
-not to break split-horizon deployments.
-
 ### Response-content telemetry
 
 Only the question is logged today, not the answer. That closes off

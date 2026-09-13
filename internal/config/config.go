@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
+	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 )
 
 // Config is the fully resolved runtime configuration.
@@ -140,6 +141,68 @@ type RateLimitOverride struct {
 	Burst float64 `yaml:"burst"`
 }
 
+// Rebinding is the DNS rebinding answer filter. See internal/rebind for the
+// algorithm and docs/algorithms.md for the reasoning.
+type Rebinding struct {
+	// Enabled is deliberately a pointer, because this setting has three
+	// states and only two of them are a bool.
+	//
+	// Load starts from Default() and unmarshals YAML over it, so an omitted
+	// key is indistinguishable afterwards from one written out explicitly —
+	// there is no "unset" left to detect. But the right default differs
+	// between a fresh install (on) and an upgrade (off, until the operator
+	// asks), and configuration cannot tell those apart. The database can, and
+	// records the answer once. Nil here means "nobody has said", and
+	// ResolveRebinding fills it in from that record.
+	//
+	// Exactly the mechanism local_dnssec_validation uses, and for exactly the
+	// same reason: withholding addresses an installation has been receiving
+	// for a year is a change to somebody's network, and inheriting it from a
+	// release upgrade is not a decision they made.
+	Enabled *bool `yaml:"enabled"`
+
+	// FilterRanges are the address ranges that must not reach a client.
+	// Replacing rather than extending the defaults, so an operator who edits
+	// this gets the list they wrote.
+	FilterRanges []string `yaml:"filter_ranges"`
+
+	// EmptyAction is what a client sees when every address was filtered:
+	// nodata, nxdomain or refused. See rebind.EmptyAction.
+	EmptyAction string `yaml:"empty_action"`
+}
+
+// RebindingConfigured reports that the operator chose a state, in the file or
+// the environment, rather than leaving it to the installation record.
+func (d DNS) RebindingConfigured() bool { return d.Rebinding.Enabled != nil }
+
+// FilterRebinding reports whether the filter should be built.
+//
+// False when nobody has decided yet, which cannot happen after
+// ResolveRebinding has run and is the safe reading if it somehow has not:
+// an unfiltered answer is the behaviour every release before this one had.
+func (d DNS) FilterRebinding() bool {
+	return d.Rebinding.Enabled != nil && *d.Rebinding.Enabled
+}
+
+// RebindingFilterConfig translates the configuration into the filter's own
+// form. Called after validate, so the prefixes parse.
+func (d DNS) RebindingFilterConfig() rebind.Config {
+	cfg := rebind.Config{EmptyAction: rebind.EmptyAction(d.Rebinding.EmptyAction)}
+	if cfg.EmptyAction == "" {
+		cfg.EmptyAction = rebind.EmptyNoData
+	}
+	if len(d.Rebinding.FilterRanges) == 0 {
+		cfg.Ranges = rebind.DefaultRanges()
+		return cfg
+	}
+	for _, raw := range d.Rebinding.FilterRanges {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(raw)); err == nil {
+			cfg.Ranges = append(cfg.Ranges, p.Masked())
+		}
+	}
+	return cfg
+}
+
 // DNS holds the resolver-side settings: what we listen on and where we forward.
 type DNS struct {
 	ListenUDP    string   `yaml:"listen_udp"`
@@ -173,6 +236,10 @@ type DNS struct {
 
 	// RateLimit bounds how much of the resolver any one client may use.
 	RateLimit RateLimit `yaml:"rate_limit"`
+
+	// Rebinding decides whether an answer may carry a private, loopback or
+	// link-local address out to a client.
+	Rebinding Rebinding `yaml:"rebinding"`
 
 	// LocalDNSSECValidation selects what Daddybound, DNS Daddy's own DNSSEC
 	// validation engine, does with real traffic. See
@@ -470,6 +537,12 @@ func Default() Config {
 			// Opening it up is a deliberate edit, not the fallback.
 			AllowedClientCIDRs: append([]string(nil), DefaultAllowedClientCIDRs...),
 			RefuseANY:          true,
+			Rebinding: Rebinding{
+				// Enabled is deliberately absent: see Rebinding.Enabled. The
+				// installation record decides, once, in store.seed.
+				FilterRanges: append([]string(nil), rebind.DefaultRangeStrings...),
+				EmptyAction:  string(rebind.EmptyNoData),
+			},
 			RateLimit: RateLimit{
 				Enabled:          true,
 				Rate:             ratelimit.DefaultRate,
@@ -649,6 +722,7 @@ func applyEnv(cfg *Config) error {
 	for _, step := range []func() error{
 		func() error { return envBool("DNSDADDY_ALLOW_PUBLIC_RESOLVER", &cfg.DNS.AllowPublicResolver) },
 		func() error { return envBool("DNSDADDY_REFUSE_ANY", &cfg.DNS.RefuseANY) },
+		func() error { return envBoolPtr("DNSDADDY_REBINDING", &cfg.DNS.Rebinding.Enabled) },
 		func() error { return envBool("DNSDADDY_RATE_LIMIT", &cfg.DNS.RateLimit.Enabled) },
 		func() error { return envFloat("DNSDADDY_RATE_LIMIT_RATE", &cfg.DNS.RateLimit.Rate) },
 		func() error { return envFloat("DNSDADDY_RATE_LIMIT_BURST", &cfg.DNS.RateLimit.Burst) },
@@ -768,6 +842,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validateRateLimit(); err != nil {
+		return err
+	}
+	if err := c.validateRebinding(); err != nil {
 		return err
 	}
 	if c.DNS.ListenUDP == "" && c.DNS.ListenTCP == "" && c.DNS.ListenDoT == "" {
@@ -1259,4 +1336,78 @@ func (d DNS) RateLimitConfig() ratelimit.Config {
 		})
 	}
 	return cfg
+}
+
+// envBoolPtr sets a tri-state boolean from the environment, leaving it unset
+// when the variable is absent.
+func envBoolPtr(key string, dst **bool) error {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		return fmt.Errorf("%s=%q is not a boolean: %w", key, v, err)
+	}
+	*dst = &b
+	return nil
+}
+
+// ResolveRebinding settles whether the rebinding filter runs, against the
+// installation record.
+//
+// Mirrors ResolveLocalDNSSEC. A fresh install filters; an upgrade does not
+// until somebody says so, because an installation that has been serving
+// 10.x answers to its clients since last year would otherwise stop the moment
+// the binary changed, and the operator would be debugging their intranet
+// rather than reading a changelog.
+//
+// Returns the state and whether it came from the installation record rather
+// than from configuration, so startup can say which.
+func (c *Config) ResolveRebinding(installDefault string) (enabled, fromInstall bool) {
+	if c.DNS.RebindingConfigured() {
+		return c.DNS.FilterRebinding(), false
+	}
+	on := installDefault == RebindingOn
+	c.DNS.Rebinding.Enabled = &on
+	return on, true
+}
+
+// The recorded installation defaults for the rebinding filter.
+const (
+	RebindingOn  = "on"
+	RebindingOff = "off"
+)
+
+// validateRebinding refuses a filter that does not mean what it says.
+func (c *Config) validateRebinding() error {
+	// Validated whatever the enabled state, because the state may still be
+	// decided by the installation record after this runs. A file with a typo
+	// in it should fail now rather than the first time somebody turns the
+	// feature on.
+	switch rebind.EmptyAction(c.DNS.Rebinding.EmptyAction) {
+	case "", rebind.EmptyNoData, rebind.EmptyNXDOMAIN, rebind.EmptyRefused:
+	default:
+		return fmt.Errorf("dns.rebinding.empty_action must be %q, %q or %q, got %q",
+			rebind.EmptyNoData, rebind.EmptyNXDOMAIN, rebind.EmptyRefused, c.DNS.Rebinding.EmptyAction)
+	}
+
+	// An explicitly empty list is refused rather than quietly falling back to
+	// the defaults. "Enabled, filtering nothing" protects nobody while
+	// presenting as a control, and an operator who deleted every entry meant
+	// something by it — most likely enabled: false.
+	if c.DNS.Rebinding.FilterRanges != nil && len(c.DNS.Rebinding.FilterRanges) == 0 {
+		return fmt.Errorf("dns.rebinding.filter_ranges is empty, which would filter nothing while the filter " +
+			"reported itself as on; set dns.rebinding.enabled: false instead")
+	}
+	for i, raw := range c.DNS.Rebinding.FilterRanges {
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("dns.rebinding.filter_ranges[%d] %q is not a CIDR: %w", i, raw, err)
+		}
+		if p.Addr() != p.Masked().Addr() {
+			return fmt.Errorf("dns.rebinding.filter_ranges[%d] %q has host bits set; write %s", i, raw, p.Masked())
+		}
+	}
+	return nil
 }

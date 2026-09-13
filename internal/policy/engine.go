@@ -16,6 +16,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
+	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -116,6 +117,11 @@ type compiledPolicy struct {
 	block      map[string]bool
 	blockMode  store.BlockMode
 	logQueries bool
+	// rebindExempt are the address ranges this policy accepts in an answer
+	// despite the rebinding filter. Compiled here so the answer path does no
+	// parsing and no database work, and swapped atomically with the rest of
+	// the snapshot.
+	rebindExempt rebind.Exemptions
 }
 
 // compiledNetwork pairs a network with its parsed CIDRs.
@@ -177,6 +183,13 @@ type Engine struct {
 	// AND set a mode other than off. Nil is the overwhelmingly common case and
 	// is checked with one nil comparison per query.
 	reputation atomic.Pointer[Reputation]
+
+	// rebindExemptDropped counts stored rebinding exemptions that would not
+	// parse and were therefore ignored. It should be zero — the write path
+	// validates — and a non-zero value is a bug report rather than an
+	// operational statistic, which is why it is exposed rather than only
+	// counted. dnsdaddy doctor fails on it.
+	rebindExemptDropped atomic.Uint64
 }
 
 // SetReputation installs or removes the external-intelligence consultant.
@@ -220,6 +233,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		policies: make(map[string]*compiledPolicy, len(policies)),
 		clients:  make(map[string]string, len(clients)),
 	}
+	var dropped uint64
 
 	for _, p := range policies {
 		cp := &compiledPolicy{
@@ -230,6 +244,17 @@ func (e *Engine) Reload(ctx context.Context) error {
 			block:      toSet(p.BlockDomains),
 			blockMode:  p.BlockMode,
 			logQueries: p.LogQueries,
+		}
+		// A stored exemption that will not parse is dropped rather than
+		// failing the reload: refusing to compile the whole policy set would
+		// take DNS down for every network because one row is malformed, and
+		// dropping an exemption fails towards filtering rather than away from
+		// it. The write path validates, so this should be unreachable; it is
+		// here for a row that arrived some other way.
+		if ex, err := rebind.ParseExemptions(p.RebindingExemptions); err == nil {
+			cp.rebindExempt = ex
+		} else {
+			dropped++
 		}
 		if !cp.blockMode.Valid() {
 			cp.blockMode = store.BlockNXDOMAIN
@@ -281,6 +306,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		snap.clients[c.IP] = c.Name
 	}
 
+	e.rebindExemptDropped.Store(dropped)
 	e.snap.Store(snap)
 	return nil
 }
@@ -496,3 +522,35 @@ func prefixContains(p netip.Prefix, addr netip.Addr) bool {
 	}
 	return p.Contains(addr)
 }
+
+// RebindingExemptions returns the address ranges the named policy accepts in
+// an answer despite the rebinding filter.
+//
+// Read from the same atomic snapshot every other decision comes from, so an
+// exemption added in the dashboard applies on the next query rather than the
+// next restart, and a query can never be evaluated against one policy's
+// blocklist and another's exemptions.
+//
+// An unknown policy returns nothing, which filters. That is the safe
+// direction: an answer withheld from a client whose policy vanished mid-query
+// is a lookup failure, and the alternative is handing out an internal address
+// because a policy id did not resolve.
+func (e *Engine) RebindingExemptions(policyID string) rebind.Exemptions {
+	snap := e.snap.Load()
+	if snap == nil {
+		return nil
+	}
+	if p, ok := snap.policies[policyID]; ok {
+		return p.rebindExempt
+	}
+	return nil
+}
+
+// RebindingExemptionsDropped counts stored exemptions that would not parse and
+// were ignored at the last reload.
+//
+// Should be zero. A non-zero value means some policy is filtering a range its
+// operator believes is exempt, which presents to them as an intranet that
+// stopped working for no reason — so it is surfaced rather than logged once at
+// startup and forgotten.
+func (e *Engine) RebindingExemptionsDropped() uint64 { return e.rebindExemptDropped.Load() }

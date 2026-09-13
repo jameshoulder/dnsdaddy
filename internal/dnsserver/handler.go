@@ -21,6 +21,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
+	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -65,10 +66,30 @@ type Handler struct {
 	// precisely the one that must not be allowed to cost anything first.
 	limiter *ratelimit.Limiter
 
+	// rebind decides whether an answer may carry a private, loopback or
+	// link-local address out to a client. Nil means no filtering, so the
+	// feature being off is a nil pointer rather than a filter that permits
+	// everything.
+	//
+	// This is the first thing in this handler that withholds part of an
+	// answer, and it runs on every serve — including cache hits. See the call
+	// site for why that is not an optimisation opportunity.
+	rebind *rebind.Filter
+
 	queries atomic.Uint64
 	blocked atomic.Uint64
 	errors  atomic.Uint64
 	refused atomic.Uint64
+	// rebindFiltered counts answers that lost at least one address, and
+	// rebindEmptied those that lost every address and became the configured
+	// empty action. Two counters because they are different events to an
+	// operator: the first is the control working quietly, the second is a
+	// client getting no address at all and possibly ringing them about it.
+	rebindFiltered atomic.Uint64
+	rebindEmptied  atomic.Uint64
+	// rebindClasses counts withheld addresses by class, for a metric whose
+	// label set must stay closed. See rebindClassCounts.
+	rebindClasses rebindClassCounts
 	// dnssecPanics counts panics contained at the observer seam. Should be
 	// zero; a non-zero value is a bug report rather than an operational
 	// statistic, which is why it is exposed rather than only logged.
@@ -128,6 +149,9 @@ type HandlerOptions struct {
 	RefuseANY bool
 	// RateLimiter bounds per-client query rates. Nil means unlimited.
 	RateLimiter *ratelimit.Limiter
+	// Rebinding filters private addresses out of answers. Nil means answers
+	// are returned exactly as resolved.
+	Rebinding *rebind.Filter
 	// Detector, when set, receives an observation per query. Alert-only: see
 	// Handler.observe.
 	Detector *detect.Engine
@@ -163,6 +187,7 @@ func NewHandler(
 		refuseANY:       o.RefuseANY,
 		acl:             o.ClientACL,
 		limiter:         o.RateLimiter,
+		rebind:          o.Rebinding,
 		detector:        o.Detector,
 		decisions:       o.Decisions,
 		dnssec:          o.DNSSEC,
@@ -203,6 +228,18 @@ func (h *Handler) RateLimited() uint64 { return h.limiter.Limited() }
 // RateLimiter exposes the limiter for diagnostics and metrics. Nil when the
 // feature is off.
 func (h *Handler) RateLimiter() *ratelimit.Limiter { return h.limiter }
+
+// RebindingStats returns how many answers lost an address to the rebinding
+// filter, and how many lost every address.
+func (h *Handler) RebindingStats() (filtered, emptied uint64) {
+	return h.rebindFiltered.Load(), h.rebindEmptied.Load()
+}
+
+// RebindingFilter exposes the filter for diagnostics. Nil when off.
+func (h *Handler) RebindingFilter() *rebind.Filter { return h.rebind }
+
+// RebindingClasses returns withheld addresses by class, for /metrics.
+func (h *Handler) RebindingClasses() map[rebind.Class]uint64 { return h.rebindClasses.counts() }
 
 // maxPresentationNameLen bounds the qname we are willing to process. RFC 1035
 // caps a name at 253 bytes on the wire; presentation-form escaping can expand
@@ -403,6 +440,23 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		h.observe(event, meta, dns.RcodeServerFailure, 0, false, false)
 		h.log.Debug("resolution failed", "domain", normalized, "error", err)
 		return errorResponse(req, dns.RcodeServerFailure)
+	}
+
+	// The rebinding filter, on the answer this client is about to receive.
+	//
+	// On every serve, including cache hits, and that is the design rather than
+	// a missed optimisation. The answer cache is keyed by question alone, so
+	// one entry is shared by every network; filtering once on the way into the
+	// cache would store one policy's view and then hand it to clients of
+	// another. Filtering on the way out means the cached answer stays the raw
+	// one and each client sees it through its own policy's exemptions.
+	//
+	// Mutating res.Msg in place is safe because it is already this query's
+	// private copy: resolver.Cache.Get copies the stored message and reattach
+	// copies again. TestTheCachedAnswerIsNeverMutated pins that, because if it
+	// stopped being true this line would corrupt the cache for everybody.
+	if rebound := h.filterRebinding(res.Msg, match); rebound != "" {
+		event.Reason = rebound
 	}
 
 	event.Action = store.ActionAllowed
@@ -673,4 +727,27 @@ func (h *Handler) recordDecision(event store.QueryEvent, match policy.Match, d p
 		Reason:      d.Reason,
 		Basis:       d.Basis,
 	})
+}
+
+// filterRebinding applies the rebinding filter to an answer and returns the
+// query-log reason, or "" when nothing was withheld.
+//
+// The policy's exemptions are read from the same atomic snapshot the blocking
+// decision came from, so a query is never evaluated against one policy's rules
+// and another's exemptions, and an exemption added in the dashboard applies on
+// the next query rather than the next restart.
+func (h *Handler) filterRebinding(msg *dns.Msg, match policy.Match) string {
+	if h.rebind == nil || msg == nil {
+		return ""
+	}
+	res := h.rebind.Apply(msg, h.engine.RebindingExemptions(match.PolicyID))
+	if !res.Changed {
+		return ""
+	}
+	h.rebindFiltered.Add(1)
+	if res.Emptied {
+		h.rebindEmptied.Add(1)
+	}
+	h.rebindClasses.observe(res.Removed)
+	return res.Reason(match.PolicyID)
 }

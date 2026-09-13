@@ -1799,6 +1799,14 @@ components:
         blockDomains:
           type: array
           items: { type: string }
+        rebindingExemptions:
+          type: array
+          items: { type: string }
+          description: >-
+            Address ranges, in CIDR form, that this policy accepts in an answer
+            despite the DNS rebinding filter. Split-horizon DNS is what these
+            are for: a name that legitimately resolves to 10.1.2.3 on this
+            network. Empty means the filter applies in full.
         assigned: { type: integer, description: Number of networks using this policy }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -1825,6 +1833,15 @@ components:
         blockDomains:
           type: array
           items: { type: string }
+        rebindingExemptions:
+          type: array
+          items: { type: string }
+          description: >-
+            Address ranges this policy accepts despite the DNS rebinding
+            filter, in CIDR form and without host bits. A default route
+            (0.0.0.0/0 or ::/0) is rejected: it would disable the filter for
+            this policy while every status display still reported it as on.
+            Omitted leaves the list unchanged; an empty array clears it.
 
     Feed:
       type: object

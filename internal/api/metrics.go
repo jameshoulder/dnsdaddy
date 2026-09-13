@@ -10,6 +10,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
+	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
 
@@ -57,6 +58,12 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metric(&b, "dnsdaddy_client_ratelimited_total", "DNS questions refused because the client exceeded its query rate limit", "counter",
 		fmt.Sprintf("dnsdaddy_client_ratelimited_total %d", a.DNS.RateLimited()))
 	a.writeRateLimitMetrics(&b)
+
+	// DNS rebinding. Two counters because they are different events: one
+	// answer lost an address and stayed usable, or lost every address and the
+	// client got nothing. The second is the one an operator gets a phone call
+	// about.
+	a.writeRebindingMetrics(&b)
 
 	// Client-access shape. Counts only: an alert wants to know that the number
 	// of publicly permitted ranges went from nought to one, not which address
@@ -407,4 +414,36 @@ func (a *API) writeRateLimitMetrics(b *strings.Builder) {
 		fmt.Sprintf("dnsdaddy_ratelimit_clients_capacity %d", l.Capacity()))
 	metric(b, "dnsdaddy_ratelimit_clients_evicted_total", "Clients dropped from the rate-limit table to make room", "counter",
 		fmt.Sprintf("dnsdaddy_ratelimit_clients_evicted_total %d", l.Evicted()))
+}
+
+// writeRebindingMetrics reports what the DNS rebinding filter withheld.
+//
+// The class label is the only labelled series here, and its values come from
+// rebind.Classes() — a closed set of seven — rather than from anything in the
+// answer. That distinction matters: the addresses being classified are chosen
+// by whoever publishes the zone, so a label derived from the address itself
+// would let a hostile zone mint a new Prometheus series per query.
+//
+// Every class is emitted, including the ones at zero, so a dashboard panel
+// does not change shape the first time a link-local address turns up.
+func (a *API) writeRebindingMetrics(b *strings.Builder) {
+	filtered, emptied := a.DNS.RebindingStats()
+
+	enabled := 0
+	if a.DNS.RebindingFilter() != nil {
+		enabled = 1
+	}
+	metric(b, "dnsdaddy_rebinding_enabled", "Whether the DNS rebinding answer filter is active (1) or off (0)", "gauge",
+		fmt.Sprintf("dnsdaddy_rebinding_enabled %d", enabled))
+	metric(b, "dnsdaddy_rebinding_filtered_total", "Answers that lost at least one address to the DNS rebinding filter", "counter",
+		fmt.Sprintf("dnsdaddy_rebinding_filtered_total %d", filtered))
+	metric(b, "dnsdaddy_rebinding_empty_total", "Answers that lost every address and became the configured empty action", "counter",
+		fmt.Sprintf("dnsdaddy_rebinding_empty_total %d", emptied))
+
+	counts := a.DNS.RebindingClasses()
+	lines := make([]string, 0, len(counts))
+	for _, c := range rebind.Classes() {
+		lines = append(lines, fmt.Sprintf("dnsdaddy_rebinding_addresses_total{class=%q} %d", string(c), counts[c]))
+	}
+	metric(b, "dnsdaddy_rebinding_addresses_total", "Addresses withheld from answers, by range class", "counter", lines...)
 }

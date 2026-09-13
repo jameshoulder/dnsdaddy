@@ -26,6 +26,21 @@ import (
 // change to someone's traffic that they did not ask for.
 const SettingLocalDNSSECDefault = "install.local_dnssec_default"
 
+// SettingRebindingDefault records whether the DNS rebinding answer filter
+// should run on this installation when the operator has not configured it.
+//
+// The same problem as SettingLocalDNSSECDefault and the same answer, but
+// deliberately keyed off its own presence rather than off installMarkerKey.
+// That marker was already written by every installation that upgraded before
+// this setting existed, so keying off it would mean the decision was never
+// taken for exactly the installations that need it taken.
+//
+// Fresh installs filter. An upgrade does not, until somebody says so: an
+// installation that has been answering with 10.x addresses since last year
+// would otherwise stop the moment the binary changed, and its operator would
+// be debugging their intranet rather than reading a changelog.
+const SettingRebindingDefault = "install.rebinding_default"
+
 // installMarkerKey records that first-run decisions have been taken for this
 // database. Both the ad-hoc access migration and the DNSSEC default are keyed
 // off it, so the two can never disagree about whether an installation is new.
@@ -137,6 +152,28 @@ func (s *Store) seed(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE networks SET allow_resolver = 1, updated_at = ? WHERE id = ?",
 			now, clientacl.DefaultNetworkID,
+		); err != nil {
+			return err
+		}
+	}
+
+	// Keyed off its own presence: see SettingRebindingDefault. freshInstall is
+	// the same evidence, read in the same transaction, so the two first-run
+	// decisions can never disagree about whether this database is new.
+	var rebindDecided int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM settings WHERE key = ?", SettingRebindingDefault,
+	).Scan(&rebindDecided); err != nil {
+		return err
+	}
+	if rebindDecided == 0 {
+		rebindDefault := "off"
+		if freshInstall {
+			rebindDefault = "on"
+		}
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO settings (key, value) VALUES (?, ?)",
+			SettingRebindingDefault, rebindDefault,
 		); err != nil {
 			return err
 		}

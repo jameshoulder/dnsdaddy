@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"net/http"
 	"strings"
 	"testing"
@@ -287,5 +288,68 @@ func TestRateLimitMetricsCarryNoClientLabel(t *testing.T) {
 		if strings.Contains(line, "{") {
 			t.Errorf("a rate-limit series carries labels: %q", line)
 		}
+	}
+}
+
+// TestMetricsExposeRebinding. Emitted whether or not the filter is on, so a
+// dashboard panel and an alert do not vanish the day somebody disables it —
+// which is the day the absence matters.
+func TestMetricsExposeRebinding(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	resp, raw := h.do("GET", "/metrics", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics = %d", resp.StatusCode)
+	}
+	body := string(raw)
+	for _, series := range []string{
+		"dnsdaddy_rebinding_enabled",
+		"dnsdaddy_rebinding_filtered_total",
+		"dnsdaddy_rebinding_empty_total",
+		"dnsdaddy_rebinding_addresses_total",
+	} {
+		if !strings.Contains(body, series) {
+			t.Errorf("/metrics does not export %s", series)
+		}
+	}
+}
+
+// TestRebindingMetricsUseAClosedLabelSet. The addresses being classified are
+// chosen by whoever publishes the zone, so a label derived from the address
+// would let a hostile zone mint a Prometheus series per query. Only the class
+// is labelled, and only from the fixed list.
+func TestRebindingMetricsUseAClosedLabelSet(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("GET", "/metrics", nil)
+	allowed := map[string]bool{}
+	for _, c := range rebind.Classes() {
+		allowed[string(c)] = true
+	}
+
+	seen := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "dnsdaddy_rebinding_") {
+			continue
+		}
+		open := strings.Index(line, "{")
+		if open < 0 {
+			continue
+		}
+		if !strings.HasPrefix(line, "dnsdaddy_rebinding_addresses_total{class=") {
+			t.Errorf("an unexpected labelled rebinding series: %q", line)
+			continue
+		}
+		class := line[strings.Index(line, "\"")+1:]
+		class = class[:strings.Index(class, "\"")]
+		if !allowed[class] {
+			t.Errorf("class label %q is not in rebind.Classes()", class)
+		}
+		seen++
+	}
+	if seen != len(rebind.Classes()) {
+		t.Errorf("%d class series emitted, want all %d including the zeroes", seen, len(rebind.Classes()))
 	}
 }

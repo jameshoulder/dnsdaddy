@@ -24,14 +24,15 @@ holds has made one. Both can be useful. Only one belongs here.
 |---|---|---|---|---|
 | [Client ACL](#client-acl) | source address | serve / REFUSE | **enforce** | shipped; open-resolver combination refused at startup |
 | [Per-client rate limiter](#per-client-rate-limiter) | source address, arrival time | serve / REFUSE | **enforce** | shipped; defaults set far above legitimate use |
+| [Rebinding filter](#rebinding-filter) | answer records + policy exemption set | strip addresses / empty action | **enforce** | shipped; per-policy exemptions exist and are tested |
 | [Blocklist policy](#blocklist-policy) | qname | block / allow | **enforce** | shipped; feed health |
 | [Daddybound](#daddybound) | chain of trust + answer | RFC 4033 state | **observe** (Learn) | disagreement rate against a trustworthy oracle, and a decided failure mode |
 | [Behavioural detectors](#behavioural-detectors) | query stream | finding | **observe** (alert-only) | a published false-positive measurement, [issue #18](https://github.com/jameshoulder/dnsdaddy/issues/18) |
 
 Engines named in the programme but **not yet implemented**, listed so this page
-is not read as a complete inventory: a persistent first-seen index, a DNS
-rebinding answer filter, a dictionary-based DGA complement, and descriptive
-device baselines. None of them exists in the code today.
+is not read as a complete inventory: a persistent first-seen index, a
+dictionary-based DGA complement, and descriptive device baselines. None of them
+exists in the code today.
 
 ---
 
@@ -121,6 +122,68 @@ rotating addresses; both are worth knowing and neither is visible any other way.
 appears as the proxy, and shares one allowance with everything else behind it.
 DoH and DoT clients identified by a network token, with no usable peer address,
 are not rate limited at all — there is no key to accumulate state against.
+
+## Rebinding filter
+
+`internal/rebind`. Decides whether an address may leave this resolver.
+
+**Input.** The A and AAAA records in an answer, the ipv4hint and ipv6hint
+parameters of any SVCB or HTTPS record in it, and the exemption set of the
+policy the client matched. Nothing else — not the name, not a reputation, not
+where the answer came from.
+
+**Procedure.** For each address: unwrap an IPv4-mapped IPv6 address to the IPv4
+address it embeds, then test it against the filter ranges. A match that the
+policy does not exempt is removed. If the answer had address records and now
+has none, the answer section is cleared entirely and the configured empty
+action applies.
+
+**Output.** What was removed — owner name, address, matching range, class — and
+a sentence for the query log naming the address, the range and the policy that
+did not exempt it.
+
+**The threat.** A page loaded from `https://evil.example` is a public origin.
+If `evil.example` answers with `10.0.0.1`, the browser will let that page make
+requests to a machine on the operator's LAN, because as far as the same-origin
+policy is concerned it is still talking to `evil.example`. The router's admin
+page, a database bound to loopback, a cloud metadata endpoint at
+`169.254.169.254`. Nothing about the DNS is malformed, which is why neither
+DNSSEC nor a trustworthy upstream prevents it.
+
+**What it does not inspect.** Addresses embedded in record types that are not
+address records: a TXT record containing `10.0.0.1`, or an SRV target that
+later resolves to one. The first is not something a client connects to; the
+second is a separate lookup, and that lookup is filtered when it happens.
+
+**The cache rule, which is the part most likely to go wrong.** The answer cache
+is keyed by question alone, so one entry is shared by every network on the
+resolver. Filtering on the way *into* the cache would store one policy's view
+and hand it to clients of another — an exempted network would populate the
+cache with a private address for everybody, and a non-exempt one would hide a
+legitimate answer from the network that is allowed it. So the cache holds the
+raw answer and **the filter runs on every serve, cache hits included**. That
+costs a pass over the answer section per query and is not an optimisation
+opportunity. `TestTwoNetworksNeverReceiveEachOthersView` pins it in both
+orders.
+
+Mutating the answer in place is safe only because `resolver.Cache.Get` returns
+a deep copy and `reattach` copies again, so the message is this query's
+private one. `TestTheCachedAnswerIsNeverMutated` pins that too, because if it
+stopped being true the filter would corrupt the cache for every client.
+
+**Exemptions.** Per policy, stored in the database, applied through the same
+atomic snapshot the blocking decision comes from — so an exemption added in the
+dashboard applies on the next query, and a query is never evaluated against one
+policy's rules and another's exemptions. A default route is refused at the
+write path, ignored defensively at read time, and reported as a FAIL by
+`dnsdaddy doctor`: exempting everything would disable the filter for that
+policy while every status display still said it was on.
+
+**Upgrade behaviour.** A fresh install filters. An upgrade does not until the
+operator asks, recorded once in the database the way
+`local_dnssec_validation` is. Withholding addresses an installation has been
+serving for a year is a change to that network, and not one a release should
+make on its operator's behalf.
 
 ## Blocklist policy
 

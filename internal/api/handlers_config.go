@@ -375,6 +375,11 @@ type policyBody struct {
 	LogQueries   *bool     `json:"logQueries"`
 	AllowDomains *[]string `json:"allowDomains"`
 	BlockDomains *[]string `json:"blockDomains"`
+
+	// RebindingExemptions are address ranges this policy accepts in an answer
+	// despite the DNS rebinding filter. Validated in the store, which is the
+	// one path every writer goes through; a default route is refused there.
+	RebindingExemptions *[]string `json:"rebindingExemptions"`
 }
 
 func (b policyBody) toInput() store.PolicyInput {
@@ -386,6 +391,8 @@ func (b policyBody) toInput() store.PolicyInput {
 		LogQueries:   b.LogQueries,
 		AllowDomains: b.AllowDomains,
 		BlockDomains: b.BlockDomains,
+
+		RebindingExemptions: b.RebindingExemptions,
 	}
 	if b.BlockMode != nil {
 		m := store.BlockMode(*b.BlockMode)

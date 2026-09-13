@@ -176,14 +176,35 @@ not excluded and will fire.
 *A short-TTL name that resolves externally then internally, to reach a private
 service from a browser.*
 
-**Mitigations.** Cache `min_ttl` raises very short TTLs, which incidentally
-slows the flip.
+**Mitigations.** The **rebinding answer filter** removes private, loopback,
+link-local, ULA, CGNAT and unspecified addresses from answers before they reach
+a client, along with the address hints carried on SVCB and HTTPS records — a
+browser will connect to a hinted address before it ever sends an A query, so
+leaving those would bypass the control entirely. An answer left with no usable
+address becomes NODATA, NXDOMAIN or REFUSED as configured, rather than a CNAME
+chain the client follows into nothing.
 
-**Residual risk. This is not mitigated.** DNS Daddy does **not** filter private
-addresses out of upstream answers, which is the actual control. If you need
-rebinding protection, it belongs on the browser and on the internal service's
-host header validation. This is an honest gap rather than a claimed feature,
-and it is on the roadmap.
+Exemptions are per policy, because split-horizon DNS is ordinary and a control
+with no escape hatch gets switched off. Cache `min_ttl` still raises very short
+TTLs, which incidentally slows the flip.
+
+**Residual risk, and it is not small.**
+
+- **Off on upgrade.** An existing installation does not start filtering until
+  its operator turns it on. A fresh install filters. The reasoning is in
+  [algorithms.md](algorithms.md#rebinding-filter); the consequence is that an
+  upgraded deployment has T8 exactly as before until somebody acts.
+- **Exemptions are holes by design.** A policy exempting 10.0.0.0/8 has the
+  full private-address rebinding attack available to its clients again.
+  `dnsdaddy doctor` warns about exemptions broad enough to matter.
+- **Only address records and SVCB hints are inspected.** An address inside a
+  TXT record, or an SRV target that later resolves to a private address, is not
+  filtered here — the second is filtered when that lookup happens, the first is
+  not something a client connects to.
+- **This is not a substitute for host-header validation** on the internal
+  service, or for the browser's own protections. A resolver can only decide
+  what it answers; a client using a hard-coded address, a different resolver,
+  or DoH direct to a public provider never asks us.
 
 ### T9 — Cache poisoning
 
@@ -442,8 +463,10 @@ The things most likely to matter, in order:
 4. **Rate limiting caps each client, not the total.** Many busy clients can
    still saturate the resolver, and IPv6 clients share an allowance per /64 by
    default.
-5. **Single admin credential.** No MFA, no RBAC, no token scoping.
-6. **No independent security review.** This is the one that qualifies all the
+5. **The rebinding filter is off on upgraded installations** until switched on,
+   and any policy exemption is a deliberate hole in it.
+6. **Single admin credential.** No MFA, no RBAC, no token scoping.
+7. **No independent security review.** This is the one that qualifies all the
    others.
 
 [T1071.004]: https://attack.mitre.org/techniques/T1071/004/

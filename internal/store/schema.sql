@@ -54,6 +54,28 @@ CREATE TABLE IF NOT EXISTS policy_rules (
     UNIQUE (policy_id, kind, domain)
 );
 
+-- Ranges a policy is willing to receive in an answer despite the DNS rebinding
+-- filter. Split-horizon DNS is ordinary -- office.example.com resolving to
+-- 10.1.2.3 on the office network is the configuration working -- so the filter
+-- needs a per-policy escape hatch or it could not be on by default.
+--
+-- A separate table rather than a third `kind` in policy_rules: that column
+-- holds domains and its CHECK constraint names the two kinds it allows.
+-- Widening a CHECK means rebuilding the table in SQLite, which would break the
+-- promise that downgrading to the previous binary keeps working. An unknown
+-- extra table is simply ignored by an older binary.
+CREATE TABLE IF NOT EXISTS policy_rebinding_exemptions (
+    id         INTEGER PRIMARY KEY,
+    policy_id  TEXT NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+    -- A CIDR in masked form. A default route is refused before it reaches
+    -- here: exempting 0.0.0.0/0 would disable the filter for this policy while
+    -- every status display still said it was on.
+    cidr       TEXT NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    UNIQUE (policy_id, cidr)
+);
+
 CREATE TABLE IF NOT EXISTS networks (
     id         TEXT PRIMARY KEY,
     name       TEXT    NOT NULL,

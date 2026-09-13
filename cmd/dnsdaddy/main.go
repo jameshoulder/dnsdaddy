@@ -41,6 +41,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
+	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/secrets"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
@@ -186,6 +187,25 @@ func run() error {
 		}
 	}
 
+	// The same question for the rebinding filter, answered from its own
+	// record. A fresh install filters; an upgrade does not until somebody asks,
+	// because withholding addresses an installation has been serving for a
+	// year is a change to that network and not one a release should make on
+	// its operator's behalf.
+	if !cfg.DNS.RebindingConfigured() {
+		installDefault, err := st.GetSetting(context.Background(), store.SettingRebindingDefault)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("read rebinding installation default: %w", err)
+		}
+		on, fromInstall := cfg.ResolveRebinding(installDefault)
+		if fromInstall {
+			log.Info("DNS rebinding filter state chosen by this installation",
+				"enabled", on,
+				"reason", "dns.rebinding.enabled is not set",
+				"set_explicitly_to_override", "true | false")
+		}
+	}
+
 	// --- blocklists ---------------------------------------------------------
 	lists := blocklist.NewHolder()
 	feeds, err := blocklist.NewManager(st, lists, cfg.Feeds, cfg.DataDir, log)
@@ -309,6 +329,11 @@ func run() error {
 
 	limiter := buildRateLimiter(cfg, log)
 
+	rebindFilter, err := buildRebindingFilter(cfg, log)
+	if err != nil {
+		return err
+	}
+
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
@@ -316,6 +341,7 @@ func run() error {
 		ClientACL:       acl,
 		RefuseANY:       cfg.DNS.RefuseANY,
 		RateLimiter:     limiter,
+		Rebinding:       rebindFilter,
 		Detector:        detector,
 		Decisions:       recorderOrNil(decisionRecorder),
 		DNSSEC:          observerOrNil(dnssecObserver),
@@ -915,4 +941,29 @@ func buildRateLimiter(cfg config.Config, log *slog.Logger) *ratelimit.Limiter {
 		"overrides", len(c.Overrides),
 	)
 	return l
+}
+
+// buildRebindingFilter constructs the DNS rebinding answer filter, or returns
+// nil when this installation is not filtering.
+//
+// The enabled state has already been settled by ResolveRebinding against the
+// installation record, so by here it is a plain bool. An error is returned
+// rather than falling back to a default: the failures New can report are an
+// empty range list and an unknown empty action, and both mean the operator
+// wrote something that does not do what they think. Starting anyway would
+// leave them believing addresses are being withheld that are not.
+func buildRebindingFilter(cfg config.Config, log *slog.Logger) (*rebind.Filter, error) {
+	if !cfg.DNS.FilterRebinding() {
+		log.Warn("DNS rebinding filter is off; a public name may answer with a private address")
+		return nil, nil
+	}
+	f, err := rebind.New(cfg.DNS.RebindingFilterConfig())
+	if err != nil {
+		return nil, fmt.Errorf("dns.rebinding: %w", err)
+	}
+	log.Info("DNS rebinding filter active",
+		"ranges", len(f.Ranges()),
+		"empty_action", string(f.EmptyAction()),
+	)
+	return f, nil
 }

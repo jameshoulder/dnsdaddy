@@ -20,6 +20,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
+	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
@@ -99,6 +100,7 @@ func runDoctor(args []string) error {
 	// Reported next to the ACL because the two answer halves of one question:
 	// the ACL says who may use this resolver, and this says how much of it any
 	// one of them may take.
+	checks = append(checks, doctorRebinding(ctx, st, cfg)...)
 	checks = append(checks, diag.RateLimit(diag.RateLimitInput{
 		Enabled: cfg.DNS.RateLimit.Enabled,
 		// The limiter's own view rather than the file's, so what is reported
@@ -732,4 +734,47 @@ func doctorLocalDNSSEC(ctx context.Context, cfg config.Config) diag.Check {
 
 	_ = ctx
 	return c
+}
+
+// doctorRebinding reports whether a public name can still answer with a
+// private address, and what each policy has been allowed to receive anyway.
+//
+// The enabled state is resolved against the installation record first, exactly
+// as the daemon does it, so this command reports what would actually run. A
+// doctor that read the config file alone would say "off (not configured)"
+// about a fresh install that filters, which is the kind of disagreement this
+// command exists to remove.
+func doctorRebinding(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
+	if !cfg.DNS.RebindingConfigured() && st != nil {
+		if v, err := st.GetSetting(ctx, store.SettingRebindingDefault); err == nil {
+			cfg.ResolveRebinding(v)
+		}
+	}
+
+	in := diag.RebindingInput{
+		Enabled:    cfg.DNS.FilterRebinding(),
+		Exemptions: map[string][]string{},
+	}
+	if in.Enabled {
+		// Built rather than read from configuration so that a range list the
+		// filter would reject shows up here as "filters nothing" rather than
+		// as a healthy-looking count.
+		if f, err := rebind.New(cfg.DNS.RebindingFilterConfig()); err == nil {
+			in.Ranges = f.Ranges()
+			in.EmptyAction = f.EmptyAction()
+		}
+	}
+	if st != nil {
+		if policies, err := st.ListPolicies(ctx); err == nil {
+			for _, p := range policies {
+				if len(p.RebindingExemptions) > 0 {
+					in.Exemptions[p.ID] = p.RebindingExemptions
+				}
+				if p.IsDefault {
+					in.DefaultPolicyID = p.ID
+				}
+			}
+		}
+	}
+	return diag.Rebinding(in)
 }
