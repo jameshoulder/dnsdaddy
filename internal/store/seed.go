@@ -179,6 +179,29 @@ func (s *Store) seed(ctx context.Context) error {
 		}
 	}
 
+	// And the machine size, on its own presence for the same reason. A fresh
+	// install sizes itself; an upgrade keeps the limits it has been running,
+	// because those limits are its current behaviour and a release is not
+	// entitled to change them on its operator's behalf.
+	var sizeDecided int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM settings WHERE key = ?", SettingMachineSizeDefault,
+	).Scan(&sizeDecided); err != nil {
+		return err
+	}
+	if sizeDecided == 0 {
+		sizeDefault := MachineSizeKeep
+		if freshInstall {
+			sizeDefault = MachineSizeAuto
+		}
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO settings (key, value) VALUES (?, ?)",
+			SettingMachineSizeDefault, sizeDefault,
+		); err != nil {
+			return err
+		}
+	}
+
 	if decided == 0 {
 		dnssecDefault := "off"
 		if freshInstall {

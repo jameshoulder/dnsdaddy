@@ -19,6 +19,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
+	"github.com/jameshoulder/dnsdaddy/internal/resources"
 )
 
 // Config is the fully resolved runtime configuration.
@@ -33,6 +34,22 @@ type Config struct {
 	Detection Detection `yaml:"detection"`
 	// Integrations is the external API provider subsystem. Off by default.
 	Integrations Integrations `yaml:"integrations"`
+
+	// Resources is how large a machine to size for. See resources.go.
+	Resources Resources `yaml:"resources"`
+
+	// DatabaseCacheMB is how much memory SQLite may use for its page cache.
+	//
+	// Derived from the machine size rather than configured: it is not a number
+	// an operator has any way to choose well, and every value it could
+	// usefully take is already implied by how much memory the box has. Set by
+	// ApplySize and read by store.Open. Deliberately not a YAML key.
+	DatabaseCacheMB int `yaml:"-"`
+
+	// ceilings remembers which size-controlled limits the operator set
+	// themselves, so that applying a machine size does not discard them.
+	// Captured by Load; see operatorCeilings.
+	ceilings operatorCeilings
 }
 
 // Integrations configures the "bring your own intelligence" subsystem: the
@@ -705,6 +722,15 @@ func Default() Config {
 			Enrichment:       false,
 			DefaultCacheTTL:  Duration(6 * time.Hour),
 		},
+		Resources: Resources{
+			// Look at the machine. Everything else in this struct exists for
+			// the cases where that guess is wrong.
+			Profile: string(resources.ProfileAuto),
+		},
+		// Overwritten by ApplySize before the database is opened. The value
+		// here is what a caller that never applies a size gets, and it matches
+		// the smallest one.
+		DatabaseCacheMB: resources.CapsFor(resources.ProfileTiny).SQLiteCacheMB,
 	}
 }
 
@@ -734,6 +760,11 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("environment: %w", err)
 	}
 
+	// After the file and the environment, before anything applies a machine
+	// size: this is the only moment at which a value the operator wrote can
+	// still be told apart from one that came from Default().
+	captureOperatorCeilings(&cfg)
+
 	if err := cfg.validate(); err != nil {
 		return cfg, err
 	}
@@ -746,6 +777,7 @@ func Load(path string) (Config, error) {
 // ignored" is worse than "the process refused to start."
 func applyEnv(cfg *Config) error {
 	envStr("DNSDADDY_DATA_DIR", &cfg.DataDir)
+	envStr("DNSDADDY_PROFILE", &cfg.Resources.Profile)
 	envStr("DNSDADDY_DNS_LISTEN_UDP", &cfg.DNS.ListenUDP)
 	envStr("DNSDADDY_DNS_LISTEN_TCP", &cfg.DNS.ListenTCP)
 	envStr("DNSDADDY_DNS_LISTEN_DOT", &cfg.DNS.ListenDoT)
@@ -782,6 +814,8 @@ func applyEnv(cfg *Config) error {
 		func() error { return envBoolPtr("DNSDADDY_REBINDING", &cfg.DNS.Rebinding.Enabled) },
 		func() error { return envBool("DNSDADDY_FIRST_SEEN", &cfg.DNS.FirstSeen.Enabled) },
 		func() error { return envInt("DNSDADDY_FIRST_SEEN_MAX_ROWS", &cfg.DNS.FirstSeen.MaxRows) },
+		func() error { return envInt("DNSDADDY_MEMORY_MB", &cfg.Resources.MemoryMB) },
+		func() error { return envInt("DNSDADDY_RESERVED_MB", &cfg.Resources.ReservedMB) },
 		func() error { return envBool("DNSDADDY_RATE_LIMIT", &cfg.DNS.RateLimit.Enabled) },
 		func() error { return envFloat("DNSDADDY_RATE_LIMIT_RATE", &cfg.DNS.RateLimit.Rate) },
 		func() error { return envFloat("DNSDADDY_RATE_LIMIT_BURST", &cfg.DNS.RateLimit.Burst) },
@@ -907,6 +941,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validateFirstSeen(); err != nil {
+		return err
+	}
+	if err := validateResources(c.Resources); err != nil {
 		return err
 	}
 	if c.DNS.ListenUDP == "" && c.DNS.ListenTCP == "" && c.DNS.ListenDoT == "" {

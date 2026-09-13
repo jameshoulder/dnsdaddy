@@ -171,6 +171,12 @@ services:
     # Modest caps so a runaway process cannot take the whole VPS with it.
     # mem_limit applies under plain `docker compose`; the deploy block is
     # honoured by Swarm. Both are set so either path is bounded.
+    #
+    # This limit is also what DNS Daddy reads to size itself. Without it, a
+    # container on a 32 GB host would see 32 GB, set its limits for that, and
+    # be killed the first time it rebuilt the blocklist. Raise it and DNS Daddy
+    # sizes up to match on the next restart; `dnsdaddy doctor` shows what it
+    # chose.
     mem_limit: 640m
     deploy:
       resources:

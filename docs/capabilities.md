@@ -77,6 +77,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | REST API with OpenAPI 3.1 | Each build serves its own spec at `/openapi.yaml`. |
 | Session and bearer-token authentication | Bcrypt password, rate-limited login, same-origin checks on cookie-authenticated writes. |
 | Single static binary | `CGO_ENABLED=0`, pure-Go SQLite, cross-compiles from a laptop. |
+| Sizes itself for the machine | On install, reads how much memory and how many processors the machine has and sets its limits to suit — one of three sizes, for a 1 GB, 2 GB or 4 GB+ machine. An operator can choose a different size, and a size they choose always wins. Inside a container it reads the container's memory limit; where no limit is set it reads the machine's and leaves more aside, which is a best-effort guess rather than a measurement. Changing size changes how much history and state is held, **never** what the resolver does: blocking, client access, the rate limit and the rebinding filter are identical at every size, and a bigger machine never switches a feature on. See [deploy.md](deploy.md#3a-machine-size). |
 
 ### Diagnostics
 

@@ -31,6 +31,11 @@ var ErrNotFound = errors.New("not found")
 type Store struct {
 	db *sql.DB
 
+	// path is the database file, kept so the write-ahead log beside it can be
+	// measured. It is the one file in the data directory that grows without
+	// anybody asking, which on a 25 GB disk is worth being able to see.
+	path string
+
 	// localFeedDir is the only directory a file:// feed may read from. Empty
 	// (the default) rejects file:// feeds outright. Set once at startup from
 	// the config, before any request is served.
@@ -62,10 +67,50 @@ func (s *Store) SetLocalFeedDir(dir string) { s.localFeedDir = dir }
 // LocalFeedDir returns the directory file:// feeds are confined to.
 func (s *Store) LocalFeedDir() string { return s.localFeedDir }
 
+// DefaultCacheMB is how much memory SQLite may use for its page cache when
+// nobody has said.
+//
+// Until this existed the driver's own default applied — around 2 MB — which
+// was never chosen, never stated anywhere an operator could find it, and far
+// too little for a machine with memory to spare. Sixteen is the figure for the
+// smallest supported machine, so a caller that does not pass one gets
+// something that is safe everywhere rather than something that is good on the
+// box the author happened to have.
+const DefaultCacheMB = 16
+
+// walSizeLimitBytes is how large the write-ahead log may be left after a
+// checkpoint.
+//
+// SQLite does not shrink the WAL on its own: after a busy period it stays at
+// its high-water mark for the life of the database file. On the reference
+// deployment that is a 25 GB disk shared with the query log and the feed
+// cache, so a WAL that grew during one bad afternoon would sit there for
+// months. This makes SQLite truncate it back, which costs one file operation
+// per checkpoint and bounds a file that is otherwise unbounded.
+const walSizeLimitBytes = 64 << 20
+
 // Open opens (creating if necessary) the database at path, applies the schema,
-// and seeds first-run defaults.
-func Open(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
+// and seeds first-run defaults. It uses DefaultCacheMB; see OpenSized.
+func Open(path string) (*Store, error) { return OpenSized(path, DefaultCacheMB) }
+
+// OpenSized is Open with an explicit page-cache size, in megabytes.
+//
+// The size comes from the machine size chosen at startup. It is set through
+// the connection string rather than by executing a statement afterwards
+// because cache_size is per-connection: the pool opens several, and a pragma
+// run once would apply to whichever one happened to serve it.
+func OpenSized(path string, cacheMB int) (*Store, error) {
+	if cacheMB <= 0 {
+		cacheMB = DefaultCacheMB
+	}
+	// Negative cache_size is kibibytes rather than pages, which is the only
+	// form that means the same thing regardless of the page size the database
+	// was created with.
+	cacheKiB := -cacheMB * 1024
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)"+
+		"&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"+
+		"&_pragma=cache_size(%d)&_pragma=journal_size_limit(%d)",
+		path, cacheKiB, walSizeLimitBytes)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -92,7 +137,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.seed(context.Background()); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("seed defaults: %w", err)
@@ -150,7 +195,7 @@ func OpenReadOnly(path string) (*Store, error) {
 	// this binary knows about, a query naming it fails and the caller reports
 	// that — which is the honest outcome, and better than silently upgrading
 	// a deployment somebody was only trying to inspect.
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
 }
 
 // addedColumns are columns introduced after the initial release.

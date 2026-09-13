@@ -12,7 +12,9 @@ device run for a while before you touch anyone else's DNS.
 
 Any current Debian or Ubuntu LTS is fine. You need:
 
-- 1 GB RAM (512 MB works with a smaller blocklist; 1 GB is comfortable)
+- 1 GB RAM (512 MB works with a smaller blocklist; 1 GB is comfortable). DNS
+  Daddy reads how much it has and sets its own limits to suit — see
+  [Machine size](#3a-machine-size)
 - 25 GB disk (query logs are the only thing that grows)
 - A static IP
 
@@ -77,6 +79,124 @@ curl -s http://127.0.0.1:8080/api/v1/health
 resolver is answering but has no blocklist yet. That is exactly what the next
 step fixes, and why the health endpoint says so rather than reporting a
 cheerful green.
+
+## 3a. Machine size
+
+**DNS Daddy sized itself for this machine. You can pick a different size if
+that is wrong.** That is the whole of it, and on most installations there is
+nothing to do here.
+
+On install it reads how much memory and how many processors the machine has and
+picks limits to suit. `dnsdaddy doctor` says what it chose, in a section called
+RESOURCE:
+
+```
+RESOURCE
+  [PASS] 1 GB machine. DNS Daddy sized itself for this machine. You can pick a
+         different size if that is wrong.
+         1,024 MB memory (machine memory), 256 MB left for everything else, 1 processor
+  [PASS] What this size holds before it starts discarding the oldest.
+         answers cached: 10,000
+         query history kept: 3 days
+         clients the rate limiter remembers: 8,192
+         database memory: 16 MB
+         domains remembered as seen before: 20,000
+         decision history: off
+         local DNSSEC Learn: off
+```
+
+### The four choices
+
+| Choice | When |
+|---|---|
+| **Automatic (recommended)** | The default. Reads the machine and picks. |
+| **1 GB machine** | A Linode Nanode or equivalent. |
+| **2 GB machine** | What the releases before this one shipped for. |
+| **4 GB+ machine** | Anything larger. |
+
+### What changes, and what never does
+
+Size changes **how much** DNS Daddy remembers: answers cached, days of query
+history, how many clients the rate limiter tracks, how many domains it
+remembers having seen, how much memory the database may use, and how many
+things each behavioural detector watches at once.
+
+Size **never** changes what DNS Daddy does. Every one of these works
+identically on a 1 GB box and a 32 GB box:
+
+- blocking, and every feed and category you have enabled
+- who may use the resolver
+- the per-client rate limit
+- the DNS rebinding filter
+
+And moving to a bigger machine never switches anything on. Decision history and
+local DNSSEC Learn cost real memory, which is why they are off on a small box —
+but they are also decisions about what gets written down about the people using
+your network, and a VPS upgrade is not consent to either. They stay exactly
+where you left them.
+
+### What a 1 GB machine gives up
+
+Nothing is removed. Every feature is in the binary at every size, and anything
+listed here can be switched on:
+
+| | On a 1 GB machine |
+|---|---|
+| Blocking, client access, rate limit, rebinding filter | **On**, same as every other size |
+| Core categories (malware, phishing, C2, cryptomining) | **On** |
+| Behavioural detection | **On**, watching about a quarter as many clients and domains at once |
+| Query history | 3 days, rather than 7 |
+| Decision history ("why was this blocked?") | Off — saves memory. Turn it on if you need it |
+| Local DNSSEC Learn | Off — saves memory and processor. Turn it on if you need it |
+| Ads, adult, gambling, newly-registered categories | Off — the same as every other size; these have never been on by default |
+
+### If the guess is wrong
+
+Two cases worth knowing about.
+
+**You upgraded from an older release.** Nothing was changed. Your resolver
+keeps exactly the limits it has been running, because those limits are its
+current behaviour and a new release is not entitled to change them on your
+behalf. `doctor` says so:
+
+```
+[WARN] No size saved yet. This looks like a 1 GB machine. Nothing was changed.
+       → Set the size to Automatic and restart if you want the 1 GB machine
+         limits applied.
+```
+
+**You chose a size this machine cannot run.** It obeys you and warns, because
+you may be adding memory this afternoon and refusing to start over a guess
+about hardware would be worse than using more memory than is available:
+
+```
+[WARN] This looks like a 1 GB machine, but the size is set to 4 GB+ machine.
+       The box may run out of memory.
+       → Set the size back to Automatic, or move to a larger VPS.
+```
+
+### Under Docker
+
+`docker-compose.yml` sets a 640 MB memory limit on the container, and that
+limit is what DNS Daddy reads. Without it, a container on a 32 GB host would
+see 32 GB, size itself accordingly, and be killed the first time it rebuilt the
+blocklist. If you raise the limit, DNS Daddy sizes up to match on the next
+restart.
+
+### For operators who want to set it in the file
+
+```yaml
+resources:
+  profile: auto    # auto | tiny | small | full
+```
+
+`auto` is the default and is what the four labels above map to: `tiny` is the
+1 GB machine, `small` is 2 GB, `full` is 4 GB and above. `DNSDADDY_PROFILE`
+does the same thing from the environment.
+
+Any limit you set yourself is left alone. If your configuration file says
+`first_seen.max_rows: 5000`, it stays 5,000 at every size, and `doctor` prints
+it as "as you set it" so the difference is explained rather than puzzling.
 
 ## 4. Never run an open resolver
 

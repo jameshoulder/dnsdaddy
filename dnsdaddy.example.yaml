@@ -4,7 +4,8 @@
 # so an empty file works too. Any setting can also be given as an environment
 # variable (DNSDADDY_*), which takes precedence — handy in Docker.
 #
-# Defaults are tuned for a 1 GB / 1 vCPU VPS.
+# Most limits below are set automatically from the size of the machine — see
+# the "resources" block at the bottom. You should not need to touch them.
 
 # Where the database, session key, and cached feed files live.
 data_dir: /var/lib/dnsdaddy
@@ -627,3 +628,51 @@ integrations:
   # How long a cached verdict stays fresh when a provider gives no TTL of its
   # own. Reputation moves in hours, not seconds.
   default_cache_ttl: 6h
+
+# ---------------------------------------------------------------------------
+# How large a machine to run on
+# ---------------------------------------------------------------------------
+#
+# DNS Daddy sized itself for this machine. You can pick a different size if
+# that is wrong.
+#
+# On install it reads how much memory and how many processors the machine has
+# and sets its limits to suit. `dnsdaddy doctor` shows what it chose and what
+# that means, in a section called RESOURCE. Most people never open this block.
+resources:
+  # auto  - read the machine and pick. The default, and the right answer
+  #         unless you know better.
+  # tiny  - a 1 GB machine, such as a Linode Nanode.
+  # small - a 2 GB machine. This is what releases before sizing shipped with.
+  # full  - 4 GB and above.
+  #
+  # The size changes HOW MUCH DNS Daddy remembers: answers cached, days of
+  # query history, clients tracked by the rate limit, domains remembered as
+  # seen before, how much memory the database may use, and how many things
+  # each behavioural detector watches at once.
+  #
+  # It never changes WHAT DNS Daddy does. Blocking, who may use the resolver,
+  # the rate limit and the rebinding filter all work identically at every
+  # size — and moving to a bigger machine never switches anything on. Decision
+  # history and local DNSSEC Learn stay exactly where you left them.
+  #
+  # Anything you set yourself is left alone. If you write first_seen.max_rows
+  # above, it keeps your number at every size, and doctor prints it as "as you
+  # set it" so the difference is explained.
+  profile: auto
+
+  # How much memory to assume this machine has, in megabytes. 0 reads it.
+  #
+  # Worth setting in one case: a virtualisation layer that reports the host's
+  # memory rather than what this machine has been given. If doctor's RESOURCE
+  # section shows a figure you do not recognise, that is what happened.
+  memory_mb: 0
+
+  # How much memory to leave for the operating system, your shell, and
+  # anything else on the box, in megabytes. 0 uses the default, which is
+  # 256 MB — or 384 MB inside a container that has no memory limit of its own,
+  # since there the figure being read is the whole machine's.
+  #
+  # Raise it if you run other things on this box and want DNS Daddy to take
+  # less of it.
+  reserved_mb: 0

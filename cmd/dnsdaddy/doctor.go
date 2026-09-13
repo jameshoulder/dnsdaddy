@@ -22,6 +22,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
+	"github.com/jameshoulder/dnsdaddy/internal/resources"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
@@ -95,6 +96,10 @@ func runDoctor(args []string) error {
 	webChecks, aclStale := doctorWeb(ctx, st, cfg, *timeout)
 
 	checks = append(checks, dbCheck)
+	// Near the top: for most operators this is the only place they will read
+	// about how large a machine DNS Daddy thinks it is on, and a section
+	// buried after the upstream probes is a section nobody finds.
+	checks = append(checks, doctorMachineSize(ctx, st, cfg)...)
 	checks = append(checks, doctorListeners(ctx, cfg, acl, *timeout)...)
 	checks = append(checks, doctorClientAccess(ctx, st, cfg, acl, aclStale)...)
 	// Reported next to the ACL because the two answer halves of one question:
@@ -866,4 +871,45 @@ func doctorAccountability(ctx context.Context, st *store.Store, cfg config.Confi
 		in.LastAuditAt = at
 	}
 	return diag.Accountability(in)
+}
+
+// doctorMachineSize reports how large a machine this installation is sized
+// for, what that means in practice, and what to change if it is wrong.
+//
+// It repeats the decision the daemon makes at startup rather than reading it
+// out of a running process, because doctor is frequently run when there is no
+// running process — that is usually why somebody is running it. The inputs are
+// the same two: the configuration file, and the record written on first run.
+func doctorMachineSize(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
+	in := diag.MachineSizeInput{}
+
+	installDefault := ""
+	if st == nil {
+		// No database to read, which here means DNS Daddy has not started on
+		// this machine yet. Distinguished from a database with no record in
+		// it, because the advice for the two is opposite.
+		in.NoDatabase = true
+	} else {
+		if v, err := st.GetSetting(ctx, store.SettingMachineSizeDefault); err == nil {
+			installDefault = v
+		}
+		in.WALBytes = st.WALBytes()
+	}
+
+	machine := resources.Detect(cfg.Resources.DetectOptions())
+	in.Sizing = resources.Decide(cfg.Resources.SizeProfile(), installDefault, machine)
+
+	// Work on a copy: doctor changes nothing, including its own idea of the
+	// configuration. What it prints is what the daemon would run, derived the
+	// same way.
+	sized := cfg
+	if in.Sizing.Applied {
+		sized.ApplySize(in.Sizing.Running)
+	}
+	in.Limits = sized.LimitsInForce()
+	in.KeptByOperator = sized.KeptByOperator()
+	in.DecisionRecords = sized.Log.DecisionRecords
+	in.LocalDNSSECLearn = sized.DNS.LocalDNSSECValidation == config.LocalDNSSECObserve
+
+	return diag.MachineSize(in)
 }

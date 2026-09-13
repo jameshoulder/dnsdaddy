@@ -26,6 +26,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
+	"github.com/jameshoulder/dnsdaddy/internal/resources"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/web"
 )
@@ -65,6 +66,11 @@ type Deps struct {
 
 	// Audit records management changes. Nil disables it.
 	Audit *audit.Logger
+
+	// Sizing is how large a machine this installation sized itself for, and
+	// why. The zero value is an installation that has not sized itself, which
+	// is what an upgrade looks like.
+	Sizing resources.Decision
 
 	// Decisions is the decision recorder, or nil when decision records are
 	// switched off. Read-only here: the API never records a decision, it only

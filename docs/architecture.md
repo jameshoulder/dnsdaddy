@@ -253,6 +253,72 @@ on a box with no outbound internet. The cost is writing the SVG charts by hand,
 which for two series over 24 points is a fair trade against 200 kB of charting
 library.
 
+## Sizing, measured
+
+`internal/resources` reads the machine once at startup and picks one of three
+sets of ceilings. The numbers below are produced by `TestTheBudgetTableForEverySize`
+and `TestTheMeasuredBudgetFitsTheSmallestMachine` in that package, not by
+estimation — run `go test ./internal/resources/ -run Budget -v` to reproduce them.
+
+**Live heap at each size, everything full:**
+
+| | 1 GB | 2 GB | 4 GB+ |
+|---|---|---|---|
+| Answer cache | 10,000 entries, 4.1 MB | 50,000, 20.6 MB | 150,000, 63.6 MB |
+| Rate-limiter table | 8,192 clients, 0.7 MB | 65,536, 6.0 MB | 131,072, 12.0 MB |
+| Detector state, saturated | 5.8 MB | 23.3 MB | 46.7 MB |
+| **Go heap subtotal** | **10.6 MB** | **50.0 MB** | **122.3 MB** |
+| SQLite page cache | 16 MB | 32 MB | 128 MB |
+| First-seen rows (disk) | 20,000 | 100,000 | 250,000 |
+| Query history (disk) | 3 days | 7 days | 14 days |
+
+The blocklist is not in that table because its cost is set by the operator's
+feeds rather than by the machine, and it is identical at every size:
+
+| Domains | Heap | Per domain |
+|---|---|---|
+| 100,000 | 12.0 MB | 126 bytes |
+| 250,000 | 43.7 MB | 183 bytes |
+| 500,000 | 87.3 MB | 183 bytes |
+
+**Does the smallest size fit a Nanode?** Adding it up, with the core feeds at a
+generous 250,000 domains:
+
+```
+blocklist index, 250000 domains     43.6 MB
+answer cache, 10000 entries          4.2 MB
+rate limiter, 8192 clients           0.6 MB
+detector tables                      5.8 MB
+database page cache                 16.0 MB
+runtime and everything else         25.0 MB
+-----------------------------------------
+live                                95.3 MB
+peak, allowing for collection      190.5 MB
+peak during a feed rebuild         234.2 MB   (of ~714 MB available)
+```
+
+Two things that budget gets right and an estimate would not. Peak is twice
+live, because Go collects when the heap has grown by `GOGC` percent over the
+live set — sizing to the live figure alone is the classic way to write a budget
+that holds until the first collection. And the real peak is during a **feed
+rebuild**, when a new index is built while the old one is still being served,
+so the largest item on the list is briefly doubled. That is the moment a box
+gets killed, and it is what the test checks.
+
+The ~480 MB of headroom is not slack to be spent. It is what absorbs a busier
+network than the test models, an operator enabling the ads category (+150,000
+domains, +26 MB), and Daddybound Learn if they turn it on.
+
+**Why the ceilings are where they are.** The answer cache is the largest thing
+after the blocklist, at roughly 430 bytes per entry for a single-address
+answer. The rate-limiter table is about 96 bytes per tracked client, which is
+cheap enough that the ceiling exists to bound an attack rather than to save
+memory. Detector state is the surprise: six detectors at their documented
+bounds come to 23 MB, more than the rate limiter and the cache together on a
+small box, which is why the smallest size scales those tables to a quarter.
+Scaling them changes capacity, never sensitivity — windows, thresholds and
+volume gates are untouched, so a finding means the same thing at every size.
+
 ## Performance notes
 
 Measured on the reference target (1 vCPU, 1 GB):

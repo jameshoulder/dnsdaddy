@@ -45,6 +45,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
+	"github.com/jameshoulder/dnsdaddy/internal/resources"
 	"github.com/jameshoulder/dnsdaddy/internal/secrets"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
@@ -147,8 +148,8 @@ func run() error {
 		"config", *configPath,
 		"data_dir", cfg.DataDir)
 
-	// --- storage ------------------------------------------------------------
-	st, err := store.Open(cfg.DBPath())
+	// --- storage and machine size -------------------------------------------
+	st, sizing, err := openSizedStore(&cfg, log)
 	if err != nil {
 		return err
 	}
@@ -260,7 +261,7 @@ func run() error {
 	// Built before the listeners open so that no query is served while the
 	// engine is half-constructed, and so a bad detection configuration is a
 	// startup error rather than a surprise at the first query.
-	detector, findingsFile, err := buildDetector(cfg, st, log)
+	detector, findingsFile, err := buildDetector(cfg, sizing, st, log)
 	if err != nil {
 		return err
 	}
@@ -449,6 +450,7 @@ func run() error {
 		Audit:          auditLog,
 		DNSSEC:         dnssecStatsOrNil(dnssecObserver),
 		DNSSECWriter:   dnssecWriterOrNil(dnssecObserver),
+		Sizing:         sizing,
 	})
 
 	httpSrv := &http.Server{
@@ -597,7 +599,7 @@ func reportClientAccess(ctx context.Context, st *store.Store, acl *clientacl.Set
 // It returns a nil engine when detection is switched off, which every caller
 // handles: detect.Engine's Observe and Wait are nil-safe precisely so that
 // turning the feature off needs no branching on the query path.
-func buildDetector(cfg config.Config, st *store.Store, log *slog.Logger) (*detect.Engine, *detect.FileSink, error) {
+func buildDetector(cfg config.Config, sizing resources.Decision, st *store.Store, log *slog.Logger) (*detect.Engine, *detect.FileSink, error) {
 	if !cfg.Detection.Enabled {
 		log.Info("behavioural detection is disabled")
 		return nil, nil, nil
@@ -653,20 +655,43 @@ func buildDetector(cfg config.Config, st *store.Store, log *slog.Logger) (*detec
 		return scaled
 	}
 
+	// How many distinct clients and domains each detector may watch at once.
+	//
+	// This is capacity, not sensitivity: windows, thresholds and volume gates
+	// are untouched, so a finding means exactly the same thing at every
+	// machine size. What changes is how many things can be watched before the
+	// least recently seen are dropped — which on a 1 GB box is the difference
+	// between roughly 6 MB of state and roughly 23 MB.
+	//
+	// Taken from the size rather than from configuration on purpose. It is not
+	// a number an operator has any way to choose well, and every value it
+	// could usefully take is already implied by how much memory the box has.
+	//
+	// Decision.Caps rather than CapsFor, so that an installation which was
+	// deliberately left unsized keeps the documented bounds instead of being
+	// given the smallest ones.
+	caps := sizing.Caps()
+
 	tunnelCfg := detect.DefaultTunnelConfig()
 	tunnelCfg.Window = scaleWindow(tunnelCfg.Window)
+	tunnelCfg.MaxTracked = caps.DetectorTracked(tunnelCfg.MaxTracked)
 	beaconCfg := detect.DefaultBeaconConfig()
 	beaconCfg.Window = scaleWindow(beaconCfg.Window)
+	beaconCfg.MaxTracked = caps.DetectorTracked(beaconCfg.MaxTracked)
 	beaconCfg.MinInterval = scaleWindow(beaconCfg.MinInterval)
 	beaconCfg.MaxInterval = scaleWindow(beaconCfg.MaxInterval)
 	nxCfg := detect.DefaultNXDomainConfig()
 	nxCfg.Window = scaleWindow(nxCfg.Window)
+	nxCfg.MaxTracked = caps.DetectorTracked(nxCfg.MaxTracked)
 	dgaCfg := detect.DefaultDGAConfig()
 	dgaCfg.Window = scaleWindow(dgaCfg.Window)
+	dgaCfg.MaxTracked = caps.DetectorTracked(dgaCfg.MaxTracked)
 	txtCfg := detect.DefaultTXTConfig()
 	txtCfg.Window = scaleWindow(txtCfg.Window)
+	txtCfg.MaxTracked = caps.DetectorTracked(txtCfg.MaxTracked)
 	resCfg := detect.DefaultResolutionFailureConfig()
 	resCfg.Window = scaleWindow(resCfg.Window)
+	resCfg.MaxTracked = caps.DetectorTracked(resCfg.MaxTracked)
 
 	if scale != 1 {
 		log.Warn("detection windows are compressed; this is a demonstration setting, "+
@@ -1017,4 +1042,87 @@ func buildFirstSeenIndex(st *store.Store, cfg config.Config, log *slog.Logger) *
 		"max_new_per_minute", c.MaxNewPerMinute,
 	)
 	return idx
+}
+
+// openSizedStore opens the database and settles how large a machine this
+// installation should size itself for.
+//
+// The two are entangled, which is why they are one function. The size decides
+// how much memory the database may use for its page cache, and that can only
+// be set as the database is opened — but whether a size applies at all is
+// recorded *in* the database, written by seed on first run. So the database is
+// opened once to read the answer and, when the answer calls for a different
+// page cache than the default, opened again with it. That costs a few
+// milliseconds at startup, once, and it is the honest way round: the
+// alternative is sizing the page cache from the machine on an installation
+// that was deliberately left alone, which is exactly the surprise the upgrade
+// rule exists to prevent.
+func openSizedStore(cfg *config.Config, log *slog.Logger) (*store.Store, resources.Decision, error) {
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		return nil, resources.Decision{}, err
+	}
+
+	installDefault, err := st.GetSetting(context.Background(), store.SettingMachineSizeDefault)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		st.Close()
+		return nil, resources.Decision{}, fmt.Errorf("read machine size record: %w", err)
+	}
+
+	machine := resources.Detect(cfg.Resources.DetectOptions())
+	sizing := resources.Decide(cfg.Resources.SizeProfile(), installDefault, machine)
+
+	if !sizing.Applied {
+		// An upgrade with no size recorded. Nothing is changed; doctor says so
+		// and names the one edit that adopts it.
+		log.Info("machine size: no size saved yet, limits left exactly as they are",
+			"looks_like", sizing.Detected.Label(),
+			"machine", machine.Describe(),
+			"to_adopt", "set resources.profile: auto and restart")
+		return st, sizing, nil
+	}
+
+	changes := cfg.ApplySize(sizing.Running)
+	log.Info("machine size applied",
+		"size", sizing.Running.Label(),
+		"chosen_by", string(sizing.Reason),
+		"machine", machine.Describe(),
+		"changes", len(changes))
+	for _, c := range changes {
+		log.Info("machine size: " + c)
+	}
+	for _, k := range cfg.KeptByOperator() {
+		log.Info("machine size: " + k)
+	}
+	if sizing.Mismatch() {
+		log.Warn("this looks like a "+sizing.Detected.Label()+" but the size is set to "+
+			sizing.Running.Label()+"; the box may run out of memory",
+			"remedy", "set the size back to Automatic, or move to a larger VPS")
+	}
+
+	// Record what was decided, once. Never overwritten: the value of a
+	// first-run record is that it describes the first run.
+	if sizing.Reason == resources.ReasonAutomatic {
+		if err := st.RecordMachineSize(context.Background(), store.MachineSizeRecord{
+			Size:      string(sizing.Running),
+			MemoryMB:  machine.MemoryMB,
+			CPUs:      machine.CPUs,
+			Automatic: true,
+		}); err != nil {
+			log.Warn("could not record the machine size", "error", err)
+		}
+	}
+
+	// Reopen only if the page cache needs to change, so the common case of a
+	// size whose cache matches the default costs nothing.
+	if cfg.DatabaseCacheMB == store.DefaultCacheMB {
+		return st, sizing, nil
+	}
+	st.Close()
+	sized, err := store.OpenSized(cfg.DBPath(), cfg.DatabaseCacheMB)
+	if err != nil {
+		return nil, sizing, fmt.Errorf("reopen database with the %s page cache: %w",
+			sizing.Running.Label(), err)
+	}
+	return sized, sizing, nil
 }

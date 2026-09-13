@@ -22,6 +22,51 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### DNS Daddy now sizes itself for the machine
+
+On install, DNS Daddy picks limits from the machine size. You can choose
+1 GB / 2 GB / 4 GB+ if that guess is wrong.
+
+It reads how much memory and how many processors are available — inside a
+container, the container's own limit — and sets one of three sets of limits:
+how many answers are cached, how many days of query history are kept, how many
+clients the rate limiter tracks, how many domains are remembered as seen
+before, how much memory the database may use, and how many things each
+behavioural detector watches at once. `dnsdaddy doctor` has a RESOURCE section
+saying what it chose and what that means.
+
+**Nothing is removed at any size, and size never changes what the resolver
+does.** Blocking, who may use the resolver, the rate limit and the rebinding
+filter are identical on a 1 GB box and a 32 GB one. A 1 GB machine keeps 3 days
+of query history instead of 7 and watches about a quarter as many clients per
+detector; decision history and local DNSSEC Learn are off there, and both can
+be switched on.
+
+Moving to a bigger machine raises the limits and **switches nothing on**.
+Decision history and local DNSSEC Learn cost memory, but they are also
+decisions about what gets written down concerning the people using a network,
+and a VPS upgrade is not consent to either.
+
+**If you are upgrading, nothing changes.** An existing installation keeps
+exactly the limits it has been running — those limits are its current
+behaviour, and a release is not entitled to change them on your behalf. Doctor
+says "No size saved yet" and names the one edit that adopts the sizing
+(`resources.profile: auto`, then restart). The one exception, stated plainly:
+the database's page cache is now set to 16 MB on every installation. It
+previously had no configured value at all and ran on the driver's own default
+of about 2 MB, so there was no setting of yours to preserve.
+
+The figures behind the three sizes are measured rather than estimated —
+`go test ./internal/resources/ -run Budget -v` reproduces them, and
+[docs/architecture.md](docs/architecture.md#sizing-measured) publishes the
+table, including the peak during a feed rebuild, which is the moment a small
+box actually runs out of memory.
+
+Also: the database's write-ahead log is now truncated after each checkpoint
+rather than being left at its high-water mark for the life of the file, and
+doctor warns if it is unusually large. On a 25 GB disk shared with the query
+log, a file that only ever grew was worth bounding.
+
 ### Why was this blocked? — decision records, an audit log, and a "why" API
 
 `GET /api/v1/queries/{id}/why` explains one query from the record written when

@@ -1562,6 +1562,74 @@ components:
         checks:
           type: array
           items: { $ref: "#/components/schemas/DiagnosticCheck" }
+        machineSize: { $ref: "#/components/schemas/MachineSize" }
+
+    MachineSize:
+      type: object
+      description: >
+        How large a machine DNS Daddy has sized itself for. On install it picks
+        limits from the machine's memory and processors; an operator can choose
+        a different size if that guess is wrong. Changing size changes how much
+        history and state the resolver holds. It never turns a feature on or
+        off: filtering, client access, the rate limit and the rebinding filter
+        work identically at every size.
+      properties:
+        size:
+          type: string
+          enum: [tiny, small, full]
+          description: >
+            The size in force, for a client that needs to act on the value.
+            Empty on an installation that upgraded from a release before sizing
+            existed and has not adopted it. Use `label` for anything a person
+            reads.
+          example: tiny
+        label:
+          type: string
+          description: The size in words. This is what to show a person.
+          example: 1 GB machine
+        message:
+          type: string
+          description: The sentence to show beside the size.
+          example: DNS Daddy sized itself for this machine. You can pick a different size if that is wrong.
+        automatic:
+          type: boolean
+          description: True when the size came from the machine rather than from a setting.
+        looksLike:
+          type: string
+          description: >
+            What this machine would have been sized as, in words. Differs from
+            `label` when somebody chose a size the machine may not be able to
+            run, which is worth showing beside it.
+          example: 1 GB machine
+        memoryMb:
+          type: integer
+          description: Memory read from the machine, before the amount set aside for everything else.
+          example: 1024
+        cpus: { type: integer, example: 1 }
+        limits:
+          type: array
+          description: What this size holds before it starts discarding the oldest, one readable line each.
+          items: { type: string }
+          example:
+            - "answers cached: 10,000"
+            - "query history kept: 3 days"
+        options:
+          type: array
+          description: >
+            The four choices a settings control should offer, already labelled,
+            in the order to show them.
+          items: { $ref: "#/components/schemas/MachineSizeOption" }
+
+    MachineSizeOption:
+      type: object
+      properties:
+        value:
+          type: string
+          enum: [auto, tiny, small, full]
+          example: auto
+        label:
+          type: string
+          example: Automatic (recommended)
 
     DiagnosticCheck:
       type: object

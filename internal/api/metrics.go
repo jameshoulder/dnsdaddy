@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
+	"github.com/jameshoulder/dnsdaddy/internal/resources"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
 
@@ -74,6 +76,7 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Decision records and the audit log: whether this installation can still
 	// say why it did what it did.
 	a.writeAccountabilityMetrics(&b)
+	a.writeMachineSizeMetrics(&b)
 
 	// Client-access shape. Counts only: an alert wants to know that the number
 	// of publicly permitted ranges went from nought to one, not which address
@@ -538,4 +541,58 @@ func (a *API) writeAccountabilityMetrics(b *strings.Builder) {
 	metric(b, "dnsdaddy_why_missing_total",
 		"Requests for an explanation that no stored record could answer", "counter",
 		fmt.Sprintf("dnsdaddy_why_missing_total %d", a.whyMissing.Load()))
+}
+
+// writeMachineSizeMetrics reports what this process decided about the machine
+// it is on.
+//
+// Worth exporting because it is the one thing that changes every other limit
+// at once: an alert firing on a resolver that is suddenly dropping records is
+// much easier to read when the same scrape says the box came up believing it
+// had 970 MB rather than 4 GB. A container that lost its memory limit in a
+// deployment change looks exactly like this and nothing else would say so.
+//
+// The size is a label on a value of 1, which is the standard shape for a piece
+// of state that is one of a few things. Three series, from a closed list.
+func (a *API) writeMachineSizeMetrics(b *strings.Builder) {
+	d := a.Sizing
+
+	metric(b, "dnsdaddy_machine_memory_bytes",
+		"Memory this process believes it has, before the amount set aside for the rest of the machine", "gauge",
+		fmt.Sprintf("dnsdaddy_machine_memory_bytes %d", int64(d.Machine.MemoryMB)*(1<<20)))
+	metric(b, "dnsdaddy_machine_cpus", "Processors this process may use", "gauge",
+		fmt.Sprintf("dnsdaddy_machine_cpus %d", d.Machine.CPUs))
+
+	// One series per size, so a dashboard can show the state without a
+	// recording rule and a change is visible as one series falling to zero
+	// while another rises.
+	lines := make([]string, 0, 3)
+	for _, p := range []resources.Profile{resources.ProfileTiny, resources.ProfileSmall, resources.ProfileFull} {
+		value := 0
+		if d.Applied && d.Running == p {
+			value = 1
+		}
+		lines = append(lines, fmt.Sprintf("dnsdaddy_machine_size{size=%q} %d", string(p), value))
+	}
+	metric(b, "dnsdaddy_machine_size",
+		"Which machine size's limits are in force; all zero on an installation that has not sized itself",
+		"gauge", lines...)
+
+	var rss uint64
+	if v, err := os.ReadFile("/proc/self/statm"); err == nil {
+		var pages, resident uint64
+		// Page size is positive on every platform Go runs on, but it is an int
+		// and this multiplies by it, so it is checked rather than assumed: a
+		// negative would wrap into a resident-set figure of several exabytes
+		// and an alert nobody could interpret.
+		if n, _ := fmt.Sscanf(string(v), "%d %d", &pages, &resident); n == 2 {
+			if page := os.Getpagesize(); page > 0 {
+				rss = resident * uint64(page)
+			}
+		}
+	}
+	if rss > 0 {
+		metric(b, "dnsdaddy_process_memory_bytes", "Memory this process is currently using", "gauge",
+			fmt.Sprintf("dnsdaddy_process_memory_bytes %d", rss))
+	}
 }
