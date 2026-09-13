@@ -159,6 +159,11 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/findings/export", a.handleExportFindings)
 	api.HandleFunc("GET /api/v1/findings/{id}", a.handleGetFinding)
 	api.HandleFunc("GET /api/v1/detectors", a.handleDetectors)
+
+	// The first-seen domain index. Read-only: there is nothing to configure
+	// here because this engine observes and never blocks.
+	api.HandleFunc("GET /api/v1/first-seen", a.handleFirstSeenLookup)
+	api.HandleFunc("GET /api/v1/first-seen/recent", a.handleFirstSeenRecent)
 	api.HandleFunc("GET /api/v1/dnssec/observations", a.handleDNSSECObservations)
 
 	api.HandleFunc("GET /api/v1/networks", a.handleListNetworks)

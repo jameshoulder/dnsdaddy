@@ -269,8 +269,30 @@ domain-verification exercise during a migration.
 has ever resolved, suddenly resolved by one host, is worth a look — especially
 alongside anything else.
 
-**Telemetry required.** Query log over a long enough baseline. *Available, but
-read the caveat.*
+**Telemetry required.** The first-seen domain index. *Available.*
+
+```
+GET /api/v1/first-seen/recent?limit=50     what the network has started talking to
+GET /api/v1/first-seen?domain=example.com  one domain: first seen, last seen, count
+```
+
+The index is kept outside the query-log retention window, one row per
+registered domain ever seen, so "never seen before" means what it says rather
+than "not in the last seven days". Names are rolled up to their registered
+domain (eTLD+1), so `a.example.com` and `b.example.com` are one answer — which
+is usually what you want, because a domain is what somebody registered.
+
+Two things to read carefully in the response. `status: unknown` means the index
+is off or the name has no registered domain; it does **not** mean the domain is
+new. And when `evictions` is above zero the index has recycled rows to stay
+inside `max_rows`, so an entry may be a domain whose row was reclaimed rather
+than one genuinely unseen — entries with `certain: true` predate the first
+eviction and are unambiguous. `dnsdaddy doctor` warns when the index passes 80%
+of its ceiling, which is where this starts to matter.
+
+**The query-log version, for a per-hostname view.** The index answers by
+registered domain. When you want novelty of a specific hostname, the query log
+still has it for as long as it is kept:
 
 ```sql
 -- Domains first seen in the last hour, given a 7-day baseline.
@@ -291,14 +313,16 @@ WHERE b.parent IS NULL
 ORDER BY r.parent;
 ```
 
-**Caveat, and it is a real one.** "Never seen before" is only as good as your
-retention. At the default 7 days, everything looks new after a week away, and
-this hunt is noisy on any network with normal browsing. It works best scoped to
-a server VLAN, where the set of domains a machine legitimately talks to is small
-and stable — and it is close to useless pointed at a floor of laptops.
+**Caveat on the SQL above, not on the index.** The query taken alone is only as
+good as your retention: at the default 7 days everything looks new after a week
+away. That is exactly what the first-seen index exists to fix, so prefer the
+API for the "has this network ever" question and keep the SQL for per-hostname
+detail within the retention window.
 
-A first-seen index maintained independently of query-log retention would fix
-this properly. It is not implemented; see [../roadmap.md](../roadmap.md).
+**And a caveat that applies to both.** A domain being new is not a domain being
+bad. Every legitimate site was new once, and the first query after a cache
+flush looks identical to the first query ever. This is a signal to investigate,
+which is why nothing in DNS Daddy blocks on it.
 
 **Investigation.** Registration date. Whether one host or many. Whether the
 name resembles a brand you use. Whether any detector fired for the same host.

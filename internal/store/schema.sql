@@ -220,6 +220,50 @@ CREATE INDEX IF NOT EXISTS dnssec_obs_disagree_idx
 
 -- Hourly rollups survive query-log pruning, so charts keep their history
 -- even with a short log retention window.
+-- Registered domains this installation has ever seen a query for.
+--
+-- Deliberately outside the query-log retention window. "This domain has never
+-- been resolved on this network before" is one of the more useful signals in
+-- DNS security, and deriving it from query_log makes it only as good as the
+-- retention setting -- at the seven-day default, close to useless. One row per
+-- registered domain ever seen, not one per query, so the cost is bounded by
+-- how many domains a network touches rather than by how much it browses.
+--
+-- Keyed by eTLD+1 rather than by the full name on purpose. attacker.a.b.example
+-- and attacker2.a.b.example are the same registration and the same signal;
+-- keying by FQDN would let one domain mint unlimited rows. Per-FQDN novelty is
+-- still answerable from query_log for as long as that lives.
+--
+-- Note for whoever adds the next prune: this table is bounded by eviction in
+-- internal/firstseen, NOT by the query-log pruner. Deleting rows here on the
+-- log's schedule would silently reset the signal every seven days and make
+-- every domain look new again.
+CREATE TABLE IF NOT EXISTS first_seen_domains (
+    -- The registered domain, normalised and lowercased by domainutil.
+    domain      TEXT PRIMARY KEY,
+    -- When this row was created. After an eviction and re-insert this is the
+    -- re-insert time, not the original sighting: the table is bounded, and the
+    -- honest thing is to say when counting restarted rather than to claim
+    -- knowledge that was evicted.
+    --
+    -- Whether a given row is the true first sighting is answerable exactly,
+    -- without remembering every evicted name: a row whose first_seen predates
+    -- this installation's FIRST eviction cannot have been re-inserted, because
+    -- nothing had been evicted yet. Rows created after it may or may not be
+    -- restarts. That watermark is kept in settings under
+    -- SettingFirstSeenFirstEviction, and it is the only claim this table can
+    -- support -- an in-memory set of evicted names would be unbounded, and a
+    -- bounded one would silently start calling restarts discoveries.
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    query_count INTEGER NOT NULL DEFAULT 0
+);
+
+-- Eviction picks the oldest last_seen, and the recent-first-seen list orders
+-- by first_seen. Both are covered.
+CREATE INDEX IF NOT EXISTS first_seen_last_idx  ON first_seen_domains (last_seen);
+CREATE INDEX IF NOT EXISTS first_seen_first_idx ON first_seen_domains (first_seen DESC);
+
 CREATE TABLE IF NOT EXISTS stats_hourly (
     hour       INTEGER NOT NULL,
     network_id TEXT    NOT NULL,

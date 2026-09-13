@@ -10,6 +10,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
+	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
@@ -64,6 +65,10 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// client got nothing. The second is the one an operator gets a phone call
 	// about.
 	a.writeRebindingMetrics(&b)
+
+	// The first-seen index. Observe-only, so none of this can move because a
+	// decision changed — it moves because the network talked to something new.
+	a.writeFirstSeenMetrics(&b)
 
 	// Client-access shape. Counts only: an alert wants to know that the number
 	// of publicly permitted ranges went from nought to one, not which address
@@ -446,4 +451,52 @@ func (a *API) writeRebindingMetrics(b *strings.Builder) {
 		lines = append(lines, fmt.Sprintf("dnsdaddy_rebinding_addresses_total{class=%q} %d", string(c), counts[c]))
 	}
 	metric(b, "dnsdaddy_rebinding_addresses_total", "Addresses withheld from answers, by range class", "counter", lines...)
+}
+
+// writeFirstSeenMetrics reports the size and health of the first-seen index.
+//
+// Two label sets, both closed and both from constants rather than from
+// anything in a query: the drop reason (firstseen.DropReasons) and the lookup
+// result (new / known / unknown). The values being counted are domains an
+// attacker chooses, so a label derived from one would let a single client mint
+// a Prometheus series per name it invents — the same cardinality trap the
+// rate-limit and rebinding metrics avoid.
+//
+// dnsdaddy_firstseen_rows against _max_rows is the one to alert on. An index
+// at its ceiling is evicting, and an evicting index answers "is this domain
+// new" with "new to this table" rather than "new to this network".
+func (a *API) writeFirstSeenMetrics(b *strings.Builder) {
+	idx := a.DNS.FirstSeenIndex()
+	stats := idx.Stats()
+
+	enabled := 0
+	if idx != nil {
+		enabled = 1
+	}
+	metric(b, "dnsdaddy_firstseen_enabled", "Whether the first-seen domain index is active (1) or off (0)", "gauge",
+		fmt.Sprintf("dnsdaddy_firstseen_enabled %d", enabled))
+	metric(b, "dnsdaddy_firstseen_rows", "Registered domains currently indexed", "gauge",
+		fmt.Sprintf("dnsdaddy_firstseen_rows %d", stats.Rows))
+	metric(b, "dnsdaddy_firstseen_max_rows", "Ceiling on indexed domains before eviction", "gauge",
+		fmt.Sprintf("dnsdaddy_firstseen_max_rows %d", stats.MaxRows))
+	metric(b, "dnsdaddy_firstseen_inserts_total", "Domains recorded for the first time", "counter",
+		fmt.Sprintf("dnsdaddy_firstseen_inserts_total %d", stats.Inserts))
+	metric(b, "dnsdaddy_firstseen_updates_total", "Repeat sightings folded into an existing row", "counter",
+		fmt.Sprintf("dnsdaddy_firstseen_updates_total %d", stats.Updates))
+	metric(b, "dnsdaddy_firstseen_evictions_total", "Rows removed to stay within the ceiling", "counter",
+		fmt.Sprintf("dnsdaddy_firstseen_evictions_total %d", stats.Evictions))
+
+	dropLines := make([]string, 0, len(firstseen.DropReasons()))
+	for _, reason := range firstseen.DropReasons() {
+		dropLines = append(dropLines,
+			fmt.Sprintf("dnsdaddy_firstseen_dropped_total{reason=%q} %d", reason, stats.Dropped[reason]))
+	}
+	metric(b, "dnsdaddy_firstseen_dropped_total", "Observations not recorded, by reason", "counter", dropLines...)
+
+	lookupLines := make([]string, 0, 3)
+	for _, st := range []firstseen.Status{firstseen.StatusNew, firstseen.StatusKnown, firstseen.StatusUnknown} {
+		lookupLines = append(lookupLines,
+			fmt.Sprintf("dnsdaddy_firstseen_lookup_total{result=%q} %d", string(st), stats.Lookups[st]))
+	}
+	metric(b, "dnsdaddy_firstseen_lookup_total", "Index lookups, by result", "counter", lookupLines...)
 }

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 )
@@ -203,6 +204,37 @@ func (d DNS) RebindingFilterConfig() rebind.Config {
 	return cfg
 }
 
+// FirstSeen configures the first-seen domain index. See internal/firstseen.
+type FirstSeen struct {
+	// Enabled switches the index on. A plain bool, unlike
+	// rebinding.enabled: this engine cannot change an answer, an RCODE, or a
+	// block decision, so turning it on during an upgrade changes nothing an
+	// operator would notice except that a hunt starts working. There is no
+	// fresh-versus-upgrade question to answer because there is no behaviour to
+	// inherit.
+	Enabled bool `yaml:"enabled"`
+
+	// MaxRows is the hard ceiling on indexed domains. See
+	// firstseen.DefaultMaxRows for how the shipped number was reasoned.
+	MaxRows int `yaml:"max_rows"`
+
+	// MaxNewPerMinute budgets how fast new rows may appear, so a client asking
+	// for a fresh name every query cannot fill the table in an afternoon.
+	// Repeats of domains already indexed never consume it.
+	MaxNewPerMinute int `yaml:"max_new_per_minute"`
+}
+
+// IndexFirstSeen reports whether the index should be built.
+func (d DNS) IndexFirstSeen() bool { return d.FirstSeen.Enabled }
+
+// FirstSeenConfig translates the configuration into the index's own form.
+func (d DNS) FirstSeenConfig() firstseen.Config {
+	return firstseen.Config{
+		MaxRows:         d.FirstSeen.MaxRows,
+		MaxNewPerMinute: d.FirstSeen.MaxNewPerMinute,
+	}
+}
+
 // DNS holds the resolver-side settings: what we listen on and where we forward.
 type DNS struct {
 	ListenUDP    string   `yaml:"listen_udp"`
@@ -240,6 +272,10 @@ type DNS struct {
 	// Rebinding decides whether an answer may carry a private, loopback or
 	// link-local address out to a client.
 	Rebinding Rebinding `yaml:"rebinding"`
+
+	// FirstSeen records which registered domains this installation has ever
+	// been asked about. Observe-only.
+	FirstSeen FirstSeen `yaml:"first_seen"`
 
 	// LocalDNSSECValidation selects what Daddybound, DNS Daddy's own DNSSEC
 	// validation engine, does with real traffic. See
@@ -543,6 +579,11 @@ func Default() Config {
 				FilterRanges: append([]string(nil), rebind.DefaultRangeStrings...),
 				EmptyAction:  string(rebind.EmptyNoData),
 			},
+			FirstSeen: FirstSeen{
+				Enabled:         true,
+				MaxRows:         firstseen.DefaultMaxRows,
+				MaxNewPerMinute: firstseen.DefaultMaxNewPerMinute,
+			},
 			RateLimit: RateLimit{
 				Enabled:          true,
 				Rate:             ratelimit.DefaultRate,
@@ -723,6 +764,8 @@ func applyEnv(cfg *Config) error {
 		func() error { return envBool("DNSDADDY_ALLOW_PUBLIC_RESOLVER", &cfg.DNS.AllowPublicResolver) },
 		func() error { return envBool("DNSDADDY_REFUSE_ANY", &cfg.DNS.RefuseANY) },
 		func() error { return envBoolPtr("DNSDADDY_REBINDING", &cfg.DNS.Rebinding.Enabled) },
+		func() error { return envBool("DNSDADDY_FIRST_SEEN", &cfg.DNS.FirstSeen.Enabled) },
+		func() error { return envInt("DNSDADDY_FIRST_SEEN_MAX_ROWS", &cfg.DNS.FirstSeen.MaxRows) },
 		func() error { return envBool("DNSDADDY_RATE_LIMIT", &cfg.DNS.RateLimit.Enabled) },
 		func() error { return envFloat("DNSDADDY_RATE_LIMIT_RATE", &cfg.DNS.RateLimit.Rate) },
 		func() error { return envFloat("DNSDADDY_RATE_LIMIT_BURST", &cfg.DNS.RateLimit.Burst) },
@@ -845,6 +888,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validateRebinding(); err != nil {
+		return err
+	}
+	if err := c.validateFirstSeen(); err != nil {
 		return err
 	}
 	if c.DNS.ListenUDP == "" && c.DNS.ListenTCP == "" && c.DNS.ListenDoT == "" {
@@ -1408,6 +1454,30 @@ func (c *Config) validateRebinding() error {
 		if p.Addr() != p.Masked().Addr() {
 			return fmt.Errorf("dns.rebinding.filter_ranges[%d] %q has host bits set; write %s", i, raw, p.Masked())
 		}
+	}
+	return nil
+}
+
+// validateFirstSeen refuses an index that cannot do its job.
+//
+// Both zeroes are errors rather than meanings. max_rows of 0 would be a table
+// that evicts everything it writes, and max_new_per_minute of 0 would be an
+// index that records nothing new while reporting itself as enabled — the same
+// "on, and doing nothing" state the rebinding filter refuses, arrived at the
+// same way. An operator who wants no index sets enabled: false, which says so.
+func (c *Config) validateFirstSeen() error {
+	fs := c.DNS.FirstSeen
+	if !fs.Enabled {
+		return nil
+	}
+	if fs.MaxRows < 1 {
+		return fmt.Errorf("dns.first_seen.max_rows must be at least 1, got %d; "+
+			"to turn the first-seen index off set dns.first_seen.enabled: false", fs.MaxRows)
+	}
+	if fs.MaxNewPerMinute < 1 {
+		return fmt.Errorf("dns.first_seen.max_new_per_minute must be at least 1, got %d; "+
+			"a budget of zero would record no new domain while reporting the index as on — "+
+			"set dns.first_seen.enabled: false instead", fs.MaxNewPerMinute)
 	}
 	return nil
 }

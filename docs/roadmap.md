@@ -35,18 +35,6 @@ see [CONTRIBUTING.md](../CONTRIBUTING.md).
 **What it unlocks:** promoting a detector from experimental to available, which
 in turn is the precondition for everything in the enforcement section below.
 
-### A persistent first-seen index
-
-"This domain has never been resolved on this network before" is one of the more
-useful signals in DNS security, and
-[hunt 5](threat-hunting/README.md#hunt-5--newly-observed-domains) currently
-approximates it from the query log — which means it is only as good as your
-retention, and at the 7-day default it is close to useless on a general network.
-
-A small separate table of (registered domain, first seen) kept independently of
-query-log retention would fix it properly, and would cost very little: it is one
-row per domain ever seen, not one per query.
-
 ### Webhook sink
 
 The one integration genuinely missing from [siem.md](siem.md). A POST per

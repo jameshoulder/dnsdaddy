@@ -100,6 +100,7 @@ func runDoctor(args []string) error {
 	// Reported next to the ACL because the two answer halves of one question:
 	// the ACL says who may use this resolver, and this says how much of it any
 	// one of them may take.
+	checks = append(checks, doctorFirstSeen(ctx, st, cfg)...)
 	checks = append(checks, doctorRebinding(ctx, st, cfg)...)
 	checks = append(checks, diag.RateLimit(diag.RateLimitInput{
 		Enabled: cfg.DNS.RateLimit.Enabled,
@@ -777,4 +778,58 @@ func doctorRebinding(ctx context.Context, st *store.Store, cfg config.Config) []
 		}
 	}
 	return diag.Rebinding(in)
+}
+
+// doctorFirstSeen reports on the first-seen domain index.
+//
+// This command is a separate process reading the database read-only, so it can
+// see how many rows exist and what the configuration asks for, but not the
+// running index's counters — drops and evictions live in the daemon's memory.
+// Those are reported through /metrics instead. Passing zeroes here rather than
+// guessing keeps the two from disagreeing: a doctor that invented an eviction
+// count would be making something up about the one signal this table exists to
+// provide.
+func doctorFirstSeen(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
+	in := diag.FirstSeenInput{
+		Enabled:         cfg.DNS.IndexFirstSeen(),
+		MaxRows:         cfg.DNS.FirstSeen.MaxRows,
+		MaxNewPerMinute: cfg.DNS.FirstSeen.MaxNewPerMinute,
+		Dropped:         map[string]uint64{},
+		Available:       true,
+	}
+	// No database to read: on a fresh machine, or one whose data directory is
+	// wrong. That is already reported by the DATABASE check, and repeating it
+	// here as a first-seen failure would tell an operator their index is
+	// broken when the truth is that this command could not look. Not the same
+	// thing as Available=false, which means the daemon is running without an
+	// index it was told to build.
+	if st == nil {
+		if !in.Enabled {
+			return diag.FirstSeen(in)
+		}
+		return []diag.Check{{
+			Section: diag.SectionSystem,
+			Name:    "First-seen domain index",
+			Status:  diag.StatusWarn,
+			Summary: "Configured on, but this command could not read the database to inspect it.",
+			Evidence: []string{
+				fmt.Sprintf("dns.first_seen.enabled is true, max_rows %d", cfg.DNS.FirstSeen.MaxRows),
+				"see the DATABASE check above for why the database could not be opened",
+			},
+			Action: "Fix the database problem reported above; this check has nothing to add until then.",
+		}}
+	}
+	if st != nil {
+		if n, err := st.CountFirstSeen(ctx); err == nil {
+			in.Rows = n
+		}
+		// Whether this installation has ever evicted is answerable from the
+		// database, unlike how many times. One bit is enough for the warning
+		// that matters: after the first eviction, "first seen" stops being
+		// unambiguous.
+		if at, err := st.FirstSeenEvictionWatermark(ctx); err == nil && !at.IsZero() {
+			in.Evictions = 1
+		}
+	}
+	return diag.FirstSeen(in)
 }

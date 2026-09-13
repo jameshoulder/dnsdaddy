@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"net/http"
 	"strings"
@@ -351,5 +352,157 @@ func TestRebindingMetricsUseAClosedLabelSet(t *testing.T) {
 	}
 	if seen != len(rebind.Classes()) {
 		t.Errorf("%d class series emitted, want all %d including the zeroes", seen, len(rebind.Classes()))
+	}
+}
+
+// TestMetricsExposeTheFirstSeenIndex, including the series that sit at zero:
+// an alert on "the index stopped recording" must not vanish when the index is
+// switched off, which is exactly when it matters.
+func TestMetricsExposeTheFirstSeenIndex(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	resp, raw := h.do("GET", "/metrics", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics = %d", resp.StatusCode)
+	}
+	body := string(raw)
+	for _, series := range []string{
+		"dnsdaddy_firstseen_enabled",
+		"dnsdaddy_firstseen_rows",
+		"dnsdaddy_firstseen_max_rows",
+		"dnsdaddy_firstseen_inserts_total",
+		"dnsdaddy_firstseen_updates_total",
+		"dnsdaddy_firstseen_evictions_total",
+		"dnsdaddy_firstseen_dropped_total",
+		"dnsdaddy_firstseen_lookup_total",
+	} {
+		if !strings.Contains(body, series) {
+			t.Errorf("/metrics does not export %s", series)
+		}
+	}
+}
+
+// TestFirstSeenMetricLabelsAreClosed. The values being counted are domains an
+// attacker chooses, so a label derived from one would let a single client mint
+// a Prometheus series per name it invents.
+func TestFirstSeenMetricLabelsAreClosed(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	_, raw := h.do("GET", "/metrics", nil)
+	reasons := map[string]bool{}
+	for _, r := range firstseen.DropReasons() {
+		reasons[r] = true
+	}
+	results := map[string]bool{"new": true, "known": true, "unknown": true}
+
+	var drops, lookups int
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "dnsdaddy_firstseen_") || !strings.Contains(line, "{") {
+			continue
+		}
+		value := line[strings.Index(line, "\"")+1:]
+		value = value[:strings.Index(value, "\"")]
+		switch {
+		case strings.HasPrefix(line, "dnsdaddy_firstseen_dropped_total{reason="):
+			if !reasons[value] {
+				t.Errorf("drop reason %q is not in firstseen.DropReasons()", value)
+			}
+			drops++
+		case strings.HasPrefix(line, "dnsdaddy_firstseen_lookup_total{result="):
+			if !results[value] {
+				t.Errorf("lookup result %q is not one of new/known/unknown", value)
+			}
+			lookups++
+		default:
+			t.Errorf("an unexpected labelled first-seen series: %q", line)
+		}
+	}
+	if drops != len(firstseen.DropReasons()) {
+		t.Errorf("%d drop series, want all %d", drops, len(firstseen.DropReasons()))
+	}
+	if lookups != 3 {
+		t.Errorf("%d lookup series, want 3", lookups)
+	}
+}
+
+// TestFirstSeenLookupSaysUnknownRatherThanNewWhenTheIndexIsOff.
+//
+// The API harness runs without an index, which is the disabled case. An
+// interface that showed "never seen before" for every domain here would be
+// the loudest false signal this project could produce.
+func TestFirstSeenLookupSaysUnknownRatherThanNewWhenTheIndexIsOff(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	resp, raw := h.do("GET", "/api/v1/first-seen?domain=example.com", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, raw)
+	}
+	var got struct {
+		Status      string `json:"status"`
+		Explanation string `json:"explanation"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "unknown" {
+		t.Errorf("status = %q, want unknown", got.Status)
+	}
+	if !strings.Contains(got.Explanation, "not the same as the domain being new") {
+		t.Errorf("the explanation does not draw the distinction: %q", got.Explanation)
+	}
+}
+
+// TestFirstSeenLookupRequiresADomain.
+func TestFirstSeenLookupRequiresADomain(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	if resp, _ := h.do("GET", "/api/v1/first-seen", nil); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestFirstSeenRecentIsCappedAndSaysWhenItIsOff.
+func TestFirstSeenRecentIsCappedAndSaysWhenItIsOff(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	resp, raw := h.do("GET", "/api/v1/first-seen/recent?limit=1000000", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, raw)
+	}
+	var got struct {
+		Enabled     bool   `json:"enabled"`
+		Domains     []any  `json:"domains"`
+		Explanation string `json:"explanation"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled {
+		t.Error("the harness has no index but the response says enabled")
+	}
+	if len(got.Domains) != 0 {
+		t.Errorf("%d domains returned with no index", len(got.Domains))
+	}
+	if !strings.Contains(got.Explanation, "switched off") {
+		t.Errorf("explanation = %q", got.Explanation)
+	}
+
+	if bad, _ := h.do("GET", "/api/v1/first-seen/recent?limit=0", nil); bad.StatusCode != http.StatusBadRequest {
+		t.Errorf("limit=0 returned %d, want 400", bad.StatusCode)
+	}
+}
+
+// TestFirstSeenRoutesNeedAuthentication, like everything else under /api/v1.
+func TestFirstSeenRoutesNeedAuthentication(t *testing.T) {
+	h := newHarness(t) // no login
+	for _, path := range []string{"/api/v1/first-seen?domain=example.com", "/api/v1/first-seen/recent"} {
+		resp, _ := h.do("GET", path, nil)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s returned %d unauthenticated, want 401", path, resp.StatusCode)
+		}
 	}
 }

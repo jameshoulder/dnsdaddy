@@ -25,14 +25,14 @@ holds has made one. Both can be useful. Only one belongs here.
 | [Client ACL](#client-acl) | source address | serve / REFUSE | **enforce** | shipped; open-resolver combination refused at startup |
 | [Per-client rate limiter](#per-client-rate-limiter) | source address, arrival time | serve / REFUSE | **enforce** | shipped; defaults set far above legitimate use |
 | [Rebinding filter](#rebinding-filter) | answer records + policy exemption set | strip addresses / empty action | **enforce** | shipped; per-policy exemptions exist and are tested |
+| [First-seen index](#first-seen-index) | qname on queries that passed the ACL | novelty signal | **observe** | n/a — there is no enforce door and there will not be one |
 | [Blocklist policy](#blocklist-policy) | qname | block / allow | **enforce** | shipped; feed health |
 | [Daddybound](#daddybound) | chain of trust + answer | RFC 4033 state | **observe** (Learn) | disagreement rate against a trustworthy oracle, and a decided failure mode |
 | [Behavioural detectors](#behavioural-detectors) | query stream | finding | **observe** (alert-only) | a published false-positive measurement, [issue #18](https://github.com/jameshoulder/dnsdaddy/issues/18) |
 
 Engines named in the programme but **not yet implemented**, listed so this page
-is not read as a complete inventory: a persistent first-seen index, a
-dictionary-based DGA complement, and descriptive device baselines. None of them
-exists in the code today.
+is not read as a complete inventory: a dictionary-based DGA complement, and
+descriptive device baselines. Neither exists in the code today.
 
 ---
 
@@ -184,6 +184,83 @@ operator asks, recorded once in the database the way
 `local_dnssec_validation` is. Withholding addresses an installation has been
 serving for a year is a change to that network, and not one a release should
 make on its operator's behalf.
+
+## First-seen index
+
+`internal/firstseen`. Records which registered domains this installation has
+ever been asked about.
+
+**Input.** The normalised qname of a query that has passed the client ACL and
+the rate limiter. Nothing about the client, nothing about the answer.
+
+**Procedure.** Reduce the name to its registered domain with
+`domainutil.RegisteredDomain` (the public suffix list, plus an exclusion list
+for private namespaces like `.local`). Hand it to a bounded channel. A worker
+collapses repeats into one row update per domain per flush, upserts the batch,
+and evicts the stalest rows if the table is over its ceiling.
+
+**Output.** `first_seen`, `last_seen`, `query_count`, and whether the
+`first_seen` is provably the true first sighting. Nothing else, and nothing
+that reaches a client.
+
+**Observe only, permanently.** There is no enforce door here and there is not
+going to be one. A domain being new is not a domain being bad: every
+legitimate site was new once, and the first query after a cache flush looks
+identical to the first query ever. Novelty is a reason to look, which is a
+thing a person does.
+
+**Why a separate table rather than the query log.** "Never resolved here
+before" derived from `query_log` is only as good as retention, and at the
+seven-day default almost every domain looks new. This table is outside that
+window and is not touched by the pruner — `TestThePrunerDoesNotTouchTheIndex`
+fails if anybody wires it in, because a weekly reset would make every domain on
+the network novel again every Monday.
+
+**Keyed by eTLD+1, not by FQDN.** `attacker1.a.b.example.com` and
+`attacker2.c.d.example.com` are one registration and one signal. Keying by full
+name would also hand any single domain an unlimited supply of rows, which is
+the table-filling attack the bounds exist to stop. Per-hostname novelty is
+still answerable from the query log for as long as that lives.
+
+**Installation-wide, not per network.** Two networks asking the same domain
+share one row and one `first_seen`. "Has anything here ever asked for this" is
+the question a hunt is actually asking; per-network rows would multiply the
+table by the number of networks and make the common case harder to answer.
+
+**Bounding, which is the actual design problem.** An authorised client can ask
+for unique names forever, and eTLD+1 cardinality is unbounded in practice — new
+gTLDs and generated second-level names see to that. Three limits, all shipped:
+
+| Limit | Default | What it stops |
+|---|---|---|
+| `max_rows` | 100,000 | the table growing without end; ~12 MB, evicting stalest `last_seen` first |
+| `max_new_per_minute` | 200 | a flood filling the ceiling in an afternoon |
+| the queue | 4,096, drops | the index adding latency when the writer falls behind |
+
+Repeats of known domains never consume the new-row budget. That split is the
+point: an attacker minting fresh names is throttled while a network browsing
+the same few thousand domains never is.
+
+Eviction is by oldest `last_seen`, not by lowest `query_count`. A domain nobody
+has asked for in months is the one whose absence is least likely to be noticed;
+evicting by count would discard a domain seen once yesterday in favour of one
+seen a thousand times last year, which inverts the signal.
+
+**The honesty problem with eviction.** After a row is evicted and later
+re-created, its `first_seen` is when counting restarted, not when the network
+first saw the domain — and remembering every evicted name to say so would be
+exactly the unbounded thing the ceiling exists to prevent. So the index makes
+one claim it can support exactly: a row created **before this installation's
+first eviction** cannot have been re-inserted, because nothing had been evicted
+yet. That is a single stored timestamp. Records carry `certain: true` when they
+predate it; `false` means "cannot prove", not "was evicted".
+`dnsdaddy doctor` warns at 80% of the ceiling, before this starts to matter.
+
+**Nothing it can be asked that it answers wrongly.** A lookup returns `new`,
+`known` or `unknown`, and `unknown` — the index is off, or the name has no
+registered domain — must never be rendered as `new`. An interface that showed
+"never seen before" for every domain on an installation with the index disabled
+would be the loudest false signal this project could produce.
 
 ## Blocklist policy
 

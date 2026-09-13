@@ -36,6 +36,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
+	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
@@ -334,6 +335,12 @@ func run() error {
 		return err
 	}
 
+	firstSeenIndex := buildFirstSeenIndex(st, cfg, log)
+	if firstSeenIndex != nil {
+		go firstSeenIndex.Run(ctx)
+		defer firstSeenIndex.Wait()
+	}
+
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
@@ -342,6 +349,7 @@ func run() error {
 		RefuseANY:       cfg.DNS.RefuseANY,
 		RateLimiter:     limiter,
 		Rebinding:       rebindFilter,
+		FirstSeen:       firstSeenIndex,
 		Detector:        detector,
 		Decisions:       recorderOrNil(decisionRecorder),
 		DNSSEC:          observerOrNil(dnssecObserver),
@@ -966,4 +974,27 @@ func buildRebindingFilter(cfg config.Config, log *slog.Logger) (*rebind.Filter, 
 		"empty_action", string(f.EmptyAction()),
 	)
 	return f, nil
+}
+
+// buildFirstSeenIndex constructs the first-seen domain index, or returns nil
+// when the operator has switched it off.
+//
+// No error path: unlike the rebinding filter, nothing this index can be
+// misconfigured into changes an answer. Validation has already refused a
+// max_rows or budget of zero, and everything else falls back to a shipped
+// default rather than refusing to start — an installation must not fail to
+// serve DNS because a statistics table was configured oddly.
+func buildFirstSeenIndex(st *store.Store, cfg config.Config, log *slog.Logger) *firstseen.Index {
+	if !cfg.DNS.IndexFirstSeen() {
+		log.Info("first-seen domain index is off; novelty is only answerable from the query log, " +
+			"and therefore only as far back as its retention")
+		return nil
+	}
+	idx := firstseen.New(st, cfg.DNS.FirstSeenConfig(), log)
+	c := idx.Config()
+	log.Info("first-seen domain index active",
+		"max_rows", c.MaxRows,
+		"max_new_per_minute", c.MaxNewPerMinute,
+	)
+	return idx
 }

@@ -22,6 +22,53 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### First-seen domain index
+
+"This domain has never been resolved on this network before" is one of the more
+useful signals in DNS security, and until now
+[hunt 5](docs/threat-hunting/README.md#hunt-5--newly-observed-domains)
+approximated it from the query log — which made it only as good as your
+retention, and at the seven-day default close to useless on a general network.
+
+There is now a table of registered domains this installation has been asked
+about, kept outside that window: one row per domain ever seen, not one per
+query. `GET /api/v1/first-seen?domain=…` answers for one domain and
+`GET /api/v1/first-seen/recent` lists what the network has started talking to.
+
+**It observes and nothing else.** It cannot change an answer, an RCODE, or a
+block decision, and there is no enforce setting to find later — a domain being
+new is not a domain being bad. On for fresh installs and upgrades alike,
+because there is no behaviour for an upgrade to inherit. Turning it off is
+`dns.first_seen.enabled: false`.
+
+Bounded three ways, because the input is names an attacker chooses: 100,000
+rows with the stalest evicted first, 200 new domains a minute, and a queue that
+drops rather than making a lookup wait. Repeats of known domains never consume
+the new-row budget, so a busy network is never throttled — only one inventing
+names is.
+
+Two things worth knowing before relying on it:
+
+- **After the index has evicted anything, `first_seen` may be when counting
+  restarted** rather than the first sighting. Remembering every evicted name to
+  say which would be the unbounded thing the ceiling exists to prevent, so the
+  index makes the one claim it can prove: records marked `certain` predate its
+  first eviction and are unambiguous. `dnsdaddy doctor` warns at 80% of the
+  ceiling, before this starts to matter.
+- **`status: unknown` is not `new`.** It means the index is off, or the name has
+  no registered domain. Anything rendering it as "never seen before" would
+  report every domain on the network as novel.
+
+**Privacy:** this is the one table that deliberately outlives query-log
+retention. It holds registered domains and counts — no client IP, no network,
+no hostname — so it cannot answer "which domains did that laptop visit". See
+[docs/privacy.md](docs/privacy.md).
+
+Also: the registered-domain (eTLD+1) splitter moved from `internal/detect` into
+`internal/domainutil`, so the detectors and the index share one implementation.
+A detector and an index that disagreed about what `example.co.uk` is would
+produce findings that could not be looked up.
+
 ### DNS rebinding answer filter
 
 [T8](docs/threat-model.md#t8--dns-rebinding) said, honestly, that DNS Daddy did

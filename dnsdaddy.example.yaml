@@ -99,6 +99,50 @@ dns:
   # them. ANY replies are large and are the classic DNS amplification lever.
   refuse_any: true
 
+  # First-seen domain index.
+  #
+  # Records which registered domains this installation has ever been asked
+  # about, so "this network has never resolved that before" means what it says
+  # rather than "not in the last seven days". One row per registered domain
+  # ever seen, not one per query.
+  #
+  # OBSERVE ONLY. It cannot change an answer, an RCODE, or a block decision,
+  # and there is no enforce setting to find later. A domain being new is not a
+  # domain being bad -- every legitimate site was new once -- so this is a
+  # signal to investigate, not a reason to refuse anything.
+  #
+  # On for fresh installs and upgrades alike, unlike the rebinding filter
+  # above: there is no behaviour for an upgrade to inherit.
+  #
+  # Note for privacy: this is the one table that deliberately outlives your
+  # query-log retention. It holds domains and counts with no client IP and no
+  # hostname -- see docs/privacy.md -- but if that is more history than you
+  # want, set enabled: false.
+  first_seen:
+    enabled: true
+
+    # The hard ceiling. A row is about 120 bytes all in, so 100,000 rows is
+    # roughly 12 MB. A home or small-office network sees a few thousand to a
+    # few tens of thousands of distinct registered domains over months, so this
+    # is years of headroom for a real network and a firm limit against one that
+    # is being abused.
+    #
+    # Past the ceiling the stalest domains are evicted, and a re-created row's
+    # first_seen is when counting restarted rather than the first sighting.
+    # `dnsdaddy doctor` warns at 80% so you can raise this before that matters.
+    max_rows: 100000
+
+    # How many previously unseen registered domains may be recorded per minute.
+    # Repeats of domains already indexed never consume this, so a busy network
+    # is never throttled -- only a client inventing names is.
+    #
+    # A network discovering 200 new REGISTERED DOMAINS every minute, sustained,
+    # is not browsing. Bursts go higher, which is why the budget is per minute
+    # rather than per second.
+    #
+    # There is no "0". Set enabled: false to turn the index off.
+    max_new_per_minute: 200
+
   # DNS rebinding answer filter.
   #
   # The threat: a page loaded from https://evil.example is a public origin. If

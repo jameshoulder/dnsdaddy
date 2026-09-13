@@ -1347,6 +1347,60 @@ paths:
                       lastAt:     { type: string, format: date-time }
                       lastStatus: { type: string }
 
+  /api/v1/first-seen:
+    get:
+      summary: Has this installation ever been asked for this domain?
+      description: >-
+        Answers domain novelty from the first-seen index, which is kept
+        independently of query-log retention. The name is rolled up to its
+        registered domain (eTLD+1), so www.example.com and mail.example.com are
+        the same question.
+
+
+        `status` is `new`, `known` or `unknown`. **`unknown` is not a synonym
+        for `new`**: it means the index is switched off, or the name has no
+        registered domain to track. Rendering it as "never seen before" would
+        report every domain on the network as novel.
+      tags: [Detection]
+      parameters:
+        - name: domain
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The index's answer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FirstSeenLookup" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/first-seen/recent:
+    get:
+      summary: Registered domains seen for the first time, most recent first
+      description: >-
+        The list behind "what has this network started talking to that it never
+        talked to before". Capped server-side regardless of the limit
+        requested.
+
+
+        When `evictions` is above zero the index has recycled rows to stay
+        within `maxRows`, so an entry may be a domain whose row was reclaimed
+        rather than one never seen before. Entries with `certain: true` predate
+        the first eviction and are unambiguous.
+      tags: [Detection]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, default: 50 }
+      responses:
+        "200":
+          description: Recently discovered domains.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FirstSeenRecent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
   /api/v1/detectors:
     get:
       tags: [Detections]
@@ -1842,6 +1896,50 @@ components:
             (0.0.0.0/0 or ::/0) is rejected: it would disable the filter for
             this policy while every status display still reported it as on.
             Omitted leaves the list unchanged; an empty array clears it.
+
+    FirstSeenRecord:
+      type: object
+      properties:
+        domain: { type: string, description: The registered domain (eTLD+1). }
+        firstSeen: { type: string, format: date-time }
+        lastSeen: { type: string, format: date-time }
+        queryCount: { type: integer, format: int64 }
+        certain:
+          type: boolean
+          description: >-
+            True when firstSeen is provably the first sighting on this
+            installation, because the row predates the index's first eviction.
+            False means the index cannot prove it was not a restart after an
+            eviction — not that it was one.
+
+    FirstSeenLookup:
+      type: object
+      properties:
+        query: { type: string, description: The name that was asked about. }
+        domain: { type: string, description: The registered domain it rolls up to. }
+        status:
+          type: string
+          enum: [new, known, unknown]
+          description: >-
+            `unknown` means the index is off or the name has no registered
+            domain. It must not be rendered as `new`.
+        record: { $ref: "#/components/schemas/FirstSeenRecord" }
+        explanation: { type: string }
+
+    FirstSeenRecent:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        rows: { type: integer, format: int64 }
+        maxRows: { type: integer }
+        evictions:
+          type: integer
+          format: int64
+          description: Rows recycled to stay within maxRows. Above zero, firstSeen times may be restarts.
+        domains:
+          type: array
+          items: { $ref: "#/components/schemas/FirstSeenRecord" }
+        explanation: { type: string }
 
     Feed:
       type: object

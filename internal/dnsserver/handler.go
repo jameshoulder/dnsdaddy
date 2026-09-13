@@ -18,6 +18,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/decisions"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
+	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
@@ -75,6 +76,11 @@ type Handler struct {
 	// answer, and it runs on every serve — including cache hits. See the call
 	// site for why that is not an optimisation opportunity.
 	rebind *rebind.Filter
+
+	// firstSeen records which registered domains this installation has been
+	// asked about. Observe-only and nil-safe: it cannot change an answer, and
+	// there is no code path here that reads it back.
+	firstSeen *firstseen.Index
 
 	queries atomic.Uint64
 	blocked atomic.Uint64
@@ -152,6 +158,8 @@ type HandlerOptions struct {
 	// Rebinding filters private addresses out of answers. Nil means answers
 	// are returned exactly as resolved.
 	Rebinding *rebind.Filter
+	// FirstSeen records registered-domain novelty. Nil disables it.
+	FirstSeen *firstseen.Index
 	// Detector, when set, receives an observation per query. Alert-only: see
 	// Handler.observe.
 	Detector *detect.Engine
@@ -188,6 +196,7 @@ func NewHandler(
 		acl:             o.ClientACL,
 		limiter:         o.RateLimiter,
 		rebind:          o.Rebinding,
+		firstSeen:       o.FirstSeen,
 		detector:        o.Detector,
 		decisions:       o.Decisions,
 		dnssec:          o.DNSSEC,
@@ -369,6 +378,28 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		// like the root NS query without protecting anyone.
 		normalized = name
 	}
+
+	// The first-seen index, recorded once for every name that got this far.
+	//
+	// A defer rather than a call at each terminal path, and that is a safety
+	// choice rather than a stylistic one. This function returns from five
+	// places — block, resolution failure, success, and the two guards above —
+	// and a sixth added later would silently stop being indexed. A defer
+	// cannot be forgotten by the next person to add a return.
+	//
+	// It runs after the answer is fully decided, which is where the brief for
+	// this engine puts it: Observe is a public-suffix lookup and a
+	// non-blocking channel send, so it costs tens of nanoseconds, but it costs
+	// them after the client's answer exists rather than before it.
+	//
+	// Deliberately placed below the ACL and the rate limiter and above
+	// everything else, so that a source which may not use this resolver, or
+	// one already being refused for asking too fast, cannot grow the index.
+	// An attacker who has hit the limiter should not also get to fill the
+	// table. Blocked and NXDOMAIN names are indexed: the question was asked
+	// and the name was observed, and novelty of a blocked name is exactly what
+	// a hunt wants. This is an index, not a blocklist.
+	defer h.firstSeen.Observe(normalized)
 
 	var match policy.Match
 	if meta.networkID != "" {
@@ -751,3 +782,7 @@ func (h *Handler) filterRebinding(msg *dns.Msg, match policy.Match) string {
 	h.rebindClasses.observe(res.Removed)
 	return res.Reason(match.PolicyID)
 }
+
+// FirstSeenIndex exposes the index for the API, diagnostics and metrics. Nil
+// when the feature is off.
+func (h *Handler) FirstSeenIndex() *firstseen.Index { return h.firstSeen }

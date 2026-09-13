@@ -122,6 +122,34 @@ and rotated in place.
 Whatever consumes it inherits the retention question. Your SIEM's retention
 policy, not `detection.retention_days`, governs the copy it holds.
 
+### The first-seen domain index — `first_seen_domains`
+
+One row per registered domain this installation has ever been asked about.
+This is the one table that **deliberately outlives your query-log retention**,
+so it deserves reading carefully.
+
+| Field | Example | Notes |
+|---|---|---|
+| `domain` | `example.com` | The registered domain (eTLD+1), never the full hostname |
+| `first_seen` | `2026-02-11T09:03:41Z` | |
+| `last_seen` | `2026-07-28T14:22:03Z` | |
+| `query_count` | `4821` | How many times, installation-wide |
+
+**No client IP, no network, no hostname.** It records that *this installation*
+has resolved `example.com`, not who asked, not when any particular device asked,
+and not that anybody asked for `secret-project.example.com`. Deleting a device's
+query-log rows does not leave a trace of it here, because there was never one to
+leave — the table cannot answer "which domains did that laptop visit", and that
+is a property of its shape rather than a policy on top of it.
+
+What it does mean is that "this network has resolved `example.com` at some point
+since February" survives a query-log prune. If that is more history than you
+want to keep, `dns.first_seen.enabled: false` turns the table off, and nothing
+else changes: the index observes only and cannot affect an answer.
+
+Bounded at `dns.first_seen.max_rows` (100,000 by default) with the stalest
+domains evicted first, so it does not grow without end.
+
 ### Configuration
 
 Networks, policies, allow and block lists, feed settings, hashed API tokens, and
@@ -137,6 +165,8 @@ the bcrypt hash of the admin password. No plaintext secrets.
 - Behavioural detection state. The detectors hold counters and bounded sets in
   memory for a few minutes at a time and never write them to disk; only the
   resulting findings are persisted.
+- Any link between a device and a domain in the first-seen index. That table is
+  domains and counts only — see above.
 
 ## Turning it down
 
