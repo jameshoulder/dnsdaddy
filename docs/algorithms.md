@@ -297,3 +297,76 @@ any of them to blocking requires a published false-positive measurement against
 real traffic, not confidence. The surface-statistics DGA detector in particular
 misses dictionary-based generators, which is a known gap rather than a solved
 problem.
+
+---
+
+## Evidence and why
+
+`internal/decisions`, `internal/store` (`decisions`, `decision_evidence`),
+`internal/api/handlers_why.go`.
+
+**This is not an engine and it scores nothing.** No name is classified here, no
+traffic is judged, and nothing on this page is decided by it. It is the memory
+of what the engines above already decided, and it is documented here only so an
+operator knows where reconstruction lives — because the question "why was this
+blocked?" is answered from stored evidence, not by re-running anything.
+
+**Reconstruction is reading, never re-deriving.** `GET
+/api/v1/queries/{id}/why` reads the decision row and the evidence rows it
+cited. It never calls the policy engine and never consults a feed. The reason is
+straightforward: feeds change. A domain URLhaus dropped this morning was still
+listed last night, and an explanation that re-evaluated the current world would
+quietly claim last night's block never had a basis. Every field is stored at
+decision time, including the feed's *name*, so renaming or deleting a feed
+cannot blank an old explanation.
+
+**Three roles, and only one of them is a cause.**
+
+| Role | Meaning |
+|---|---|
+| `caused` | The evidence the outcome turned on. |
+| `contributed` | Part of the reasoning without changing the outcome — the block-list entry an allow-list win overrode. |
+| `observed` | An engine that looked and cannot change an outcome: Daddybound, the detectors, the first-seen index. |
+
+The separation is load-bearing rather than cosmetic. Every observe-mode engine
+on this page is observe-mode *by design*, and a record that listed a Daddybound
+bogus verdict beside a block with no role attached would read, to anyone
+skimming it, as if DNSSEC validation had refused the answer. It did not, it
+cannot, and the record says so in a field rather than in prose a client may not
+render. There is no code path that writes an observation with any role but
+`observed`, and `TestAnObserveEngineIsNeverCaused` fails if one
+appears.
+
+**Three completeness states, because "no evidence" has three causes.** A
+response says `complete`, `truncated` or `missing`, and a `missing` one says
+which kind:
+
+* nothing decided the query — it was allowed normally, and there was never
+  anything to record;
+* a decision was made but its record was dropped under load, or the query
+  predates the feature;
+* the query names a decision the decisions table does not hold, which is what a
+  drop between two independent writers looks like from the outside.
+
+The alternative — one empty evidence list for all three — would make an
+explanation that was never written indistinguishable from one that was never
+needed. `dnsdaddy_why_missing_total` counts the requests that could not be
+answered.
+
+**Bounded.** One decision cites at most `MaxEvidence` = 16 pieces, ordered
+cause first, then contributors, then observations, so the cap drops the least
+load-bearing items rather than an arbitrary slice. Exceeding it sets
+`truncated`; it is never silently trimmed and reported as the whole story.
+
+**Dropped rather than delayed.** The recorder is a bounded channel with a
+non-blocking send. A full queue drops the record and counts it. The answer path
+does not wait for SQLite, and it does not wait for the audit writer either —
+losing the explanation of a block is a bad day; adding write latency to every
+blocked answer is an outage.
+
+**Indicator lifecycle fields: P5.** `blocklist.Entry` is
+`{Category, FeedID, FeedName}` (`internal/blocklist/index.go:45`) and carries no
+first-seen, last-seen or expiry. So a record can say *which feed* listed a
+domain and *what it was called*, but not *how long it had been listed* or
+whether the listing has since aged out. That is the honest limit of what is
+stored today.

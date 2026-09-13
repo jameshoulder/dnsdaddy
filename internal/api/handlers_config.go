@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/jameshoulder/dnsdaddy/internal/audit"
 	"net/http"
 	"net/url"
 	"slices"
@@ -273,6 +274,7 @@ func (a *API) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	a.record(r, audit.ActionNetworkCreate, "network", n.ID, nil, n)
 	a.reloadEngine(r)
 	writeNetwork(w, http.StatusCreated, n, a.reloadNetworkAccess(r))
 }
@@ -285,11 +287,14 @@ func (a *API) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	a.networkWrites.Lock()
 	defer a.networkWrites.Unlock()
 
+	before, _ := a.Store.GetNetwork(r.Context(), r.PathValue("id"))
+
 	n, err := a.Store.UpdateNetwork(r.Context(), r.PathValue("id"), body.toInput())
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	a.record(r, audit.ActionNetworkUpdate, "network", n.ID, before, n)
 	a.reloadEngine(r)
 	writeNetwork(w, http.StatusOK, n, a.reloadNetworkAccess(r))
 }
@@ -300,10 +305,12 @@ func (a *API) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 
 	// DeleteNetwork removes the row inside a transaction that reads it first,
 	// so the count check and the delete cannot disagree about what is there.
+	before, _ := a.Store.GetNetwork(r.Context(), r.PathValue("id"))
 	if _, err := a.Store.DeleteNetwork(r.Context(), r.PathValue("id")); err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	a.record(r, audit.ActionNetworkDelete, "network", r.PathValue("id"), before, nil)
 	a.reloadEngine(r)
 
 	// Deletion is the failure case that matters most: whatever the network
@@ -411,6 +418,7 @@ func (a *API) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	a.record(r, audit.ActionPolicyCreate, "policy", p.ID, nil, p)
 	a.reloadEngine(r)
 	writeJSON(w, http.StatusCreated, p)
 }
@@ -420,11 +428,18 @@ func (a *API) handleUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	// Read the prior state before the write, because "what did it say before?"
+	// is the question an audit log exists to answer and it is unanswerable
+	// afterwards. A read that fails is not allowed to fail the edit: the
+	// change is still legitimate, and the entry records what it can.
+	before, _ := a.Store.GetPolicy(r.Context(), r.PathValue("id"))
+
 	p, err := a.Store.UpdatePolicy(r.Context(), r.PathValue("id"), body.toInput())
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	a.record(r, audit.ActionPolicyUpdate, "policy", p.ID, before, p)
 	a.reloadEngine(r)
 	// A policy change can flip a name from blocked to allowed. Purging the
 	// cache makes that take effect on the next query rather than after a TTL,
@@ -434,10 +449,12 @@ func (a *API) handleUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleDeletePolicy(w http.ResponseWriter, r *http.Request) {
+	before, _ := a.Store.GetPolicy(r.Context(), r.PathValue("id"))
 	if err := a.Store.DeletePolicy(r.Context(), r.PathValue("id")); err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	a.record(r, audit.ActionPolicyDelete, "policy", r.PathValue("id"), before, nil)
 	a.reloadEngine(r)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -746,7 +763,12 @@ func (a *API) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	// t.Secret is populated exactly once, here.
+	// t.Secret is populated exactly once, here — and must not reach the audit
+	// log. audit.Redact would catch the field name anyway; naming only the
+	// identifying fields means the secret never enters the call.
+	a.record(r, audit.ActionTokenCreate, "token", t.ID, nil, map[string]any{
+		"id": t.ID, "name": t.Name, "prefix": t.Prefix,
+	})
 	writeJSON(w, http.StatusCreated, t)
 }
 
@@ -755,6 +777,8 @@ func (a *API) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	a.record(r, audit.ActionTokenRevoke, "token", r.PathValue("id"),
+		map[string]any{"id": r.PathValue("id")}, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -150,6 +150,59 @@ else changes: the index observes only and cannot affect an answer.
 Bounded at `dns.first_seen.max_rows` (100,000 by default) with the stalest
 domains evicted first, so it does not grow without end.
 
+### Decision records — `decisions`, `decision_evidence`
+
+One row per **blocked** query, plus the evidence that decision cited. Off by
+default; `log.decision_records: true` turns it on.
+
+| Field | Example | Notes |
+|---|---|---|
+| `domain` | `evil.example` | |
+| `client_ip`, `client_name` | `192.0.2.10`, `workstation-14` | Same attribution the query log holds |
+| `policy_path` | `network:Office → policy:Standard → category:malware → BLOCK` | |
+| `explanation` | `Blocked because URLhaus listed as malware.` | Stored as written, not regenerated |
+| cited evidence | feed name, category, claim, role | |
+
+It is the same **categories** of personal data as the query log, for a much
+smaller number of events — blocks are a fraction of traffic. Its own window,
+`log.decision_retention_days` (30 by default), pruned on the same hourly
+schedule as everything else.
+
+Worth knowing if you turned query logging off for privacy reasons: decision
+records are a separate switch and stay off unless you turn them on. If you want
+neither, leave both off.
+
+### The audit log — `audit_log`
+
+One row per **configuration change**, not per query. Who changed what, when,
+from where, and what the value was before and after.
+
+| Field | Example | Notes |
+|---|---|---|
+| `action` | `policy.update` | Closed set of dotted verbs |
+| `actor`, `actor_kind` | `admin`, `session` — or a token's name and `token` | |
+| `source` | `dashboard`, `api`, `config-reload`, `seed` | |
+| `target_type`, `target_id` | `policy`, `p_3` | What was changed |
+| `before_json`, `after_json` | `{"categories":["malware"]}` → `{"categories":["malware","phishing"]}` | Redacted before the write; see below |
+
+**This one is about the operator, not about the people using the network.** It
+records that somebody changed a policy at 14:02. It holds no domains, no client
+addresses, and no query data — a device's browsing history cannot be
+reconstructed from it, and erasing a device's query rows does not need to touch
+it.
+
+**Secrets are redacted before the row is written, not on the way out.** A
+password change stores `set`. A cleared provider key stores `cleared`. Bcrypt
+hashes, raw API tokens, provider keys and session material never reach the
+table in the first place, which matters because an audit export is the single
+most likely thing an operator hands to an auditor, an insurer, or a support
+engineer.
+
+Kept for `log.audit_retention_days` (90 by default) — deliberately longer than
+the query log, because "what changed before this started?" is asked about
+incidents nobody noticed for weeks. Zero keeps everything. The table grows per
+edit, not per lookup, so it stays small either way.
+
 ### Configuration
 
 Networks, policies, allow and block lists, feed settings, hashed API tokens, and
@@ -167,6 +220,8 @@ the bcrypt hash of the admin password. No plaintext secrets.
   resulting findings are persisted.
 - Any link between a device and a domain in the first-seen index. That table is
   domains and counts only — see above.
+- Any secret in the audit log. Credentials are replaced with `set` or `cleared`
+  at the point of writing, so there is no version of the row that ever held one.
 
 ## Turning it down
 

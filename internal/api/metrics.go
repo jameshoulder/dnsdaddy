@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
+	"github.com/jameshoulder/dnsdaddy/internal/audit"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
@@ -69,6 +70,10 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// The first-seen index. Observe-only, so none of this can move because a
 	// decision changed — it moves because the network talked to something new.
 	a.writeFirstSeenMetrics(&b)
+
+	// Decision records and the audit log: whether this installation can still
+	// say why it did what it did.
+	a.writeAccountabilityMetrics(&b)
 
 	// Client-access shape. Counts only: an alert wants to know that the number
 	// of publicly permitted ranges went from nought to one, not which address
@@ -499,4 +504,38 @@ func (a *API) writeFirstSeenMetrics(b *strings.Builder) {
 			fmt.Sprintf("dnsdaddy_firstseen_lookup_total{result=%q} %d", string(st), stats.Lookups[st]))
 	}
 	metric(b, "dnsdaddy_firstseen_lookup_total", "Index lookups, by result", "counter", lookupLines...)
+}
+
+// writeAccountabilityMetrics reports whether the record of what happened is
+// intact.
+//
+// Both writers drop rather than delaying the thing they describe — a DNS
+// answer in one case, a committed configuration change in the other — so a
+// non-zero drop count is not a malfunction, it is the designed behaviour under
+// pressure. What it is not is acceptable to leave invisible: an explanation
+// nobody can produce and an audit entry nobody wrote are indistinguishable
+// from nothing having happened, and these counters are the only thing that
+// tells an operator the difference.
+func (a *API) writeAccountabilityMetrics(b *strings.Builder) {
+	d := a.Decisions.Stats()
+	metric(b, "dnsdaddy_decisions_written_total", "Decision records written", "counter",
+		fmt.Sprintf("dnsdaddy_decisions_written_total %d", d.Written))
+	// Two reasons, both closed: the queue was full, or the write failed.
+	metric(b, "dnsdaddy_decisions_dropped_total", "Decision records not written, by reason", "counter",
+		fmt.Sprintf("dnsdaddy_decisions_dropped_total{reason=%q} %d", "full", d.Dropped),
+		fmt.Sprintf("dnsdaddy_decisions_dropped_total{reason=%q} %d", "failed", d.Failed))
+
+	au := a.Audit.Stats()
+	metric(b, "dnsdaddy_audit_written_total", "Audit entries written", "counter",
+		fmt.Sprintf("dnsdaddy_audit_written_total %d", au.Written))
+	lines := make([]string, 0, len(audit.DropReasons()))
+	for _, reason := range audit.DropReasons() {
+		lines = append(lines,
+			fmt.Sprintf("dnsdaddy_audit_dropped_total{reason=%q} %d", reason, au.Dropped[reason]))
+	}
+	metric(b, "dnsdaddy_audit_dropped_total", "Audit entries not written, by reason", "counter", lines...)
+
+	metric(b, "dnsdaddy_why_missing_total",
+		"Requests for an explanation that no stored record could answer", "counter",
+		fmt.Sprintf("dnsdaddy_why_missing_total %d", a.whyMissing.Load()))
 }

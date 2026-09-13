@@ -150,6 +150,16 @@ type QueryEvent struct {
 	// would silently mis-attribute a verdict whenever the same name was asked
 	// twice in the same instant, which is exactly what a busy resolver does.
 	DNSSECObservationID string `json:"-"`
+
+	// DecisionID correlates this query with the decision record explaining it,
+	// or is empty when nothing was decided, decision records are off, or the
+	// record was dropped under load.
+	//
+	// Generated on the answer path and given to both writers, because the two
+	// rows are inserted independently and a database-generated key on one is
+	// not visible to the other. Same mechanism as DNSSECObservationID, for the
+	// same reason.
+	DecisionID string `json:"decisionId,omitempty"`
 }
 
 // DNSSEC validation statuses recorded against a query.

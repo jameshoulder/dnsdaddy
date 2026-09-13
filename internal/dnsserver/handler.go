@@ -443,11 +443,12 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		h.blocked.Add(1)
 		event.Action = store.ActionBlocked
 		event.ElapsedMS = int(time.Since(start).Milliseconds())
+		// Recorded before the query log so the row can carry the correlation
+		// id. The recorder's send is non-blocking and drops rather than
+		// waiting, so this cannot delay an answer. See
+		// decisions.Recorder.Record.
+		event.DecisionID = h.recordDecision(event, match, decision, nil)
 		h.qlog.Record(event, persist)
-		// After the query log and before the response is built: the recorder's
-		// send is non-blocking and drops rather than waiting, so this cannot
-		// delay an answer. See decisions.Recorder.Record.
-		h.recordDecision(event, match, decision)
 		resp := blockResponse(req, decision.BlockMode)
 		h.observe(event, meta, resp.Rcode, 0, false, true)
 		return resp
@@ -501,6 +502,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	// deciding it. The call is a non-blocking channel send; res.Msg is already
 	// what this function will return, whatever any of this concludes.
 	event.DNSSECObservationID = h.observeDNSSEC(event, q, persist)
+	event.DecisionID = h.recordDecision(event, match, decision, h.observers(event.DNSSECObservationID))
 	h.qlog.Record(event, persist)
 	h.observe(event, meta, res.Rcode, res.MinTTL, res.Validated, false)
 	return res.Msg
@@ -741,11 +743,36 @@ func itoa(n int) string {
 // decision's basis — so this allocates one struct and offers it to a buffered
 // channel. With no recorder configured it is a nil comparison, which is the
 // cost a deployment that never turns this on pays per blocked query.
-func (h *Handler) recordDecision(event store.QueryEvent, match policy.Match, d policy.Decision) {
+// recordDecision queues the record explaining one query and returns the
+// correlation id to put on its query-log row.
+//
+// The id is minted here rather than taken from either table's primary key
+// because the two rows are written by different batched writers at different
+// times: the query-log row gets a SQLite rowid the decision writer never sees,
+// and the decision's own id is assigned after the query log has already
+// flushed. Generating it on the answer path is the only point at which both
+// writers can be told the same thing. Same mechanism as the DNSSEC
+// observation id, for the same reason.
+//
+// Returns "" when nothing was recorded, which is the common case: an ordinary
+// allowed query decides nothing and so explains nothing.
+//
+// An observe-mode engine having looked at the query is deliberately not enough
+// on its own. Observations attach to a record that exists for another reason;
+// they never bring one into being. The alternative is worse than it sounds:
+// Daddybound in Learn mode looks at every successfully resolved query, so
+// admitting observations as a reason to record would silently turn this from
+// one row per blocked query into one row per query the moment an operator
+// enabled local validation — inflating the table by three or four orders of
+// magnitude, on the same box, without either setting saying so. It would also
+// make "decision record" a misnomer for most of its contents.
+func (h *Handler) recordDecision(event store.QueryEvent, match policy.Match, d policy.Decision, observed []decisions.Observation) string {
 	if h.decisions == nil || !d.Basis.Decided() {
-		return
+		return ""
 	}
+	id := store.NewID("dec")
 	h.decisions.Record(decisions.Event{
+		ID:          id,
 		Time:        event.Time,
 		Domain:      event.Domain,
 		QType:       event.QType,
@@ -757,7 +784,26 @@ func (h *Handler) recordDecision(event store.QueryEvent, match policy.Match, d p
 		Blocked:     d.Blocked,
 		Reason:      d.Reason,
 		Basis:       d.Basis,
+		Observed:    observed,
 	})
+	return id
+}
+
+// observers lists the observe-mode engines that looked at this query.
+//
+// What each engine concluded is not available here and is deliberately not
+// guessed: detect.Engine.Observe is a channel send that returns nothing, and
+// Daddybound's verdict lands in its own table seconds later. What is true at
+// this moment is that the engine saw the query and where its answer will be,
+// so that is what gets recorded.
+func (h *Handler) observers(dnssecObsID string) []decisions.Observation {
+	var out []decisions.Observation
+	if dnssecObsID != "" {
+		out = append(out, decisions.Observation{
+			Engine: "daddybound", Mode: "observe", CorrelationID: dnssecObsID,
+		})
+	}
+	return out
 }
 
 // filterRebinding applies the rebinding filter to an answer and returns the

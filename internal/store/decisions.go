@@ -34,9 +34,36 @@ type Decision struct {
 	Explanation        string `json:"explanation"`
 	ExplanationVersion string `json:"explanationVersion"`
 
+	// Completeness is CompleteRecord or TruncatedRecord: whether Cited is the
+	// whole evidence list or was capped. A truncated record says so rather
+	// than presenting a partial list as the full story.
+	Completeness string `json:"completeness"`
+
 	// Cited is populated by DecisionWithEvidence, not by the list queries.
 	Cited []CitedEvidence `json:"evidence,omitempty"`
 }
+
+// Role says how a piece of evidence related to the outcome.
+type Role string
+
+const (
+	// RoleCaused is the evidence the decision turned on. There is normally
+	// exactly one.
+	RoleCaused Role = "caused"
+	// RoleContributed is evidence that was part of the reasoning without being
+	// the deciding fact — a listing an allow-list overrode, for instance.
+	RoleContributed Role = "contributed"
+	// RoleObserved is evidence from an engine that cannot change an outcome.
+	//
+	// The value exists so that "did a detector cause this block?" is
+	// answerable from the row rather than from knowing which engines happen to
+	// enforce in this release. Only observe-mode engines are written with it,
+	// and nothing else may be.
+	RoleObserved Role = "observed"
+)
+
+// Contributing reports whether a role changed the outcome.
+func (r Role) Contributing() bool { return r == RoleCaused || r == RoleContributed }
 
 // CitedEvidence is one piece of evidence a decision referred to.
 type CitedEvidence struct {
@@ -44,7 +71,37 @@ type CitedEvidence struct {
 	// Contributed reports whether this evidence changed the outcome, as
 	// opposed to merely being on file at the time. An explanation that
 	// conflates the two overstates its own case.
+	//
+	// Kept for the API's v1 promise and for a downgraded binary; Role is the
+	// finer answer and the one to read.
 	Contributed bool `json:"contributed"`
+	// Role is how this evidence related to the outcome.
+	Role Role `json:"role"`
+}
+
+// Completeness states for a decision record.
+const (
+	// CompleteRecord means the evidence list is the whole list.
+	CompleteRecord = "complete"
+	// TruncatedRecord means there was more evidence than the cap allows.
+	TruncatedRecord = "truncated"
+)
+
+// roleOrLegacy reads a role, falling back to the contributed flag for rows
+// written before the column existed.
+//
+// Legacy rows only ever carried the evidence that decided, so contributed
+// maps to caused rather than to the weaker "contributed" — calling an old
+// record's only evidence merely contributory would understate what it said.
+func roleOrLegacy(role string, contributed bool) Role {
+	switch Role(role) {
+	case RoleCaused, RoleContributed, RoleObserved:
+		return Role(role)
+	}
+	if contributed {
+		return RoleCaused
+	}
+	return RoleContributed
 }
 
 // RecordDecision writes a decision and the evidence it cited, in one
@@ -74,30 +131,42 @@ func (s *Store) RecordDecision(ctx context.Context, d Decision, cited []CitedEvi
 	if d.QueryLogID != nil {
 		qlID = *d.QueryLogID
 	}
+	if d.Completeness == "" {
+		d.Completeness = CompleteRecord
+	}
 	const insert = `
 		INSERT INTO decisions
 			(id, ts, query_log_id, subject_type, subject, action, category,
 			 rule, policy_path, policy_id, network_id, client_ip, client_name,
-			 qtype, explanation, explanation_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			 qtype, explanation, explanation_version, completeness)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if _, err := tx.ExecContext(ctx, insert,
 		d.ID, unixMilli(d.Time), qlID, string(d.Subject.Type), d.Subject.Value,
 		d.Action, d.Category, d.Rule, d.PolicyPath, d.PolicyID, d.NetworkID,
 		d.ClientIP, d.ClientName, d.QType, d.Explanation, d.ExplanationVersion,
+		d.Completeness,
 	); err != nil {
 		return Decision{}, err
 	}
 
-	for _, c := range cited {
+	for i := range cited {
+		c := &cited[i]
 		if c.Evidence.ID == "" {
 			continue
 		}
+		if c.Role == "" {
+			c.Role = roleOrLegacy("", c.Contributed)
+		}
+		// Both columns are written. contributed is what a downgraded binary
+		// reads, and it must not disagree with role: observed evidence did not
+		// contribute, and the other two did.
 		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO decision_evidence (decision_id, evidence_id, contributed)
-			 VALUES (?, ?, ?)`,
-			d.ID, c.Evidence.ID, boolToInt(c.Contributed)); err != nil {
+			`INSERT OR IGNORE INTO decision_evidence (decision_id, evidence_id, contributed, role)
+			 VALUES (?, ?, ?, ?)`,
+			d.ID, c.Evidence.ID, boolToInt(c.Role.Contributing()), string(c.Role)); err != nil {
 			return Decision{}, err
 		}
+		c.Contributed = c.Role.Contributing()
 	}
 	if err := tx.Commit(); err != nil {
 		return Decision{}, err
@@ -125,7 +194,7 @@ func (s *Store) ListDecisions(ctx context.Context, f DecisionFilter) ([]Decision
 	q := `
 		SELECT id, ts, query_log_id, subject_type, subject, action, category,
 		       rule, policy_path, policy_id, network_id, client_ip, client_name,
-		       qtype, explanation, explanation_version
+		       qtype, explanation, explanation_version, completeness
 		  FROM decisions WHERE 1=1`
 	args := []any{}
 	if f.Subject != "" {
@@ -170,7 +239,7 @@ func (s *Store) DecisionWithEvidence(ctx context.Context, id string) (Decision, 
 	const q = `
 		SELECT id, ts, query_log_id, subject_type, subject, action, category,
 		       rule, policy_path, policy_id, network_id, client_ip, client_name,
-		       qtype, explanation, explanation_version
+		       qtype, explanation, explanation_version, completeness
 		  FROM decisions WHERE id = ?`
 	d, err := scanDecision(s.db.QueryRowContext(ctx, q, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -181,24 +250,24 @@ func (s *Store) DecisionWithEvidence(ctx context.Context, id string) (Decision, 
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT evidence_id, contributed FROM decision_evidence WHERE decision_id = ?`, id)
+		`SELECT evidence_id, contributed, role FROM decision_evidence WHERE decision_id = ?`, id)
 	if err != nil {
 		return Decision{}, err
 	}
 	defer rows.Close()
 
 	var (
-		ids         []string
-		contributed = map[string]bool{}
+		ids   []string
+		roles = map[string]Role{}
 	)
 	for rows.Next() {
-		var evID string
+		var evID, role string
 		var contrib int
-		if err := rows.Scan(&evID, &contrib); err != nil {
+		if err := rows.Scan(&evID, &contrib, &role); err != nil {
 			return Decision{}, err
 		}
 		ids = append(ids, evID)
-		contributed[evID] = contrib != 0
+		roles[evID] = roleOrLegacy(role, contrib != 0)
 	}
 	if err := rows.Err(); err != nil {
 		return Decision{}, err
@@ -210,7 +279,10 @@ func (s *Store) DecisionWithEvidence(ctx context.Context, id string) (Decision, 
 	}
 	d.Cited = make([]CitedEvidence, 0, len(found))
 	for _, e := range found {
-		d.Cited = append(d.Cited, CitedEvidence{Evidence: e, Contributed: contributed[e.ID]})
+		role := roles[e.ID]
+		d.Cited = append(d.Cited, CitedEvidence{
+			Evidence: e, Role: role, Contributed: role.Contributing(),
+		})
 	}
 	return d, nil
 }
@@ -242,8 +314,11 @@ func scanDecision(sc rowScanner) (Decision, error) {
 	if err := sc.Scan(&d.ID, &ts, &qlID, &subjType, &d.Subject.Value, &d.Action,
 		&d.Category, &d.Rule, &d.PolicyPath, &d.PolicyID, &d.NetworkID,
 		&d.ClientIP, &d.ClientName, &d.QType, &d.Explanation,
-		&d.ExplanationVersion); err != nil {
+		&d.ExplanationVersion, &d.Completeness); err != nil {
 		return Decision{}, err
+	}
+	if d.Completeness == "" {
+		d.Completeness = CompleteRecord
 	}
 	d.Time = fromUnixMilli(ts)
 	d.Subject.Type = evidence.SubjectType(subjType)

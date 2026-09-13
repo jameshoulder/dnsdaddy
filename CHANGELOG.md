@@ -22,6 +22,67 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Why was this blocked? — decision records, an audit log, and a "why" API
+
+`GET /api/v1/queries/{id}/why` explains one query from the record written when
+it was decided: the sentence as it stood, the policy path, and the evidence
+behind it. It never re-runs the policy engine and never re-reads a feed, which
+is the whole point — feeds change, and an explanation that re-evaluated the
+current world would quietly claim last night's block never had a basis.
+
+**Blunt version first: queries answered before you turn this on have no "why",
+and no amount of later work can give them one.** The explanation is read back
+from something stored at decision time. If it was not stored, it does not
+exist, and the feeds have moved on since. Those queries report
+`completeness: missing` with the reason stated rather than a reconstructed
+story. Decision records are still off by default (`log.decision_records`), so
+on most installations that is *every* query until somebody switches it on.
+
+`missing` says which of three things happened, because they are not the same:
+nothing decided the query and there was never anything to record; something
+decided it but the record was dropped under load or predates the feature; or
+the query log names a decision the decisions table does not hold, which is what
+a drop between two independent writers looks like from outside.
+
+**Evidence now carries a role — `caused`, `contributed` or `observed`.** An
+allow-list win says what it beat (`OverrodeFeedName`, `OverrodeCategory`), so
+"why is this malware domain resolving?" gets an answer that mentions the
+malware. Observe-mode engines — Daddybound in Learn mode, the behavioural
+detectors, the first-seen index — are recorded as `observed` and can never
+appear as a cause, because they cannot be one. A record listing a bogus DNSSEC
+verdict next to a block with nothing to separate them would read as if
+validation had refused the answer. It did not and it cannot.
+
+An observation is also not enough on its own to create a record. Daddybound in
+Learn mode looks at every query that resolves, so admitting observations as a
+reason to write would have turned this table from one row per block into one
+row per query the moment somebody enabled local DNSSEC validation.
+
+**New: a configuration audit log**, always on, at `GET /api/v1/audit`. One row
+per operator change — policies, networks, tokens, provider credentials, mode
+switches, password changes, session revocations — with the actor, the source,
+and the value before and after. It grows per edit rather than per query, so no
+amount of DNS traffic can fill it. Secrets are redacted *before* the write: a
+credential change stores `set` or `cleared`, never the value, so an audit
+export cannot carry one. Kept for `log.audit_retention_days` (default 90,
+deliberately longer than the query log — "what changed before this started?" is
+asked about incidents nobody noticed for weeks); 0 keeps everything.
+
+Neither writer ever delays what it describes. The decision recorder drops
+rather than putting SQLite's write latency into a DNS answer; the audit writer
+batches, so an operator's already-committed policy update is never failed
+because its row could not be queued. Both drops are counted and both are
+visible — `dnsdaddy_decisions_dropped_total`, `dnsdaddy_audit_dropped_total`,
+`dnsdaddy_why_missing_total`, the `dropped` field on every `/api/v1/audit`
+response, and a `dnsdaddy doctor` warning. An audit log with holes is only
+trustworthy if the holes are visible.
+
+**Not here:** indicator lifecycle. A record names the feed that listed a domain
+and what it was called, but not how long it had been listed or whether the
+listing has since aged out — `blocklist.Entry` carries no first-seen, last-seen
+or expiry, so there is nothing to record. See
+[docs/decision-records.md](docs/decision-records.md).
+
 ### First-seen domain index
 
 "This domain has never been resolved on this network before" is one of the more

@@ -482,13 +482,24 @@ type Logging struct {
 	// explanation should not pay for one.
 	DecisionRecords bool `yaml:"decision_records"`
 	// DecisionRetentionDays bounds how long those records are kept.
-	DecisionRetentionDays int  `yaml:"decision_retention_days"`
-	QueryLog              bool `yaml:"query_log"`
-	LogClientIP           bool `yaml:"log_client_ip"`
-	RetentionDays         int  `yaml:"retention_days"`
-	RollupDays            int  `yaml:"rollup_days"`
-	BufferSize            int  `yaml:"buffer_size"`
-	FlushIntervalMS       int  `yaml:"flush_interval_ms"`
+	DecisionRetentionDays int `yaml:"decision_retention_days"`
+
+	// AuditRetentionDays bounds how long the record of configuration changes
+	// is kept.
+	//
+	// Its own window, deliberately longer than the query log's. The two answer
+	// different questions over different timescales — who resolved what last
+	// week, versus who changed the policy that let them — and an operator who
+	// shortened query-log retention for privacy has said nothing about how
+	// long they want to remember their own edits. Zero disables the prune and
+	// keeps everything.
+	AuditRetentionDays int  `yaml:"audit_retention_days"`
+	QueryLog           bool `yaml:"query_log"`
+	LogClientIP        bool `yaml:"log_client_ip"`
+	RetentionDays      int  `yaml:"retention_days"`
+	RollupDays         int  `yaml:"rollup_days"`
+	BufferSize         int  `yaml:"buffer_size"`
+	FlushIntervalMS    int  `yaml:"flush_interval_ms"`
 }
 
 // Cache controls the answer cache.
@@ -642,10 +653,15 @@ func Default() Config {
 			LogClientIP:           true,
 			DecisionRecords:       false,
 			DecisionRetentionDays: 30,
-			RetentionDays:         7,
-			RollupDays:            90,
-			BufferSize:            8192,
-			FlushIntervalMS:       500,
+			// Ninety days: long enough that "what changed before this
+			// started?" is answerable about an incident nobody noticed for a
+			// month, short enough that the table stays small — it grows per
+			// edit, not per query.
+			AuditRetentionDays: 90,
+			RetentionDays:      7,
+			RollupDays:         90,
+			BufferSize:         8192,
+			FlushIntervalMS:    500,
 		},
 		Cache: Cache{
 			Enabled:     true,

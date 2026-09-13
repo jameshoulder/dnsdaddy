@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -32,8 +33,8 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO query_log (ts, client_ip, client_name, network_id, qname, qtype,
 			                       action, reason, category, source, proto, elapsed_ms, cached,
-			                       dnssec, dnssec_obs)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			                       dnssec, dnssec_obs, decision_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return err
 		}
@@ -42,7 +43,8 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		for _, e := range events {
 			if _, err := stmt.ExecContext(ctx, unixMilli(e.Time), e.ClientIP, e.ClientName, e.NetworkID,
 				e.Domain, e.QType, e.Action, e.Reason, e.Category, e.Source, e.Proto,
-				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID); err != nil {
+				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID,
+				e.DecisionID); err != nil {
 				return err
 			}
 		}
@@ -196,7 +198,8 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 	// ("network_id = ?"); every filter value is bound as a parameter in args.
 	// Never append a fragment built from input here.
 	q := `SELECT id, ts, client_ip, client_name, network_id, qname, qtype, action,
-	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs
+	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs,
+	             decision_id
 	      FROM query_log WHERE ` + strings.Join(where, " AND ") + `
 	      ORDER BY id DESC LIMIT ?`
 
@@ -215,7 +218,7 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 		)
 		if err := rows.Scan(&e.ID, &ts, &e.ClientIP, &e.ClientName, &e.NetworkID, &e.Domain,
 			&e.QType, &e.Action, &e.Reason, &e.Category, &e.Source, &e.Proto, &e.ElapsedMS,
-			&cached, &e.DNSSEC, &e.DNSSECObservationID); err != nil {
+			&cached, &e.DNSSEC, &e.DNSSECObservationID, &e.DecisionID); err != nil {
 			return nil, 0, err
 		}
 		e.Time = fromUnixMilli(ts)
@@ -495,4 +498,35 @@ func (s *Store) CountQueryLogRows(ctx context.Context) (int64, error) {
 	var n int64
 	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM query_log").Scan(&n)
 	return n, err
+}
+
+// QueryByID returns one query-log row.
+//
+// The "why" endpoint needs it in order to tell three states apart that all
+// look like "no explanation" from the outside: the query decided nothing, the
+// decision record was dropped under load, and the query predates decision
+// records entirely. Only the row itself distinguishes them.
+func (s *Store) QueryByID(ctx context.Context, id int64) (QueryEvent, error) {
+	var (
+		e      QueryEvent
+		ts     int64
+		cached int
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, ts, client_ip, client_name, network_id, qname, qtype, action,
+		       reason, category, source, proto, elapsed_ms, cached, dnssec,
+		       dnssec_obs, decision_id
+		  FROM query_log WHERE id = ?`, id,
+	).Scan(&e.ID, &ts, &e.ClientIP, &e.ClientName, &e.NetworkID, &e.Domain,
+		&e.QType, &e.Action, &e.Reason, &e.Category, &e.Source, &e.Proto,
+		&e.ElapsedMS, &cached, &e.DNSSEC, &e.DNSSECObservationID, &e.DecisionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return QueryEvent{}, ErrNotFound
+	}
+	if err != nil {
+		return QueryEvent{}, err
+	}
+	e.Time = fromUnixMilli(ts)
+	e.Cached = cached == 1
+	return e, nil
 }

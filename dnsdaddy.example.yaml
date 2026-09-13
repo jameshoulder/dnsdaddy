@@ -414,6 +414,23 @@ log:
   # asked weeks after the fact.
   decision_retention_days: 30
 
+  # How long the record of CONFIGURATION CHANGES is kept — who changed which
+  # policy, network, token, provider credential or mode, when, and what the
+  # value was before and after.
+  #
+  # Always on. This table grows per operator edit, not per query, so it stays
+  # small on any installation: there is no traffic level at which it becomes
+  # expensive, and no way for a client to fill it by sending lookups.
+  #
+  # Longer than the query log on purpose. An audit log answers "what changed
+  # before this started?", and incidents are usually noticed weeks late.
+  # 0 disables the prune and keeps everything.
+  #
+  # Secrets never reach it: a credential change records "set" or "cleared",
+  # never the value, and the redaction happens before the write rather than at
+  # the point somebody reads or exports it.
+  audit_retention_days: 90
+
   # How long the hourly statistics used by the dashboard and reports are kept.
   # These survive the query-log prune, so charts keep their history.
   rollup_days: 90

@@ -19,6 +19,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/jameshoulder/dnsdaddy/internal/audit"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -56,6 +57,9 @@ type harness struct {
 	// dir is the data directory, kept so a test can reopen the database and
 	// check that a setting survived a restart.
 	dir string
+	// audit is the live audit logger, so a test can wait for its queue to
+	// drain rather than sleeping.
+	audit *audit.Logger
 	// api is the API itself, for tests that must call a handler directly
 	// rather than over the loopback listener — the health tests need a peer
 	// address that is not loopback, and httptest only serves 127.0.0.1.
@@ -167,6 +171,11 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("EnsureAdminPassword: %v", err)
 	}
 
+	auditLog := audit.New(st, audit.Options{Log: log})
+	auditCtx, auditCancel := context.WithCancel(context.Background())
+	go auditLog.Run(auditCtx)
+	t.Cleanup(func() { auditCancel(); auditLog.Wait() })
+
 	api := New(Deps{
 		Config:   cfg,
 		Store:    st,
@@ -185,6 +194,7 @@ func newHarness(t *testing.T) *harness {
 		Auth:      auth,
 		Log:       log,
 		ClientACL: acl,
+		Audit:     auditLog,
 		StartedAt: time.Now(),
 	})
 
@@ -197,6 +207,7 @@ func newHarness(t *testing.T) *harness {
 		holdACLReload: &holdACLReload,
 		client:        &http.Client{Jar: jar},
 		detector:      detector, lists: lists, feeds: feeds, dir: dir,
+		audit: auditLog,
 	}
 }
 
@@ -756,4 +767,27 @@ func TestDashboardAssetsServed(t *testing.T) {
 			t.Errorf("GET %s Content-Type = %q, want it to contain %q", path, ct, want)
 		}
 	}
+}
+
+// drainAudit waits for queued audit entries to reach the database.
+//
+// The logger is asynchronous on purpose — a committed mutation must never wait
+// on its own audit row — so a test that asserts on the log has to wait for it
+// rather than assuming.
+func (h *harness) drainAudit(want int) {
+	h.t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	var n int64
+	for time.Now().Before(deadline) {
+		var err error
+		n, err = h.store.CountAudit(context.Background())
+		if err != nil {
+			h.t.Fatalf("CountAudit: %v", err)
+		}
+		if n >= int64(want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	h.t.Fatalf("only %d audit entries were written, want at least %d", n, want)
 }

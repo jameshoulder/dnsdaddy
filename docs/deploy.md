@@ -895,6 +895,8 @@ What it tells apart, which `dig` alone cannot:
 | A network exists but gets nothing | that the network is **not permitted to use the resolver**, quoting the effective ACL and naming the tick-box that fixes it |
 | Everything resolves, nothing blocked | that the **threat index is empty**, or is enforcing last-known-good data that is stale |
 | Names fail intermittently | which **upstreams** resolved a real test query and which did not — and, for one that answered `REFUSED` or `SERVFAIL`, that the transport is fine and the problem is the resolver itself |
+| A block nobody can explain | whether **decision records are off** (the query log keeps a one-line reason with no sources behind it), whether the tables are missing, and how many records and configuration changes are actually stored |
+| Records with holes in them | how many decision records and audit entries were **dropped under load**. Both writers drop rather than delaying what they describe — a DNS answer, or a change that has already committed — so this is designed behaviour, and it is reported because an explanation nobody can produce is indistinguishable from nothing having happened |
 
 ### The most common first-install failure
 

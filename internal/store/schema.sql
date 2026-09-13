@@ -155,8 +155,20 @@ CREATE TABLE IF NOT EXISTS query_log (
     -- observation queue was full. Deliberately not a foreign key: the two rows
     -- are written independently and asynchronously, and neither may wait for
     -- the other. A dangling id means "no observation", not an error.
-    dnssec_obs  TEXT    NOT NULL DEFAULT ''
+    dnssec_obs  TEXT    NOT NULL DEFAULT '',
+    -- The decision record explaining this row, or '' when nothing was decided
+    -- and there is nothing to explain.
+    --
+    -- A correlation id the application generated, not a foreign key, for the
+    -- same reason as dnssec_obs above: the two rows are written by different
+    -- batched writers at different times and neither may wait for the other.
+    -- The id is minted on the answer path and handed to both, so the link
+    -- exists even though nothing enforces it. A dangling id means the decision
+    -- was dropped under load, which the "why" endpoint reports rather than
+    -- hides.
+    decision_id TEXT    NOT NULL DEFAULT ''
 );
+
 
 CREATE INDEX IF NOT EXISTS query_log_ts_idx        ON query_log (ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_action_ts_idx ON query_log (action, ts DESC);
@@ -284,6 +296,39 @@ CREATE TABLE IF NOT EXISTS blocked_domain_stats (
 );
 
 CREATE INDEX IF NOT EXISTS blocked_domain_stats_day_idx ON blocked_domain_stats (day DESC, count DESC);
+
+-- Changes an operator made to how this resolver behaves.
+--
+-- Append-only from the application's point of view: nothing updates a row, and
+-- the only deletion is the retention prune. This is the management plane, not
+-- the query plane -- one row per configuration change, never one per DNS
+-- query. query_log is where per-query history lives, and conflating the two
+-- would make an attacker able to fill this table by sending traffic.
+--
+-- before_json and after_json are redacted at the boundary that writes them:
+-- see internal/audit.Redact. A row must never carry a token, a password hash,
+-- a provider key or session material, because the audit log is the one table
+-- an operator is most likely to export and hand to somebody else.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          TEXT    PRIMARY KEY,
+    ts          INTEGER NOT NULL,
+    -- Who: a user id, an API token id, or one of the synthetic actors
+    -- ("local-config", "seed") for changes nobody clicked.
+    actor       TEXT    NOT NULL DEFAULT '',
+    actor_kind  TEXT    NOT NULL DEFAULT '',
+    -- What: a dotted verb such as policy.update or token.revoke.
+    action      TEXT    NOT NULL,
+    target_type TEXT    NOT NULL DEFAULT '',
+    target_id   TEXT    NOT NULL DEFAULT '',
+    before_json TEXT    NOT NULL DEFAULT '',
+    after_json  TEXT    NOT NULL DEFAULT '',
+    -- Where it came from: dashboard, api, config-reload, seed.
+    source      TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS audit_ts_idx     ON audit_log (ts DESC);
+CREATE INDEX IF NOT EXISTS audit_target_idx ON audit_log (target_type, target_id, ts DESC);
+CREATE INDEX IF NOT EXISTS audit_action_idx ON audit_log (action, ts DESC);
 
 CREATE TABLE IF NOT EXISTS api_tokens (
     id           TEXT PRIMARY KEY,
@@ -478,7 +523,12 @@ CREATE TABLE IF NOT EXISTS decisions (
     explanation   TEXT    NOT NULL DEFAULT '',
     -- Schema version of the explanation, so a later wording change is visible
     -- as a version rather than silently rewriting history.
-    explanation_version TEXT NOT NULL DEFAULT '1.0'
+    explanation_version TEXT NOT NULL DEFAULT '1.0',
+    -- 'complete' or 'truncated'. A record that had more evidence than the cap
+    -- allows says so rather than presenting a partial list as the whole story.
+    -- "missing" is deliberately not a value here: a record that does not exist
+    -- cannot carry a column, and the API derives that state from the absence.
+    completeness TEXT NOT NULL DEFAULT 'complete'
 );
 
 CREATE INDEX IF NOT EXISTS decisions_ts_idx ON decisions (ts DESC);
@@ -490,6 +540,21 @@ CREATE INDEX IF NOT EXISTS decisions_subject_idx ON decisions (subject_type, sub
 CREATE TABLE IF NOT EXISTS decision_evidence (
     decision_id TEXT    NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
     evidence_id TEXT    NOT NULL,
+    -- Kept alongside role so an older binary reading this table still sees the
+    -- distinction it understands. role is the finer answer; contributed is
+    -- role != 'observed'.
     contributed INTEGER NOT NULL DEFAULT 0,
+    -- 'caused', 'contributed' or 'observed'.
+    --
+    -- The three-way split exists because two-way could not express the thing
+    -- that matters most: an engine that only observes must never be readable
+    -- as the reason something was blocked. Observe-mode engines are written
+    -- with 'observed' and nothing else can write that value, so "did a
+    -- detector cause this block?" is answerable from the row rather than from
+    -- knowing which engines happen to enforce this release.
+    --
+    -- Empty on rows written before this column existed; readers map those from
+    -- contributed.
+    role        TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (decision_id, evidence_id)
 );

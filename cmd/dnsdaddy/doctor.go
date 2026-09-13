@@ -100,6 +100,7 @@ func runDoctor(args []string) error {
 	// Reported next to the ACL because the two answer halves of one question:
 	// the ACL says who may use this resolver, and this says how much of it any
 	// one of them may take.
+	checks = append(checks, doctorAccountability(ctx, st, cfg)...)
 	checks = append(checks, doctorFirstSeen(ctx, st, cfg)...)
 	checks = append(checks, doctorRebinding(ctx, st, cfg)...)
 	checks = append(checks, diag.RateLimit(diag.RateLimitInput{
@@ -832,4 +833,37 @@ func doctorFirstSeen(ctx context.Context, st *store.Store, cfg config.Config) []
 		}
 	}
 	return diag.FirstSeen(in)
+}
+
+// doctorAccountability reports whether this installation can still say why it
+// did what it did.
+//
+// Drop counters live in the running daemon and are reported through /metrics;
+// this command reads the database, so it passes zero rather than guessing. A
+// doctor that invented a drop count would be making something up about the
+// thing this check exists to verify.
+func doctorAccountability(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
+	in := diag.AccountabilityInput{
+		DecisionsEnabled:      cfg.Log.DecisionRecords,
+		DecisionRetentionDays: cfg.Log.DecisionRetentionDays,
+		AuditRetentionDays:    cfg.Log.AuditRetentionDays,
+		SchemaPresent:         st != nil,
+	}
+	if st == nil {
+		// No database to read. The DATABASE check already says so, and
+		// repeating it here as an accountability failure would tell an
+		// operator their audit trail is broken when this command simply could
+		// not look.
+		return nil
+	}
+	if n, err := st.CountDecisions(ctx); err == nil {
+		in.DecisionRows = n
+	}
+	if n, err := st.CountAudit(ctx); err == nil {
+		in.AuditRows = n
+	}
+	if at, err := st.LastAuditAt(ctx); err == nil {
+		in.LastAuditAt = at
+	}
+	return diag.Accountability(in)
 }

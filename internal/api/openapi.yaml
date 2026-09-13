@@ -1347,6 +1347,81 @@ paths:
                       lastAt:     { type: string, format: date-time }
                       lastStatus: { type: string }
 
+  /api/v1/queries/{id}/why:
+    get:
+      summary: Why one query was answered the way it was
+      description: >-
+        Reconstructed entirely from the record written when the decision was
+        made. The policy engine is never re-run and the feeds are never
+        re-read: a feed that dropped a domain this morning must not change why
+        it was blocked last night.
+
+
+        Read `completeness` before anything else. `complete` means the evidence
+        list is the whole list. `truncated` means the decision cited more than
+        a record holds. `missing` means there is no record, and `note` says
+        which of three things happened — nothing decided the query, the record
+        was dropped while the resolver was under load, or the query predates
+        decision records. In the missing case `reason` is still present, but it
+        is the query log's own one-line summary with no stored evidence behind
+        it and must not be presented as a full explanation.
+
+
+        Each evidence item carries a `role`. Only `caused` evidence decided the
+        outcome. `observed` comes from an engine that cannot change an outcome
+        at all, and a client that renders it as a cause is asserting
+        enforcement this resolver does not do.
+      tags: [Detection]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: The explanation, or an honest statement that there is none.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueryWhy" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/audit:
+    get:
+      summary: Configuration changes, most recent first
+      description: >-
+        One row per change an operator made — policies, networks, API tokens,
+        provider credentials, reputation mode — never one per DNS query. Secrets
+        are redacted before they are written, so an export of this log carries
+        no credential.
+
+
+        `dropped` is on every response rather than only in `/metrics`: the
+        writer drops rather than failing a change that has already committed,
+        so an audit log can have holes, and the person reading it is the one
+        who needs to know.
+      tags: [Diagnostics]
+      parameters:
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: target_type
+          in: query
+          schema: { type: string }
+        - name: target_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, default: 100 }
+      responses:
+        "200":
+          description: Recent configuration changes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
   /api/v1/first-seen:
     get:
       summary: Has this installation ever been asked for this domain?
@@ -1896,6 +1971,83 @@ components:
             (0.0.0.0/0 or ::/0) is rejected: it would disable the filter for
             this policy while every status display still reported it as on.
             Omitted leaves the list unchanged; an empty array clears it.
+
+    WhyEvidence:
+      type: object
+      properties:
+        kind: { type: string, description: "feed, provider, operator or local." }
+        source: { type: string }
+        sourceName: { type: string }
+        category: { type: string }
+        claim: { type: string, description: What this source asserted, in its own terms. }
+        confidence: { type: string }
+        observedAt: { type: string, format: date-time }
+        role:
+          type: string
+          enum: [caused, contributed, observed]
+          description: >-
+            `caused` decided the outcome. `contributed` was part of the
+            reasoning without deciding it — a feed listing an allow-list
+            overrode, for instance. `observed` came from an engine that cannot
+            change an outcome and must never be rendered as a cause.
+
+    QueryWhy:
+      type: object
+      properties:
+        queryId: { type: integer, format: int64 }
+        domain: { type: string }
+        qtype: { type: string }
+        time: { type: string, format: date-time }
+        action: { type: string }
+        completeness:
+          type: string
+          enum: [complete, truncated, missing]
+        explanation:
+          type: string
+          description: The sentence written when the decision was made, not one regenerated now.
+        reason:
+          type: string
+          description: >-
+            The query log's own flattened summary. Present even when
+            completeness is `missing`, where it has no stored evidence behind
+            it.
+        policy:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            path: { type: string }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/WhyEvidence" }
+        note: { type: string, description: Why a record is missing or truncated, in words. }
+
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: string }
+        time: { type: string, format: date-time }
+        actor: { type: string }
+        actorKind: { type: string, enum: [session, token, system] }
+        action: { type: string, description: "A dotted verb such as policy.update or token.revoke." }
+        targetType: { type: string }
+        targetId: { type: string }
+        before: { type: string, description: JSON of the prior state, redacted. }
+        after: { type: string, description: JSON of the new state, redacted. }
+        source: { type: string, enum: [dashboard, api, config-reload, seed] }
+
+    AuditList:
+      type: object
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEntry" }
+        written: { type: integer, format: int64 }
+        dropped:
+          type: object
+          additionalProperties: { type: integer, format: int64 }
+          description: Entries not written, by reason. Non-zero means this log has gaps.
+        note: { type: string }
 
     FirstSeenRecord:
       type: object

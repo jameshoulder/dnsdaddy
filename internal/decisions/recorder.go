@@ -27,6 +27,7 @@ package decisions
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -42,6 +43,10 @@ import (
 // A value, not a pointer into resolver state: by the time the worker reads it
 // the query is long finished and anything it pointed at may have been reused.
 type Event struct {
+	// ID is the correlation the answer path minted, so the query-log row and
+	// this record name each other. Empty lets the store assign one, which is
+	// what a caller with nothing to correlate wants.
+	ID          string
 	Time        time.Time
 	Domain      string
 	QType       string
@@ -53,6 +58,34 @@ type Event struct {
 	Blocked     bool
 	Reason      string
 	Basis       *policy.Basis
+
+	// Observed names the observe-mode engines that looked at this query and
+	// what correlation each left behind.
+	//
+	// Deliberately not their verdicts. Every observe engine in this resolver
+	// is asynchronous — detect.Engine.Observe is a channel send that returns
+	// nothing, and Daddybound's verdict lands in its own table seconds later —
+	// so at decision time there is no conclusion to record. What can be
+	// recorded is that the engine saw the query and where its answer will be,
+	// which is enough to join later and is true when written.
+	//
+	// This is also why nothing here can ever be read as the cause of a block:
+	// it is written with RoleObserved and the recorder has no path that writes
+	// an observe engine any other way.
+	Observed []Observation
+}
+
+// Observation is one observe-mode engine's involvement in a query.
+type Observation struct {
+	// Engine is the short name: daddybound, detectors, first_seen.
+	Engine string
+	// Mode is what that engine is doing today. "observe" for all of them; the
+	// field exists so a record written while an engine observed still says so
+	// after that engine learns to enforce.
+	Mode string
+	// CorrelationID points at where this engine's conclusion will be found,
+	// when it produces one. Empty when the engine leaves no row.
+	CorrelationID string
 }
 
 // Recorder queues decisions and writes them off the resolution path.
@@ -102,8 +135,10 @@ func (r *Recorder) Record(e Event) {
 	if r == nil || r.stopped.Load() {
 		return
 	}
-	// An ordinary allowed query has no basis and nothing to explain.
-	if !e.Basis.Decided() {
+	// An ordinary allowed query that nothing looked at has nothing to explain,
+	// and recording one per query would turn this table into a second query
+	// log that an attacker could fill with traffic.
+	if !e.Basis.Decided() && len(e.Observed) == 0 {
 		return
 	}
 	select {
@@ -141,7 +176,7 @@ func (r *Recorder) write(ctx context.Context, e Event) {
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cited, err := r.recordEvidence(wctx, e)
+	cited, truncated, err := r.recordEvidence(wctx, e)
 	if err != nil {
 		r.failed.Add(1)
 		// The domain is in the query log already, so naming it here discloses
@@ -153,6 +188,7 @@ func (r *Recorder) write(ctx context.Context, e Event) {
 	}
 
 	d := store.Decision{
+		ID:         e.ID,
 		Time:       e.Time,
 		Subject:    evidence.Domain(e.Domain),
 		Action:     e.Action,
@@ -165,6 +201,10 @@ func (r *Recorder) write(ctx context.Context, e Event) {
 		ClientName: e.ClientName,
 		QType:      e.QType,
 	}
+	d.Completeness = store.CompleteRecord
+	if truncated {
+		d.Completeness = store.TruncatedRecord
+	}
 	d.Explanation = Explain(e, cited)
 
 	if _, err := r.store.RecordDecision(wctx, d, cited); err != nil {
@@ -176,21 +216,124 @@ func (r *Recorder) write(ctx context.Context, e Event) {
 	r.written.Add(1)
 }
 
-// recordEvidence writes the evidence implied by the basis and returns it.
+// MaxEvidence caps how many pieces of evidence one decision may cite.
 //
-// One piece of evidence per basis, because one rule fired. Everything else on
-// file about the subject is shown alongside by the investigation view; only
-// what actually decided is cited as contributing.
-func (r *Recorder) recordEvidence(ctx context.Context, e Event) ([]store.CitedEvidence, error) {
-	ev, ok := evidenceFor(e)
-	if !ok {
-		return nil, nil
+// A decision today cites one or two things, so the cap is not load-bearing
+// yet — it is here because the list grows with every engine that learns to
+// contribute, and a row whose size is set by how many engines happen to be
+// enabled is a row that will one day be enormous. Past the cap the record says
+// truncated rather than presenting what fitted as the whole story.
+const MaxEvidence = 16
+
+// recordEvidence writes the evidence behind a decision and returns it, with
+// the role each piece played.
+//
+// Ordered deliberately: what caused the outcome first, then what it overrode,
+// then what merely watched. The cap therefore drops the least load-bearing
+// evidence first — losing the record of an observe engine's involvement is a
+// smaller loss than losing the listing that caused a block.
+func (r *Recorder) recordEvidence(ctx context.Context, e Event) ([]store.CitedEvidence, bool, error) {
+	type pending struct {
+		ev   evidence.Evidence
+		role store.Role
 	}
-	stored, err := r.store.PutEvidence(ctx, ev)
-	if err != nil {
-		return nil, err
+	var want []pending
+
+	if ev, ok := evidenceFor(e); ok {
+		want = append(want, pending{ev, store.RoleCaused})
 	}
-	return []store.CitedEvidence{{Evidence: stored, Contributed: true}}, nil
+	if ev, ok := overriddenEvidence(e); ok {
+		want = append(want, pending{ev, store.RoleContributed})
+	}
+	for _, o := range e.Observed {
+		if ev, ok := observedEvidence(e, o); ok {
+			want = append(want, pending{ev, store.RoleObserved})
+		}
+	}
+
+	truncated := false
+	if len(want) > MaxEvidence {
+		want = want[:MaxEvidence]
+		truncated = true
+	}
+
+	out := make([]store.CitedEvidence, 0, len(want))
+	for _, w := range want {
+		stored, err := r.store.PutEvidence(ctx, w.ev)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, store.CitedEvidence{Evidence: stored, Role: w.role})
+	}
+	return out, truncated, nil
+}
+
+// overriddenEvidence is the listing an operator allow-list beat.
+//
+// Recorded as contributed rather than caused, because it did not cause this
+// outcome — it caused the outcome that did not happen. An operator asking why
+// a domain their feed calls malware is resolving needs to see both facts, and
+// needs to see which one won.
+func overriddenEvidence(e Event) (evidence.Evidence, bool) {
+	if e.Basis == nil || e.Basis.Rule != policy.RuleAllowList {
+		return evidence.Evidence{}, false
+	}
+	if e.Basis.OverrodeFeedName == "" && e.Basis.OverrodeFeedID == "" {
+		return evidence.Evidence{}, false
+	}
+	ev := evidence.Evidence{
+		Subject:    evidence.Domain(e.Domain),
+		ObservedAt: e.Time,
+		Kind:       evidence.KindFeed,
+		Source:     e.Basis.OverrodeFeedID,
+		SourceName: e.Basis.OverrodeFeedName,
+		Category:   e.Basis.OverrodeCategory,
+		Claim: "listed as " + categoryOr(e.Basis.OverrodeCategory, "malicious") +
+			", overridden by the operator's allow-list",
+		Confidence: evidence.ConfidenceHigh,
+	}
+	if ev.Source == "" {
+		ev.Source = e.Basis.OverrodeFeedName
+	}
+	if err := ev.Validate(); err != nil {
+		return evidence.Evidence{}, false
+	}
+	return ev, true
+}
+
+// observedEvidence records that an observe-mode engine looked at this query.
+//
+// The claim is about involvement, not about a conclusion, and it is worded
+// that way on purpose. Writing "Daddybound found this bogus" here would be
+// inventing a verdict that does not exist yet; writing "Daddybound examined
+// this answer" is true at the moment it is written and stays true.
+func observedEvidence(e Event, o Observation) (evidence.Evidence, bool) {
+	if strings.TrimSpace(o.Engine) == "" {
+		return evidence.Evidence{}, false
+	}
+	mode := o.Mode
+	if mode == "" {
+		mode = "observe"
+	}
+	claim := "examined this query in " + mode + " mode; it cannot change an outcome"
+	if o.CorrelationID != "" {
+		claim += " (record " + o.CorrelationID + ")"
+	}
+	ev := evidence.Evidence{
+		Subject:    evidence.Domain(e.Domain),
+		ObservedAt: e.Time,
+		Kind:       evidence.KindLocal,
+		Source:     o.Engine,
+		SourceName: o.Engine,
+		Claim:      claim,
+		// Low, and that is the honest level for "this engine was present".
+		// It is not a finding.
+		Confidence: evidence.ConfidenceLow,
+	}
+	if err := ev.Validate(); err != nil {
+		return evidence.Evidence{}, false
+	}
+	return ev, true
 }
 
 // evidenceFor turns a basis into the claim it represents.
@@ -201,13 +344,22 @@ func (r *Recorder) recordEvidence(ctx context.Context, e Event) ([]store.CitedEv
 // logic — an operator's own rule and a curated feed are things somebody stands
 // behind, a provider's automated verdict is not quite the same claim.
 func evidenceFor(e Event) (evidence.Evidence, bool) {
+	// The nil check comes first, and it has to.
+	//
+	// It used to sit below the struct literal, which read e.Basis.Category and
+	// therefore dereferenced the pointer it was about to test. That was
+	// unreachable while Record refused every event whose basis had not
+	// decided, so a nil basis never got this far. Admitting events that
+	// decided nothing but were observed made it reachable, and the first such
+	// event panicked the recorder's goroutine — taking the process with it,
+	// from a statistics path that is not allowed to affect resolution at all.
+	if e.Basis == nil {
+		return evidence.Evidence{}, false
+	}
 	base := evidence.Evidence{
 		Subject:    evidence.Domain(e.Domain),
 		ObservedAt: e.Time,
 		Category:   e.Basis.Category,
-	}
-	if e.Basis == nil {
-		return evidence.Evidence{}, false
 	}
 	switch e.Basis.Rule {
 	case policy.RuleAllowList:
@@ -304,24 +456,87 @@ func Explain(e Event, cited []store.CitedEvidence) string {
 	if len(cited) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	first := cited[0].Evidence
 
+	// Only evidence that caused the outcome may be the subject of "because".
+	//
+	// Without this the sentence would be built from cited[0] whatever it was,
+	// and a query that decided nothing but was looked at by an observe-mode
+	// engine would read "Allowed because Daddybound examined this query" — a
+	// sentence asserting that an engine which cannot change an outcome
+	// produced one. The three-way role exists precisely so this function can
+	// tell the difference, and this is where it has to.
+	var cause *evidence.Evidence
+	var overrode *evidence.Evidence
+	observed := 0
+	for i := range cited {
+		switch cited[i].Role {
+		case store.RoleCaused:
+			if cause == nil {
+				cause = &cited[i].Evidence
+			}
+		case store.RoleContributed:
+			if overrode == nil {
+				overrode = &cited[i].Evidence
+			}
+		case store.RoleObserved:
+			observed++
+		}
+	}
+
+	if cause == nil {
+		// Nothing decided. Say so plainly rather than dressing an observation
+		// up as a reason.
+		if observed == 0 {
+			return ""
+		}
+		return "No rule changed this outcome. " + observedLabel(observed) +
+			" examined the query without being able to affect it."
+	}
+
+	var b strings.Builder
 	if e.Blocked {
 		b.WriteString("Blocked because ")
 	} else {
 		b.WriteString("Allowed because ")
 	}
-	b.WriteString(sourceLabel(first))
+	b.WriteString(sourceLabel(*cause))
 	b.WriteString(" ")
-	b.WriteString(first.Claim)
+	b.WriteString(cause.Claim)
 	b.WriteString(".")
 
-	if len(cited) > 1 {
+	// The listing an allow-list beat is named rather than counted. It is the
+	// one thing an operator asking "why is this malware domain resolving?"
+	// actually wants, and folding it into "and 1 other" would hide it.
+	if overrode != nil {
+		b.WriteString(" This overrode ")
+		b.WriteString(sourceLabel(*overrode))
+		b.WriteString(", which ")
+		b.WriteString(overriddenClaim(*overrode))
+		b.WriteString(".")
+	}
+	if observed > 0 {
 		b.WriteString(" ")
-		b.WriteString(othersLabel(len(cited) - 1))
+		b.WriteString(observedLabel(observed))
+		b.WriteString(" also examined it, without affecting the outcome.")
 	}
 	return b.String()
+}
+
+// observedLabel counts observe-mode engines in words.
+func observedLabel(n int) string {
+	if n == 1 {
+		return "One observe-mode engine"
+	}
+	return fmt.Sprintf("%d observe-mode engines", n)
+}
+
+// overriddenClaim trims the trailing note from an overridden listing's claim,
+// because the sentence around it already says it was overridden.
+func overriddenClaim(ev evidence.Evidence) string {
+	if i := strings.Index(ev.Claim, ", overridden by"); i > 0 {
+		return ev.Claim[:i]
+	}
+	return ev.Claim
 }
 
 func sourceLabel(e evidence.Evidence) string {
@@ -329,13 +544,6 @@ func sourceLabel(e evidence.Evidence) string {
 		return e.SourceName
 	}
 	return e.Source
-}
-
-func othersLabel(n int) string {
-	if n == 1 {
-		return "One further source was on file at the time."
-	}
-	return "Further sources were on file at the time."
 }
 
 // Stats are the recorder's counters, for metrics and the dashboard.

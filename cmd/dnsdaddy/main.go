@@ -29,6 +29,7 @@ import (
 	// read, so an adapter is added by writing one file and removing one by
 	// deleting it.
 	_ "github.com/jameshoulder/dnsdaddy/internal/apiprovider/adapters"
+	"github.com/jameshoulder/dnsdaddy/internal/audit"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -318,6 +319,14 @@ func run() error {
 			"retention_days", cfg.Log.DecisionRetentionDays)
 	}
 
+	// The audit log: who changed what. Always on — it records management
+	// actions, of which there are a handful a week even on a busy
+	// installation, so there is no volume argument for switching it off and
+	// every reason to have it when something changed that nobody admits to.
+	auditLog := audit.New(st, audit.Options{Log: log})
+	go auditLog.Run(ctx)
+	defer auditLog.Wait()
+
 	// Local DNSSEC observation. Off unless the operator asked for it, and
 	// when on it observes without deciding anything: the answer a client
 	// receives is produced entirely by the code above and is not shown to
@@ -437,6 +446,7 @@ func run() error {
 		Providers:      providers,
 		Intel:          intelSource,
 		Decisions:      decisionRecorder,
+		Audit:          auditLog,
 		DNSSEC:         dnssecStatsOrNil(dnssecObserver),
 		DNSSECWriter:   dnssecWriterOrNil(dnssecObserver),
 	})
@@ -847,6 +857,16 @@ func pruneOnce(ctx context.Context, st *store.Store, cfg config.Config, log *slo
 			log.Error("decision prune failed", "error", err)
 		} else if n > 0 {
 			log.Info("pruned expired decision records", "rows", n, "retention_days", days)
+		}
+	}
+
+	// The audit log, on its own window. See config.Logging.AuditRetentionDays
+	// for why it is not the query log's.
+	if days := cfg.Log.AuditRetentionDays; days > 0 {
+		if n, err := st.PruneAudit(pctx, time.Now().AddDate(0, 0, -days)); err != nil {
+			log.Error("audit prune failed", "error", err)
+		} else if n > 0 {
+			log.Info("pruned expired audit entries", "rows", n, "retention_days", days)
 		}
 	}
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"github.com/jameshoulder/dnsdaddy/internal/audit"
 	"net/http"
 	"strings"
 	"time"
@@ -402,6 +403,13 @@ func (a *API) handleSetProviderSecret(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	// The audit entry says a credential was set on this provider and nothing
+	// else. body.Secret is deliberately never passed: audit.Redact would catch
+	// a field named "secret" anyway, but the strongest guarantee is that the
+	// value has no path into the call at all.
+	a.record(r, audit.ActionProviderWrite, "provider", id,
+		map[string]any{"secretSet": false}, map[string]any{"secretSet": true})
+
 	// The response carries secretSet and the four-character hint, which is
 	// what the dashboard needs to confirm the rotation landed, and nothing
 	// that would let anybody reconstruct the key.
@@ -419,6 +427,8 @@ func (a *API) handleDeleteProviderSecret(w http.ResponseWriter, r *http.Request)
 	}
 	a.Providers.InvalidateProvider(id)
 	a.reloadProviders(r)
+	a.record(r, audit.ActionProviderClear, "provider", id,
+		map[string]any{"secretSet": true}, map[string]any{"secretSet": false})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -691,6 +701,8 @@ func (a *API) handleSetReputationMode(w http.ResponseWriter, r *http.Request) {
 			"mode must be one of off, cache_only, blocking")
 		return
 	}
+	previous, _ := a.Store.GetSetting(r.Context(), settingReputationMode)
+
 	ceiling := a.reputationCeiling()
 	if mode.Rank() > ceiling.Rank() {
 		writeError(w, http.StatusForbidden,
@@ -706,6 +718,11 @@ func (a *API) handleSetReputationMode(w http.ResponseWriter, r *http.Request) {
 	}
 	a.Providers.SetMode(mode)
 	a.Log.Info("reputation mode changed", "mode", string(mode), "ceiling", string(ceiling))
+	// A mode change decides whether a third party is consulted during
+	// resolution. That is exactly the kind of change somebody later needs to
+	// be able to attribute.
+	a.record(r, audit.ActionModeSet, "setting", settingReputationMode,
+		map[string]any{"mode": previous}, map[string]any{"mode": string(mode)})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":       mode,

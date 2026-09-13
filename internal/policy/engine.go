@@ -91,6 +91,24 @@ type Basis struct {
 	// Category is the security category the rule assigned, where it assigned
 	// one.
 	Category string
+
+	// OverrodeFeedID, OverrodeFeedName and OverrodeCategory name a listing
+	// that would have blocked this domain had the operator's allow-list not
+	// won.
+	//
+	// Set only on RuleAllowList, and only when the listing would actually have
+	// blocked under this policy's enabled categories. Without them an operator
+	// asking "why is this malware domain resolving?" got an answer that did
+	// not mention the malware — the allow-list short-circuits before the feed
+	// index is consulted, so the record could not say what it beat.
+	//
+	// Empty means nothing was overridden, which is the common case: most
+	// allow-listed domains are not on any feed. They are deliberately not
+	// filled in speculatively, because a malware claim printed next to a
+	// domain no list has ever mentioned is worse than no claim.
+	OverrodeFeedID   string
+	OverrodeFeedName string
+	OverrodeCategory string
 }
 
 // Decided reports whether any rule fired. An ordinary allowed query has no
@@ -395,6 +413,23 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 		d.Reason = "Allowed by policy allow-list"
 		d.Source = "allow-list"
 		d.Basis = &Basis{Rule: RuleAllowList, PolicyID: p.id, PolicyName: p.name}
+
+		// One extra index lookup, for the record rather than the decision.
+		//
+		// The allow-list wins whatever this finds; what it buys is an answer
+		// to "why is this malware domain resolving?" that mentions the
+		// malware. Only on the allow-list path, which is a handful of names an
+		// operator wrote by hand, and only against the local index — the
+		// external provider is still never consulted for an allow-listed
+		// domain, so allow-listing continues to mean the name is not disclosed
+		// to a third party.
+		if len(p.categories) > 0 {
+			if entry, ok := e.lists.Load().LookupEnabled(domain, p.categories); ok {
+				d.Basis.OverrodeFeedID = entry.FeedID
+				d.Basis.OverrodeFeedName = entry.FeedName
+				d.Basis.OverrodeCategory = entry.Category
+			}
+		}
 		return d
 	}
 

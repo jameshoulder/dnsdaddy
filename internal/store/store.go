@@ -203,6 +203,17 @@ var addedColumns = []struct{ table, column, definition string }{
 	// verdict, and zero on every pre-existing row.
 	{"dnssec_observations", "queries", "INTEGER NOT NULL DEFAULT 0"},
 	{"dnssec_observations", "delegations", "INTEGER NOT NULL DEFAULT 0"},
+	// Whether a decision's evidence list is the whole list. Pre-existing rows
+	// were written before any cap existed and had one piece of evidence, so
+	// 'complete' is true of them.
+	{"decisions", "completeness", "TEXT NOT NULL DEFAULT 'complete'"},
+	// The three-way role. Empty on pre-existing rows, which readers map from
+	// the contributed flag they were written with.
+	{"decision_evidence", "role", "TEXT NOT NULL DEFAULT ''"},
+	// The decision correlation. Empty on every row written before decision
+	// records could be linked, which is what makes "this query predates the
+	// feature" distinguishable from "the record was dropped".
+	{"query_log", "decision_id", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func migrate(db *sql.DB) error {

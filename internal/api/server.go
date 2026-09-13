@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
+	"github.com/jameshoulder/dnsdaddy/internal/audit"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -61,6 +63,9 @@ type Deps struct {
 	// whenever local validation is off.
 	DNSSECWriter DNSSECWriterStats
 
+	// Audit records management changes. Nil disables it.
+	Audit *audit.Logger
+
 	// Decisions is the decision recorder, or nil when decision records are
 	// switched off. Read-only here: the API never records a decision, it only
 	// reports what the resolver already decided.
@@ -106,6 +111,15 @@ type API struct {
 	// The remaining writer is the seed, which runs once at startup before
 	// anything is served.
 	networkWrites sync.Mutex
+
+	// whyMissing counts explanations that could not be given because the
+	// decision record was absent. Exposed in /metrics: a climbing value means
+	// records are being dropped, which is the difference between an audit
+	// trail and a collection of anecdotes.
+	//
+	// On API rather than Deps because Deps is copied by value into New, and a
+	// counter that is copied counts nothing.
+	whyMissing atomic.Uint64
 }
 
 // New returns an API bound to deps.
@@ -159,6 +173,15 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/findings/export", a.handleExportFindings)
 	api.HandleFunc("GET /api/v1/findings/{id}", a.handleGetFinding)
 	api.HandleFunc("GET /api/v1/detectors", a.handleDetectors)
+
+	// Why one query was answered the way it was, reconstructed from the
+	// record written at the time. Same authentication as the query log it
+	// explains, because it shows the same names.
+	api.HandleFunc("GET /api/v1/queries/{id}/why", a.handleQueryWhy)
+
+	// What operators changed, and when. Read-only: the audit log is appended
+	// by the actions it describes and has no write surface of its own.
+	api.HandleFunc("GET /api/v1/audit", a.handleListAudit)
 
 	// The first-seen domain index. Read-only: there is nothing to configure
 	// here because this engine observes and never blocks.

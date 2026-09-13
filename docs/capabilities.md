@@ -65,6 +65,9 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Prometheus metrics | Hand-rolled, no client library. |
 | Markdown reports | A period summary written for someone who does not run the network. |
 | Structured security findings | Stored, queryable, and exportable as NDJSON. See [detection/README.md](detection/README.md). |
+| Decision records with cited evidence | One record per **blocked** query, not per query, written off the answer path. Stores the sentence as it was written, the policy path, and the evidence behind it — each piece marked `caused`, `contributed` or `observed`. Off by default (`log.decision_records`). See [decision-records.md](decision-records.md). |
+| "Why was this blocked?" API | `GET /api/v1/queries/{id}/why` reconstructs one answered query **from what was stored**, never by re-running the policy engine or re-reading a feed. Reports `complete`, `truncated` or `missing`, and a missing one says which of three things it was. See the gap below. |
+| Configuration audit log | One row per operator change — policies, networks, tokens, provider credentials, mode switches, password changes, session revocations — with actor, source, and a before/after diff. Secrets are redacted before the write, not on the way out: a credential change stores `set` or `cleared`, never the value. Its own retention window (`log.audit_retention_days`, default 90) and bounded by how often somebody edits something rather than by traffic. |
 
 ### Management
 
@@ -200,6 +203,8 @@ how likely it is to happen — see [roadmap.md](roadmap.md) for the reasoning.
 |---|---|
 | **Local DNSSEC *enforcement*** | Validation itself now runs against real traffic in Learn mode (Experimental, above), so the engine is no longer the missing piece. What is missing is evidence: a measured disagreement rate against the upstream over real traffic and real time, a false-positive investigation, and a decided answer to what should happen to a client's query when validation fails. Refusing to answer on a verdict from a validator that has never run in production would trade a theoretical attack for a certain outage. |
 | **Policy enforcement from behavioural findings** | Needs a measured false-positive rate first. Blocking on a heuristic with an unknown FP rate is not a feature. |
+| **Indicator lifecycle in decision records** | A decision record can say *which* feed listed a domain and what that feed was called, but not how long it had been listed or whether the listing has since aged out. `blocklist.Entry` carries `{Category, FeedID, FeedName}` and nothing else, so first-seen, last-seen and expiry are not available to record. Adding them means changing the index a decision reads from, which is a separate change to this one. |
+| **A "why" for queries answered before this build** | The explanation is reconstructed from a record written at decision time. There is no record for anything answered before decision records were turned on, and none can be manufactured — the feeds have moved on. Those queries report `missing` with the reason stated, which is the honest answer rather than a plausible one. |
 | **`safeSearch` enforcement** | The flag is accepted by the API and stored on the policy. The resolver does not act on it, and setting it changes nothing about how queries are answered. A known gap since the first release; the field is marked `deprecated` in the OpenAPI schema with that stated in the description, so a generated client cannot present it as a working control. |
 | **Webhook and syslog sinks** | The NDJSON file plus a log shipper covers the same ground today without a bespoke client per vendor. |
 | **Sigma rule export / detection-as-code** | Research. The finding schema was designed with it in mind. |
