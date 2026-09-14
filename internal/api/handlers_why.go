@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/evidence"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -38,7 +39,32 @@ type whyEvidence struct {
 	// reason for anything. Clients must not present an observed item as a
 	// cause; the field exists so they do not have to guess from the kind.
 	Role string `json:"role"`
+
+	// FirstListed is when the feed behind this evidence first listed the
+	// domain, as recorded at the moment of the decision. Omitted when unknown.
+	FirstListed string `json:"firstListed,omitempty"`
+	// ExpiresAt is when the feed said the listing stops being current.
+	// Omitted when the feed gave no expiry, which is every feed shipped today.
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	// ListingState is "dated" when the dates below are known and "unknown"
+	// when they are not.
+	//
+	// A separate field rather than leaving a client to infer it from empty
+	// strings, because the two readings are opposite: a missing date here
+	// means nobody recorded one, never that the domain was listed at the epoch
+	// or that the listing is brand new.
+	ListingState string `json:"listingState"`
 }
+
+// Listing states reported on a piece of evidence.
+const (
+	// listingDated: the record carries the dates the feed's claim had.
+	listingDated = "dated"
+	// listingUnknown: no dates were recorded. Either the block predates this
+	// installation keeping them, or the evidence is not a feed listing at all
+	// — an operator block-list entry has no first-seen in this sense.
+	listingUnknown = "unknown"
+)
 
 // whyResponse explains one answered query.
 type whyResponse struct {
@@ -157,7 +183,7 @@ func (a *API) handleQueryWhy(w http.ResponseWriter, r *http.Request) {
 		out.Policy = &whyPolicy{ID: d.PolicyID, Path: d.PolicyPath}
 	}
 	for _, c := range d.Cited {
-		out.Evidence = append(out.Evidence, whyEvidence{
+		item := whyEvidence{
 			Kind:       string(c.Evidence.Kind),
 			Source:     c.Evidence.Source,
 			SourceName: c.Evidence.SourceName,
@@ -166,7 +192,24 @@ func (a *API) handleQueryWhy(w http.ResponseWriter, r *http.Request) {
 			Confidence: string(c.Evidence.Confidence),
 			ObservedAt: c.Evidence.ObservedAt.UTC().Format(time.RFC3339),
 			Role:       string(c.Role),
-		})
+			// Unknown until something is actually known. An installation that
+			// was blocking before it started keeping dates has none of them,
+			// and the response has to say that rather than leave a client to
+			// read an absent field as a fresh listing.
+			ListingState: listingUnknown,
+		}
+		// Read off the stored record, never from the live index. This is the
+		// whole point: the feeds move, and an explanation that re-read them
+		// would quietly claim last night's block had a different basis.
+		if c.Evidence.Kind == evidence.KindFeed && !c.Evidence.ObservedAt.IsZero() {
+			item.FirstListed = c.Evidence.ObservedAt.UTC().Format(time.RFC3339)
+			item.ListingState = listingDated
+		}
+		if c.Evidence.ExpiresAt != nil && !c.Evidence.ExpiresAt.IsZero() {
+			item.ExpiresAt = c.Evidence.ExpiresAt.UTC().Format(time.RFC3339)
+			item.ListingState = listingDated
+		}
+		out.Evidence = append(out.Evidence, item)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

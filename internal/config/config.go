@@ -530,6 +530,17 @@ type Cache struct {
 
 // Feeds controls threat-intelligence feed refreshes.
 type Feeds struct {
+	// ListingHistoryDays is how long to remember that a feed used to list a
+	// domain, after it has stopped.
+	//
+	// Only history. A domain a feed still lists keeps its dates for as long as
+	// it is listed, with no window at all: those are the dates behind a block
+	// that could happen in the next second, not a record of one that did.
+	//
+	// 0 keeps history for ever. The table grows per listing rather than per
+	// query, so no amount of DNS traffic can fill it.
+	ListingHistoryDays int `yaml:"listing_history_days"`
+
 	RefreshInterval Duration `yaml:"refresh_interval"`
 	RefreshOnStart  bool     `yaml:"refresh_on_start"`
 	HTTPTimeout     Duration `yaml:"http_timeout"`
@@ -688,10 +699,15 @@ func Default() Config {
 			NegativeTTL: 300,
 		},
 		Feeds: Feeds{
-			RefreshInterval: Duration(12 * time.Hour),
-			RefreshOnStart:  true,
-			HTTPTimeout:     Duration(90 * time.Second),
-			MaxFeedBytes:    128 << 20,
+			// Ninety days of history for domains feeds have dropped. Long
+			// enough to answer "was this ever listed?" about an incident
+			// somebody noticed late, and the table grows per listing rather
+			// than per query so it stays predictable.
+			ListingHistoryDays: 90,
+			RefreshInterval:    Duration(12 * time.Hour),
+			RefreshOnStart:     true,
+			HTTPTimeout:        Duration(90 * time.Second),
+			MaxFeedBytes:       128 << 20,
 		},
 		Detection: Detection{
 			Enabled:      true,

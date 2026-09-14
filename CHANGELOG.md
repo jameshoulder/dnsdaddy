@@ -22,6 +22,65 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### A blocked domain now says how long its feed has been listing it
+
+"Blocked because URLhaus listed it as malware" is half an answer. The other
+half is how long URLhaus has been saying so: a listing from this morning and
+one from eighteen months ago call for different responses, and until now the
+record could not tell them apart.
+
+Every successful feed refresh records what that feed lists, and a block copies
+those dates onto its own record. `GET /api/v1/queries/{id}/why` reports
+`firstListed`, `expiresAt` where a feed publishes one, and a `listingState` of
+`dated` or `unknown`.
+
+**`unknown` is a real answer, not a missing one.** An operator's own block-list
+entry has no first-seen in this sense, and neither does anything blocked before
+this release — the dates start being recorded at each feed's next update, and
+nothing can recover the earlier ones because feeds do not publish when they
+started listing something. A client must never render a missing date as a
+recent one.
+
+The rules, all of which are tested:
+
+- **A domain a feed keeps listing keeps its original first-seen.** Feeds
+  refresh twice a day; the date does not move with them.
+- **A domain a feed drops keeps its dates and stops blocking.** If the feed
+  re-lists it next month it keeps the *original* first-seen — a gap in a feed
+  is one history, not two. (Once the retention window has removed a dropped
+  listing, a reappearance is indistinguishable from a first sighting. That is
+  stated rather than papered over.)
+- **A feed whose download failed is left completely alone.** Its cached copy
+  keeps blocking and its dates are untouched: a feed listing nothing and a feed
+  that could not be read look identical otherwise, and one damaged file must
+  not wipe a feed's history.
+- **An expired listing cannot block.** No feed shipped today publishes an
+  expiry — `hosts`, `domains` and `adblock` are bare domain lists and the
+  Observatory document carries none — so the enforcement exists for formats
+  that do, and nothing invents one. In practice a domain ages out by simply not
+  being in the next rebuild.
+- **The dates are read from the record, never from the feeds as they are now.**
+  Same rule as the stored sentence and the feed name: an explanation that
+  re-read the world would quietly change what a past block was based on.
+
+**Sizing.** The table is bounded by machine size — 400,000 rows on a 1 GB box,
+3,000,000 on 4 GB+ — and discards in one direction: history for dropped domains
+goes first, and listings a feed currently carries are never discarded to make
+room. `feeds.listing_history_days` (90) controls how long dropped listings are
+kept; listings a feed still carries have no window, because they are current
+state rather than history.
+
+**Cost.** Each indexed domain grew by 16 bytes, taking the blocklist from
+165–215 to 200–249 bytes per domain, and a 1 GB machine's worst moment — a feed
+rebuild — from 234 MB to 258 MB of about 714 MB available. The dates are stored
+as two integers rather than three timestamps precisely because of that budget;
+last-seen is held once per feed rather than once per domain for the same
+reason.
+
+Blocking never depends on any of this. A database that is read-only, full or
+locked costs stale dates, a counted failure and a doctor warning — never a
+published index.
+
 ### DNS Daddy now sizes itself for the machine
 
 On install, DNS Daddy picks limits from the machine size. You can choose

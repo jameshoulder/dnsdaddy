@@ -49,6 +49,23 @@ type Caps struct {
 	DetectorTrackedNumerator   int
 	DetectorTrackedDenominator int
 
+	// LifecycleMaxRows bounds the feed indicator lifecycle table: how many
+	// (feed, domain) listings this installation remembers the dates of.
+	//
+	// A disk figure rather than a memory one, at roughly 80 bytes a row, and
+	// not something traffic can drive — rows come from feeds, not from
+	// queries. What it really bounds is how long a refresh spends writing, on
+	// a box with one processor and one database writer.
+	//
+	// It has to be comfortably above the live set or there is no room for
+	// history at all: the core feeds come to roughly 250,000 indicators, so
+	// the smallest size still leaves about 150,000 rows for domains feeds have
+	// dropped. Past the ceiling, history is discarded oldest first and the
+	// live set is never touched — losing the dates behind a block that is
+	// happening now, to keep the dates of one that stopped last year, is the
+	// wrong trade in both directions.
+	LifecycleMaxRows int
+
 	// SQLiteCacheMB is the database's own page cache.
 	//
 	// Until this existed the driver's default applied, which is about 2 MB —
@@ -66,6 +83,7 @@ var capsByProfile = map[Profile]Caps{
 		FirstSeenMaxRows:           20_000,
 		FirstSeenMaxNewPerMinute:   60,
 		QueryLogRetentionDays:      3,
+		LifecycleMaxRows:           400_000,
 		DetectorTrackedNumerator:   1,
 		DetectorTrackedDenominator: 4,
 		SQLiteCacheMB:              16,
@@ -76,6 +94,7 @@ var capsByProfile = map[Profile]Caps{
 		FirstSeenMaxRows:           100_000,
 		FirstSeenMaxNewPerMinute:   200,
 		QueryLogRetentionDays:      7,
+		LifecycleMaxRows:           1_000_000,
 		DetectorTrackedNumerator:   1,
 		DetectorTrackedDenominator: 1,
 		SQLiteCacheMB:              32,
@@ -86,6 +105,7 @@ var capsByProfile = map[Profile]Caps{
 		FirstSeenMaxRows:           250_000,
 		FirstSeenMaxNewPerMinute:   400,
 		QueryLogRetentionDays:      14,
+		LifecycleMaxRows:           3_000_000,
 		DetectorTrackedNumerator:   2,
 		DetectorTrackedDenominator: 1,
 		SQLiteCacheMB:              128,

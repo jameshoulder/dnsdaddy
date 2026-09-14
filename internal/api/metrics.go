@@ -77,6 +77,7 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// say why it did what it did.
 	a.writeAccountabilityMetrics(&b)
 	a.writeMachineSizeMetrics(&b)
+	a.writeListingDateMetrics(r.Context(), &b)
 
 	// Client-access shape. Counts only: an alert wants to know that the number
 	// of publicly permitted ranges went from nought to one, not which address
@@ -595,4 +596,29 @@ func (a *API) writeMachineSizeMetrics(b *strings.Builder) {
 		metric(b, "dnsdaddy_process_memory_bytes", "Memory this process is currently using", "gauge",
 			fmt.Sprintf("dnsdaddy_process_memory_bytes %d", rss))
 	}
+}
+
+// writeListingDateMetrics reports how much the resolver knows about when its
+// feeds started listing things.
+//
+// Counts only, and never labelled by domain. An indicator label would be one
+// series per blocked domain — hundreds of thousands of them, from a list an
+// attacker partly controls by getting names onto feeds — which is the textbook
+// way to take down a monitoring system with a resolver. The feed label is
+// safe because the catalogue is a handful of operator-configured rows.
+func (a *API) writeListingDateMetrics(ctx context.Context, b *strings.Builder) {
+	stats, err := a.Store.CountLifecycle(ctx)
+	if err != nil {
+		// A momentary database error must not blank the rest of the scrape.
+		// Everything above this line is already written.
+		return
+	}
+	metric(b, "dnsdaddy_listing_dates_current", "Current feed listings whose dates are known", "gauge",
+		fmt.Sprintf("dnsdaddy_listing_dates_current %d", stats.Live))
+	metric(b, "dnsdaddy_listing_dates_history",
+		"Listings feeds have dropped, kept as history", "gauge",
+		fmt.Sprintf("dnsdaddy_listing_dates_history %d", stats.History))
+	metric(b, "dnsdaddy_listing_dates_failures_total",
+		"Blocklist updates that could not record listing dates; blocking is unaffected", "counter",
+		fmt.Sprintf("dnsdaddy_listing_dates_failures_total %d", a.Feeds.LifecycleFailures()))
 }

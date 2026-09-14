@@ -183,12 +183,12 @@ not what you want, leave both off.
 
 ## What is not here
 
-* **Indicator lifecycle.** A record names the feed that listed a domain and
-  what that feed was called, but not how long it had been listed or whether the
-  listing has since aged out. `blocklist.Entry` is `{Category, FeedID,
-  FeedName}` and carries no first-seen, last-seen or expiry, so those fields do
-  not exist to record. Adding them means changing the index a decision reads
-  from.
+* **Listing dates for anything blocked before this release.** Dates are
+  recorded when a feed refreshes, so an installation that has been blocking for
+  a year starts with none. They appear per feed at its next update, and the
+  first-seen recorded then is that date rather than the real one — the feeds do
+  not publish when they started listing something, so nothing can recover it.
+  Those blocks report `listingState: unknown`.
 * **No "why" for anything answered before this was on.** The explanation is
   read back from a record written at the time, and none can be manufactured
   afterwards — the feeds have moved on. Those queries report `missing` with the
@@ -203,6 +203,55 @@ not what you want, leave both off.
   returns nothing, so there is no finding to attach at decision time. When one
   attaches it will attach as `observed`, like everything else that cannot
   enforce.
+
+## How long has the feed been saying this?
+
+Evidence from a feed carries the dates that feed's listing had, as of the
+moment the decision was made:
+
+```
+Evidence cited
+  URLhaus            feed        high confidence    caused
+    listed as malware, last confirmed 1 June 2026
+    first listed      2026-03-02
+    expires           —
+```
+
+`listingState` is `dated` or `unknown`. Unknown means nobody recorded them — an
+operator's own block-list entry has no first-seen in this sense, and neither
+does anything blocked before this installation started keeping dates. It never
+means the domain was listed at the epoch, and a client must not render a
+missing date as a recent one.
+
+**The dates are copied, not looked up.** `GET /api/v1/queries/{id}/why` reads
+them off the record. A domain a feed dropped this morning was still listed last
+night, and an explanation that consulted the feeds as they are now would
+quietly change what a past block was based on — the same rule that governs the
+sentence and the feed name.
+
+**A domain a feed drops and re-lists keeps its original first-seen.** The row
+is marked as no longer listed rather than deleted, so a gap in a feed does not
+restart the clock. The one limit: once the retention window has removed a
+dropped listing, a reappearance is indistinguishable from a first sighting,
+because there is nothing left to distinguish it from.
+
+**An expired listing cannot block.** A feed publishing an expiry is saying the
+listing stops being current, and honouring it past that point would mean
+blocking on intelligence its own author has withdrawn. No feed DNS Daddy ships
+with publishes one — they are bare domain lists — so in practice the aged-out
+mechanism is simpler: a domain the feed has stopped listing is not in the index
+the next rebuild produces.
+
+```yaml
+feeds:
+  listing_history_days: 90   # how long to remember a listing a feed dropped
+```
+
+Listings a feed still carries have no window at all: they are current state,
+not history, and no amount of age is a reason to discard the explanation for a
+block that is still happening.
+
+---
 
 ## The audit log
 

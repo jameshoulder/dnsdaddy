@@ -36,12 +36,12 @@ var indexBudgets = []struct {
 	maxBytesPerDomain float64
 }{
 	// Short names — a domains-only feed of registrable names.
-	{"short", "h%08d.co", 200},
+	{"short", "h%08d.co", 220},
 	// The typical shape of a malware feed entry.
-	{"typical", "malware-host%08d.example.com", 220},
+	{"typical", "malware-host%08d.example.com", 240},
 	// Long third-level names, which is what a DGA or tracking feed looks like.
 	// This is the case that sets the top of the published range.
-	{"long", "a-rather-long-malicious-subdomain-%08d.tracking.example.net", 270},
+	{"long", "a-rather-long-malicious-subdomain-%08d.tracking.example.net", 290},
 }
 
 // The index is the largest thing DNS Daddy holds in memory, and its cost per
@@ -52,11 +52,18 @@ func TestIndexMemoryPerDomainStaysWithinBudget(t *testing.T) {
 		t.Skip("allocates ~110 MB per case")
 	}
 
-	// Three string headers, before the key or any of the bytes. This is why
-	// the per-domain cost cannot be small with the current representation, and
-	// it is asserted so that a change to Entry is a deliberate one.
-	if got := unsafe.Sizeof(Entry{}); got != 48 {
-		t.Errorf("sizeof(Entry) = %d, expected 48; the capacity figures in "+
+	// Three string headers plus two timestamps, before the key or any of the
+	// bytes. This is why the per-domain cost cannot be small with the current
+	// representation, and it is asserted so that a change to Entry is a
+	// deliberate one.
+	//
+	// It was 48 before listing times were added. The two are stored as Unix
+	// milliseconds rather than time.Time precisely because of this number:
+	// three time.Time fields would have made it 120, which at 250,000 domains
+	// is 18 MB on a machine whose whole budget is 1 GB. Last-seen is not here
+	// at all — it is one value per feed, held on the Index.
+	if got := unsafe.Sizeof(Entry{}); got != 64 {
+		t.Errorf("sizeof(Entry) = %d, expected 64; the capacity figures in "+
 			"README.md and docs/architecture.md are derived from this", got)
 	}
 

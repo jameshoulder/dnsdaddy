@@ -44,7 +44,27 @@ type Manager struct {
 	// loads is what the live index is actually made of, keyed by feed ID and
 	// replaced wholesale on every rebuild. See FeedLoads.
 	loads atomic.Pointer[map[string]FeedLoad]
+
+	// lifecycleMaxRows bounds the feed indicator lifecycle table. Set from the
+	// machine size at startup; zero means no ceiling.
+	lifecycleMaxRows int
+
+	// lifecycleFailures counts rebuilds that could not record listing dates.
+	//
+	// A rebuild whose lifecycle work fails still publishes its index: blocking
+	// is built from the feeds, never from the lifecycle table, and refusing to
+	// update the blocklist because a history table was unwritable would turn a
+	// bookkeeping fault into a protection outage. The counter is how an
+	// operator finds out the dates have gone stale.
+	lifecycleFailures atomic.Uint64
 }
+
+// SetLifecycleMaxRows bounds the lifecycle table. Call it during startup,
+// before any refresh.
+func (m *Manager) SetLifecycleMaxRows(n int) { m.lifecycleMaxRows = n }
+
+// LifecycleFailures reports how many rebuilds could not record listing dates.
+func (m *Manager) LifecycleFailures() uint64 { return m.lifecycleFailures.Load() }
 
 // FeedLoad says whether a feed's cached copy made it into the index that is
 // serving traffic right now.
@@ -514,6 +534,11 @@ func (m *Manager) rebuild(ctx context.Context, results map[string]store.FeedResu
 	}
 
 	ix := b.Build()
+	// Listing dates, stamped on before the index is published so that a query
+	// served from it carries the same times for its whole life. Doing this
+	// after the swap would leave a window where a block could be explained
+	// with times that were not yet loaded.
+	m.applyLifecycle(ctx, ix, loaded)
 	m.holder.Store(ix)
 	m.loads.Store(&loads)
 	m.log.Info("blocklist index rebuilt",
@@ -657,5 +682,85 @@ func sortByCategoryPriority(feeds []store.Feed) {
 			return pi < pj
 		}
 		return feeds[i].ID < feeds[j].ID
+	})
+}
+
+// applyLifecycle records what each feed now lists and stamps the stored dates
+// onto a freshly built index.
+//
+// # Only feeds that loaded
+//
+// Reconcile reads the absence of an indicator from a snapshot as the feed
+// having dropped it. A feed whose cached copy was missing or damaged
+// contributed nothing to this index, and handing that emptiness to the store
+// would mark its entire history as no longer listed — turning one unreadable
+// file into a wholesale loss of dates, and doing it silently. So the snapshot
+// is built only for feeds that actually loaded, and everything else is left
+// exactly as it was.
+//
+// # Never fatal
+//
+// Every failure here is logged and counted, and the index is published either
+// way. Blocking is built from the feeds; the lifecycle table only says when.
+// An installation whose database is read-only, full, or momentarily locked
+// keeps filtering, with the dates it last managed to read — and doctor says
+// the dates are stale rather than pretending they are current.
+func (m *Manager) applyLifecycle(ctx context.Context, ix *Index, loaded []string) {
+	if m.store == nil || ix == nil {
+		return
+	}
+	now := time.Now().UTC()
+	indicators := ix.Indicators()
+
+	for _, feedID := range loaded {
+		snap := store.LifecycleSnapshot{
+			FeedID: feedID, At: now,
+			Indicators: indicators[feedID],
+		}
+		if snap.Indicators == nil {
+			// The feed loaded but contributed no domain to the finished index:
+			// every one of its claims was taken over by a more severe listing
+			// from another feed. That is a real "it lists nothing here now",
+			// so an empty snapshot is the correct thing to record.
+			snap.Indicators = map[string]time.Time{}
+		}
+		res, err := m.store.ReconcileLifecycle(ctx, snap, m.lifecycleMaxRows)
+		if err != nil {
+			m.lifecycleFailures.Add(1)
+			m.log.Warn("could not record when this feed listed its domains",
+				"feed", feedID, "error", err)
+			continue
+		}
+		if res.Rejected > 0 {
+			m.log.Warn("the listing-date table is full, so some domains have no dates",
+				"feed", feedID, "without_dates", res.Rejected)
+		}
+	}
+
+	byFeed, err := m.store.LoadLifecycle(ctx)
+	if err != nil {
+		m.lifecycleFailures.Add(1)
+		m.log.Warn("could not read listing dates; blocks will be explained without them",
+			"error", err)
+		return
+	}
+
+	lastSeen := make(map[string]int64, len(loaded))
+	for _, feedID := range loaded {
+		lastSeen[feedID] = now.UnixMilli()
+	}
+	ix.ApplyLifecycle(lastSeen, func(feedID, domain string) (LifecycleTimes, bool) {
+		l, ok := byFeed[feedID][domain]
+		if !ok {
+			return LifecycleTimes{}, false
+		}
+		t := LifecycleTimes{}
+		if !l.FirstSeen.IsZero() {
+			t.FirstSeenUnixMs = l.FirstSeen.UnixMilli()
+		}
+		if !l.ExpiresAt.IsZero() {
+			t.ExpiresAtUnixMs = l.ExpiresAt.UnixMilli()
+		}
+		return t, t.FirstSeenUnixMs != 0 || t.ExpiresAtUnixMs != 0
 	})
 }

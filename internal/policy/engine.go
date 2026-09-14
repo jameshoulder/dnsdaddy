@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"sort"
 	"sync/atomic"
+	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
@@ -109,6 +110,34 @@ type Basis struct {
 	OverrodeFeedID   string
 	OverrodeFeedName string
 	OverrodeCategory string
+
+	// Listing is when the feed behind this decision first listed the domain,
+	// when it last confirmed it, and when the listing expires.
+	//
+	// Copied here, at the moment of the decision, and never looked up again.
+	// The feeds move: a domain listed today can be gone next week, and an
+	// explanation that re-read the index would quietly change what a past
+	// block was based on. Zero times mean unknown, which is the honest state
+	// for anything blocked before this installation started keeping dates.
+	Listing Listing
+
+	// OverrodeListing is the same, for the listing an allow-list beat. An
+	// operator asking why a domain their feed calls malware is resolving wants
+	// to know how long it has been called that.
+	OverrodeListing Listing
+}
+
+// Listing is when a feed's claim on a domain began, was last confirmed, and
+// expires. Every field is zero when unknown.
+type Listing struct {
+	FirstSeen time.Time
+	LastSeen  time.Time
+	ExpiresAt time.Time
+}
+
+// Known reports whether anything at all is known about this listing's dates.
+func (l Listing) Known() bool {
+	return !l.FirstSeen.IsZero() || !l.LastSeen.IsZero() || !l.ExpiresAt.IsZero()
 }
 
 // Decided reports whether any rule fired. An ordinary allowed query has no
@@ -424,10 +453,12 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 		// domain, so allow-listing continues to mean the name is not disclosed
 		// to a third party.
 		if len(p.categories) > 0 {
-			if entry, ok := e.lists.Load().LookupEnabled(domain, p.categories); ok {
+			lists := e.lists.Load()
+			if entry, ok := lists.LookupEnabled(domain, p.categories); ok {
 				d.Basis.OverrodeFeedID = entry.FeedID
 				d.Basis.OverrodeFeedName = entry.FeedName
 				d.Basis.OverrodeCategory = entry.Category
+				d.Basis.OverrodeListing = listingOf(entry, lists)
 			}
 		}
 		return d
@@ -446,11 +477,15 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 	}
 
 	if len(p.categories) > 0 {
+		// One snapshot, used for both the decision and the dates on it. Two
+		// separate Loads could straddle a refresh and explain a block with a
+		// different index's dates.
+		lists := e.lists.Load()
 		// LookupEnabled, not Lookup: a domain can be claimed under several
 		// categories, and this policy blocks it if it enables any one of them.
 		// Asking for the domain's primary category and comparing it here would
 		// miss a C2 domain that a malware feed also lists.
-		if entry, ok := e.lists.Load().LookupEnabled(domain, p.categories); ok {
+		if entry, ok := lists.LookupEnabled(domain, p.categories); ok {
 			d.Blocked = true
 			d.Category = entry.Category
 			d.Source = entry.FeedName
@@ -459,6 +494,10 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 				Rule: RuleCategory, Category: entry.Category,
 				FeedID: entry.FeedID, FeedName: entry.FeedName,
 				PolicyID: p.id, PolicyName: p.name,
+				// Read off the entry that decided, not looked up again. This
+				// is the moment the dates are true, and copying them here is
+				// what lets the explanation stay fixed while the feeds move.
+				Listing: listingOf(entry, lists),
 			}
 			return d
 		}
@@ -589,3 +628,19 @@ func (e *Engine) RebindingExemptions(policyID string) rebind.Exemptions {
 // stopped working for no reason — so it is surfaced rather than logged once at
 // startup and forgotten.
 func (e *Engine) RebindingExemptionsDropped() uint64 { return e.rebindExemptDropped.Load() }
+
+// listingOf reads the dates off the entry that decided, plus the feed-level
+// last-seen the index holds.
+//
+// Last-seen is one value per feed rather than one per domain, because that is
+// genuinely the shape of the fact: everything a feed currently lists was last
+// confirmed by the same refresh. Storing it per domain would have repeated one
+// timestamp a few hundred thousand times in the largest structure in the
+// process.
+func listingOf(entry blocklist.Entry, lists *blocklist.Index) Listing {
+	return Listing{
+		FirstSeen: entry.FirstSeen(),
+		LastSeen:  lists.LastSeenFor(entry.FeedID),
+		ExpiresAt: entry.ExpiresAt(),
+	}
+}

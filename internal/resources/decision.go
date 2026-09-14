@@ -114,10 +114,27 @@ func (d Decision) Caps() Caps {
 // documentedDefaults is the ceilings an installation runs when no size applies
 // to it: whatever each package's own default already was.
 //
-// Only the detector scaling is meaningful here — every other field is read
-// from the configuration, which an unsized installation keeps untouched — so
-// the rest is deliberately left at zero rather than filled in with figures
-// nothing will use.
+// Most fields are deliberately zero. They are read from the configuration,
+// which an unsized installation keeps untouched, so filling them in here would
+// be inventing figures nothing will use.
+//
+// Two exceptions, both of which would otherwise be wrong rather than merely
+// unused:
+//
+// The detector scaling has to be 1:1. A zero denominator would fall through to
+// the smallest size's fraction and quietly shrink every detector table on
+// precisely the installations the upgrade rule promises to leave alone.
+//
+// The listing-date ceiling has to be a real number. That table is new, so
+// there is no prior behaviour for an upgrade to preserve — and a table with no
+// ceiling at all is worse than one sized slightly wrong, because it grows with
+// the operator's feeds and nothing stops it. The 2 GB figure is used because
+// that is the machine the releases before machine sizing were built for, which
+// makes it the honest guess about a box that has been running one of them.
 func documentedDefaults() Caps {
-	return Caps{DetectorTrackedNumerator: 1, DetectorTrackedDenominator: 1}
+	return Caps{
+		DetectorTrackedNumerator:   1,
+		DetectorTrackedDenominator: 1,
+		LifecycleMaxRows:           capsByProfile[ProfileSmall].LifecycleMaxRows,
+	}
 }

@@ -364,9 +364,43 @@ does not wait for SQLite, and it does not wait for the audit writer either —
 losing the explanation of a block is a bad day; adding write latency to every
 blocked answer is an outage.
 
-**Indicator lifecycle fields: P5.** `blocklist.Entry` is
-`{Category, FeedID, FeedName}` (`internal/blocklist/index.go:45`) and carries no
-first-seen, last-seen or expiry. So a record can say *which feed* listed a
-domain and *what it was called*, but not *how long it had been listed* or
-whether the listing has since aged out. That is the honest limit of what is
-stored today.
+**Indicator lifecycle.** A record now says how long the feed behind it had
+been listing the domain. `internal/store/lifecycle.go` keeps one row per
+`(feed, domain)` — first seen, last seen, expiry, and whether the feed still
+lists it — and the dates are copied onto the decision at the moment it is made.
+
+Four rules, each of which is the whole reason the table exists:
+
+* **First-seen is never rewritten.** A feed is re-downloaded twice a day. An
+  implementation that stamped the refresh time would make every indicator look
+  twelve hours old for ever, which is not useless but confidently wrong.
+* **Dropping is not forgetting.** A domain a feed stops listing goes off the
+  live set and keeps its dates. A domain it re-lists a week later keeps its
+  *original* first-seen, because that is one history.
+* **Expired cannot block**, and neither can gone. A listing past an expiry the
+  feed itself published is skipped exactly as if the policy did not enable it,
+  so a parent name or a second feed's claim can still block — what expires is
+  one claim, not the name. "Gone from the latest good snapshot" needs no date
+  comparison at all: it is simply not in the index the next rebuild produces,
+  and that is the primary aged-out mechanism.
+* **A failed fetch changes nothing.** Reconcile reads an indicator's absence as
+  the feed having dropped it, so a feed whose cached copy was unreadable is not
+  reconciled at all. One damaged file must not wipe a feed's history.
+
+**No feed shipped today publishes an expiry.** `hosts`, `domains` and `adblock`
+are bare domain lists; the Observatory document carries `{value, domain, type,
+categories}` and explicitly drops the rest. So `ExpiresAt` is zero everywhere in
+practice — the field and its enforcement exist so that a format which does
+carry one is honoured, and so that nothing invents one.
+
+**Bounded, and it discards in one direction.** The table is capped by machine
+size (400,000 rows on a 1 GB box, 3,000,000 on 4 GB+). Past the ceiling,
+history for dropped domains goes first, oldest first; listings a feed currently
+carries are never discarded to make room, because those are the dates behind a
+block that could happen in the next second. If there is nothing left to
+discard, new domains simply get no dates — they still block, and the API
+reports `listingState: unknown`.
+
+**It cannot stop the resolver.** Blocking is built from the feeds; this only
+says when. A database that is read-only, full or locked costs stale dates, a
+counted failure and a doctor warning — never a published index.

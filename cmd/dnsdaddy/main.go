@@ -215,6 +215,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// How many listing dates this machine will remember. Taken from the
+	// machine size, because the ceiling is really about how long a feed
+	// refresh spends writing on a box with one processor and one database
+	// writer — not about anything an operator can choose well.
+	feeds.SetLifecycleMaxRows(sizing.Caps().LifecycleMaxRows)
 
 	// Load whatever is already on disk before opening any listener. A restart
 	// must not leave a window where the resolver is answering but filtering
@@ -892,6 +897,24 @@ func pruneOnce(ctx context.Context, st *store.Store, cfg config.Config, log *slo
 			log.Error("audit prune failed", "error", err)
 		} else if n > 0 {
 			log.Info("pruned expired audit entries", "rows", n, "retention_days", days)
+		}
+	}
+
+	// Listing history for domains feeds have stopped listing.
+	//
+	// Only the history: a listing a feed still carries is current state rather
+	// than history, and no retention window applies to it — it is the dates a
+	// block happening in the next second would be explained with.
+	//
+	// It also cannot reach a decision record. Those dates were copied onto the
+	// decision when it was made, precisely so that nothing here can change
+	// what a past block was explained with.
+	if days := cfg.Feeds.ListingHistoryDays; days > 0 {
+		if n, err := st.PruneLifecycle(pctx, time.Now().AddDate(0, 0, -days)); err != nil {
+			log.Error("listing history prune failed", "error", err)
+		} else if n > 0 {
+			log.Info("pruned listing history for domains no longer on any feed",
+				"rows", n, "retention_days", days)
 		}
 	}
 

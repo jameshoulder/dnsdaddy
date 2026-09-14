@@ -238,6 +238,7 @@ func TestEachSizeHoldsMoreThanTheOneBelowIt(t *testing.T) {
 		{"first-seen rows", func(c resources.Caps) int { return c.FirstSeenMaxRows }},
 		{"first-seen new per minute", func(c resources.Caps) int { return c.FirstSeenMaxNewPerMinute }},
 		{"query log retention days", func(c resources.Caps) int { return c.QueryLogRetentionDays }},
+		{"lifecycle rows", func(c resources.Caps) int { return c.LifecycleMaxRows }},
 		{"database page cache MB", func(c resources.Caps) int { return c.SQLiteCacheMB }},
 		{"detector tracking", func(c resources.Caps) int { return c.DetectorTracked(4096) }},
 	} {
@@ -266,6 +267,7 @@ func TestTheTwoGigabyteSizeKeepsTodaysBehaviour(t *testing.T) {
 		{"first-seen rows", c.FirstSeenMaxRows, 100_000},
 		{"first-seen new per minute", c.FirstSeenMaxNewPerMinute, 200},
 		{"query log retention days", c.QueryLogRetentionDays, 7},
+		{"lifecycle rows", c.LifecycleMaxRows, 1_000_000},
 		{"detector tracking at the documented 4096", c.DetectorTracked(4096), 4096},
 	} {
 		if tc.got != tc.want {

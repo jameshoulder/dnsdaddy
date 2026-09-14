@@ -2058,6 +2058,35 @@ components:
             reasoning without deciding it — a feed listing an allow-list
             overrode, for instance. `observed` came from an engine that cannot
             change an outcome and must never be rendered as a cause.
+        listingState:
+          type: string
+          enum: [dated, unknown]
+          description: >-
+            Whether the dates below are known. `unknown` means nobody recorded
+            them — the block happened before this installation kept them, or
+            the evidence is not a feed listing at all, such as an operator's
+            own block-list entry. It never means the domain was listed at the
+            epoch, and a client must not render a missing date as a recent one.
+        firstListed:
+          type: string
+          format: date-time
+          description: >-
+            When the feed behind this evidence first listed the domain, as
+            recorded at the moment of the decision. Omitted when unknown.
+
+            Read back from the record, never from the feeds as they are now.
+            Feeds move: a domain listed today can be gone next week, and an
+            explanation that re-read them would quietly change what a past
+            block was based on. A feed that drops a domain and re-lists it
+            later keeps its original date, because the history is one history.
+        expiresAt:
+          type: string
+          format: date-time
+          description: >-
+            When the feed said this listing stops being current. Omitted when
+            the feed gave no expiry, which is the case for every feed DNS Daddy
+            ships with — they are bare domain lists that carry no dates of
+            their own. An expired listing cannot cause a block.
 
     QueryWhy:
       type: object

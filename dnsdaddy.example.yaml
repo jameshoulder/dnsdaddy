@@ -455,6 +455,22 @@ cache:
   negative_ttl: 300
 
 feeds:
+  # How long to remember that a feed used to list a domain, after it has
+  # stopped listing it.
+  #
+  # Only history. A domain a feed STILL lists keeps its dates for as long as it
+  # is listed, with no window at all — those are the dates behind a block that
+  # could happen in the next second, not a record of one that did.
+  #
+  # This is what lets "why was this blocked?" say how long the feed had been
+  # saying so, and what lets a domain a feed drops and re-lists keep its
+  # original first-seen date rather than restarting the clock.
+  #
+  # 0 keeps history for ever. The table grows per listing rather than per
+  # query, so no amount of DNS traffic can fill it, and it is bounded by the
+  # machine size either way.
+  listing_history_days: 90
+
   # How often to re-download enabled feeds. Downloads are cached to disk, so a
   # restart rebuilds the index locally without touching the network.
   refresh_interval: 12h

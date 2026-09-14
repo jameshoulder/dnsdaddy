@@ -107,6 +107,7 @@ func runDoctor(args []string) error {
 	// one of them may take.
 	checks = append(checks, doctorAccountability(ctx, st, cfg)...)
 	checks = append(checks, doctorFirstSeen(ctx, st, cfg)...)
+	checks = append(checks, doctorListingDates(ctx, st, cfg)...)
 	checks = append(checks, doctorRebinding(ctx, st, cfg)...)
 	checks = append(checks, diag.RateLimit(diag.RateLimitInput{
 		Enabled: cfg.DNS.RateLimit.Enabled,
@@ -883,21 +884,15 @@ func doctorAccountability(ctx context.Context, st *store.Store, cfg config.Confi
 func doctorMachineSize(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
 	in := diag.MachineSizeInput{}
 
-	installDefault := ""
 	if st == nil {
 		// No database to read, which here means DNS Daddy has not started on
 		// this machine yet. Distinguished from a database with no record in
 		// it, because the advice for the two is opposite.
 		in.NoDatabase = true
 	} else {
-		if v, err := st.GetSetting(ctx, store.SettingMachineSizeDefault); err == nil {
-			installDefault = v
-		}
 		in.WALBytes = st.WALBytes()
 	}
-
-	machine := resources.Detect(cfg.Resources.DetectOptions())
-	in.Sizing = resources.Decide(cfg.Resources.SizeProfile(), installDefault, machine)
+	in.Sizing = doctorSizing(ctx, st, cfg)
 
 	// Work on a copy: doctor changes nothing, including its own idea of the
 	// configuration. What it prints is what the daemon would run, derived the
@@ -912,4 +907,48 @@ func doctorMachineSize(ctx context.Context, st *store.Store, cfg config.Config) 
 	in.LocalDNSSECLearn = sized.DNS.LocalDNSSECValidation == config.LocalDNSSECObserve
 
 	return diag.MachineSize(in)
+}
+
+// doctorListingDates reports whether this installation knows how long its
+// feeds have been listing what they list.
+func doctorListingDates(ctx context.Context, st *store.Store, cfg config.Config) []diag.Check {
+	in := diag.ListingDatesInput{
+		// The ceiling the running daemon would actually use, which is the one
+		// the size decided. Asking CapsFor for the configured setting would
+		// hand it "auto", which is not a size and falls through to the
+		// smallest — reporting a 400,000 ceiling on a machine running three
+		// million.
+		MaxRows:       doctorSizing(ctx, st, cfg).Caps().LifecycleMaxRows,
+		RetentionDays: cfg.Feeds.ListingHistoryDays,
+	}
+	if st == nil {
+		// No database to read. Reported as unavailable rather than empty: the
+		// two have opposite remedies, and doctor is frequently run before the
+		// daemon has ever started.
+		return nil
+	}
+	stats, err := st.CountLifecycle(ctx)
+	if err != nil {
+		return diag.ListingDates(in)
+	}
+	in.Available = true
+	in.Live, in.History, in.Feeds = stats.Live, stats.History, stats.Feeds
+	return diag.ListingDates(in)
+}
+
+// doctorSizing works out what machine size the running daemon would apply.
+//
+// Shared by every check that needs to know a ceiling, so they cannot disagree
+// about which size is in force — and derived the same way the daemon derives
+// it, from the configuration and the first-run record, because doctor is
+// frequently run when there is no daemon to ask.
+func doctorSizing(ctx context.Context, st *store.Store, cfg config.Config) resources.Decision {
+	installDefault := ""
+	if st != nil {
+		if v, err := st.GetSetting(ctx, store.SettingMachineSizeDefault); err == nil {
+			installDefault = v
+		}
+	}
+	return resources.Decide(cfg.Resources.SizeProfile(),
+		installDefault, resources.Detect(cfg.Resources.DetectOptions()))
 }

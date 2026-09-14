@@ -174,3 +174,28 @@ func TestAnUpgradeGetsTheDocumentedDefaultsRatherThanTheSmallestCeilings(t *test
 		t.Error("a sized installation did not get its size's detector ceiling")
 	}
 }
+
+// TestAnUpgradeStillBoundsTheListingDateTable.
+//
+// The other caps are left alone on an upgrade because they describe behaviour
+// that installation already has. The listing-date table has no prior
+// behaviour — it is new — so "leave it alone" would mean leaving it unbounded,
+// and it grows with the operator's feeds rather than with anything this
+// program controls.
+func TestAnUpgradeStillBoundsTheListingDateTable(t *testing.T) {
+	upgrade := Decide(ProfileAuto, "keep", machineOf(1024, 1))
+	if upgrade.Applied {
+		t.Fatal("the test is not exercising the upgrade path")
+	}
+	if got := upgrade.Caps().LifecycleMaxRows; got <= 0 {
+		t.Errorf("an upgrade has no ceiling on listing dates (%d); that table would "+
+			"grow without limit", got)
+	}
+	// And a sized installation gets its own size's figure rather than this
+	// fallback, so the fallback is not quietly becoming the only value.
+	sized := Decide(ProfileAuto, "auto", machineOf(1024, 1))
+	if sized.Caps().LifecycleMaxRows != CapsFor(ProfileTiny).LifecycleMaxRows {
+		t.Errorf("a sized installation got %d, want the 1 GB figure %d",
+			sized.Caps().LifecycleMaxRows, CapsFor(ProfileTiny).LifecycleMaxRows)
+	}
+}

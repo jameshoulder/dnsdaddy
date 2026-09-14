@@ -374,6 +374,32 @@ A refresh bumps an internal generation counter, which invalidates the answer
 cache. A newly listed domain stops resolving immediately rather than lingering
 for the length of its TTL.
 
+### What a refresh remembers
+
+Every successful refresh records what each feed now lists, so that a block can
+say how long that feed has been saying so. **Four rules worth knowing:**
+
+- **A domain a feed keeps listing keeps its original first-seen date.** Feeds
+  refresh twice a day; the date does not move with them.
+- **A domain a feed drops keeps its dates** and stops blocking. If the feed
+  lists it again next month, it keeps the *original* first-seen — a gap in a
+  feed is one history, not two.
+- **A feed whose download failed is left completely alone.** The previous
+  cached copy keeps blocking and its dates are untouched. The dates are only
+  ever updated from a copy that actually loaded, because a feed listing nothing
+  and a feed that could not be read look identical otherwise.
+- **Two feeds listing the same domain keep two histories.** URLhaus carrying a
+  domain since March says nothing about when a phishing list picked it up.
+
+Dates for a domain no feed lists any more are kept for
+`feeds.listing_history_days` (90 by default) and then discarded. Dates for
+domains feeds *do* list have no window: they are current state rather than
+history.
+
+If the database cannot be written, the blocklist still updates and still
+blocks — only the dates go stale. `dnsdaddy doctor` says so under THREAT
+INTELLIGENCE, and `dnsdaddy_listing_dates_failures_total` counts it.
+
 ## False positives
 
 They will happen. Public feeds occasionally list a shared CDN, a URL shortener,
@@ -461,8 +487,11 @@ lines are counted and skipped rather than aborting the load.
 
 ## Memory
 
-Roughly 165–215 bytes per unique domain, measured rather than estimated — about
-80–105 MB for a 500,000-domain index. A domain claimed under more than one
+Roughly 200–249 bytes per unique domain, measured rather than estimated — about
+100–125 MB for a 500,000-domain index. (It was 165–215 before listing dates
+were added; those cost 16 bytes an entry, stored as two integers rather than
+three timestamps precisely because this is the largest structure in the
+process.) A domain claimed under more than one
 category costs about 7 bytes more per claim; domains claimed once, which is
 almost all of them, cost exactly what they always did. It is a range because the index stores the
 names themselves, so a feed of long third-level names costs about a quarter more

@@ -558,3 +558,41 @@ CREATE TABLE IF NOT EXISTS decision_evidence (
     role        TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (decision_id, evidence_id)
 );
+
+-- Feed indicator lifecycle: when each feed first listed a domain, when it last
+-- said so, and when (if ever) that listing expires.
+--
+-- Keyed by (feed_id, indicator) because two feeds listing the same domain are
+-- two independent claims with two independent histories. URLhaus having
+-- carried evil.example since March says nothing about when a phishing list
+-- picked it up, and merging them would produce a first-seen belonging to
+-- neither.
+--
+-- The indicator is normalised by domainutil.Normalize, the same function the
+-- live index uses, so "EVIL.example." and "evil.example" are one row rather
+-- than two histories for one name.
+--
+-- `live` is whether this indicator was in the most recent good snapshot of its
+-- feed. A row that goes off-live keeps its times: a domain dropped from a feed
+-- and re-listed a week later has one history, not two, and the first-seen that
+-- matters is the original one. Off-live rows are what the retention prune
+-- removes; live ones are never pruned, because they are the times a block
+-- happening right now would be explained with.
+CREATE TABLE IF NOT EXISTS feed_indicators (
+    feed_id    TEXT    NOT NULL,
+    indicator  TEXT    NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL,
+    -- 0 means the feed gave no expiry, which is every feed DNS Daddy ships
+    -- with: hosts, domains and adblock are bare domain lists, and the
+    -- Observatory document does not carry one either. It is stored rather than
+    -- invented so that a feed format which does carry one can be honoured
+    -- without a migration.
+    expires_at INTEGER NOT NULL DEFAULT 0,
+    live       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (feed_id, indicator)
+);
+
+-- The prune walks off-live rows oldest first; the doctor check counts by
+-- liveness. Both are covered by one index.
+CREATE INDEX IF NOT EXISTS feed_indicators_live_idx ON feed_indicators (live, last_seen);

@@ -383,3 +383,120 @@ func TestWhyReportsADanglingDecisionIDAsMissing(t *testing.T) {
 		t.Errorf("note %q does not say the record was dropped", note)
 	}
 }
+
+// TestWhyReportsTheListingDatesStoredWithTheDecision.
+//
+// The dates come from the record, and the record was written when the decision
+// was made. An analyst asking about last night's block wants "URLhaus has
+// called this malware since March", not "a feed listed it at the moment you
+// clicked".
+func TestWhyReportsTheListingDatesStoredWithTheDecision(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	ctx := context.Background()
+
+	firstListed := time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC)
+	expires := firstListed.Add(365 * 24 * time.Hour)
+
+	ev, err := h.store.PutEvidence(ctx, evidence.Evidence{
+		Subject: evidence.Domain("dated.example"), ObservedAt: firstListed,
+		Kind: evidence.KindFeed, Source: "f_threat", SourceName: "Threat feed",
+		Category: "malware", Claim: "listed as malware, last confirmed 1 June 2026",
+		Confidence: evidence.ConfidenceHigh, ExpiresAt: &expires,
+	})
+	if err != nil {
+		t.Fatalf("PutEvidence: %v", err)
+	}
+	stored, err := h.store.RecordDecision(ctx, store.Decision{
+		ID: "dec_dated", Time: time.Now().UTC(),
+		Subject: evidence.Domain("dated.example"), Action: "blocked",
+		Rule: "category", Category: "malware", PolicyID: "p_standard",
+		Explanation: "Blocked because Threat feed listed it as malware.",
+	}, []store.CitedEvidence{{Evidence: ev, Role: store.RoleCaused}})
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+	id := seedQuery(t, h, store.QueryEvent{
+		Time: time.Now().UTC(), Domain: "dated.example", QType: "A",
+		Action: store.ActionBlocked, Reason: "Blocked by a feed", DecisionID: stored.ID,
+	})
+
+	// Empty the live index: nothing lists this domain any more, as far as the
+	// running resolver is concerned.
+	h.lists.Store(blocklist.NewBuilder(0).Build())
+
+	got := fetchWhy(t, h, id)
+	cited, _ := got["evidence"].([]any)
+	if len(cited) != 1 {
+		t.Fatalf("%d pieces of evidence, want 1", len(cited))
+	}
+	first, _ := cited[0].(map[string]any)
+
+	if first["listingState"] != listingDated {
+		t.Errorf("listingState = %v, want %q", first["listingState"], listingDated)
+	}
+	if got, want := first["firstListed"], firstListed.Format(time.RFC3339); got != want {
+		t.Errorf("firstListed = %v, want %v — the dates did not come from the record", got, want)
+	}
+	if got, want := first["expiresAt"], expires.Format(time.RFC3339); got != want {
+		t.Errorf("expiresAt = %v, want %v", got, want)
+	}
+	if claim, _ := first["claim"].(string); !strings.Contains(claim, "last confirmed 1 June 2026") {
+		t.Errorf("claim = %q, want the last-confirmed date stored with it", claim)
+	}
+}
+
+// TestWhySaysTheDatesAreUnknownRatherThanReporting1970.
+//
+// The upgrade case at the API. An installation that has been blocking for a
+// year has no stored dates, and a client must be able to tell "nobody recorded
+// this" from "listed at the epoch" — which is what an omitted field alone
+// would leave it guessing.
+func TestWhySaysTheDatesAreUnknownRatherThanReporting1970(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	ctx := context.Background()
+
+	// Operator block-list evidence: a real decision with no feed listing
+	// behind it, so no dates of this kind exist to report.
+	ev, err := h.store.PutEvidence(ctx, evidence.Evidence{
+		Subject: evidence.Domain("undated.example"), ObservedAt: time.Now().UTC(),
+		Kind: evidence.KindOperator, Source: "operator", SourceName: "Operator block-list",
+		Claim: "block-listed by an operator", Confidence: evidence.ConfidenceHigh,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := h.store.RecordDecision(ctx, store.Decision{
+		ID: "dec_undated", Time: time.Now().UTC(),
+		Subject: evidence.Domain("undated.example"), Action: "blocked",
+		Rule: "block_list", PolicyID: "p_standard",
+		Explanation: "Blocked because an operator block-listed it.",
+	}, []store.CitedEvidence{{Evidence: ev, Role: store.RoleCaused}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := seedQuery(t, h, store.QueryEvent{
+		Time: time.Now().UTC(), Domain: "undated.example", QType: "A",
+		Action: store.ActionBlocked, Reason: "Blocked by your custom block-list",
+		DecisionID: stored.ID,
+	})
+
+	got := fetchWhy(t, h, id)
+	cited, _ := got["evidence"].([]any)
+	if len(cited) != 1 {
+		t.Fatalf("%d pieces of evidence, want 1", len(cited))
+	}
+	first, _ := cited[0].(map[string]any)
+
+	if first["listingState"] != listingUnknown {
+		t.Errorf("listingState = %v, want %q", first["listingState"], listingUnknown)
+	}
+	if _, present := first["firstListed"]; present {
+		t.Errorf("firstListed was reported as %v on evidence with no listing dates",
+			first["firstListed"])
+	}
+	if _, present := first["expiresAt"]; present {
+		t.Error("an expiry was reported for evidence that has none")
+	}
+}

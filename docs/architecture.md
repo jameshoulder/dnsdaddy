@@ -100,17 +100,26 @@ with `cp`.
 
 `map[string]Entry`, consulted with a suffix walk.
 
-**Roughly 165–215 bytes per domain — about 80–105 MB for 500,000.** That is
+**Roughly 200–249 bytes per domain — about 100–125 MB for 500,000.** That is
 measured rather than estimated: `TestIndexMemoryPerDomainStaysWithinBudget` in
 `internal/blocklist` builds a 500,000-domain index at three different name
 lengths and reports the heap each costs, so the figures have a source of truth
 and cannot drift silently.
 
 It is a range rather than a number because the map stores the names' own bytes,
-so the cost moves with the length of what is in your feeds: 167 bytes per
-domain for short registrable names, 183 for a typical malware-feed entry, 215
+so the cost moves with the length of what is in your feeds: 201 bytes per
+domain for short registrable names, 217 for a typical malware-feed entry, 249
 for the long third-level names a DGA or tracking feed is full of. Quote the top
 of the range when sizing a box.
+
+Sixteen of those bytes are the listing dates added in the same release as the
+"why was this blocked?" answer: when a feed first listed the domain, and when
+the listing expires. They are Unix milliseconds rather than `time.Time` because
+three of the latter would have been 72 bytes — a 150% increase in the largest
+structure in the process, or 18 MB at 250,000 domains on a machine whose whole
+budget is 1 GB. Last-seen is not on the entry at all: every live indicator of a
+feed was last seen at that feed's most recent refresh, which is one value per
+feed rather than one per domain.
 
 The cost is dominated by the representation rather than by the names. `Entry`
 holds three strings — category, feed ID, feed name — which is 48 bytes of
@@ -270,6 +279,7 @@ estimation — run `go test ./internal/resources/ -run Budget -v` to reproduce t
 | **Go heap subtotal** | **10.6 MB** | **50.0 MB** | **122.3 MB** |
 | SQLite page cache | 16 MB | 32 MB | 128 MB |
 | First-seen rows (disk) | 20,000 | 100,000 | 250,000 |
+| Listing-date rows (disk) | 400,000 | 1,000,000 | 3,000,000 |
 | Query history (disk) | 3 days | 7 days | 14 days |
 
 The blocklist is not in that table because its cost is set by the operator's
@@ -277,24 +287,24 @@ feeds rather than by the machine, and it is identical at every size:
 
 | Domains | Heap | Per domain |
 |---|---|---|
-| 100,000 | 12.0 MB | 126 bytes |
-| 250,000 | 43.7 MB | 183 bytes |
-| 500,000 | 87.3 MB | 183 bytes |
+| 100,000 | 14.0 MB | 147 bytes |
+| 250,000 | 51.7 MB | 217 bytes |
+| 500,000 | 103.3 MB | 217 bytes |
 
 **Does the smallest size fit a Nanode?** Adding it up, with the core feeds at a
 generous 250,000 domains:
 
 ```
-blocklist index, 250000 domains     43.6 MB
+blocklist index, 250000 domains     51.6 MB
 answer cache, 10000 entries          4.2 MB
-rate limiter, 8192 clients           0.6 MB
+rate limiter, 8192 clients           0.7 MB
 detector tables                      5.8 MB
 database page cache                 16.0 MB
 runtime and everything else         25.0 MB
 -----------------------------------------
-live                                95.3 MB
-peak, allowing for collection      190.5 MB
-peak during a feed rebuild         234.2 MB   (of ~714 MB available)
+live                               103.3 MB
+peak, allowing for collection      206.6 MB
+peak during a feed rebuild         258.2 MB   (of ~714 MB available)
 ```
 
 Two things that budget gets right and an estimate would not. Peak is twice
@@ -305,7 +315,7 @@ rebuild**, when a new index is built while the old one is still being served,
 so the largest item on the list is briefly doubled. That is the moment a box
 gets killed, and it is what the test checks.
 
-The ~480 MB of headroom is not slack to be spent. It is what absorbs a busier
+The ~456 MB of headroom is not slack to be spent. It is what absorbs a busier
 network than the test models, an operator enabling the ads category (+150,000
 domains, +26 MB), and Daddybound Learn if they turn it on.
 

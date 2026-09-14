@@ -295,6 +295,10 @@ func overriddenEvidence(e Event) (evidence.Evidence, bool) {
 	if ev.Source == "" {
 		ev.Source = e.Basis.OverrodeFeedName
 	}
+	// The dates come across too. "Why is this malware domain resolving?" is
+	// half-answered by naming the feed; the other half is how long it has been
+	// saying so.
+	applyListing(&ev, e.Basis.OverrodeListing)
 	if err := ev.Validate(); err != nil {
 		return evidence.Evidence{}, false
 	}
@@ -385,6 +389,7 @@ func evidenceFor(e Event) (evidence.Evidence, bool) {
 		base.Claim = "listed as " + categoryOr(e.Basis.Category, "malicious")
 		// A curated feed is a human somewhere deciding a domain is malicious.
 		base.Confidence = evidence.ConfidenceHigh
+		applyListing(&base, e.Basis.Listing)
 
 	case policy.RuleReputation:
 		base.Kind = evidence.KindProvider
@@ -591,4 +596,30 @@ func basisPolicyID(b *policy.Basis) string {
 		return ""
 	}
 	return b.PolicyID
+}
+
+// applyListing copies a feed's listing dates onto one piece of evidence.
+//
+// ObservedAt stops being the time of the query and becomes the time the feed
+// first listed the domain, which is what somebody reading the record actually
+// wants: "URLhaus has called this malware since March" rather than "we looked
+// this up at 14:02". The query's own time is already on the decision row.
+//
+// A listing with no known dates leaves the evidence exactly as it was, so an
+// installation that upgraded into this feature keeps recording what it always
+// did rather than acquiring a field full of zeroes.
+func applyListing(ev *evidence.Evidence, l policy.Listing) {
+	if ev == nil || !l.Known() {
+		return
+	}
+	if !l.FirstSeen.IsZero() {
+		ev.ObservedAt = l.FirstSeen
+	}
+	if !l.ExpiresAt.IsZero() {
+		expires := l.ExpiresAt
+		ev.ExpiresAt = &expires
+	}
+	if !l.LastSeen.IsZero() {
+		ev.Claim += ", last confirmed " + l.LastSeen.UTC().Format("2 January 2006")
+	}
 }
