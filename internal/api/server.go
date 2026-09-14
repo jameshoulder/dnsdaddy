@@ -72,6 +72,11 @@ type Deps struct {
 	// is what an upgrade looks like.
 	Sizing resources.Decision
 
+	// Webhook sends findings to an address the operator chose. Nil when no
+	// address is configured, which is the default; every method on it is safe
+	// on nil.
+	Webhook *detect.WebhookSink
+
 	// Decisions is the decision recorder, or nil when decision records are
 	// switched off. Read-only here: the API never records a decision, it only
 	// reports what the resolver already decided.

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
@@ -418,6 +419,10 @@ type Detection struct {
 	// FindingsFileKeep is how many rotated NDJSON files to retain.
 	FindingsFileKeep int `yaml:"findings_file_keep"`
 
+	// Webhook sends each finding to an address the operator chose. Off unless
+	// a URL is set.
+	Webhook Webhook `yaml:"webhook"`
+
 	// WindowScale multiplies every detector's observation window.
 	//
 	// 1.0 is production and is what the thresholds were calibrated against.
@@ -436,6 +441,47 @@ type Detection struct {
 	// sensitive, because the volume gates do not scale with it.
 	WindowScale float64 `yaml:"window_scale"`
 }
+
+// Webhook sends each behavioural finding to an address the operator chose.
+//
+// Off by default and normal to leave off, especially on a small machine.
+// Findings already go to the database, the log and — if configured — an NDJSON
+// file; this is a notification on top of those, not a replacement for them.
+type Webhook struct {
+	// URL is where to POST each finding. Empty switches the whole thing off:
+	// no queue, no goroutine, no connection pool.
+	//
+	// HTTPS only, and it must be a publicly routable address. A finding names
+	// a device and a domain somebody looked up, so plain HTTP would put that
+	// in front of every hop on the way; and an address on this machine or this
+	// LAN is either a mistake or somebody using the management API to make the
+	// resolver probe its own host.
+	URL string `yaml:"url"`
+
+	// HeaderName and HeaderValue are one optional header, for an endpoint that
+	// authenticates. One rather than a map on purpose: a free-form header map
+	// is a way to put a Host or an Authorization somewhere it was not meant to
+	// go, and nothing has asked for more than one.
+	//
+	// The value is redacted everywhere it could be read back.
+	HeaderName  string `yaml:"header_name"`
+	HeaderValue string `yaml:"header_value"`
+
+	// Timeout bounds one attempt.
+	Timeout Duration `yaml:"timeout"`
+	// MaxAttempts is how many times to try one finding. A rate limit or a
+	// server error is retried; a rejection is not.
+	MaxAttempts int `yaml:"max_attempts"`
+	// QueueSize bounds how many findings wait to be sent. Full means dropped
+	// and counted — never a detector waiting on an endpoint.
+	QueueSize int `yaml:"queue_size"`
+	// MaxBodyBytes bounds how much of a response is read before it is
+	// discarded. The body is not wanted; the status is.
+	MaxBodyBytes int64 `yaml:"max_body_bytes"`
+}
+
+// Enabled reports whether a notification address is configured.
+func (w Webhook) Enabled() bool { return strings.TrimSpace(w.URL) != "" }
 
 // HTTP holds the management API and dashboard settings.
 type HTTP struct {
@@ -724,7 +770,16 @@ func Default() Config {
 			FindingsFile:         "",
 			FindingsFileMaxBytes: 32 << 20,
 			FindingsFileKeep:     3,
-			WindowScale:          1,
+			Webhook: Webhook{
+				// Off. Everything below is what it uses once an operator sets
+				// a URL, and none of it runs until they do.
+				URL:          "",
+				Timeout:      Duration(detect.DefaultWebhookTimeout),
+				MaxAttempts:  detect.DefaultWebhookAttempts,
+				QueueSize:    detect.DefaultWebhookQueueSize,
+				MaxBodyBytes: detect.DefaultWebhookMaxBodyBytes,
+			},
+			WindowScale: 1,
 		},
 		Integrations: Integrations{
 			// Off. Everything below is what the subsystem uses once an
@@ -960,6 +1015,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := validateResources(c.Resources); err != nil {
+		return err
+	}
+	if err := validateWebhook(c.Detection.Webhook); err != nil {
 		return err
 	}
 	if c.DNS.ListenUDP == "" && c.DNS.ListenTCP == "" && c.DNS.ListenDoT == "" {
@@ -1547,6 +1605,48 @@ func (c *Config) validateFirstSeen() error {
 		return fmt.Errorf("dns.first_seen.max_new_per_minute must be at least 1, got %d; "+
 			"a budget of zero would record no new domain while reporting the index as on — "+
 			"set dns.first_seen.enabled: false instead", fs.MaxNewPerMinute)
+	}
+	return nil
+}
+
+// validateWebhook refuses a notification address that can never work.
+//
+// At startup rather than on first use. An address that is wrong should stop
+// the operator at the point they can still fix it, not produce a silent drop
+// counter three days later when a finding they cared about failed to arrive.
+//
+// An empty URL is not an error. Off is the default and the normal state.
+func validateWebhook(w Webhook) error {
+	if !w.Enabled() {
+		return nil
+	}
+	if err := detect.ValidateWebhookURL(w.URL); err != nil {
+		return fmt.Errorf("detection.webhook.%w", err)
+	}
+	if (w.HeaderName == "") != (w.HeaderValue == "") {
+		return fmt.Errorf("detection.webhook: header_name and header_value must be set together")
+	}
+	if strings.ContainsAny(w.HeaderName, "\r\n:") {
+		return fmt.Errorf("detection.webhook.header_name: %q is not a header name", w.HeaderName)
+	}
+	if strings.ContainsAny(w.HeaderValue, "\r\n") {
+		// A newline in a header value is request splitting. The value comes
+		// from a config file rather than a request, so this is unlikely rather
+		// than impossible — and "unlikely" is not a reason to hand an
+		// unchecked string to a header writer.
+		return fmt.Errorf("detection.webhook.header_value: must not contain a line break")
+	}
+	if w.MaxAttempts < 0 {
+		return fmt.Errorf("detection.webhook.max_attempts: %d cannot be negative", w.MaxAttempts)
+	}
+	if w.QueueSize < 0 {
+		return fmt.Errorf("detection.webhook.queue_size: %d cannot be negative", w.QueueSize)
+	}
+	if w.MaxBodyBytes < 0 {
+		return fmt.Errorf("detection.webhook.max_body_bytes: %d cannot be negative", w.MaxBodyBytes)
+	}
+	if w.Timeout < 0 {
+		return fmt.Errorf("detection.webhook.timeout: cannot be negative")
 	}
 	return nil
 }

@@ -266,9 +266,14 @@ func run() error {
 	// Built before the listeners open so that no query is served while the
 	// engine is half-constructed, and so a bad detection configuration is a
 	// startup error rather than a surprise at the first query.
-	detector, findingsFile, err := buildDetector(cfg, sizing, st, log)
+	detector, findingsFile, webhook, err := buildDetector(cfg, sizing, st, log)
 	if err != nil {
 		return err
+	}
+	if webhook != nil {
+		// Its own goroutine, draining its own bounded queue. Nothing on the
+		// detection path or the answer path ever waits for it.
+		go webhook.Run(ctx)
 	}
 	if detector != nil {
 		go detector.Run(ctx)
@@ -456,6 +461,7 @@ func run() error {
 		DNSSEC:         dnssecStatsOrNil(dnssecObserver),
 		DNSSECWriter:   dnssecWriterOrNil(dnssecObserver),
 		Sizing:         sizing,
+		Webhook:        webhook,
 	})
 
 	httpSrv := &http.Server{
@@ -604,10 +610,10 @@ func reportClientAccess(ctx context.Context, st *store.Store, acl *clientacl.Set
 // It returns a nil engine when detection is switched off, which every caller
 // handles: detect.Engine's Observe and Wait are nil-safe precisely so that
 // turning the feature off needs no branching on the query path.
-func buildDetector(cfg config.Config, sizing resources.Decision, st *store.Store, log *slog.Logger) (*detect.Engine, *detect.FileSink, error) {
+func buildDetector(cfg config.Config, sizing resources.Decision, st *store.Store, log *slog.Logger) (*detect.Engine, *detect.FileSink, *detect.WebhookSink, error) {
 	if !cfg.Detection.Enabled {
 		log.Info("behavioural detection is disabled")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	exclusions := detect.NewExclusions(cfg.Detection.ExcludedDomains, cfg.Detection.DisableDefaultExclusions)
@@ -633,11 +639,35 @@ func buildDetector(cfg config.Config, sizing resources.Decision, st *store.Store
 			Keep:     cfg.Detection.FindingsFileKeep,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("detection findings file: %w", err)
+			return nil, nil, nil, fmt.Errorf("detection findings file: %w", err)
 		}
 		fileSink = fs
 		sinks = append(sinks, fs)
 		log.Info("writing findings as NDJSON", "path", path)
+	}
+
+	// The webhook goes last, and the order is the design rather than
+	// housekeeping. MultiSink runs sinks in order, so by the time this one is
+	// offered a finding, the finding is already in the database and in the
+	// NDJSON file. Those are the record; this is a notification about it. A
+	// notification that could be delivered for something that was never
+	// stored would be the worst of both.
+	hook, err := detect.NewWebhookSink(detect.WebhookOptions{
+		URL:          cfg.Detection.Webhook.URL,
+		HeaderName:   cfg.Detection.Webhook.HeaderName,
+		HeaderValue:  cfg.Detection.Webhook.HeaderValue,
+		Timeout:      time.Duration(cfg.Detection.Webhook.Timeout),
+		MaxAttempts:  cfg.Detection.Webhook.MaxAttempts,
+		QueueSize:    cfg.Detection.Webhook.QueueSize,
+		MaxBodyBytes: cfg.Detection.Webhook.MaxBodyBytes,
+		Log:          log,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if hook != nil {
+		sinks = append(sinks, hook)
+		log.Info("sending findings to a notification address", "address", hook.RedactedURL())
 	}
 
 	minSeverity, ok := detect.ParseSeverity(cfg.Detection.MinSeverity)
@@ -727,7 +757,7 @@ func buildDetector(cfg config.Config, sizing resources.Decision, st *store.Store
 		"exclusions", exclusions.Len(),
 		"enforcement", "none (alert-only)")
 
-	return engine, fileSink, nil
+	return engine, fileSink, hook, nil
 }
 
 // startIntel brings up the external-intelligence engine, or returns nils.

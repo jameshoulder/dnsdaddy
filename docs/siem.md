@@ -306,11 +306,52 @@ it is the difference between "nothing happened" and "we stopped looking".
 **The query log** via `/api/v1/queries` for the raw telemetry behind a finding.
 Considerably higher volume, and subject to its own retention.
 
+## Push, for people rather than platforms
+
+There is also a webhook: set `detection.webhook.url` and each finding is POSTed
+to it as it happens, as exactly the JSON document described above — same
+`schemaVersion`, same `id`, same fields. Anything that can read the NDJSON file
+can read a webhook body without a second parser.
+
+```yaml
+detection:
+  webhook:
+    url: https://hooks.slack.com/services/...
+```
+
+**This is not the SIEM path, and it is not a replacement for one.** The two
+answer different questions:
+
+| | The file | The webhook |
+|---|---|---|
+| Survives a restart | Yes — it is on disk | No — anything queued is lost |
+| Survives the endpoint being down | Yes | No, past the queue |
+| Replayable | Yes, it is a file | No |
+| Reaches a person in seconds | No | Yes |
+
+Use the file for the record and a shipper to get it into a platform. Use the
+webhook to put an alert in front of somebody. An installation wanting both
+should have both; an installation wanting reliable ingestion should not rely on
+the webhook for it.
+
+**Delivery is at-least-once and best-effort.** A finding is written to the
+database and the file *before* the webhook is offered it, so a notification
+that fails costs a notification and never a record. Retries mean a consumer can
+see the same finding twice — de-duplicate on `id`. A full queue drops and
+counts rather than making detection wait, which is visible in
+`dnsdaddy_webhook_dropped_total` and in `dnsdaddy doctor`.
+
+**Where it will and will not send.** HTTPS only, to a publicly routable
+address. Not to this machine, not to your own network, and not to a cloud
+metadata service — redirects are never followed, so an endpoint cannot move the
+destination after the check. If your collector is on the LAN, the NDJSON file
+and a shipper is the right answer; a webhook aimed at an internal address is
+refused at startup with the reason.
+
 ## What is not implemented
 
 Stated so it is not inferred from the presence of this page:
 
-- **No webhook sink.** On the roadmap.
 - **No native syslog output.** The file plus a shipper covers it.
 - **No CEF or LEEF formatting.** JSON only.
 - **No push to any vendor API.** By design, as above.

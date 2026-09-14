@@ -514,6 +514,51 @@ feeds:
 # against the synthetic corpora in internal/detect, not against a production
 # network. See docs/detection/README.md.
 detection:
+  # Send each behavioural finding to an address you choose — Slack, Teams, or
+  # anything that accepts a JSON POST.
+  #
+  # OFF unless you set a URL, and normal to leave off. With no address,
+  # findings stay on this machine: in the database, in the log, and in the
+  # findings file if you have configured one.
+  #
+  # What is sent is exactly the finding document the findings file holds, so
+  # anything that can read one can read the other. It is a copy, not the
+  # record: the finding is stored first, and a notification that fails costs a
+  # notification and nothing else.
+  #
+  # Before turning this on, note that it takes data that was staying on your
+  # server and sends it to a third party. See docs/privacy.md.
+  webhook:
+    # Empty is off. Must start with https:// and point at an address on the
+    # internet — not at this machine, your own network, or a cloud metadata
+    # service. A finding names a device and a domain somebody looked up, so
+    # plain HTTP would put that in front of every hop on the way.
+    #
+    # If your collector is on the LAN, use the findings file and a log shipper
+    # instead; that is the better tool for it anyway.
+    url: ""
+
+    # One optional header, for an endpoint that authenticates. Both must be set
+    # together. The value is redacted everywhere it could be read back.
+    header_name: ""
+    header_value: ""
+
+    # How long one attempt may take.
+    timeout: 5s
+
+    # How many times to try one finding. A rate limit or a server error is
+    # retried with a growing wait; a rejection is not, because it would be
+    # rejected identically next time.
+    max_attempts: 3
+
+    # How many findings may wait to be sent. Full means dropped and counted —
+    # never detection waiting on an endpoint that has gone away.
+    queue_size: 256
+
+    # How much of a response to read before discarding it. The body is not
+    # wanted; the status is.
+    max_body_bytes: 65536
+
   # Alert-only, bounded in memory, and off the resolution path, so this is on
   # by default.
   enabled: true

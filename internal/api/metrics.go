@@ -12,6 +12,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
 	"github.com/jameshoulder/dnsdaddy/internal/audit"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
 	"github.com/jameshoulder/dnsdaddy/internal/resources"
@@ -78,6 +79,7 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	a.writeAccountabilityMetrics(&b)
 	a.writeMachineSizeMetrics(&b)
 	a.writeListingDateMetrics(r.Context(), &b)
+	a.writeNotificationMetrics(&b)
 
 	// Client-access shape. Counts only: an alert wants to know that the number
 	// of publicly permitted ranges went from nought to one, not which address
@@ -621,4 +623,43 @@ func (a *API) writeListingDateMetrics(ctx context.Context, b *strings.Builder) {
 	metric(b, "dnsdaddy_listing_dates_failures_total",
 		"Blocklist updates that could not record listing dates; blocking is unaffected", "counter",
 		fmt.Sprintf("dnsdaddy_listing_dates_failures_total %d", a.Feeds.LifecycleFailures()))
+}
+
+// writeNotificationMetrics reports whether findings are reaching the address
+// an operator chose.
+//
+// No URL label, ever. The address is frequently a bearer token in path form —
+// a Slack webhook is exactly that — and a label would put it in every scrape,
+// every dashboard and every alert that quotes the series. The reason label is
+// a short closed list for the same class of reason: a label whose values came
+// from an error string would grow a new series on the first unusual failure.
+func (a *API) writeNotificationMetrics(b *strings.Builder) {
+	st := a.Webhook.Stats()
+	if !st.Configured {
+		// Nothing configured. Emitting zeroes would put a permanent flat line
+		// on every dashboard for a feature nobody turned on, and an operator
+		// cannot tell "off" from "on and silent" by looking at a zero.
+		return
+	}
+
+	metric(b, "dnsdaddy_webhook_enqueued_total",
+		"Findings queued for the notification address", "counter",
+		fmt.Sprintf("dnsdaddy_webhook_enqueued_total %d", st.Enqueued))
+	metric(b, "dnsdaddy_webhook_sent_total",
+		"Findings delivered to the notification address", "counter",
+		fmt.Sprintf("dnsdaddy_webhook_sent_total %d", st.Sent))
+
+	// Every reason gets a series whether or not it has happened, so an
+	// operator can write an alert before the first failure rather than after.
+	lines := make([]string, 0, len(detect.WebhookDropReasons()))
+	for _, reason := range detect.WebhookDropReasons() {
+		lines = append(lines,
+			fmt.Sprintf("dnsdaddy_webhook_dropped_total{reason=%q} %d", reason, st.Dropped[reason]))
+	}
+	metric(b, "dnsdaddy_webhook_dropped_total",
+		"Findings not delivered, by reason; each is still recorded locally", "counter", lines...)
+
+	metric(b, "dnsdaddy_webhook_queue_length",
+		"Findings waiting to be sent", "gauge",
+		fmt.Sprintf("dnsdaddy_webhook_queue_length %d", st.QueueLen))
 }

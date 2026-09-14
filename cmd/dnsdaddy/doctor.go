@@ -18,6 +18,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/ratelimit"
 	"github.com/jameshoulder/dnsdaddy/internal/rebind"
@@ -108,6 +109,7 @@ func runDoctor(args []string) error {
 	checks = append(checks, doctorAccountability(ctx, st, cfg)...)
 	checks = append(checks, doctorFirstSeen(ctx, st, cfg)...)
 	checks = append(checks, doctorListingDates(ctx, st, cfg)...)
+	checks = append(checks, doctorNotifications(cfg)...)
 	checks = append(checks, doctorRebinding(ctx, st, cfg)...)
 	checks = append(checks, diag.RateLimit(diag.RateLimitInput{
 		Enabled: cfg.DNS.RateLimit.Enabled,
@@ -951,4 +953,31 @@ func doctorSizing(ctx context.Context, st *store.Store, cfg config.Config) resou
 	}
 	return resources.Decide(cfg.Resources.SizeProfile(),
 		installDefault, resources.Detect(cfg.Resources.DetectOptions()))
+}
+
+// doctorNotifications reports where findings are sent, if anywhere.
+//
+// It reads the configuration rather than a running sink, because doctor is
+// frequently run when there is no running process — that is usually why
+// somebody is running it. So it reports what the address is and whether it can
+// be used; the counters live on the daemon and appear in /metrics and
+// /api/v1/diagnostics.
+func doctorNotifications(cfg config.Config) []diag.Check {
+	w := cfg.Detection.Webhook
+	in := diag.NotificationsInput{
+		Configured: w.Enabled(),
+		Dropped:    map[string]uint64{},
+	}
+	if !in.Configured {
+		return diag.Notifications(in)
+	}
+	if err := detect.ValidateWebhookURL(w.URL); err != nil {
+		in.URLError = err.Error()
+		return diag.Notifications(in)
+	}
+	// Redacted before it goes anywhere a person will read: a notification
+	// address is frequently a bearer token in path form, and a doctor report
+	// is the kind of thing somebody pastes into a ticket.
+	in.Address = detect.RedactWebhookURL(w.URL)
+	return diag.Notifications(in)
 }

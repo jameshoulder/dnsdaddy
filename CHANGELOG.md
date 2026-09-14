@@ -22,6 +22,58 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Findings can be pushed to Slack, Teams, or anything that accepts JSON
+
+**Off by default, and normal to leave off** — especially on a 1 GB machine.
+With no address set, findings stay on this machine exactly as before, and
+`dnsdaddy doctor` says so in one line rather than nagging.
+
+```yaml
+detection:
+  webhook:
+    url: https://hooks.slack.com/services/...
+```
+
+Each behavioural finding is POSTed as it happens, as **exactly the JSON
+document the NDJSON file already holds** — same `schemaVersion`, same `id`,
+same fields. Nothing that reads one needs a second parser for the other.
+
+**It is a copy, never the record.** The finding is written to the database and
+the findings file *before* the webhook is offered it, so a notification that
+fails costs a notification. A bounded queue (256 by default) drops and counts
+rather than making detection wait for an endpoint that has gone away — if a
+chat tool is down, detection carries on and nothing is lost. Delivery is
+at-least-once, so consumers should de-duplicate on `id`.
+
+**This is not the SIEM path.** The NDJSON file plus a log shipper remains the
+way to get findings into a log platform: it survives restarts and can be
+replayed, and the webhook can do neither. The webhook is for putting an alert
+in front of a person within seconds. [docs/siem.md](docs/siem.md) has the
+comparison.
+
+**Where it will send, and where it will not.** HTTPS only — a finding names a
+device and a domain somebody looked up, and plain HTTP would put that in front
+of every hop on the way. The address must be publicly routable: not this
+machine, not your own network, not a cloud metadata service. Redirects are
+never followed, because a redirect is the standard way to move a destination
+after it has been checked. An address that breaks any of these is refused at
+startup with the reason, rather than silently never delivering.
+
+A single optional secret header is supported for endpoints that authenticate.
+The address and the header are redacted everywhere an operator or a ticket
+system could read them — a webhook URL is frequently a bearer token in path
+form.
+
+New metrics: `dnsdaddy_webhook_enqueued_total`, `_sent_total`,
+`_dropped_total{reason}` and `_queue_length`, none of them labelled by address.
+
+**Also in this change:** the address rules that protect this and the
+threat-intelligence providers now live in one place (`internal/netguard`) with
+two stated postures rather than two hand-maintained lists. Providers keep
+exactly the behaviour they had — private ranges stay reachable, because an
+internal reputation service is a stated use case — and the webhook gets the
+stricter one. Nothing about provider behaviour changes.
+
 ### A blocked domain now says how long its feed has been listing it
 
 "Blocked because URLhaus listed it as malware" is half an answer. The other

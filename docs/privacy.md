@@ -22,7 +22,9 @@ Self-hosted DNS Daddy makes exactly three kinds of outbound connection:
    so your ISP cannot read or tamper with it.
 2. **Feed downloads**, to the public URLs in
    [threat-intel.md](threat-intel.md), on a schedule you control.
-3. Nothing else.
+3. **A notification address, if you set one** — see below. Off by default, and
+   it only ever goes to the URL you typed.
+4. Nothing else.
 
 There is no telemetry, no analytics, no licence check, and no call home. Set
 `feeds.refresh_interval` to `0` and configure a `file://` feed and it will run
@@ -202,6 +204,35 @@ Kept for `log.audit_retention_days` (90 by default) — deliberately longer than
 the query log, because "what changed before this started?" is asked about
 incidents nobody noticed for weeks. Zero keeps everything. The table grows per
 edit, not per lookup, so it stays small either way.
+
+### Findings sent to a notification address
+
+Off by default. Setting `detection.webhook.url` POSTs each behavioural finding
+to that address as it happens.
+
+**It goes where you said and nowhere else.** There is no DNS Daddy endpoint
+involved, no relay, and no copy kept anywhere but your own machine. The URL is
+yours; we never see it or what passes through it.
+
+**What is sent** is exactly the finding document already described under
+[Behavioural findings](#behavioural-findings--findings) — including the client
+IP and device name, because that is what a finding is about. It honours
+`log.log_client_ip` the same way the stored finding does: with device
+attribution off, the finding has no IP to send, so neither does the
+notification. Nothing is added or enriched on the way out.
+
+**What is not sent:** queries, answers, statistics, configuration, or anything
+about the installation itself. One finding, one POST.
+
+**Before you turn it on,** be clear that this takes data that was staying on
+your server and sends it to a third party — Slack, Teams, or whoever operates
+the endpoint. That is a decision to make deliberately, and one worth mentioning
+in whatever you tell your staff about monitoring. It is off by default for
+exactly that reason.
+
+HTTPS only, to a publicly routable address. A finding names a device and a
+domain somebody looked up, and plain HTTP would put that in front of every hop
+along the way.
 
 ### Configuration
 
