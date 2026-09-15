@@ -59,9 +59,13 @@ while the DS is absent is a contradiction and produces Bogus. A response whose
 rcode is NXDOMAIN establishes no delegation at all, whatever its records say —
 a delegation is a name that exists (`R-DEN-13`, `R-N3-12`).
 
-**Assumed, when no DS RRset is present and no denial is supplied:** that the
-name is not a zone cut. This is the one substantive assumption left in the walk,
-and it is deliberately one-sided — see standards.md §5.5. It can cost a false
+**Assumed, when no DS RRset is present, no denial is supplied, and the source
+cannot establish the boundary:** that the name is not a zone cut. The walk asks
+before it assumes — a source that resolves iteratively crosses zone cuts and can
+probe for the ones it did not cross — so this is now the fallback for sources
+that cannot see the path at all, and for a walk whose lookup budget is spent. It
+remains the one substantive assumption left in the walk, and it is deliberately
+one-sided — see standards.md §5.5. It can cost a false
 Bogus. It cannot manufacture a false Secure, because concluding Secure needs a
 signature from a key set this walk has already authenticated, and an attacker
 below an insecure delegation does not have one.

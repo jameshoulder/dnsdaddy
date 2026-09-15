@@ -684,6 +684,58 @@ establish validation" and fails safe rather than as an accusation against the
 data. `TestAnObservedDelegationWithNoProvableDSIsIndeterminateNotInsecure`
 strips a DS and requires exactly this.
 
+#### Establishing a cut the resolution did not cross
+
+Observing referrals answers the question only for the names a resolution walked
+through. Two situations leave the iterative source with nothing to report, and
+both are ordinary rather than exotic:
+
+- the resolution for the name **failed** — a lame delegation, a child whose
+  nameservers are unreachable, a zone whose operator let the delegation lapse.
+  The cut exists and the parent's referral is perfectly readable; it is the
+  child that cannot be reached.
+- the name sits **above where this resolution began**. A warm cache starts a
+  resolution at a cached delegation, and nothing above that point was walked.
+
+Until these were closed, either case made the source decline to answer and the
+walk fell back to assuming the name was not a cut. For a real delegation that
+meant descending into the child's records holding the parent's keys, no
+signature verifying, and the answer reported Bogus — an accusation against data
+that was fine.
+
+So where inference has nothing to say about the name it was asked about,
+`Source.ZoneCutsFor` establishes the boundary instead of declining:
+`Resolver.DelegationAt` walks down from the deepest delegation already proved
+*strictly above* the name, one label at a time, asking NS and reading the
+boundary off the shape of each reply.
+
+| The reply | Conclusion |
+|---|---|
+| Referral at the name: NS in the authority section, AA clear | It is a zone cut |
+| Authoritative for the name, referring nowhere at it | It is not a zone cut |
+| Authoritative NXDOMAIN for the name itself | It does not exist, so it is not a cut |
+| Anything else — timeout, lame server, budget spent, context cancelled | Unknown; the assumption below still applies |
+
+Three properties make this safe to add:
+
+- **It cannot manufacture a Secure.** A discovered cut takes the
+  `delegation_unprovable` row above — Indeterminate, never Insecure — and a
+  discovered non-cut produces exactly what the assumption produced. So the
+  change removes refusals without adding acceptances, over every question the
+  reference hierarchy can be asked and with the delegation answer inverted in
+  both directions (`TestDiscoveringDelegationsNeverProducesSecure`).
+- **It is minimised.** Each server is told one label more than it already had
+  to know, so the root still learns only the TLD
+  (`TestTheProbeTellsEachServerOnlyTheNextLabel`).
+- **It is bounded.** Establishing a boundary costs queries, so it is spent from
+  the same `MaxLookups` budget as a record lookup. At the budget the answer is
+  "cannot tell", which lands on the assumption — a resource limit is not
+  evidence and must not be dressed as any
+  (`TestEstablishingDelegationsIsSpentFromTheLookupBudget`).
+
+Established boundaries are remembered for the same interval as a referral, so a
+deep name does not pay for a walk per label.
+
 ### When the source cannot see delegations
 
 A forwarding source — `netsource`, or any source reading records through

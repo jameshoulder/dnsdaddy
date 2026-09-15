@@ -133,11 +133,32 @@ func (w *walk) noDSAtDelegation(zone *zoneState, child string, resp Response) (*
 // zone cut" and "I have no idea" lead to different behaviour, and collapsing
 // them into one boolean is how a validator ends up treating ignorance as
 // evidence.
+//
+// # Why this spends the lookup budget
+//
+// Answering costs queries. A source that resolves iteratively may have to walk
+// down to the name to establish the boundary, and doing that once per
+// unproven candidate is once per label of the query name. MaxLookups exists to
+// bound exactly this — the total work one validation may provoke — and until
+// this counted against it a hostile hierarchy could have a single question
+// drive an unbounded number of packets while the budget that was supposed to
+// stop it sat untouched, because it only ever counted Lookup.
+//
+// At the budget the answer is "I have no idea", which is true and which lands
+// on the assumption the walk has always had. A resource limit is not evidence,
+// so it must not be dressed as any.
 func (w *walk) delegationKnown(child string) (isCut bool, known bool) {
 	ds, ok := w.v.src.(DelegationSource)
 	if !ok {
 		return false, false
 	}
+	if w.ctx.Err() != nil {
+		return false, false
+	}
+	if w.lookups >= w.v.cfg.Limits.MaxLookups {
+		return false, false
+	}
+	w.lookups++
 	cuts, ok := ds.ZoneCutsFor(w.ctx, child)
 	if !ok {
 		return false, false

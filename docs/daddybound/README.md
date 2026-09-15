@@ -95,9 +95,11 @@ being complete:
   was not asked.
 - **One remaining zone-cut assumption, and only where the resolver cannot
   see.** Reading through the native resolver, zone cuts are established from
-  referrals actually followed. Reading through a forwarder, which cannot see
-  the path, the walk still assumes a name with no proof either way is not a
-  zone cut. That can cost a false Bogus and cannot produce a false Secure —
+  referrals actually followed, and where a resolution crossed none — it failed,
+  or the name sits above where a warm cache started — the boundary is
+  established by a bounded, minimised NS probe rather than guessed. Reading
+  through a forwarder, which cannot see the path at all, the walk still assumes
+  a name with no proof either way is not a zone cut. That can cost a false Bogus and cannot produce a false Secure —
   argued in standards.md §5.5 and measured by a property test that strips every
   delegation proof and checks no verdict strengthens.
 - **No encrypted transport to authoritative servers.** Native recursion speaks

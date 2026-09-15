@@ -277,10 +277,18 @@ func (p *pin) Lookup(ctx context.Context, name string, rrtype uint16) (dnssec.Re
 
 // ZoneCutsFor forwards to the live source, which is the only thing that knows
 // where the referrals were. The pin holds replies, not paths.
+//
+// Counted like a lookup, because it is one. Establishing a boundary sends
+// queries — see recursive.Resolver.DelegationAt — and a counter that reported
+// only the replies the validator read would understate the work a question
+// caused by however many delegations it had to establish.
 func (p *pin) ZoneCutsFor(ctx context.Context, name string) (map[string]bool, bool) {
 	if p.src == nil {
 		return nil, false
 	}
+	p.mu.Lock()
+	p.lookups++
+	p.mu.Unlock()
 	return p.src.ZoneCutsFor(ctx, name)
 }
 

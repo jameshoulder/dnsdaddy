@@ -77,18 +77,28 @@ func (s *Source) Lookup(ctx context.Context, name string, rrtype uint16) (dnssec
 //     names the resolver actually walked through, which means at or below the
 //     zone the resolution started in.
 //
-// Above that starting point the honest answer is no answer, and the walk falls
-// back to its own conservative assumption for those names.
+// Above that starting point inference has nothing to say — but that is not the
+// end of the matter, because the boundary can be established by asking. Where
+// this function would otherwise have no opinion about the very name it was
+// asked about, it falls through to Resolver.DelegationAt, which walks down
+// from the deepest already-proven ancestor and reads the boundary off the
+// replies. Inference stays bounded by what was walked; the probe covers the
+// rest. See delegation.go.
 func (s *Source) ZoneCutsFor(ctx context.Context, name string) (map[string]bool, bool) {
+	qname := dns.CanonicalName(name)
+
 	// Resolving the name is what produces the delegation evidence. It is
 	// almost always a cache hit by the time a validator asks, because the
 	// validator is validating something the resolver just fetched.
 	res, err := s.r.Resolve(ctx, name, dns.TypeNS)
 	if err != nil || res == nil {
-		return nil, false
+		// A failed resolution is not a reason to be blind about the
+		// boundary. It says nothing was learned *this way*, and the probe is
+		// a different way; before this fell straight through to the
+		// validator's assumption, so an unrelated failure cost a verdict.
+		return s.establish(ctx, qname, nil)
 	}
 
-	qname := dns.CanonicalName(name)
 	cuts := map[string]bool{}
 	for _, d := range res.Delegations {
 		cuts[dns.CanonicalName(d.Child)] = true
@@ -129,6 +139,24 @@ func (s *Source) ZoneCutsFor(ctx context.Context, name string) (map[string]bool,
 			break
 		}
 		n = n[i+1:]
+	}
+	return s.establish(ctx, qname, cuts)
+}
+
+// establish fills in the one name that matters when inference could not.
+//
+// The validator asks about a single candidate and reads a single entry back,
+// so that entry is the only gap worth a query. Filling the whole map would
+// turn one question into a walk per name, and the names inference already
+// covered are covered by evidence just as good.
+func (s *Source) establish(ctx context.Context, qname string, cuts map[string]bool) (map[string]bool, bool) {
+	if _, present := cuts[qname]; !present {
+		if isCut, known := s.r.DelegationAt(ctx, qname); known {
+			if cuts == nil {
+				cuts = map[string]bool{}
+			}
+			cuts[qname] = isCut
+		}
 	}
 	if len(cuts) == 0 {
 		return nil, false

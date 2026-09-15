@@ -9,9 +9,10 @@ import (
 	"github.com/miekg/dns"
 )
 
-// The cache is deliberately three separate maps rather than one.
+// The cache is deliberately several separate maps rather than one.
 //
-// Answers, delegations and nameserver addresses have different lifetimes,
+// Answers, delegations, nameserver addresses and established zone-cut
+// boundaries have different lifetimes,
 // different sizes and — the reason that matters — different trust. An answer
 // is what a server said about a name it is authoritative for. A delegation is
 // what a parent said about where to ask next. Glue is a hint. Keeping them
@@ -22,6 +23,14 @@ import (
 // Everything here is bounded. A cache that grows with traffic is a way to run
 // a small box out of memory from the network, so each map has a hard entry
 // limit and evicts when it is reached.
+
+// referralTTL is how long a zone cut is remembered, in seconds.
+//
+// A referral carries no TTL of its own that this resolver is obliged to trust
+// — the NS records in it are the parent's copy, not the child's — so the
+// lifetime is chosen here and applied to both halves of what a referral
+// establishes: where to ask next, and that the boundary exists at all.
+const referralTTL = 600
 
 // CacheOptions configures a Cache.
 type CacheOptions struct {
@@ -66,6 +75,7 @@ type CacheStats struct {
 	Answers   int
 	Dels      int
 	Addrs     int
+	Cuts      int
 }
 
 type answerEntry struct {
@@ -84,6 +94,18 @@ type addrEntry struct {
 	expires time.Time
 }
 
+// cutEntry remembers whether a name was established to be a zone cut.
+//
+// A fourth map rather than a flag on delegationEntry, because the two hold
+// different facts. delegationEntry says "here is where to ask next" and only
+// ever exists for names that are cuts; this says "this name was asked about
+// and the answer was yes or no", and the negative half is the one the
+// validator cannot get anywhere else.
+type cutEntry struct {
+	isCut   bool
+	expires time.Time
+}
+
 // Cache is a bounded, TTL-respecting recursive cache.
 type Cache struct {
 	opt CacheOptions
@@ -92,6 +114,7 @@ type Cache struct {
 	answers map[string]answerEntry
 	dels    map[string]delegationEntry
 	addrs   map[string]addrEntry
+	cuts    map[string]cutEntry
 	stats   CacheStats
 }
 
@@ -103,6 +126,7 @@ func NewCache(opt CacheOptions) *Cache {
 		answers: make(map[string]answerEntry),
 		dels:    make(map[string]delegationEntry),
 		addrs:   make(map[string]addrEntry),
+		cuts:    make(map[string]cutEntry),
 	}
 }
 
@@ -182,7 +206,7 @@ func (c *Cache) PutDelegation(zone string, ns []string, glue map[string][]netip.
 	c.dels[dns.CanonicalName(zone)] = delegationEntry{
 		ns:      append([]string(nil), ns...),
 		glue:    glue,
-		expires: c.opt.Now().Add(c.clamp(600)),
+		expires: c.opt.Now().Add(c.clamp(referralTTL)),
 	}
 }
 
@@ -261,6 +285,70 @@ func (c *Cache) KnownCuts(name string) []string {
 	}
 }
 
+// HasDelegation reports whether a live delegation is cached at exactly this
+// name.
+//
+// At exactly this name, unlike BestDelegation, which walks upwards. The
+// question here is "is this name itself a cut", and an ancestor's delegation
+// is not an answer to it.
+func (c *Cache) HasDelegation(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := dns.CanonicalName(name)
+	e, ok := c.dels[n]
+	if !ok {
+		return false
+	}
+	if !c.opt.Now().Before(e.expires) {
+		delete(c.dels, n)
+		c.stats.Expired++
+		return false
+	}
+	return true
+}
+
+// GetCut returns a remembered zone-cut boundary for name.
+//
+// Separate from the delegation map because this remembers negatives too, and
+// a negative has no nameservers to store. See Resolver.DelegationAt.
+func (c *Cache) GetCut(name string) (isCut bool, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := dns.CanonicalName(name)
+	e, present := c.cuts[n]
+	if !present {
+		return false, false
+	}
+	if !c.opt.Now().Before(e.expires) {
+		delete(c.cuts, n)
+		c.stats.Expired++
+		return false, false
+	}
+	return e.isCut, true
+}
+
+// PutCut remembers an established boundary.
+//
+// Held for the same interval as a referral, and for the same reason: a
+// delegation is a fact about the shape of the tree that a zone may change, and
+// remembering it longer than the parent would have us remember the referral
+// itself would be inventing a guarantee nobody made.
+func (c *Cache) PutCut(name string, isCut bool) {
+	ttl := c.clamp(referralTTL)
+	if ttl <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evictIfNeededLocked(len(c.cuts), c.opt.MaxDelegations, func(k string) { delete(c.cuts, k) }, c.cuts)
+	c.cuts[dns.CanonicalName(name)] = cutEntry{
+		isCut:   isCut,
+		expires: c.opt.Now().Add(ttl),
+	}
+}
+
 // GetAddrs returns cached addresses for a nameserver name.
 func (c *Cache) GetAddrs(name string) ([]netip.Addr, bool) {
 	c.mu.Lock()
@@ -334,6 +422,14 @@ func (c *Cache) evictIfNeededLocked(size, max int, del func(string), m any) {
 				return
 			}
 		}
+	case map[string]cutEntry:
+		for k := range mm {
+			del(k)
+			c.stats.Evictions++
+			if drop--; drop <= 0 {
+				return
+			}
+		}
 	}
 }
 
@@ -358,6 +454,7 @@ func (c *Cache) Flush() {
 	c.answers = make(map[string]answerEntry)
 	c.dels = make(map[string]delegationEntry)
 	c.addrs = make(map[string]addrEntry)
+	c.cuts = make(map[string]cutEntry)
 }
 
 // Stats returns a snapshot.
@@ -366,6 +463,7 @@ func (c *Cache) Stats() CacheStats {
 	defer c.mu.Unlock()
 	s := c.stats
 	s.Answers, s.Dels, s.Addrs = len(c.answers), len(c.dels), len(c.addrs)
+	s.Cuts = len(c.cuts)
 	return s
 }
 
