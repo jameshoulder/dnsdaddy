@@ -55,13 +55,30 @@ test-daddybound: ## Compare Daddybound against libunbound and BIND delv (needs l
 	CGO_ENABLED=1 go test -tags daddybound_unbound -v ./internal/daddybound/...
 
 .PHONY: corpus
-corpus: ## Compare Daddybound against libunbound and delv over real Internet names (needs network, several minutes)
+corpus: ## Compare Daddybound against libunbound and delv, through two resolvers, over real Internet names (needs network, several minutes)
 	@# Deliberately not part of `make test` and not in CI. It needs the
-	@# network, a public recursive resolver, both reference validators and
-	@# several minutes, and its result depends on the state of zones nobody
-	@# here controls — every one of which is a reason it must not gate a pull
-	@# request. A CI job that goes red because someone else let a signature
-	@# expire teaches contributors to re-run red builds.
+	@# network, two public recursive resolvers, at least one reference
+	@# validator and several minutes, and its result depends on the state of
+	@# zones nobody here controls — every one of which is a reason it must not
+	@# gate a pull request. A CI job that goes red because someone else let a
+	@# signature expire teaches contributors to re-run red builds.
+	@#
+	@# Tools. Both are optional and independently so; an absent one costs its
+	@# column and nothing else, and the run continues on whatever is present:
+	@#   libunbound   apt-get install libunbound-dev   (needs cgo)
+	@#   delv         apt-get install bind9-dnsutils
+	@#   root anchors apt-get install dns-root-data    (or set DADDYBOUND_ROOT_KEY)
+	@#
+	@# Views. Every validator in a view reads through that view's resolver, so
+	@# a view is one answer to "where did these records come from". The
+	@# default is two independent operators; override with a comma-separated
+	@# list of name=host:port, and note that two names for one address are
+	@# refused rather than merged, because that would be one view reported as
+	@# two:
+	@#   DADDYBOUND_CORPUS_VIEWS='cf=1.1.1.1:53,q9=9.9.9.10:53'
+	@#
+	@# Other knobs: DADDYBOUND_CORPUS_LIMIT=N for a short run,
+	@# DADDYBOUND_CORPUS_SERVER=addr for the old single-view behaviour.
 	DADDYBOUND_CORPUS=1 CGO_ENABLED=1 go test -tags daddybound_unbound \
 		./internal/daddybound/differential/ -run TestRealWorldCorpus -v -count=1 -timeout 60m
 

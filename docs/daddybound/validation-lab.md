@@ -356,9 +356,9 @@ cannot establish is that the rules are the right *set* — that no shape
 occurring in the wild falls outside every scenario anyone thought to write.
 Only real names can answer that, because nobody has to think of them.
 
-`make corpus` puts 612 questions to Daddybound, libunbound and delv over a
-public recursive resolver. Two disciplines make the answer worth having, and
-both are about the corpus rather than the code.
+`make corpus` puts 612 questions to Daddybound, libunbound and delv, through
+two independent resolving views. Three disciplines make the answer worth
+having, and all three are about the corpus rather than the code.
 
 **The names are not chosen by verdict.** 277 come from the Tranco top-1M,
 sampled by rank arithmetic across four bands — nothing inspected before
@@ -434,6 +434,47 @@ for everything would pass that. Its trust anchor's digest is thirty-two zero
 octets, so no DNSKEY can match it and nothing the fuzzer produces may
 validate. A Secure verdict there is a forged chain of trust and fails the run.
 
+**The records come from more than one place.** Two oracles reading one
+forwarder is two validators judging whatever that single resolver chose to
+hand over: a stale DNSKEY, a filtered answer or a truncated chain makes
+Daddybound, libunbound and delv agree unanimously on the same wrong input, and
+unanimous agreement on bad input is the most convincing wrong answer
+available. So a *view* — one resolver, read by every validator in it — is the
+unit the run is organised around, and the default is two operators on two
+networks: Cloudflare's `1.1.1.1`, and Quad9's unsecured `9.9.9.10`. The second
+address is deliberate: `9.9.9.9` validates and filters, so for the
+deliberately broken names in this corpus it returns SERVFAIL where the raw
+records are what a validator under test needs to see, and using it would have
+manufactured disagreements that say nothing about Daddybound. Two names for
+one address are refused rather than merged, because a run that reported two
+views while reading one resolver would be claiming corroboration it does not
+have.
+
+### What the corpus now proves, and what it still does not
+
+It now proves three things it could not prove with one view. That Daddybound
+agrees with two independent reference validators on several hundred real
+names; that it agrees with them through two unrelated resolvers, so the
+agreement is not an artefact of one operator's cache or filtering policy; and
+that where its own verdict *changes* with the view, the run says so as a named
+outcome — a class of finding that could not exist when there was nothing to
+differ from. A cross-view disagreement is reported rather than asserted on,
+because two public resolvers genuinely can hold different records for a name
+mid-re-sign; the single hard assertion remains that no view produced a false
+Secure.
+
+It still does not prove readiness to enforce, and nothing here should be read
+that way. The corpus exercises Observe: records are fetched, judged and
+counted, and no client ever sees a different answer because of what it found.
+It says nothing about RFC 5011 trust-anchor rollover, which is a separate
+mechanism on a separate timescale and is not exercised by any run here. It
+says nothing about what happens when a Bogus verdict is allowed to withhold an
+answer — the failure modes of enforcement are about availability under
+partial failure, and this measures agreement under working conditions. And two
+views are two, not many: a resolver that minimised qnames differently again,
+or sat behind a different transport, could still hand over a set of responses
+neither of these produced. Enforce stays gated.
+
 ## What this evidence does not cover
 
 - The laboratory scenarios are still ones we thought of. The corpus is the
@@ -448,6 +489,12 @@ validate. A Secure verdict there is a forged chain of trust and fails the run.
   and the corpus samples it rather than enumerating it.
 - Aggressive use of NSEC and NSEC3 (RFC 8198), RFC 5011 rollover, and
   recursive resolution: not implemented, so not tested.
-- The corpus runs against one public resolver's view. A resolver that
-  minimised qnames differently, or cached differently, would hand Daddybound a
-  different set of responses for the same names.
+- The corpus runs against two public resolvers' views, not against the DNS.
+  Two is enough to catch an answer that depends on one operator's cache or
+  filtering; it is not enough to characterise the range. A resolver that
+  minimised qnames differently again, or sat behind a different transport,
+  could still hand Daddybound a set of responses neither view produced.
+- Enforcement readiness. Every corpus run is an Observe run: verdicts are
+  recorded and no answer to a client changes because of one. Agreement under
+  working conditions says nothing about the availability failure modes that
+  matter when a Bogus verdict is allowed to withhold an answer.

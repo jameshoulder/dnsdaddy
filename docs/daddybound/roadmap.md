@@ -63,8 +63,8 @@ exposed:
 **Unblocked:** the single largest increase in evidence available.
 
 `make corpus` puts several hundred real names to Daddybound, libunbound and
-delv over a public recursive resolver. It found two defects on its first runs,
-both in shapes no laboratory scenario reached. See
+delv through two independent resolving views. It found two defects on its
+first runs, both in shapes no laboratory scenario reached. See
 [validation-lab.md](validation-lab.md).
 
 This is not recursion. Daddybound still validates records something else

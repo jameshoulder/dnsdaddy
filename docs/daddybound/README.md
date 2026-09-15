@@ -136,9 +136,11 @@ and the isolation is checked as a property of the import graph rather than
 promised here.
 
 The live differential corpus is a separate, opt-in test rather than a
-subcommand, for the same reason it is not in CI — it needs the network, both
-reference validators, and several minutes, and its result depends on the state
-of other people's zones:
+subcommand, for the same reason it is not in CI — it needs the network, two
+public resolvers, at least one reference validator, and several minutes, and
+its result depends on the state of other people's zones. Both oracles are
+optional and independently so: an absent one costs its column and the run
+continues on whatever is present.
 
 ```
 make corpus

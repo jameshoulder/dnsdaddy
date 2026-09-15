@@ -67,10 +67,10 @@ break is asserted over the import graph rather than left to the absence of a
 flag.
 
 Real Internet names are reachable — the live differential corpus points the
-engine at a recursive resolver — but through a test rather than a subcommand.
-That is the honest place for it: the corpus needs the network, both reference
-validators and several minutes, and what it produces is a comparison report,
-not an answer anyone should act on.
+engine at two public recursive resolvers — but through a test rather than a
+subcommand. That is the honest place for it: the corpus needs the network, at
+least one reference validator and several minutes, and what it produces is a
+comparison report, not an answer anyone should act on.
 
 ## What Daddybound is trusted to say
 
