@@ -147,7 +147,7 @@ listed here can be switched on:
 | Behavioural detection | **On**, watching about a quarter as many clients and domains at once |
 | Query history | 3 days, rather than 7 |
 | Decision history ("why was this blocked?") | Off — saves memory. Turn it on if you need it |
-| Local DNSSEC Learn | Off — saves memory and processor. Turn it on if you need it |
+| Local DNSSEC Learn | Off, including on a new install — it looks each name up a second time to check its signatures, and that cost is outside the figures above. Turn it on if you want it |
 | Ads, adult, gambling, newly-registered categories | Off — the same as every other size; these have never been on by default |
 
 ### If the guess is wrong

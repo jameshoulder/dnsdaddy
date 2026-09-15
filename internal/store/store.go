@@ -89,17 +89,47 @@ const DefaultCacheMB = 16
 // per checkpoint and bounds a file that is otherwise unbounded.
 const walSizeLimitBytes = 64 << 20
 
+// Options configures how a database is opened and what a first run seeds.
+//
+// Every field has a working zero value, so Open(path) remains the whole story
+// for anything that does not care — which is every test and every tool that is
+// not the daemon.
+type Options struct {
+	// CacheMB is how much memory SQLite may use for its page cache. Zero means
+	// DefaultCacheMB.
+	CacheMB int
+
+	// FreshInstallLearn is what local DNSSEC validation should do on an
+	// installation that has never run before: "off" or "observe". Empty means
+	// "observe", which is what every release before machine sizing did.
+	//
+	// It has to be passed in rather than decided here because it depends on
+	// how large the machine is, and this package cannot see that. It also has
+	// to be decided before the first run rather than after, because the whole
+	// point of the first-run record is that it is written once: a value
+	// corrected on the second start would already have been the installation's
+	// behaviour for one boot, and would look to an operator like the setting
+	// changing itself.
+	FreshInstallLearn string
+}
+
 // Open opens (creating if necessary) the database at path, applies the schema,
-// and seeds first-run defaults. It uses DefaultCacheMB; see OpenSized.
-func Open(path string) (*Store, error) { return OpenSized(path, DefaultCacheMB) }
+// and seeds first-run defaults. See OpenWithOptions for the daemon's version.
+func Open(path string) (*Store, error) { return OpenWithOptions(path, Options{}) }
 
 // OpenSized is Open with an explicit page-cache size, in megabytes.
-//
-// The size comes from the machine size chosen at startup. It is set through
-// the connection string rather than by executing a statement afterwards
-// because cache_size is per-connection: the pool opens several, and a pragma
-// run once would apply to whichever one happened to serve it.
 func OpenSized(path string, cacheMB int) (*Store, error) {
+	return OpenWithOptions(path, Options{CacheMB: cacheMB})
+}
+
+// OpenWithOptions is Open with the choices the daemon makes at startup.
+//
+// The page-cache size is set through the connection string rather than by
+// executing a statement afterwards because cache_size is per-connection: the
+// pool opens several, and a pragma run once would apply to whichever one
+// happened to serve it.
+func OpenWithOptions(path string, o Options) (*Store, error) {
+	cacheMB := o.CacheMB
 	if cacheMB <= 0 {
 		cacheMB = DefaultCacheMB
 	}
@@ -138,7 +168,7 @@ func OpenSized(path string, cacheMB int) (*Store, error) {
 	}
 
 	s := &Store{db: db, path: path}
-	if err := s.seed(context.Background()); err != nil {
+	if err := s.seed(context.Background(), o); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("seed defaults: %w", err)
 	}

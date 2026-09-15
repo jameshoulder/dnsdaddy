@@ -137,10 +137,21 @@ the blocklist, the query log and the store still cannot reach the validator at
 all — only the DNS handler has a door, and only at the point where the answer
 is already final.
 
-Learn mode is **on for a new installation** and **unchanged by an upgrade**:
-it is off the answer path but sends its own DNSSEC queries upstream, so it is
-not something to inherit from a version bump. Setting
-`dns.local_dnssec_validation` explicitly always wins.
+Learn mode is **on for a new installation on a 2 GB machine or larger**, **off
+for a new installation on a 1 GB machine**, and **unchanged by an upgrade**.
+
+It is off the answer path, but it looks each name up a second time and checks
+its signatures, which makes it the most expensive default in this software —
+and its cost is deliberately outside the memory figures published for a 1 GB
+machine. Turning it on there and then warning about it was creating the
+situation the warning described. On a small box it is one setting away
+whenever an operator wants it.
+
+An upgrade keeps whatever it recorded, in both directions: Learn sends its own
+DNSSEC queries upstream, and that is not something to inherit from a version
+bump — nor to lose to one. Moving an existing installation to a larger or
+smaller machine changes nothing either. Setting
+`dns.local_dnssec_validation` explicitly always wins over all of it.
 
 The dashboard shows the future **Live** mode — Daddybound participating in
 enforcement — as *unavailable* rather than hiding it, so nothing on the page

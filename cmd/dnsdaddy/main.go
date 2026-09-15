@@ -1111,7 +1111,22 @@ func buildFirstSeenIndex(st *store.Store, cfg config.Config, log *slog.Logger) *
 // that was deliberately left alone, which is exactly the surprise the upgrade
 // rule exists to prevent.
 func openSizedStore(cfg *config.Config, log *slog.Logger) (*store.Store, resources.Decision, error) {
-	st, err := store.Open(cfg.DBPath())
+	// The machine is read before the database is opened, because one first-run
+	// decision depends on it.
+	//
+	// Local DNSSEC Learn is the most expensive default in this tree, and its
+	// cost is deliberately outside the memory budget published for a 1 GB
+	// machine. The first-run record is written once, by seed, inside Open — so
+	// if the size is not known by then, a fresh 1 GB install spends its first
+	// boot running Learn and either keeps it or appears to change its own
+	// setting on the second start. Neither is acceptable, and detection needs
+	// no database: it reads the machine.
+	machine := resources.Detect(cfg.Resources.DetectOptions())
+	seedSize, _ := resources.Resolve(cfg.Resources.SizeProfile(), machine)
+
+	st, err := store.OpenWithOptions(cfg.DBPath(), store.Options{
+		FreshInstallLearn: freshInstallLearn(seedSize),
+	})
 	if err != nil {
 		return nil, resources.Decision{}, err
 	}
@@ -1122,7 +1137,6 @@ func openSizedStore(cfg *config.Config, log *slog.Logger) (*store.Store, resourc
 		return nil, resources.Decision{}, fmt.Errorf("read machine size record: %w", err)
 	}
 
-	machine := resources.Detect(cfg.Resources.DetectOptions())
 	sizing := resources.Decide(cfg.Resources.SizeProfile(), installDefault, machine)
 
 	if !sizing.Applied {
@@ -1178,4 +1192,25 @@ func openSizedStore(cfg *config.Config, log *slog.Logger) (*store.Store, resourc
 			sizing.Running.Label(), err)
 	}
 	return sized, sizing, nil
+}
+
+// freshInstallLearn decides whether a brand-new installation runs local DNSSEC
+// validation in Learn mode.
+//
+// Off on a 1 GB machine, on everywhere else, and it applies only to an
+// installation that has never run. An upgrade keeps whatever it recorded, and
+// an operator who wrote dns.local_dnssec_validation in their configuration
+// wins over both — this only fills in the blank nobody filled.
+//
+// It is deliberately not tied to the expensive-mode rule that says a larger
+// machine never switches a feature on. That rule is about a size CHANGING on
+// an installation that already exists; this is the one moment there is nothing
+// to inherit, and choosing a default that the machine can afford is not the
+// same as turning something on behind an operator's back. Moving a 1 GB
+// install to a 4 GB VPS still leaves Learn exactly where it was.
+func freshInstallLearn(size resources.Profile) string {
+	if size == resources.ProfileTiny {
+		return "off"
+	}
+	return "observe"
 }

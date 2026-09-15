@@ -50,7 +50,7 @@ const installMarkerKey = "install.first_run_decisions_v1"
 // the built-in feed list. It is idempotent — existing rows are left alone,
 // except that built-in feed metadata (name, URL, category) is refreshed so an
 // upgrade can correct a moved or renamed source.
-func (s *Store) seed(ctx context.Context) error {
+func (s *Store) seed(ctx context.Context, o Options) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -203,9 +203,25 @@ func (s *Store) seed(ctx context.Context) error {
 	}
 
 	if decided == 0 {
+		// What local DNSSEC validation does on an installation nobody has
+		// configured it on.
+		//
+		// A fresh install validates in Learn mode — unless the machine is too
+		// small to afford it. Learn resolves and checks the signatures on each
+		// name a second time, which is the most expensive default in this
+		// tree, and its cost is deliberately outside the memory budget
+		// published for a 1 GB machine. Turning it on there and then warning
+		// about it was creating the situation the warning describes.
+		//
+		// An upgrade stays off regardless. Learn sends real DNSSEC queries
+		// upstream and consumes processor, and inheriting that from a release
+		// upgrade is a change to somebody's traffic that they did not ask for.
 		dnssecDefault := "off"
 		if freshInstall {
 			dnssecDefault = "observe"
+			if o.FreshInstallLearn != "" {
+				dnssecDefault = o.FreshInstallLearn
+			}
 		}
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO settings (key, value) VALUES (?, ?)",

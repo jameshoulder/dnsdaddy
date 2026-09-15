@@ -22,6 +22,26 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### A new install on a 1 GB machine no longer starts DNSSEC Learn
+
+Learn looks each name up a second time and checks its signatures. It is the
+most expensive default in this software, and its cost is deliberately outside
+the memory figures published for a 1 GB machine — so turning it on there and
+then warning about it was creating the situation the warning described.
+
+A **new** installation now records Learn as off when the machine is a 1 GB one,
+and on at 2 GB and above exactly as before. Choosing the 1 GB size by hand
+counts the same way. It remains one setting away on any machine.
+
+**Nothing changes for an existing installation.** The first-run record is
+written once and never revisited: an installation running Learn goes on running
+it, one that is not does not acquire it, and moving to a larger or smaller VPS
+changes neither. `dns.local_dnssec_validation` in your configuration still wins
+over all of it.
+
+Learn is observe-only, so this changes what the box costs and what is written
+down, and nothing a client receives.
+
 ### Findings can be pushed to Slack, Teams, or anything that accepts JSON
 
 **Off by default, and normal to leave off** — especially on a 1 GB machine.

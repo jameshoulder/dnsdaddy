@@ -392,3 +392,39 @@ func TestAMachineThatHasNeverRunIsNotToldItUpgraded(t *testing.T) {
 		t.Errorf("a real upgrade no longer warns: %v %q", upgrade.Status, upgrade.Summary)
 	}
 }
+
+// TestAFresh1GBMachineIsNotWarnedAboutLearn.
+//
+// The warning exists for an installation that is running the two expensive
+// features on a machine whose published budget does not include them. A fresh
+// 1 GB install no longer turns Learn on, so the warning should simply not
+// fire — and a check that warned anyway would be telling an operator to fix
+// something the program had already stopped doing.
+func TestAFresh1GBMachineIsNotWarnedAboutLearn(t *testing.T) {
+	fresh := MachineSizeInput{
+		Sizing: resources.Decide(resources.ProfileAuto, "auto", machineWith(1024, 1)),
+		// What a fresh 1 GB install now looks like: neither expensive feature
+		// on, because neither was switched on for it.
+		DecisionRecords:  false,
+		LocalDNSSECLearn: false,
+	}
+	for _, c := range MachineSize(fresh) {
+		if c.Name == "Heavy features on a small machine" {
+			t.Errorf("a fresh 1 GB install was warned about a feature it does not "+
+				"run: %q", c.Summary)
+		}
+		if c.Status == StatusWarn {
+			t.Errorf("a fresh 1 GB install produced a warning: %q", c.Summary)
+		}
+	}
+
+	// An operator who turns Learn on anyway is still told what it costs. The
+	// warning is about a live situation, not about a default that no longer
+	// exists — and an upgraded 1 GB box that recorded Learn years ago is
+	// exactly that situation.
+	chose := fresh
+	chose.LocalDNSSECLearn = true
+	if c := onlyCheck(t, MachineSize(chose), "Heavy features on a small machine"); c.Status != StatusWarn {
+		t.Errorf("a 1 GB machine actually running Learn = %v, want WARN", c.Status)
+	}
+}
