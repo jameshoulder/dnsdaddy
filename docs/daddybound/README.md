@@ -155,4 +155,5 @@ make corpus
 | [architecture.md](architecture.md) | The packages, the dependency direction, and why the seams are where they are |
 | [security-model.md](security-model.md) | What Daddybound is trusted with, what it is not, and how that is enforced |
 | [validation-lab.md](validation-lab.md) | The laboratory, the scenarios, and the differential comparison |
+| [enforcement-readiness.md](enforcement-readiness.md) | Why Live mode is still unavailable, and what must be measured before it is not |
 | [roadmap.md](roadmap.md) | What comes next, and what each step unblocks |

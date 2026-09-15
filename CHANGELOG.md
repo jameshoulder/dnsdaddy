@@ -22,6 +22,27 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Documentation: why Live mode is still unavailable, with the numbers
+
+`docs/daddybound/enforcement-readiness.md` answers the question the Learn-mode
+doctor output invites: DNSSEC verdicts are recorded and not acted on, so what
+would let them be acted on? The page states what Learn measures today against
+what enforcement would do to a client's packet, the three assumption paths that
+can still refuse a correctly signed answer, what the two-view corpus does and
+does not prove, the four ways enforcement could take a network down, and the
+conditions that must be measured on real traffic before `enforce` is accepted.
+
+Those conditions are deliberately numeric — days, deployments, a false-Bogus
+rate, a measured query-rate increase — because "the tests pass" and "the corpus
+is green" are entry conditions for collecting evidence rather than the evidence
+itself, and treating them as the latter is how enforcement ships early.
+
+`dnsdaddy doctor` gains one line saying Live mode is unavailable for want of
+production evidence, and pointing at that page. No setting is added: there is
+nothing to toggle, and offering one would be the opposite of the point.
+
+Documentation and one diagnostic line only. No code on the answer path.
+
 ### A new install on a 1 GB machine no longer starts DNSSEC Learn
 
 Learn looks each name up a second time and checks its signatures. It is the

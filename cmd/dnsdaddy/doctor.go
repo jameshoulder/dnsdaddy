@@ -720,6 +720,13 @@ func doctorLocalDNSSEC(ctx context.Context, cfg config.Config) diag.Check {
 		fmt.Sprintf("workers %d, queue %d, per-observation timeout %s",
 			cfg.DNS.LocalDNSSECWorkers, cfg.DNS.LocalDNSSECQueue, cfg.DNS.LocalDNSSECTimeout.D()),
 		"Enforcement is not implemented. A bogus verdict is recorded, not acted on.",
+		// Deliberately a statement and not an offer. An operator reading
+		// "records but does not act" reasonably asks what would let it act,
+		// and the honest answer is evidence from real traffic rather than a
+		// setting they have not found yet. Saying so here is cheaper than
+		// letting them go looking for a toggle that must not exist.
+		"Live mode unavailable — not enough production evidence. " +
+			"See docs/daddybound/enforcement-readiness.md.",
 	}
 
 	anchors, err := loadTrustAnchors(cfg.DNS.LocalDNSSECTrustAnchorFile)

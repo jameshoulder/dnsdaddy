@@ -473,7 +473,9 @@ answer — the failure modes of enforcement are about availability under
 partial failure, and this measures agreement under working conditions. And two
 views are two, not many: a resolver that minimised qnames differently again,
 or sat behind a different transport, could still hand over a set of responses
-neither of these produced. Enforce stays gated.
+neither of these produced. Enforce stays gated, and
+[enforcement-readiness.md](enforcement-readiness.md) sets out what would have
+to be measured on real traffic before that changes.
 
 ## What this evidence does not cover
 
