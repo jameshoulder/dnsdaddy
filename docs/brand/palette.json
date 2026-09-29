@@ -1,0 +1,18 @@
+{
+  "name": "DNS Daddy Brand Package 3.0",
+  "colors": {
+    "blue": "#205AC9",
+    "brand": "#1B5CB8",
+    "deep": "#174E9D",
+    "ink": "#202B3E",
+    "paper": "#F4F6FA",
+    "white": "#FFFFFF",
+    "silver": "#DCE2EB",
+    "ice": "#E8EEF7",
+    "green": "#1D694F",
+    "muted": "#546175",
+    "pale": "#ACC6EC"
+  },
+  "typeface": "Inter 4.1",
+  "ui_typeface": "Native system sans-serif"
+}

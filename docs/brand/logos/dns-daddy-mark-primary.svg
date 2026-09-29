@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title"><title id="title">DNS Daddy standalone mark, primary</title><g opacity="1" transform="translate(256.000 256.000) scale(8.800000) translate(-20.7 -21.9)"><g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="18" cy="18" r="13" stroke="#205AC9" stroke-width="2.4"/>
+      <ellipse cx="18" cy="18" rx="5.6" ry="13" stroke="#205AC9" stroke-width="1.5" opacity=".75"/>
+      <path d="M5.4 18h25.2" stroke="#205AC9" stroke-width="1.5" opacity=".75"/>
+      <path d="M11.2 10.6L18 13.4L25.4 10.2M18 13.4L13.4 24.6" stroke="#174E9D" stroke-width="1.4"/>
+    </g><g fill="#174E9D"><circle cx="11.2" cy="10.6" r="1.9"/><circle cx="25.4" cy="10.2" r="1.7"/><circle cx="13.4" cy="24.6" r="1.7"/></g>
+    <circle cx="18" cy="13.4" r="2.3" fill="#205AC9"/><path d="M29 22.2 l7.4 2.6 v5.1 c0 4.6-3.3 7.7-7.4 8.9 -4.1-1.2-7.4-4.3-7.4-8.9 v-5.1 Z" fill="white" stroke="white" stroke-width="2.4" stroke-linejoin="round"/><path d="M29 22.2 l7.4 2.6 v5.1 c0 4.6-3.3 7.7-7.4 8.9 -4.1-1.2-7.4-4.3-7.4-8.9 v-5.1 Z" fill="#1D694F"/>
+        <path d="M25.6 30.2 l2.6 2.6 4.5-5.2" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></g></svg>
