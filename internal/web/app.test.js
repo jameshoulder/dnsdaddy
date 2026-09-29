@@ -49,6 +49,15 @@ const {
   evidenceSection,
   relatedFindingsSection,
   observationsSection,
+  reviewBadge,
+  reviewForm,
+  findingRow,
+  findingFilters,
+  findingHash,
+  findingFilterForm,
+  createFindingLoader,
+  reviewHistoryList,
+  REVIEW_STATES,
   attentionItems,
   attentionPanel,
   recentlyBlocked,
@@ -3296,4 +3305,116 @@ test('related findings and observations keep their experimental, non-enforcing l
   // The existing badge wording carries the guarantee: a bogus verdict says
   // nothing was blocked.
   assert.match(obs, /not blocked|changed nothing|nothing was blocked/i);
+});
+
+/* ---------- finding review ------------------------------------------- */
+
+test('a review badge names every state in words and treats no review as new', () => {
+  assert.match(reviewBadge(undefined), />New</);
+  assert.match(reviewBadge({ state: 'new', version: 0 }), />New</);
+  for (const [state, label] of REVIEW_STATES) {
+    assert.match(reviewBadge({ state }), new RegExp(`>${label}<`));
+  }
+  // An unknown state from a newer server is shown, not silently called new.
+  const odd = reviewBadge({ state: 'escalated' });
+  assert.match(odd, /escalated/);
+  assert.doesNotMatch(odd, />New</);
+});
+
+test('the review form offers only the moves the workflow allows and says what it does not do', () => {
+  const fresh = reviewForm({ id: 'f1', review: { state: 'new', version: 0 } });
+  assert.match(fresh, /data-version="0"/);
+  assert.match(fresh, /<option value="new" selected>New/);
+  assert.match(fresh, /<option value="acknowledged">/);
+  assert.match(fresh, /<option value="false_positive">/);
+  assert.match(fresh, /does not disable a detector, relax a policy, delete evidence or allow a domain/);
+  assert.match(fresh, /Not yet reviewed/);
+
+  // A resolved finding cannot go straight back to new.
+  const closed = reviewForm({ id: 'f1', review: { state: 'resolved', version: 3, actor: 'session:admin', updatedAt: now(), note: 'ticket 9' } });
+  assert.doesNotMatch(closed, /<option value="new"/);
+  assert.match(closed, /<option value="acknowledged">/);
+  assert.match(closed, /Version 3/);
+  assert.match(closed, /session:admin/);
+  assert.match(closed, />ticket 9</);
+});
+
+test('a review note and actor render as inert text', () => {
+  const hostile = reviewForm({ id: 'f<1>', review: { state: 'acknowledged', version: 1, actor: '<b>x</b>', note: '<img src=x onerror=alert(1)>', updatedAt: now() } });
+  assert.doesNotMatch(hostile, /<img|<b>x/);
+  assert.match(hostile, /&lt;img/);
+  assert.match(hostile, /&lt;b&gt;x/);
+  assert.doesNotMatch(hostile, /data-review-form="f<1>"/);
+
+  const history = reviewHistoryList([
+    { at: now(), fromState: 'new', toState: 'acknowledged', actor: 'token:<soc>', note: '<script>x</script>' },
+  ]);
+  assert.doesNotMatch(history, /<script>|<soc>/);
+  assert.match(history, /&lt;script&gt;/);
+  assert.match(history, /not tamper-evident/);
+  assert.match(reviewHistoryList([]), /No review recorded yet/);
+});
+
+test('a finding row carries its review badge, its links and its review form beside the evidence', () => {
+  const row = findingRow({
+    id: 'f1', eventType: 'dns_tunnel_suspected', severity: 'high', confidence: 0.8, score: 0.7,
+    domain: 'tunnel.example', clientIp: '10.0.0.5', detector: 'dns_tunnel', summary: 's', time: now(),
+    review: { state: 'false_positive', version: 2 },
+    detail: { signals: [{ name: 'unique_subdomains', description: 'd', value: 187, floor: 20, ceiling: 200, weight: 0.3, contribution: 0.2 }], evidence: {}, mitre: [], falsePositives: [], nextSteps: [] },
+  });
+  assert.match(row, />False positive</);
+  assert.match(row, /data-review-form="f1"/);
+  assert.match(row, /Investigate domain/);
+  // The measurements are still rendered from the detail, untouched by the review.
+  assert.match(row, /unique_subdomains/);
+  assert.match(row, /187/);
+});
+
+test('finding filters live in the URL and drop what the server does not accept', () => {
+  const hash = findingHash({ state: 'acknowledged', severity: 'high', days: '30' });
+  assert.equal(hash, '#/detections?state=acknowledged&severity=high&days=30');
+  const back = findingFilters(hash);
+  assert.deepEqual(back, { state: 'acknowledged', severity: 'high', days: '30' });
+  assert.equal(findingHash({}), '#/detections');
+  assert.deepEqual(findingFilters('#/detections?state=escalated&severity=catastrophic&days=999'), { state: '', severity: '', days: '7' });
+  assert.equal(routeName('#/detections?state=new'), 'detections');
+});
+
+test('the finding filter form shows review counts for the period and never invents them', () => {
+  const withCounts = findingFilterForm({ state: 'new', severity: '', days: '7' }, { new: 4, acknowledged: 1, resolved: 0, false_positive: 2 });
+  assert.match(withCounts, /New \(4\)/);
+  assert.match(withCounts, /False positive \(2\)/);
+  assert.match(withCounts, /<option value="new" selected>/);
+  const without = findingFilterForm({ state: '', severity: '', days: '7' }, null);
+  assert.doesNotMatch(without, /\(\d+\)/);
+});
+
+test('the finding loader pages by cursor and respects route ownership', async () => {
+  const calls = [];
+  let current = true;
+  const loader = createFindingLoader({
+    filters: { state: 'new', severity: 'high', days: '7' },
+    isCurrent: () => current,
+    read: async (path) => {
+      calls.push(path);
+      return calls.length === 1
+        ? { findings: [{ id: 'a' }, { id: 'b' }], nextCursor: '123:b' }
+        : { findings: [{ id: 'c' }], nextCursor: '' };
+    },
+    onLoading() {}, onData() {}, onError() {},
+  });
+  assert.equal(await loader.load(), true);
+  assert.match(calls[0], /state=new/);
+  assert.match(calls[0], /severity=high/);
+  assert.match(calls[0], /hours=168/);
+  assert.match(calls[0], /detail=true/);
+  assert.equal(loader.state.cursor, '123:b');
+  assert.equal(await loader.load(true), true);
+  assert.match(calls[1], /cursor=123%3Ab/);
+  assert.deepEqual(loader.state.rows.map((r) => r.id), ['a', 'b', 'c']);
+  // Exhausted: a further append is a no-op, and a stale route loads nothing.
+  assert.equal(await loader.load(true), false);
+  current = false;
+  assert.equal(await loader.load(), false);
+  assert.equal(calls.length, 2);
 });

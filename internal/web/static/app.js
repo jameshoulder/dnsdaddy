@@ -2276,14 +2276,167 @@ function findingDetail(detail) {
   `;
 }
 
+/* ---------- finding review ------------------------------------------------ */
+
+/*
+ * An operator's disposition of a finding sits beside the finding, never
+ * inside it: the measurements, severity, confidence and evidence are what the
+ * detector produced and stay as they were. Marking a finding a false positive
+ * records that assessment and does nothing else — no detector is disabled, no
+ * policy relaxed, no domain allowed — and the form says so.
+ *
+ * Writes carry the version that was read. A 409 means somebody else reviewed
+ * the finding in the meantime, and the form shows what they wrote instead of
+ * overwriting it.
+ */
+
+const REVIEW_STATES = [
+  ['new', 'New', ''],
+  ['acknowledged', 'Acknowledged', 'info'],
+  ['resolved', 'Resolved', 'ok'],
+  ['false_positive', 'False positive', 'warn'],
+];
+
+const REVIEW_LABEL = Object.fromEntries(REVIEW_STATES.map(([v, l]) => [v, l]));
+
+function reviewBadge(review) {
+  const state = review && review.state ? review.state : 'new';
+  const entry = REVIEW_STATES.find(([v]) => v === state);
+  const cls = entry ? entry[2] : 'warn';
+  const label = entry ? entry[1] : String(state);
+  return html`<span class="badge ${cls} review-badge" data-review-badge>${label}</span>`;
+}
+
+// The moves the server allows from each state, mirrored here so the form
+// offers only what will be accepted. The server remains the authority.
+const REVIEW_MOVES = {
+  new: ['acknowledged', 'resolved', 'false_positive'],
+  acknowledged: ['new', 'resolved', 'false_positive'],
+  resolved: ['acknowledged', 'false_positive'],
+  false_positive: ['acknowledged', 'resolved'],
+};
+
+// The version line under a review form. Each html`` result is marked raw
+// exactly once where it is inserted: nesting one html`` inside another
+// without raw() escapes it a second time and shows the markup as text.
+function reviewMetaLine(review) {
+  if (!review || !review.version) return 'Not yet reviewed';
+  const by = review.actor ? html`by <span class="mono">${review.actor}</span> · ` : '';
+  return html`Version ${review.version} · ${raw(by)}updated ${relTime(review.updatedAt)}`;
+}
+
+function reviewForm(finding) {
+  const review = finding.review || { state: 'new', version: 0, note: '' };
+  const state = REVIEW_LABEL[review.state] ? review.state : 'new';
+  const options = [state, ...(REVIEW_MOVES[state] || [])];
+  const id = finding.id;
+  return html`
+    <form class="review-form" data-review-form="${id}" data-version="${review.version || 0}">
+      <h4>Review</h4>
+      <p class="muted small">Records your assessment. It does not disable a detector, relax a policy, delete evidence or allow a domain.</p>
+      <div class="review-fields">
+        <label class="field"><span>Disposition</span>
+          <select name="state">
+            ${raw(options.map((v) => html`<option value="${v}"${raw(v === state ? ' selected' : '')}>${REVIEW_LABEL[v]}</option>`).join(''))}
+          </select></label>
+        <label class="field review-note"><span>Note</span>
+          <textarea name="note" maxlength="2000" rows="2" placeholder="What you found, a ticket reference, why it is benign…">${review.note || ''}</textarea></label>
+        <div class="field"><span>&nbsp;</span><button type="submit" class="btn btn-observe btn-sm">Save review</button></div>
+      </div>
+      <p class="muted small review-meta">
+        ${raw(reviewMetaLine(review))}
+        · <a href="#" data-review-history="${id}">History</a>
+      </p>
+      <p class="form-error" role="alert" hidden data-review-error></p>
+      <div class="review-history" data-review-history-for="${id}" hidden></div>
+    </form>`;
+}
+
+function findingRow(f) {
+  return html`
+    <details class="finding" data-finding="${f.id}">
+      <summary>
+        ${raw(severityBadge(f.severity))}
+        ${raw(reviewBadge(f.review))}
+        <span class="mono">${f.eventType}</span>
+        <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
+        <span class="muted small nowrap">confidence ${f.confidence}</span>
+        <span class="muted small nowrap">${relTime(f.time)}</span>
+      </summary>
+      <div class="finding-body">
+        <p>${f.summary}</p>
+        <p class="muted small">
+          Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> ·
+          Detector: <span class="mono">${f.detector}</span> ·
+          Score: <span class="mono">${f.score}</span>
+        </p>
+        ${raw(findingLinks(f))}
+        ${raw(reviewForm(f))}
+        ${raw(findingDetail(f.detail))}
+      </div>
+    </details>`;
+}
+
+function normaliseFindingFilters(input = {}) {
+  return {
+    state: REVIEW_LABEL[input.state] ? String(input.state) : '',
+    severity: ['high', 'medium', 'low', 'info'].includes(input.severity) ? String(input.severity) : '',
+    days: ['1', '7', '30', '90'].includes(String(input.days)) ? String(input.days) : '7',
+  };
+}
+
+function findingFilters(hash) {
+  const params = new URLSearchParams(String(hash || '').split('?')[1] || '');
+  return normaliseFindingFilters(Object.fromEntries(params));
+}
+
+function findingHash(filters) {
+  const f = normaliseFindingFilters(filters);
+  const query = new URLSearchParams(Object.entries(f).filter(([k, v]) => v && !(k === 'days' && v === '7'))).toString();
+  return `#/detections${query ? `?${query}` : ''}`;
+}
+
+function findingFilterForm(filters, byState) {
+  const option = (value, label, selected) => html`<option value="${value}"${raw(value === selected ? ' selected' : '')}>${label}</option>`;
+  const count = (state) => (byState && typeof byState[state] === 'number' ? ` (${num(byState[state])})` : '');
+  return html`
+    <div class="card section query-filter-card">
+      <form class="query-filters" id="f-filters">
+        <div class="query-filter"><label for="f-state">Review state</label>
+          <select id="f-state" name="state">
+            ${raw(option('', 'All states', filters.state))}
+            ${raw(REVIEW_STATES.map(([v, l]) => option(v, l + count(v), filters.state)).join(''))}
+          </select></div>
+        <div class="query-filter"><label for="f-severity">Severity</label>
+          <select id="f-severity" name="severity">
+            ${raw([['', 'All severities'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low'], ['info', 'Info']].map(([v, l]) => option(v, l, filters.severity)).join(''))}
+          </select></div>
+        <div class="query-filter"><label for="f-days">Period</label>
+          <select id="f-days" name="days">
+            ${raw([['1', 'Last 24 hours'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days']].map(([v, l]) => option(v, l, filters.days)).join(''))}
+          </select></div>
+        <div class="query-filter-actions">
+          <button type="submit" class="btn btn-observe" id="f-apply">Apply</button>
+          <button type="button" class="btn btn-ghost" id="f-clear">Clear</button>
+        </div>
+      </form>
+      <div class="query-filter-note query-filter-summary row">
+        <p class="muted small">Counts are for the selected period. A finding nobody has reviewed is New.</p>
+        <span class="row-end muted small" id="f-count" role="status" aria-live="polite"></span>
+      </div>
+    </div>`;
+}
+
 pages.detections = {
   title: 'Findings',
   subtitle: 'Behavioural findings. Observed and explained, never blocked.',
-  async render() {
-    const [catalogue, findings, summary] = await Promise.all([
-      apiGet('/detectors'),
-      apiGet('/findings?limit=100&detail=true'),
-      apiGet('/findings/summary?days=7'),
+  async render(context = {}) {
+    const hash = context.hash === undefined ? window.location.hash : context.hash;
+    const filters = findingFilters(hash);
+    const read = (path) => apiGet(path, { signal: context.signal });
+    const [catalogue, summary] = await Promise.all([
+      read('/detectors'),
+      read(`/findings/summary?days=${encodeURIComponent(filters.days)}`),
     ]);
 
     if (!catalogue.enabled) {
@@ -2300,6 +2453,8 @@ pages.detections = {
     for (const row of summary.byType || []) {
       if (bySeverity[row.severity] !== undefined) bySeverity[row.severity] += row.count;
     }
+    const byState = summary.byState || null;
+    const period = `Last ${filters.days} day${filters.days === '1' ? '' : 's'}`;
 
     return html`
       <div class="card notice">
@@ -2307,53 +2462,25 @@ pages.detections = {
           heuristics: they score traffic, explain the score, and alert. Blocking is done by the
           policy and threat-feed engine, from curated intelligence rather than inference. Every
           detector below is <strong>experimental</strong> — the thresholds are calibrated against
-          synthetic traffic, not a production network.</p>
+          synthetic traffic, not a production network. Reviewing a finding records your assessment
+          and changes none of that.</p>
       </div>
 
       <div class="section grid grid-4">
-        ${raw(metricCard({ label: 'High', value: num(bySeverity.high), sub: 'Last 7 days', tone: bySeverity.high ? 'bad' : '' }))}
-        ${raw(metricCard({ label: 'Medium', value: num(bySeverity.medium), sub: 'Last 7 days' }))}
-        ${raw(metricCard({ label: 'Low', value: num(bySeverity.low), sub: 'Last 7 days' }))}
+        ${raw(metricCard({ label: 'High', value: num(bySeverity.high), sub: period, tone: bySeverity.high ? 'bad' : '' }))}
+        ${raw(metricCard({ label: 'Medium', value: num(bySeverity.medium), sub: period }))}
+        ${raw(metricCard({ label: 'Awaiting review', value: byState ? num(byState.new) : '—', sub: byState ? `${num(byState.acknowledged)} acknowledged · ${num(byState.resolved)} resolved · ${num(byState.false_positive)} false positive` : 'Review counts unavailable', tone: byState && byState.new ? 'warn' : '' }))}
         ${raw(metricCard({ label: 'Detectors', value: num(catalogue.detectors.length), sub: 'All alert-only', tone: 'detect' }))}
       </div>
 
+      ${raw(findingFilterForm(filters, byState))}
+
       <div class="card">
-        <div class="card-head"><div><h2>Recent findings</h2><p>Newest first. Expand one to see the
-          measurements behind it.</p></div></div>
-        ${raw(
-          findings.findings.length
-            ? findings.findings
-                .map(
-                  (f) => html`
-                    <details class="finding">
-                      <summary>
-                        ${raw(severityBadge(f.severity))}
-                        <span class="mono">${f.eventType}</span>
-                        <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
-                        <span class="muted small nowrap">confidence ${f.confidence}</span>
-                        <span class="muted small nowrap">${relTime(f.time)}</span>
-                      </summary>
-                      <div class="finding-body">
-                        <p>${f.summary}</p>
-                        <p class="muted small">
-                          Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> ·
-                          Detector: <span class="mono">${f.detector}</span> ·
-                          Score: <span class="mono">${f.score}</span>
-                        </p>
-                        ${raw(findingLinks(f))}
-                        ${raw(findingDetail(f.detail))}
-                      </div>
-                    </details>
-                  `
-                )
-                .join('')
-            : emptyState(
-                'No findings yet',
-                'Either nothing has behaved unusually, or not enough traffic has passed through yet. ' +
-                  'This is not a statement that the network is clean: it is a statement that these ' +
-                  'detectors have not raised anything.'
-              )
-        )}
+        <div class="card-head"><div><h2>Findings</h2><p>Newest first. Expand one to see the
+          measurements behind it and to record a review.</p></div></div>
+        <div id="f-results" aria-busy="true">${raw(emptyState('Loading findings…', 'Fetching matching findings.', { icon: '·' }))}</div>
+        <p class="form-error" id="f-error" role="alert" hidden></p>
+        <div class="row mt-4"><button type="button" class="btn btn-ghost" id="f-more" hidden>Load more</button></div>
       </div>
 
       <div class="card">
@@ -2385,7 +2512,195 @@ pages.detections = {
       </div>
     `;
   },
+  async mounted(context = {}) {
+    const host = $('#f-results');
+    if (!host) return; // detection off
+    const form = $('#f-filters');
+    const more = $('#f-more');
+    const count = $('#f-count');
+    const error = $('#f-error');
+    const hash = context.hash === undefined ? window.location.hash : context.hash;
+    const filters = findingFilters(hash);
+    const isCurrent = () => host.isConnected && window.location.hash === hash &&
+      (!context.isCurrent || context.isCurrent());
+
+    const loader = createFindingLoader({
+      filters,
+      isCurrent,
+      read: (path) => apiGet(path, { signal: context.signal }),
+      onLoading: (loading, append) => {
+        host.setAttribute('aria-busy', String(loading));
+        more.disabled = loading;
+        more.textContent = loading && append ? 'Loading more…' : 'Load more';
+        if (loading) {
+          error.hidden = true;
+          count.textContent = append ? `${num(loader.state.rows.length)} shown · Loading more…` : 'Loading…';
+        }
+      },
+      onData: (state, append) => {
+        if (append) {
+          // Append rather than re-render, so open findings and half-written
+          // reviews above stay exactly as they were.
+          const fragment = document.createElement('div');
+          fragment.innerHTML = sanitize(state.added.map(findingRow).join(''));
+          while (fragment.firstChild) host.appendChild(fragment.firstChild);
+        } else {
+          host.innerHTML = sanitize(state.rows.length
+            ? state.rows.map(findingRow).join('')
+            : emptyState(
+                filters.state || filters.severity ? 'No matching findings' : 'No findings yet',
+                filters.state || filters.severity
+                  ? 'Nothing matches these filters in the selected period.'
+                  : 'Either nothing has behaved unusually, or not enough traffic has passed through yet. ' +
+                    'This is not a statement that the network is clean: it is a statement that these ' +
+                    'detectors have not raised anything.'
+              ));
+        }
+        paintDynamic(host);
+        bindReviewForms(host);
+        count.textContent = `${num(state.rows.length)} finding${state.rows.length === 1 ? '' : 's'} shown`;
+        more.hidden = !state.cursor;
+      },
+      onError: (err, append) => {
+        if (append) {
+          error.textContent = `Could not load more findings. ${err.message || 'Try again.'}`;
+          error.hidden = false;
+        } else {
+          host.innerHTML = sanitize(unavailableState('Findings unavailable', err.message || 'The findings could not be retrieved. Try again.'));
+          count.textContent = 'Results unavailable';
+          more.hidden = true;
+        }
+      },
+    });
+    this.state = loader.state;
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const next = findingHash(Object.fromEntries(new FormData(form)));
+      if (window.location.hash === next) router.reload();
+      else window.location.hash = next;
+    });
+    $('#f-clear').addEventListener('click', () => { window.location.hash = findingHash({}); });
+    more.addEventListener('click', () => loader.load(true));
+    await loader.load();
+  },
 };
+
+// The findings list pages by keyset cursor; the same ownership rule as the
+// query log applies, so a late page cannot land on a different filter.
+function createFindingLoader({ read, filters, isCurrent, onLoading, onData, onError }) {
+  const state = { cursor: '', rows: [], added: [], loading: false };
+  return {
+    state,
+    async load(append = false) {
+      if (state.loading || !isCurrent() || (append && !state.cursor)) return false;
+      state.loading = true;
+      onLoading(true, append);
+      const params = new URLSearchParams({ limit: '50', detail: 'true' });
+      if (filters.state) params.set('state', filters.state);
+      if (filters.severity) params.set('severity', filters.severity);
+      params.set('hours', String(Number(filters.days || '7') * 24));
+      if (append) params.set('cursor', state.cursor);
+      try {
+        const data = await read(`/findings?${params}`);
+        if (!isCurrent()) return false;
+        if (!data || !Array.isArray(data.findings)) throw new Error('The findings list returned an unreadable response.');
+        state.cursor = data.nextCursor || '';
+        state.added = data.findings;
+        state.rows = append ? state.rows.concat(data.findings) : data.findings;
+        onData(state, append);
+        return true;
+      } catch (err) {
+        if (isCurrent() && err.name !== 'AbortError') onError(err, append);
+        return false;
+      } finally {
+        state.loading = false;
+        if (isCurrent()) onLoading(false, append);
+      }
+    },
+  };
+}
+
+// applyReviewResult updates one finding's row in place after a write or a
+// conflict, so the rest of the list is untouched.
+function applyReviewResult(form, review) {
+  const row = form.closest('[data-finding]');
+  form.dataset.version = String(review.version || 0);
+  const select = $('select[name="state"]', form);
+  const state = REVIEW_LABEL[review.state] ? review.state : 'new';
+  const options = [state, ...(REVIEW_MOVES[state] || [])];
+  select.innerHTML = sanitize(options.map((v) => html`<option value="${v}"${raw(v === state ? ' selected' : '')}>${REVIEW_LABEL[v]}</option>`).join(''));
+  $('textarea[name="note"]', form).value = review.note || '';
+  const meta = $('.review-meta', form);
+  if (meta) {
+    meta.innerHTML = sanitize(html`${raw(reviewMetaLine(review))}
+      · <a href="#" data-review-history="${form.dataset.reviewForm}">History</a>`);
+  }
+  if (row) {
+    const badge = $('[data-review-badge]', row);
+    if (badge) badge.outerHTML = sanitize(reviewBadge(review));
+  }
+}
+
+function reviewHistoryList(events) {
+  if (!events || !events.length) return html`<p class="muted small">No review recorded yet.</p>`;
+  return html`<ol class="review-history-list">${raw(events.map((e) => html`<li>
+      <span class="muted small">${new Date(e.at).toLocaleString('en-GB')}</span>
+      ${REVIEW_LABEL[e.fromState] || e.fromState} → <strong>${REVIEW_LABEL[e.toState] || e.toState}</strong>
+      ${raw(e.actor ? html` <span class="muted small">by <span class="mono">${e.actor}</span></span>` : '')}
+      ${raw(e.note ? html`<div class="small review-history-note">${e.note}</div>` : '')}
+    </li>`).join(''))}</ol>
+    <p class="muted small">Application history, in write order. It explains what an operator did; it is not tamper-evident.</p>`;
+}
+
+function bindReviewForms(root) {
+  $$('[data-review-form]', root).forEach((form) => {
+    if (form.dataset.bound) return;
+    form.dataset.bound = '1';
+    const id = form.dataset.reviewForm;
+    const errorEl = $('[data-review-error]', form);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = $('button[type="submit"]', form);
+      button.disabled = true;
+      errorEl.hidden = true;
+      try {
+        const review = await apiSend('PUT', `/findings/${encodeURIComponent(id)}/review`, {
+          state: $('select[name="state"]', form).value,
+          note: $('textarea[name="note"]', form).value,
+          version: Number(form.dataset.version || 0),
+        });
+        applyReviewResult(form, review);
+        toast('Review saved');
+      } catch (err) {
+        if (err && err.status === 409 && err.body && err.body.current) {
+          applyReviewResult(form, err.body.current);
+          errorEl.textContent = 'Somebody else reviewed this finding first. The form now shows their review; check it and save again if you still want to change it.';
+        } else {
+          errorEl.textContent = err && err.message ? err.message : 'The review could not be saved.';
+        }
+        errorEl.hidden = false;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    form.addEventListener('click', async (event) => {
+      const link = event.target.closest('[data-review-history]');
+      if (!link) return;
+      event.preventDefault();
+      const host = $('[data-review-history-for]', form);
+      host.hidden = !host.hidden;
+      if (host.hidden || host.dataset.loaded) return;
+      host.dataset.loaded = '1';
+      host.innerHTML = sanitize(html`<p class="muted small">Loading…</p>`);
+      try {
+        const data = await apiGet(`/findings/${encodeURIComponent(id)}/review/history`);
+        host.innerHTML = sanitize(reviewHistoryList(data.history));
+      } catch (err) {
+        host.innerHTML = sanitize(html`<p class="rec-note is-warn">${err.message}</p>`);
+      }
+    });
+  });
+}
 
 /* ---------- investigation ------------------------------------------------ */
 
@@ -5385,6 +5700,15 @@ if (typeof module !== 'undefined' && module.exports) {
     evidenceSection,
     relatedFindingsSection,
     observationsSection,
+    reviewBadge,
+    reviewForm,
+    findingRow,
+    findingFilters,
+    findingHash,
+    findingFilterForm,
+    createFindingLoader,
+    reviewHistoryList,
+    REVIEW_STATES,
     attentionItems,
     attentionPanel,
     recentlyBlocked,

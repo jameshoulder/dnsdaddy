@@ -395,6 +395,47 @@ the evidence, and carries **no ATT&CK mapping**.
 
 ---
 
+## Reviewing findings
+
+A finding can be reviewed from the Findings page or through
+`PUT /api/v1/findings/{id}/review`. The review is a separate record beside
+the finding — state, a plain-text note, a version, the actor and timestamps —
+and the finding itself is never modified by it: the measurements, severity,
+confidence and evidence stay exactly as the detector wrote them.
+
+| State | Meaning |
+|---|---|
+| `new` | Nobody has looked at it. The implicit state of every finding. |
+| `acknowledged` | Somebody is looking at it. |
+| `resolved` | Investigated and dealt with, whatever that meant. |
+| `false_positive` | Investigated and judged benign. |
+
+From `new` any other state may be chosen. `acknowledged` may return to `new`
+or close as either closed state. A closed finding reopens to `acknowledged`,
+or is reclassified as the other closed state; it never returns straight to
+`new`, because it was looked at. Saving the same state with a new note is a
+change like any other: the version moves and the history records it.
+
+Every write carries the version the writer read. A write naming any other
+version is refused with `409` and the current review, so two people cannot
+silently overwrite each other. `GET /api/v1/findings/{id}/review/history`
+lists every accepted change in order — application history for explaining
+what an operator did, written by the same process into the same database as
+the findings, and therefore not tamper-proof evidence against a host
+administrator.
+
+**A review changes nothing else.** Marking a finding a false positive records
+that assessment. It does not disable the detector, relax a policy, delete
+evidence or allow the domain. Each of those is its own decision with its own
+control, and folding any of them into a review would turn a note into an
+enforcement change. If a detector keeps raising the same benign pattern, the
+[false-positive issue template](https://github.com/jameshoulder/dnsdaddy/issues/new?template=false-positive.yml)
+is where that becomes useful to everyone.
+
+The actor recorded is the principal as the API knows it — `session:admin` or
+`token:<name>`. That is the identity model this product has; no named user is
+invented, and no session secret is ever stored.
+
 ## False positives
 
 The exclusion list is the load-bearing false-positive control, and it is a

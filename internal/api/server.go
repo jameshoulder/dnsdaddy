@@ -158,6 +158,12 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/findings/summary", a.handleFindingsSummary)
 	api.HandleFunc("GET /api/v1/findings/export", a.handleExportFindings)
 	api.HandleFunc("GET /api/v1/findings/{id}", a.handleGetFinding)
+	// The review workflow is the one write on findings, and it writes beside
+	// the finding rather than to it. Same-origin protected like every other
+	// state change. See handleReviewFinding for what it deliberately does
+	// not do.
+	api.HandleFunc("PUT /api/v1/findings/{id}/review", a.handleReviewFinding)
+	api.HandleFunc("GET /api/v1/findings/{id}/review/history", a.handleFindingReviewHistory)
 	api.HandleFunc("GET /api/v1/detectors", a.handleDetectors)
 	api.HandleFunc("GET /api/v1/dnssec/observations", a.handleDNSSECObservations)
 

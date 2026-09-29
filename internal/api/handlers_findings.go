@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,11 @@ type findingResponse struct {
 	Title      string          `json:"title"`
 	Summary    string          `json:"summary"`
 	Detail     json.RawMessage `json:"detail,omitempty"`
+	// Review is the operator's disposition, kept beside the detection rather
+	// than inside it. Present on every row: an unreviewed finding carries
+	// state "new" at version 0, which is what a writer passes back to claim
+	// the first review.
+	Review *store.FindingReview `json:"review,omitempty"`
 }
 
 func toFindingResponse(f store.Finding, includeDetail bool) findingResponse {
@@ -60,6 +66,31 @@ func toFindingResponse(f store.Finding, includeDetail bool) findingResponse {
 	return r
 }
 
+// withReviews attaches each finding's review, or the implicit new one.
+//
+// One query for the page rather than one per row, and a read failure fails
+// the request: a list that silently showed every finding as unreviewed would
+// tell an operator their work was lost.
+func (a *API) withReviews(ctx context.Context, rows []findingResponse) ([]findingResponse, error) {
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	reviews, err := a.Store.FindingReviews(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		if r, ok := reviews[rows[i].ID]; ok {
+			rv := r
+			rows[i].Review = &rv
+			continue
+		}
+		rows[i].Review = &store.FindingReview{FindingID: rows[i].ID, State: store.ReviewNew, Version: 0}
+	}
+	return rows, nil
+}
+
 // handleListFindings returns one page of behavioural findings.
 //
 // GET /api/v1/findings?severity=&type=&client=&domain=&hours=&limit=&detail=&cursor=
@@ -76,6 +107,7 @@ func (a *API) handleListFindings(w http.ResponseWriter, r *http.Request) {
 		EventType: strings.TrimSpace(q.Get("type")),
 		ClientIP:  strings.TrimSpace(q.Get("client")),
 		Domain:    strings.TrimSpace(q.Get("domain")),
+		State:     strings.ToLower(strings.TrimSpace(q.Get("state"))),
 		Limit:     boundedParam(q.Get("limit"), 100, 1, 1000),
 		Cursor:    strings.TrimSpace(q.Get("cursor")),
 	}
@@ -84,6 +116,10 @@ func (a *API) handleListFindings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "severity must be info, low, medium, or high")
 			return
 		}
+	}
+	if filter.State != "" && !store.ValidReviewState(filter.State) {
+		writeError(w, http.StatusBadRequest, "state must be one of "+strings.Join(store.ReviewStates(), ", "))
+		return
 	}
 	if hours := boundedParam(q.Get("hours"), 0, 1, 24*365); hours > 0 {
 		filter.Since = time.Now().Add(-time.Duration(hours) * time.Hour)
@@ -102,6 +138,10 @@ func (a *API) handleListFindings(w http.ResponseWriter, r *http.Request) {
 	out := make([]findingResponse, 0, len(findings))
 	for _, f := range findings {
 		out = append(out, toFindingResponse(f, includeDetail))
+	}
+	if out, err = a.withReviews(r.Context(), out); err != nil {
+		writeStoreError(w, err)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -141,7 +181,101 @@ func (a *API) handleGetFinding(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toFindingResponse(f, true))
+	rows, err := a.withReviews(r.Context(), []findingResponse{toFindingResponse(f, true)})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rows[0])
+}
+
+// reviewBody is the review write.
+type reviewBody struct {
+	State   string `json:"state"`
+	Note    string `json:"note"`
+	Version int64  `json:"version"`
+}
+
+// handleReviewFinding records an operator's disposition of a finding.
+//
+// PUT /api/v1/findings/{id}/review
+//
+// A PUT of the whole review, carrying the version the caller read. A
+// version that is not the current one is answered 409 with the current
+// review, so two operators cannot silently overwrite each other. The
+// finding itself is never modified: the review sits beside it.
+//
+// What this does not do, stated here because the temptation is real: a
+// false-positive disposition does not disable a detector, relax a policy,
+// delete evidence or allow a domain. It records an assessment. Each of those
+// other things has its own route, its own confirmation and its own reason to
+// exist as a separate decision.
+func (a *API) handleReviewFinding(w http.ResponseWriter, r *http.Request) {
+	var body reviewBody
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	p, _ := a.Auth.authenticate(r)
+	in := store.ReviewInput{
+		State:   strings.ToLower(strings.TrimSpace(body.State)),
+		Note:    body.Note,
+		Version: body.Version,
+		Actor:   reviewActor(p),
+	}
+	review, err := a.Store.SetFindingReview(r.Context(), r.PathValue("id"), in)
+	if err != nil {
+		var stale *store.ErrStaleReview
+		var bad *store.ErrReviewTransition
+		switch {
+		case errors.As(err, &stale):
+			// 409 with the current state, so a dashboard can show what
+			// changed rather than a bare failure.
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":   err.Error(),
+				"current": stale.Current,
+			})
+		case errors.As(err, &bad):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrReviewInvalid):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeStoreError(w, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, review)
+}
+
+// reviewActor names the principal in the only terms the product has.
+//
+// A single admin password plus API tokens: there are no named users, and
+// this does not invent one. A session is "session:admin"; a token is
+// "token:<its name>". The session cookie itself is never written anywhere.
+func reviewActor(p principal) string {
+	if p.kind == "" {
+		return ""
+	}
+	return p.kind + ":" + p.label
+}
+
+// handleFindingReviewHistory returns a finding's review changes, oldest
+// first.
+//
+// GET /api/v1/findings/{id}/review/history
+func (a *API) handleFindingReviewHistory(w http.ResponseWriter, r *http.Request) {
+	events, err := a.Store.FindingReviewHistory(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"findingId": r.PathValue("id"),
+		"history":   events,
+		// Application history: written by the same process into the same
+		// database file as the findings. It explains what an operator did;
+		// it is not tamper-proof evidence against a host administrator.
+		"note": "application history, in write order; not tamper-evident",
+	})
 }
 
 // Export continuation headers.
@@ -287,6 +421,11 @@ func (a *API) handleFindingsSummary(w http.ResponseWriter, r *http.Request) {
 	if summary == nil {
 		summary = []store.FindingSummary{}
 	}
+	byState, err := a.Store.ReviewStateCounts(r.Context(), since)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 
 	var total int64
 	for _, s := range summary {
@@ -298,6 +437,10 @@ func (a *API) handleFindingsSummary(w http.ResponseWriter, r *http.Request) {
 		"total":   total,
 		"byType":  summary,
 		"enabled": a.Detector != nil,
+		// Review dispositions over the same period as byType, every state
+		// present at zero. "new" counts findings nobody has reviewed as well
+		// as those returned to new.
+		"byState": byState,
 	})
 }
 

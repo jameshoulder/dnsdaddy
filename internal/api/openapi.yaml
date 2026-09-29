@@ -1294,6 +1294,10 @@ paths:
             Continue from a previous page: the `nextCursor` it returned.
             Omit to start from the newest finding. A cursor this server did
             not issue is answered `400` rather than silently restarted.
+        - name: state
+          in: query
+          schema: { type: string, enum: [new, acknowledged, resolved, false_positive] }
+          description: Keep only findings whose review is in this state. `new` includes findings nobody has reviewed.
       responses:
         "200":
           description: One page of matching findings, newest first
@@ -1346,6 +1350,10 @@ paths:
                         eventType: { type: string }
                         severity: { type: string }
                         count: { type: integer, format: int64 }
+                  byState:
+                    type: object
+                    description: Findings in the same period by review state, every state present at zero. `new` includes findings nobody has reviewed.
+                    additionalProperties: { type: integer, format: int64 }
 
   /api/v1/findings/export:
     get:
@@ -1409,6 +1417,104 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FindingSummaryRow" }
+        "404":
+          description: No such finding
+
+  /api/v1/findings/{id}/review:
+    put:
+      tags: [Detections]
+      summary: Record an operator's disposition of a finding
+      description: |
+        The one write on findings, and it writes beside the finding rather
+        than to it: the measurements, severity, confidence and evidence the
+        detector produced are never modified by a review.
+
+        States are `new`, `acknowledged`, `resolved` and `false_positive`.
+        From `new` any other state may be chosen; `acknowledged` may return
+        to `new` or close as either; a closed finding reopens to
+        `acknowledged` or is reclassified as the other closed state, and
+        never returns straight to `new`. Writing the same state again with a
+        different note is allowed and recorded.
+
+        The request carries the `version` the caller read (0 for a finding
+        nobody has reviewed). A write naming any other version is answered
+        `409` with the current review, so two operators cannot silently
+        overwrite each other.
+
+        **A review changes nothing else.** Marking a finding a false
+        positive does not disable a detector, relax a policy, delete
+        evidence or allow a domain. It records an assessment.
+
+        The actor recorded is the principal as the API knows it —
+        `session:admin` or `token:<name>` — because that is the identity
+        model this product has. No named user is invented and no session
+        secret is stored.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state, version]
+              properties:
+                state: { type: string, enum: [new, acknowledged, resolved, false_positive] }
+                note: { type: string, maxLength: 2000, description: Plain text. Control characters other than newline and tab are stripped; markup is kept as literal text and escaped by every renderer. }
+                version: { type: integer, format: int64, description: The version read. 0 for an unreviewed finding. }
+      responses:
+        "200":
+          description: The review as stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FindingReview" }
+        "400":
+          description: Unknown state, a transition the workflow does not allow, or an over-long note
+        "404":
+          description: No such finding
+        "409":
+          description: The review moved on since the caller read it
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  current: { $ref: "#/components/schemas/FindingReview" }
+  /api/v1/findings/{id}/review/history:
+    get:
+      tags: [Detections]
+      summary: A finding's review changes, oldest first
+      description: |
+        Application history for explaining what an operator did and when. It
+        is written by the same process into the same database file as the
+        findings, so it is not tamper-proof evidence against a host
+        administrator, and the payload says so.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  findingId: { type: string }
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer, format: int64 }
+                        findingId: { type: string }
+                        version: { type: integer, format: int64 }
+                        fromState: { type: string }
+                        toState: { type: string }
+                        note: { type: string }
+                        actor: { type: string }
+                        at: { type: string, format: date-time }
+                  note: { type: string }
         "404":
           description: No such finding
 
@@ -2317,11 +2423,23 @@ components:
               domains: { type: integer }
               lastRefreshedAt: { type: [string, "null"], format: date-time }
 
+    FindingReview:
+      type: object
+      description: An operator's disposition of a finding, kept beside the finding. An unreviewed finding is `new` at version 0.
+      properties:
+        findingId: { type: string }
+        state: { type: string, enum: [new, acknowledged, resolved, false_positive] }
+        note: { type: string }
+        version: { type: integer, format: int64 }
+        actor: { type: string, description: "`session:admin` or `token:<name>`. Never a secret." }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     FindingSummaryRow:
       type: object
       description: A finding as the REST API returns it. `detail` is the complete document.
       properties:
         id: { type: string }
+        review: { $ref: "#/components/schemas/FindingReview" }
         time: { type: string, format: date-time }
         eventType: { type: string, example: dns_tunnel_suspected }
         severity: { type: string, enum: [info, low, medium, high] }

@@ -285,6 +285,51 @@ CREATE INDEX IF NOT EXISTS findings_severity_idx ON findings (severity, ts DESC)
 CREATE INDEX IF NOT EXISTS findings_type_idx     ON findings (event_type, ts DESC);
 CREATE INDEX IF NOT EXISTS findings_client_idx   ON findings (client_ip, ts DESC);
 
+-- An operator's review of a finding: separate from the finding on purpose.
+--
+-- The findings row is what the detector measured, and it is never updated:
+-- an acknowledgement, a resolution or a "false positive" is a statement by a
+-- person about the finding, kept in its own row so the measurement it is
+-- about cannot be edited by the act of reviewing it. A finding with no row
+-- here is in the implicit "new" state.
+--
+-- A review changes nothing else. Marking a finding a false positive does not
+-- disable a detector, relax a policy, delete evidence or allow a domain; those
+-- are separate actions with their own routes. The version column supports
+-- optimistic concurrency so two operators cannot silently overwrite each
+-- other. actor is the authenticated principal as the API actually knows it —
+-- "session:admin" or "token:<name>" — never a session secret, and never a
+-- named user this product does not have.
+CREATE TABLE IF NOT EXISTS finding_reviews (
+    finding_id TEXT    PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+    state      TEXT    NOT NULL DEFAULT 'new',
+    note       TEXT    NOT NULL DEFAULT '',
+    version    INTEGER NOT NULL DEFAULT 1,
+    actor      TEXT    NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS finding_reviews_state_idx ON finding_reviews (state);
+
+-- Every review change, in order. Application history for explaining what an
+-- operator did and when; it is written by the same process and the same
+-- database file as everything else, so it is not tamper-proof evidence
+-- against a host administrator, and nothing here claims otherwise.
+CREATE TABLE IF NOT EXISTS finding_review_history (
+    id         INTEGER PRIMARY KEY,
+    finding_id TEXT    NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    version    INTEGER NOT NULL,
+    from_state TEXT    NOT NULL,
+    to_state   TEXT    NOT NULL,
+    note       TEXT    NOT NULL DEFAULT '',
+    actor      TEXT    NOT NULL DEFAULT '',
+    at         INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS finding_review_history_finding_idx
+    ON finding_review_history (finding_id, id);
+
 -- ---------------------------------------------------------------------------
 -- External API providers: "bring your own intelligence".
 --

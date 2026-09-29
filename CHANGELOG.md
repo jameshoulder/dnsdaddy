@@ -66,6 +66,33 @@ process's lifetime error counter by the last day's queries, which on a
 long-running resolver with a quiet day read as degraded for a fault weeks
 past.
 
+### Findings can be reviewed
+
+A finding now carries a review beside it: **new**, **acknowledged**,
+**resolved** or **false positive**, with a plain-text note of up to 2,000
+characters, a version, the actor and a change history. The Findings page
+gains a review form on every finding, a state filter that lives in the URL,
+review counts for the selected period, and a **Load more** that pages by
+cursor without disturbing open findings.
+
+The finding is never modified by reviewing it — the measurements, severity,
+confidence and evidence stay exactly as the detector wrote them, and a test
+compares them byte for byte. A review changes nothing else either: marking a
+false positive disables no detector, relaxes no policy, deletes no evidence
+and allows no domain. It records an assessment.
+
+Writes carry the version that was read, and a stale write is answered `409`
+with the current review so two operators cannot silently overwrite each other;
+the dashboard shows the other person's review in place of a bare error. The
+actor is recorded as `session:admin` or `token:<name>`, the identity model the
+product has; no named user is invented and no session secret is stored. The
+history is application history, in write order, and says of itself that it is
+not tamper-evident.
+
+`GET /api/v1/findings` gains `state`, every row gains `review`, and
+`GET /api/v1/findings/summary` gains `byState` for the same period as its
+severity counts. Reviews follow their finding when it is pruned.
+
 ### Investigate one name or one address
 
 A new **Investigate** page and two read-only routes,

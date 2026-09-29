@@ -57,6 +57,10 @@ type FindingFilter struct {
 	// dashboard wants; the export walks forward so that a consumer can keep
 	// the last cursor and pick up exactly where it left off.
 	Ascending bool
+	// State, when set, keeps only findings whose review is in that state.
+	// "new" matches findings with no review row as well as those returned
+	// to new.
+	State string
 }
 
 // ErrInvalidCursor reports a continuation cursor this store did not issue.
@@ -189,6 +193,13 @@ func (s *Store) ListFindings(ctx context.Context, f FindingFilter) ([]Finding, s
 		where = append(where, "ts <= ?")
 		args = append(args, unixMilli(f.Until))
 	}
+	if f.State != "" {
+		// A LEFT JOIN so "new" reaches findings that have never been
+		// reviewed. The join key is the primary key on both sides, so the
+		// cost is one lookup per candidate row.
+		where = append(where, "COALESCE(r.state, ?) = ?")
+		args = append(args, ReviewNew, f.State)
+	}
 	// One more than the page, so "is there another page" is answered by
 	// the same query rather than by a count that a concurrent insert could
 	// make wrong.
@@ -204,7 +215,8 @@ func (s *Store) ListFindings(ctx context.Context, f FindingFilter) ([]Finding, s
 	// value is bound as a parameter in args.
 	q := `SELECT id, ts, event_type, severity, confidence, score, client_ip, client_name,
 	             network_id, domain, qtype, detector, title, summary, detail
-	      FROM findings WHERE ` + strings.Join(where, " AND ") + `
+	      FROM findings LEFT JOIN finding_reviews r ON r.finding_id = findings.id
+	      WHERE ` + strings.Join(where, " AND ") + `
 	      ORDER BY ` + order + ` LIMIT ?`
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
