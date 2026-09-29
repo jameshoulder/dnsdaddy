@@ -12,34 +12,13 @@ import (
 
 const modulePath = "github.com/jameshoulder/dnsdaddy"
 
-// Daddybound may now be reached from the query path, but only through one
-// door and only as far as two packages. This test is what makes that a
-// property of the build rather than a convention.
-//
-// Until observe mode, the rule was simply "the query path cannot reach
-// Daddybound", enforced here. That rule has served its purpose and could not
-// survive this milestone: dnsserver has to be able to hand a resolved query to
-// the observer. Deleting the test rather than replacing it would have thrown
-// away the part that still matters, which is *which* packages may be reached
-// and by whom.
-//
-// Three things are asserted, and each would let something specific go wrong if
-// it were dropped.
-//
-// The resolver, the policy engine, the blocklist, the query log and the store
-// still cannot reach Daddybound at all. Those are the packages that decide and
-// deliver an answer, and an import from any of them would be the beginning of
-// a verdict influencing one. Only dnsserver has a door, and it is the one
-// place where the answer is already final.
-//
-// Nothing on the query path may reach the laboratory or the differential
-// harness. Those generate keys, sign zones, and shell out to reference
-// validators; they exist to be adversarial and belong nowhere near a process
-// answering real queries.
-//
-// And the door itself is narrow: dnsserver may reach the observer and the
-// validation engine, and nothing else under internal/daddybound.
-func TestTheQueryPathReachesDaddyboundOnlyThroughTheObserver(t *testing.T) {
+// Native Live is deliberately composed at dnsserver. The forwarding resolver,
+// policy/store, and deterministic cryptographic core remain separate; no
+// shipped query path may import the laboratory, signing keys or reference
+// validator processes. These restrictions still matter after enforcement is
+// implemented and must not disappear merely because the old observe-only
+// dependency list is no longer accurate.
+func TestTheQueryPathReachesOnlyNativeRuntimeAndObservationPackages(t *testing.T) {
 	graph, err := importGraph()
 	if err != nil {
 		t.Fatalf("reading the import graph: %v", err)
@@ -51,8 +30,7 @@ func TestTheQueryPathReachesDaddyboundOnlyThroughTheObserver(t *testing.T) {
 		engine     = daddybound + "/dnssec"
 	)
 
-	// Packages that decide or deliver an answer and must stay entirely clear
-	// of the validator.
+	// State and forwarding packages do not secretly invoke validation.
 	sealed := []string{
 		modulePath + "/internal/resolver",
 		modulePath + "/internal/policy",
@@ -100,14 +78,18 @@ func TestTheQueryPathReachesDaddyboundOnlyThroughTheObserver(t *testing.T) {
 		}
 	}
 
-	// The door is exactly two packages wide.
-	allowed := map[string]bool{observe: true, engine: true}
+	allowed := map[string]bool{
+		observe: true, engine: true,
+		daddybound + "/native":       true,
+		daddybound + "/recursive":    true,
+		daddybound + "/trustanchors": true,
+	}
 	for pkg := range graph {
 		if !strings.HasPrefix(pkg, daddybound) || allowed[pkg] {
 			continue
 		}
 		if path := reaches(graph, modulePath+"/internal/dnsserver", pkg); path != nil {
-			t.Errorf("dnsserver reaches a Daddybound package outside the observer seam:\n  %s",
+			t.Errorf("dnsserver reaches a Daddybound package outside the native/observer seams:\n  %s",
 				strings.Join(path, "\n    -> "))
 		}
 	}
@@ -116,6 +98,9 @@ func TestTheQueryPathReachesDaddyboundOnlyThroughTheObserver(t *testing.T) {
 	// anything would be worthless.
 	if path := reaches(graph, modulePath+"/internal/dnsserver", observe); path == nil {
 		t.Fatal("dnsserver does not reach the observer at all; this test is checking nothing")
+	}
+	if path := reaches(graph, modulePath+"/internal/dnsserver", daddybound+"/native"); path == nil {
+		t.Fatal("dnsserver does not reach the native answer adapter; this test is checking no Live path")
 	}
 }
 

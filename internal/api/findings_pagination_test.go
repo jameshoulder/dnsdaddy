@@ -172,7 +172,7 @@ func TestAFullExportPageIsNotClaimedComplete(t *testing.T) {
 		t.Errorf("an export holding every match was marked truncated: %v", resp.Header)
 	}
 
-	seedFinding(t, h, "qe", "dns_tunnel_suspected", "low", "10.0.0.5", "x.example", now.Add(time.Second))
+	seedFinding(t, h, "qe", "dns_tunnel_suspected", "low", "10.0.0.5", "x.example", now.Add(-time.Millisecond))
 	resp, _ = h.do(http.MethodGet, "/api/v1/findings/export?limit=4", nil)
 	resp.Body.Close()
 	if resp.Header.Get("X-Truncated") != "true" || resp.Header.Get("X-Next-Cursor") == "" {

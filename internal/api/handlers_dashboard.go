@@ -382,32 +382,32 @@ func (a *API) handleTopBlocked(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleQueryLog(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	f := store.QueryFilter{
-		NetworkID: q.Get("networkId"),
-		Action:    q.Get("action"),
-		Category:  q.Get("category"),
-		Domain:    q.Get("domain"),
-		ClientIP:  q.Get("clientIp"),
-		Limit:     intParam(r, "limit", 100),
+	f, err := queryFilterFromRequest(r)
+	if err != nil {
+		writeExportError(w, err)
+		return
 	}
-	if c := q.Get("cursor"); c != "" {
-		if v, err := strconv.ParseInt(c, 10, 64); err == nil {
-			f.Cursor = v
+	q := r.URL.Query()
+	if raw := q.Get("cursor"); raw != "" {
+		f.Cursor, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || f.Cursor < 0 {
+			writeExportError(w, store.ErrInvalidCursor)
+			return
 		}
 	}
-	if h := intParam(r, "hours", 0); h > 0 {
-		f.Since = time.Now().Add(-time.Duration(h) * time.Hour)
+	f.Since, f.Until, err = requestTimeWindow(q, time.Now(), 0)
+	if err != nil {
+		writeExportError(w, err)
+		return
 	}
-
 	events, next, err := a.Store.ListQueries(r.Context(), f)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeExportError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"queries":    a.withDNSSECObservations(r.Context(), events),
-		"nextCursor": next,
+		"queries": a.withDNSSECObservations(r.Context(), events), "nextCursor": next,
+		"limit": f.Limit, "count": len(events),
 	})
 }
 

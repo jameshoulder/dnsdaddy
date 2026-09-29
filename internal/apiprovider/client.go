@@ -3,6 +3,7 @@ package apiprovider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -11,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,14 +39,24 @@ const MaxResponseBytes = 1 << 20
 // with a gigabyte of memory. Bounded idle connections keep the footprint flat
 // whether an operator has configured one provider or ten.
 var sharedTransport = sync.OnceValue(func() *http.Transport {
+	return NewTransport(false)
+})
+
+var privateTransport = sync.OnceValue(func() *http.Transport {
+	return NewTransport(true)
+})
+
+// NewTransport enforces destination checks on every resolved connection. It
+// deliberately ignores HTTP(S)_PROXY: a proxy could resolve the final hostname
+// itself and bypass those checks. TLS certificate verification stays enabled.
+func NewTransport(allowPrivate bool) *http.Transport {
 	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
 			// Refuses link-local, which is where every cloud keeps its
 			// instance metadata service. See dial.go.
-			Control: dialControl,
+			Control: destinationControl(allowPrivate),
 		}).DialContext,
 		MaxIdleConns:          32,
 		MaxIdleConnsPerHost:   4,
@@ -53,7 +65,7 @@ var sharedTransport = sync.OnceValue(func() *http.Transport {
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}
-})
+}
 
 // Client is one provider's view of the outside world: the shared transport,
 // wrapped in that provider's timeout, rate limiter and circuit breaker.
@@ -63,15 +75,18 @@ var sharedTransport = sync.OnceValue(func() *http.Transport {
 // without a timeout, a limit and a breaker" — there is nothing else for them
 // to call.
 type Client struct {
-	providerID string
-	timeout    time.Duration
-	limiter    *Limiter
-	breaker    *Breaker
-	http       *http.Client
+	providerID      string
+	timeout         time.Duration
+	limiter         *Limiter
+	breaker         *Breaker
+	http            *http.Client
+	allowPrivate    bool
+	customTransport bool
 
 	// Counters, read by the dashboard and the metrics endpoint.
 	calls    atomic.Uint64
 	failures atomic.Uint64
+	rejected atomic.Uint64
 	totalNS  atomic.Uint64
 	lastErr  atomic.Pointer[string]
 	lastCall atomic.Int64 // unix milli
@@ -85,6 +100,9 @@ type ClientOptions struct {
 	Breaker       BreakerOptions
 	// Transport overrides the shared one. For tests only.
 	Transport http.RoundTripper
+	// AllowPrivate is an explicit per-provider opt-in for internal HTTPS
+	// services. It never permits loopback, metadata or reserved addresses.
+	AllowPrivate bool
 }
 
 // NewClient builds a client for one provider.
@@ -95,12 +113,17 @@ func NewClient(o ClientOptions) *Client {
 	rt := o.Transport
 	if rt == nil {
 		rt = sharedTransport()
+		if o.AllowPrivate {
+			rt = privateTransport()
+		}
 	}
 	return &Client{
-		providerID: o.ProviderID,
-		timeout:    o.Timeout,
-		limiter:    NewLimiter(o.RatePerMinute),
-		breaker:    NewBreaker(o.Breaker),
+		providerID:      o.ProviderID,
+		timeout:         o.Timeout,
+		limiter:         NewLimiter(o.RatePerMinute),
+		breaker:         NewBreaker(o.Breaker),
+		allowPrivate:    o.AllowPrivate,
+		customTransport: o.Transport != nil,
 		// No Timeout on the http.Client: the per-call context deadline set in
 		// Do is the authority, and two competing deadlines produce errors that
 		// name the wrong one.
@@ -152,7 +175,7 @@ func (r *Response) DecodeJSON(v any) error {
 		// The provider's body is not included. It is untrusted input that
 		// would end up in a log line and, for a misconfigured provider, may
 		// be an error page containing the credential it was sent.
-		return fmt.Errorf("%w: %v", ErrBadResponse, err)
+		return fmt.Errorf("%w: invalid JSON response", ErrBadResponse)
 	}
 	return nil
 }
@@ -178,16 +201,29 @@ func (r *Response) Excerpt(limit int) string {
 // bounded — is true because it is true here, rather than because ten adapters
 // each remembered.
 func (c *Client) Do(ctx context.Context, req *http.Request) (*Response, error) {
-	// Before the breaker, the limiter and any dial: a request to a blocked
-	// address must not consume a breaker slot or a rate-limit token, and it
-	// must be refused even when a proxy would otherwise carry it past the
-	// dialer's control. See checkURLHost.
-	if err := checkURLHost(req.URL.Hostname()); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// Validate before consuming a rate token or breaker slot. Hostnames are
+	// checked again against their actual resolved addresses at connection time.
+	if !c.customTransport {
+		if err := ValidateEndpoint(req.URL.String(), c.allowPrivate); err != nil {
+			return nil, err
+		}
+	} else {
+		// An explicitly supplied in-process transport is a dependency-injection
+		// seam for fixture tests, never a user-configurable setting. Metadata
+		// remains forbidden even for those transports.
+		if addr, err := netip.ParseAddr(req.URL.Hostname()); err == nil {
+			addr = addr.Unmap()
+			if addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr == awsIPv6Metadata {
+				return nil, ErrBlockedAddress
+			}
+		}
 	}
 
 	if !c.breaker.Allow() {
-		c.failures.Add(1)
+		c.rejected.Add(1)
 		return nil, ErrCircuitOpen
 	}
 
@@ -260,6 +296,9 @@ func (c *Client) attempt(ctx context.Context, req *http.Request) (*Response, err
 
 // once performs a single request and classifies the outcome.
 func (c *Client) once(ctx context.Context, req *http.Request) (*Response, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	r := req.Clone(ctx)
 	if r.Header.Get("User-Agent") == "" {
 		r.Header.Set("User-Agent", "dnsdaddy/"+version.String())
@@ -271,7 +310,7 @@ func (c *Client) once(ctx context.Context, req *http.Request) (*Response, bool, 
 	if req.GetBody != nil {
 		body, err := req.GetBody()
 		if err != nil {
-			return nil, false, fmt.Errorf("rewind request body: %w", err)
+			return nil, false, errors.New("provider request body could not be replayed")
 		}
 		r.Body = body
 	}
@@ -290,13 +329,19 @@ func (c *Client) once(ctx context.Context, req *http.Request) (*Response, bool, 
 		if ctx.Err() != nil {
 			return nil, false, ctx.Err()
 		}
-		return nil, true, err
+		// net/http wraps transport errors in a url.Error containing the full
+		// request URL. Authentication query parameters must never reach test
+		// responses, counters or logs through that error chain.
+		if errors.Is(err, ErrBlockedAddress) {
+			return nil, false, ErrBlockedAddress
+		}
+		return nil, true, errors.New("provider connection failed; check the endpoint, TLS certificate and network connectivity")
 	}
 	defer resp.Body.Close()
 
 	body, truncated, readErr := readBounded(resp.Body)
 	if readErr != nil {
-		return nil, true, fmt.Errorf("read provider response: %w", readErr)
+		return nil, true, errors.New("provider response could not be read")
 	}
 	// Drain what is left so the connection can be reused rather than dropped.
 	// Bounded, because draining an unbounded body is the same denial of
@@ -374,6 +419,7 @@ func (c *Client) recordErr(err error) {
 type Stats struct {
 	Calls         uint64        `json:"calls"`
 	Failures      uint64        `json:"failures"`
+	Rejected      uint64        `json:"rejected"`
 	MeanLatency   time.Duration `json:"-"`
 	MeanLatencyMS int64         `json:"meanLatencyMs"`
 	ErrorRate     float64       `json:"errorRate"`
@@ -386,13 +432,16 @@ type Stats struct {
 
 // Stats snapshots the counters.
 func (c *Client) Stats() Stats {
-	calls := c.calls.Load()
+	// Failures are recorded after calls. Reading them first preserves that
+	// denominator even when another request completes during this snapshot.
 	failures := c.failures.Load()
+	calls := c.calls.Load()
 	trips, _, _ := c.breaker.Stats()
 
 	s := Stats{
 		Calls:        calls,
 		Failures:     failures,
+		Rejected:     c.rejected.Load(),
 		Breaker:      c.breaker.State(),
 		BreakerTrips: trips,
 		RateWaits:    c.limiter.Waited(),

@@ -115,22 +115,27 @@ Public resolvers like Quad9 and Cloudflare can block known-bad domains. What the
 | | |
 |---|---|
 | **Threat blocking** | Malware, phishing, C2 and cryptomining on by default. Additional categories are available. |
-| **Plain-English logs** | Every query records what happened and why. |
+| **Plain-English logs** | Recorded queries explain what happened and why, subject to configured privacy, retention and bounded logging queues. |
 | **Per-network policies** | Match clients by CIDR, including different sites and VLANs. |
 | **Instant allow-listing** | Clear a false positive from the dashboard and purge the cached answer. |
-| **Encrypted upstream** | DNS-over-TLS forwarding by default. |
+| **Daddybound Live** | Fresh installations use the experimental native recursive resolver and DNSSEC validation. Existing Off/Learn selections are preserved on upgrade. |
+| **Forwarding modes** | Learn and Off use configured upstreams, with DNS-over-TLS configured by default. Native Live uses plaintext authoritative UDP/TCP 53. |
 | **DoH and DoT** | Serves DNS-over-HTTPS and DNS-over-TLS as well as plain DNS. |
-| **Behavioural detection** | Six experimental, alert-only detectors with explainable measurements. |
+| **Behavioural detection** | Six experimental heuristics plus a local learned baseline, with explainable measurements and no automatic heuristic blocking. |
 | **Self-diagnosis** | `dnsdaddy doctor` explains configuration, listener, ACL, upstream and threat-intelligence problems. |
-| **DNSSEC visibility** | Records the upstream validation verdict per query, and optionally what its own experimental validator concludes about the same name. Neither decides whether a query succeeds. |
-| **SIEM-ready** | Versioned NDJSON with integration guidance for Wazuh, Elastic, Splunk and Sentinel. |
+| **Investigation and policy preview** | Domain/client history, original decisions, current evidence, findings and native observations in one workflow. Policy preview is read-only and does not silently contact external providers. |
+| **Finding review** | Acknowledge, resolve, classify false positives and add notes with versioned review history, preserving original evidence. |
+| **Operational protection** | Bounded per-client rate limiting and IPv4/IPv6 rebinding checks, with explicit internal/split-DNS exceptions and counters. |
+| **External APIs** | Add your own VirusTotal, Safe Browsing or custom HTTP/JSON credentials safely in the UI, with separate tests and outbound consent. |
+| **Recovery and change history** | Redacted management change history, encrypted backups including credential keys and learned/native state, and verified restore into a fresh directory. |
+| **Exports and notifications** | Complete paginated query/decision/finding NDJSON exports and an optional signed HTTPS webhook with bounded asynchronous delivery. |
 | **Open by construction** | OpenAPI, Prometheus metrics, public threat-feed catalogue and documented design decisions. |
 
 ## DNS Daddy + Pi-hole
 
 **DNS Daddy is not a Pi-hole replacement.** Pi-hole is excellent at blocking ads and trackers. DNS Daddy focuses on protective DNS, threat intelligence, explainable security decisions and visibility into what devices are resolving.
 
-The two can run together. If DNS Daddy sits in front with Pi-hole as its upstream, DNS Daddy can retain per-client identity while Pi-hole continues handling ad/tracker blocking.
+The two can run together. In **Learn or Off mode**, DNS Daddy can sit in front with Pi-hole as its configured upstream, retaining per-client identity while Pi-hole handles ad/tracker blocking. Live performs native recursion and does not forward client questions through Pi-hole.
 
 See **[docs/pi-hole.md](docs/pi-hole.md)** for the topology options, trade-offs and current evidence level.
 
@@ -256,7 +261,7 @@ Default threat intelligence comes from public, no-registration sources listed in
 
 Downloaded feeds are cached to disk. A failed or malformed refresh keeps the last-known-good index rather than emptying it.
 
-The **DNS Daddy Threat Observatory** is also present in the catalogue but ships **disabled**, so a stock install does not depend on infrastructure operated by this project.
+The project-operated **Threat Observatory** integration has been retired. Its built-in feed is removed from the active catalogue and disabled on existing installations; recorded history is retained. Extension now centres on **your own external APIs and credentials**, with deliberate consent before outbound lookup or delivery.
 
 See **[docs/threat-intel.md](docs/threat-intel.md)**.
 
@@ -280,75 +285,76 @@ Start with:
 
 Worth knowing before you rely on DNS Daddy:
 
-- **No independent professional security review.**
-- **Early software.** Interfaces, deployment behaviour and storage formats may change between releases.
-- **Forwarding, not recursive — for clients.** Every client answer comes from a configured upstream resolver. Daddybound's Learn mode resolves natively, from the root hints to the authoritative servers, for its own observations only; nothing it resolves is ever returned to a client.
-- **No DNSSEC enforcement.** It records the upstream's validation verdict, and — in Learn mode, which new installations start in — what its own experimental validator, Daddybound, concludes about the same name. Neither blocks anything: a forged answer for a signed zone is recorded rather than refused.
-- **Behavioural detection is experimental and alert-only.** There is no measured production false-positive rate yet.
+- **No independent professional security review.** Automated testing and implementation evidence are not an independent audit.
+- **Native Live is experimental.** It is the fresh-install default, but production reliability, constrained-hardware performance and long-running key-rollover behavior are not established. Existing Off/Learn selections survive upgrades.
+- **Native traffic is plaintext authoritative DNS.** Live sends UDP/TCP 53 traffic to authoritative servers; the encrypted forwarding upstream does not protect this path. Learn adds independent native observation traffic alongside forwarded answers.
+- **Live does not silently fall back.** Bogus, indeterminate, timeout and bounded-work failures return SERVFAIL. Review the mode and network egress requirements before activation.
+- **Learning and behavioural findings are alert-only.** A learned anomaly is not a maliciousness probability. The checked-in evaluation is synthetic and contains false alerts and misses; there is no measured production false-positive rate.
+- **Rebinding exceptions require deployment knowledge.** Legitimate split-DNS/private answers need explicit exceptions; exceptions are not learned automatically from traffic.
+- **Recovery has explicit boundaries.** Backups capture consistent SQLite data and committed auxiliary files, not every in-flight observation. Restore is offline into a new directory; service/firewall/reverse-proxy configuration is not recreated.
 - **Browser DoH can bypass network DNS.** Mitigations require network/endpoint configuration.
-- **No clustering or anycast.** One DNS Daddy instance is one server.
-- **No SSO, RBAC or multi-tenancy.** Authentication is currently simpler than enterprise platforms.
-- **No per-client rate limiting.** An authorised client can consume resolver capacity.
-- **DNS rebinding is not currently mitigated.**
+- **No clustering, anycast, SSO, RBAC or multi-tenancy.** One DNS Daddy instance is one server with an administrator account and API tokens.
 
 **[docs/capabilities.md](docs/capabilities.md)** is the authoritative capability map: available, experimental and planned.
 
-### Daddybound
+### Daddybound: native DNS plus local learning
 
-Daddybound is an experimental DNS resolution and validation engine being built
-inside this repository. It walks a DNSSEC chain of trust from a configured
-trust anchor to a signed answer; validates authenticated denial of existence
-with NSEC and NSEC3; and follows CNAME chains, DNAME redirections and
-QTYPE=ANY answers. A separate opt-in test run compares its verdicts against
-libunbound and BIND's `delv` over several hundred real Internet names.
+Daddybound now has two distinct responsibilities: native DNS resolution and
+DNSSEC validation, and a local incremental model of client DNS behaviour.
+Cryptographic validation and statistical anomaly detection make different
+claims and remain visible as separate evidence.
 
-It can now be run against your own traffic in **Learn mode**
-(`dns.local_dnssec_validation: observe`) — on for new installations, and left
-as it was when you upgrade. It validates the same names your clients ask for
-and records what it concludes; **the answer the client receives is unchanged**,
-whatever the verdict. There is no enforcement, and none is planned until the
-observations say what enforcing would cost. The dashboard shows the future
-**Live** mode as unavailable rather than hiding it, so nothing implies
-Daddybound is protecting traffic today.
+| Native mode | Client answer path | Behavior |
+| --- | --- | --- |
+| **Live** (`enforce`) | Daddybound authoritative recursion | Returns secure or proven-insecure answers; bogus, indeterminate and operational failures return SERVFAIL. Validation is bound to the records actually returned. |
+| **Learn** (`observe`) | Configured forwarding upstream | Resolves allowed names independently after their answers are decided and records native observations without changing those answers. |
+| **Off** (`off`) | Configured forwarding upstream | Stops native resolution and anchor refresh. Local policy, rate limiting and rebinding protection remain active. |
 
-That is a step, not a finish line. Since native recursion landed, Learn
-resolves each observed name itself — from the root hints to the authoritative
-servers, over plaintext port 53 with QNAME minimisation, a transport that is
-separate from and not protected by your encrypted upstream — and follows RFC
-5011 trust-anchor rollover from the compiled-in IANA digests. It still does
-not use NSEC aggressively, and the Assurance page and
-`GET /api/v1/dnssec/status` report what it is doing rather than leaving it to
-this paragraph.
+**Fresh installations default to Live.** Upgrades preserve recorded Off/Learn
+choices. Explicit YAML mode settings pin the choice; otherwise the dashboard
+can save an acknowledged mode change. Native authoritative traffic uses
+plaintext UDP/TCP port 53 with QNAME minimisation. A client DNSSEC CD request
+skips cryptographic checking only; policy and rebinding checks still apply.
 
-**It is experimental and must not be relied upon as a production DNSSEC
-validator.** It enforces no policy: no configuration lets a Daddybound verdict
-change, delay or fail a DNS answer. A test drives the query path with the
-validator forced to return each verdict in turn and requires the client's
-response to be byte-identical every time.
+The native engine implements DNS/DNSSEC protocol and trust logic in Go,
+using established cryptographic primitives and the DNS wire library. It
+handles chain validation, NSEC/NSEC3 denial, CNAME/DNAME processing and managed
+RFC 5011 anchors. libunbound and BIND `delv` are differential test oracles,
+not the implementation that produces Daddybound's verdicts.
 
-It implements the DNS and DNSSEC protocol and trust logic itself, from the
-standards, using established cryptographic primitives from Go's standard
-library for the mathematics and `github.com/miekg/dns` for wire format. No
-validating resolver implementation produces a Daddybound verdict; libunbound
-and BIND's `delv` appear only as differential test oracles, neither reachable
-from a shipped build.
+**Local learning is enabled by default and never blocks by itself.** It learns
+bounded per-client baselines for query rate, label length/entropy, name
+diversity, TXT usage and label count. It warms up from eligible five-minute
+windows, compares later windows with the previous baseline, and updates
+parameters gradually. It excludes blocked, failed, partial, saturated and
+strongly anomalous windows from normal-baseline updates. Persisted checkpoints
+carry fitted parameters and sample counts, not raw queried names.
 
-See **[docs/daddybound/](docs/daddybound/README.md)**.
+A ready baseline is not proof of accurate detection. Warm-up contamination,
+gradual changes and benign application changes remain limitations. The UI
+shows sample counts, exclusions, persistence health and uncalibrated anomaly
+distance. The [evaluation report](labs/evaluation/RESULTS.md) publishes
+synthetic test populations and investigated misses/false alerts with their
+denominators.
+
+Read **[Daddybound](docs/daddybound/README.md)** and
+**[local learning](docs/learning.md)** for the implementation and its limits.
 
 ## Resource target
 
 DNS Daddy is intentionally designed to run on small infrastructure. A 1 GB / 1 vCPU VPS is the reference class, with threat-intelligence memory use scaling with the number of indexed domains and disk use scaling with retained query volume.
 
-Measured figures and assumptions are documented in the project rather than presented as universal performance guarantees.
+The 1 GB / 1 vCPU figure is a design target, not a fresh benchmark of native Live, learning and all optional integrations together. Work queues and state are bounded; workload-dependent performance still needs deployment measurement.
 
 ## Configuration
 
 Configuration is YAML with `DNSDADDY_*` environment variables taking precedence. Every option is documented in **[`dnsdaddy.example.yaml`](dnsdaddy.example.yaml)**.
 
-Example:
+The example below explicitly selects Learn mode so these encrypted upstreams answer client queries. Omit the explicit mode only when the installation default or saved dashboard selection is intended.
 
 ```yaml
 dns:
+  local_dnssec_validation: observe
   upstreams:
     - "tls://9.9.9.9:853#dns.quad9.net"
     - "tls://1.1.1.1:853#cloudflare-dns.com"
@@ -362,10 +368,20 @@ log:
 
 Every resolver serves an OpenAPI 3.1 specification at `/openapi.yaml`. Prometheus metrics are available at `/metrics`, and versioned exports are available for SIEM workflows.
 
-Integration guidance includes pfSense, OPNsense, UniFi, FortiGate, Windows Server, Wazuh, Elastic, Splunk and Sentinel.
+The **External APIs** page lets each operator add their own provider credentials, save configuration, run a deliberate connection test and choose how the provider may contribute. Reputation starts Off and enrichment starts disabled. Saving a disabled provider makes no external call. Enabling/testing a provider requires consent; synchronous blocking reputation also requires accepting its DNS latency budget.
+
+Credentials are write-only and encrypted with a separate local master key. The project does not supply shared accounts or API keys. Current built-in adapters are VirusTotal v3, Google Safe Browsing Lookup and Custom HTTP/JSON; adapter fixtures and an operator’s successful connection test are reported separately.
+
+Optional signed webhooks deliver new finding events and, when selected, review events to the operator’s own HTTPS receiver. Delivery is bounded and asynchronous, with persistent counters and at-least-once semantics. Receivers should deduplicate using the event ID.
+
+Network/SIEM guidance includes pfSense, OPNsense, UniFi, FortiGate, Windows Server, Wazuh, Elastic, Splunk and Sentinel.
 
 See:
 
+- [docs/external-apis.md](docs/external-apis.md)
+- [docs/webhooks.md](docs/webhooks.md)
+- [docs/exports.md](docs/exports.md)
+- [docs/recovery.md](docs/recovery.md)
 - [docs/integrations.md](docs/integrations.md)
 - [docs/siem.md](docs/siem.md)
 - [internal/api/openapi.yaml](internal/api/openapi.yaml)
@@ -381,6 +397,11 @@ See:
 | [docs/audit-2026-08.md](docs/audit-2026-08.md) | Audit findings, fixes and reviewer guide |
 | [docs/threat-model.md](docs/threat-model.md) | Assets, boundaries, threats and mitigations |
 | [docs/detection/](docs/detection/) | Detection engineering and finding schema |
+| [docs/learning.md](docs/learning.md) | Local fitted baselines, privacy, warm-up and limitations |
+| [docs/external-apis.md](docs/external-apis.md) | Provider credentials, consent, modes and testing |
+| [docs/recovery.md](docs/recovery.md) | Configuration history and encrypted backup/restore |
+| [docs/exports.md](docs/exports.md) | Complete paginated exports and retention limits |
+| [docs/webhooks.md](docs/webhooks.md) | Signed asynchronous event delivery |
 | [docs/threat-hunting/](docs/threat-hunting/) | Threat-hunting workflows |
 | [docs/dns-security/](docs/dns-security/) | Protective DNS, DNSSEC, DoH/DoT and bypass |
 | [labs/](labs/) | Offline lab and synthetic scenarios |

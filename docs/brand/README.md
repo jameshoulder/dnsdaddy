@@ -63,7 +63,7 @@ Keep the alpha status and the experimental, alert-only nature of behavioural det
 
 ## UI images
 
-The README screenshots are actual application captures from main revision `382beb2d0ebaea56659646d23fa6f8bd1106f2fe`, using synthetic lab data. [Screenshot provenance](../images/SCREENSHOTS.md) records their routes, dimensions, source revision, capture conditions and checksums.
+The README screenshots are actual application captures of the current interface, using synthetic lab data. [Screenshot provenance](../images/SCREENSHOTS.md) records their routes, dimensions, source revision, capture conditions and checksums.
 
 Brand artwork is separate from interface screenshots. When replacing a product screenshot, capture the current application and retain the visible experimental labels and limitations.
 

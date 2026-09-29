@@ -35,6 +35,12 @@ type ValidationResult struct {
 	// relative to it, so a disagreement about expiry is only meaningful
 	// alongside the clock that produced it.
 	At time.Time `json:"at"`
+
+	// Authenticated binds successful signature checks to their exact RRsets.
+	// A native response adapter uses these receipts to omit unauthenticated
+	// authority records and cap TTLs before asserting AD. Human trace text is
+	// never interpreted as evidence that a record was authenticated.
+	Authenticated []AuthenticatedRRset `json:"-"`
 }
 
 // Secure reports whether the result is a positive verdict.
@@ -87,10 +93,11 @@ func (r ValidationResult) Trace() string {
 // recorded how it got there: the only ways out are the four terminal methods
 // below, and each one takes the reason it is about to publish.
 type recorder struct {
-	name   string
-	rrType uint16
-	at     time.Time
-	steps  []ValidationStep
+	name          string
+	rrType        uint16
+	at            time.Time
+	steps         []ValidationStep
+	authenticated []AuthenticatedRRset
 }
 
 func newRecorder(name string, rrType uint16, at time.Time) *recorder {
@@ -132,12 +139,13 @@ func (r *recorder) skip(s ValidationStep, reason Reason) Reason {
 
 func (r *recorder) result(status ValidationStatus, reason Reason) ValidationResult {
 	return ValidationResult{
-		Status: status,
-		Reason: reason,
-		Name:   r.name,
-		RRType: r.rrType,
-		Steps:  r.steps,
-		At:     r.at,
+		Status:        status,
+		Reason:        reason,
+		Name:          r.name,
+		RRType:        r.rrType,
+		Steps:         r.steps,
+		At:            r.at,
+		Authenticated: r.authenticated,
 	}
 }
 

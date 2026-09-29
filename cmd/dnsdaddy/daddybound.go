@@ -12,19 +12,10 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/lab"
 )
 
-// Daddybound's command surface is deliberately small and deliberately
-// incapable.
-//
-// It runs the deterministic offline laboratory and prints what the validation
-// engine concluded and why. It cannot be pointed at the Internet, it cannot
-// be pointed at a running deployment, and there is no flag that makes it
-// enforce anything. That is a structural property rather than an unfinished
-// feature: v0.1 performs no recursive resolution, so there is nothing to
-// point at a real name with, and adding a switch that appeared to do so would
-// be the single most misleading thing this command could offer.
-//
-// The resolver does not import internal/daddybound. Running this subcommand
-// does not touch a configuration file, a database, or a socket.
+// This command runs the deterministic offline laboratory and prints each
+// verdict and trace. Runtime Live/Learn modes are configured separately.
+// Running this subcommand does not touch deployment configuration, a database
+// or a socket, and does not enable live native recursion.
 
 // runDaddybound dispatches the daddybound subcommands.
 func runDaddybound(args []string) error {
@@ -52,10 +43,10 @@ func runDaddybound(args []string) error {
 func daddyboundUsage(w io.Writer) {
 	fmt.Fprint(w, `dnsdaddy daddybound — the experimental DNSSEC validation engine
 
-  EXPERIMENTAL. Daddybound is not a production DNSSEC validator and must not
-  be relied upon as one. It answers no queries and enforces no policy. These
-  commands run a signed laboratory built in memory; they cannot be pointed at
-  the Internet or at a running deployment.
+  EXPERIMENTAL. These commands run a signed laboratory built in memory; they
+  cannot be pointed at the Internet or a running deployment. Native Live and
+  Learn runtime modes are configured separately. See ADR 0003 for their
+  failure semantics, transport and remaining readiness evidence.
 
 Usage:
   dnsdaddy daddybound lab                 show the laboratory hierarchy and its trust anchor

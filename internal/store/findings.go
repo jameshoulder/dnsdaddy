@@ -61,6 +61,8 @@ type FindingFilter struct {
 	// "new" matches findings with no review row as well as those returned
 	// to new.
 	State string
+	// MaxInsertionID freezes the insertion boundary of an export; nil is a live list.
+	MaxInsertionID *int64
 }
 
 // ErrInvalidCursor reports a continuation cursor this store did not issue.
@@ -199,6 +201,10 @@ func (s *Store) ListFindings(ctx context.Context, f FindingFilter) ([]Finding, s
 		// cost is one lookup per candidate row.
 		where = append(where, "COALESCE(r.state, ?) = ?")
 		args = append(args, ReviewNew, f.State)
+	}
+	if f.MaxInsertionID != nil {
+		where = append(where, "findings.insertion_seq <= ?")
+		args = append(args, *f.MaxInsertionID)
 	}
 	// One more than the page, so "is there another page" is answered by
 	// the same query rather than by a count that a concurrent insert could

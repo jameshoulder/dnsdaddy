@@ -1,383 +1,257 @@
-# DNSSEC
+# DNSSEC in DNS Daddy
 
-What it does, what it does not do, what DNS Daddy can honestly tell you about
-it, and where that stops.
+DNS Daddy reports the source of its validation information and provides three
+native modes: **Live**, **Learn** and **Off**. Live is an implemented,
+experimental client-serving resolver. Learn collects separate observations
+while clients continue using the forwarding resolver.
 
-## The problem DNSSEC solves
+## What DNSSEC establishes
 
-DNS was designed in 1983 with no authentication. A resolver asks a question and
-believes the answer. Anything that can produce a plausible-looking response —
-an off-path attacker guessing a query ID, a compromised nameserver, a malicious
-resolver, a machine on the same wifi — can redirect a name anywhere.
+DNSSEC adds signatures and authenticated delegations to DNS. A validating
+resolver checks records against a chain leading to a configured trust anchor.
+The result concerns authenticity and integrity of DNS data. It does not prove
+a website is harmless, encrypt DNS traffic, or prevent a device from choosing
+another resolver. A phishing domain can have valid DNSSEC signatures.
 
-That is not a bug in an implementation. It is the protocol.
+A DNSSEC verdict also depends on the configured trust anchor, supported
+algorithms, available proof, time and the records that were actually checked.
+An inability to finish checking is not a proof that the zone is unsigned.
 
-**DNSSEC** ([RFC 4033]–[RFC 4035]) adds cryptographic signatures over DNS data.
-Each zone signs its records; its parent signs a hash of its signing key; the
-chain runs to the root, whose key is the trust anchor. A **validating resolver**
-verifies that chain and refuses to serve data that fails.
+The basic protocol is described in [RFC 4033], [RFC 4034] and [RFC 4035].
 
-The guarantee is: *this answer is what the domain's owner published, and it has
-not been altered in transit or substituted by anyone along the way.*
+## Selecting the native mode
 
-## Local validation: Learn mode
+| Selection | Client answer path | Validation behavior |
+| --- | --- | --- |
+| **Live** (`enforce`) | Daddybound's native authoritative recursion | Validates the exact records returned to the client. Bogus, indeterminate and operational failures return SERVFAIL; there is no silent forwarding fallback. |
+| **Learn** (`observe`) | Configured forwarding upstream | Resolves allowed questions independently after the client answer is decided, then records the local observation. That observation cannot change the client answer. |
+| **Off** (`off`) | Configured forwarding upstream | Native client resolution, background observation and managed-anchor refresh are stopped. |
 
-Since v0.4 DNS Daddy can run its own DNSSEC validator, **Daddybound**,
-alongside resolution:
+### Defaults and precedence
+
+Fresh installations default to **Live**. An upgrade preserves the
+installation's recorded Off/Learn choice. A recorded dashboard mode overrides
+the installation default when the mode is not pinned in configuration.
+Explicit `dns.local_dnssec_validation` in YAML or the corresponding environment
+configuration pins the choice; remove that explicit setting to manage it from
+the dashboard.
+
+For an intentionally fixed forwarding-with-observation setup:
 
 ```yaml
 dns:
-  local_dnssec_validation: observe   # off | observe
+  local_dnssec_validation: observe
 ```
 
-The dashboard calls this **Learn**. `observe` is the configuration value and
-does not change; Learn is what it is called where a person reads it.
+For an intentionally fixed native setup:
 
-**Which mode you get if you say nothing.** Leave the key out and the
-installation decides, once, on first start:
-
-| Installation | Mode |
-|---|---|
-| A new install (a database that has never run DNS Daddy) | **Learn** |
-| An upgrade of an installation that never configured this | **off** |
-| Anything with `local_dnssec_validation` set | exactly what you set |
-
-The split exists because Learn is off the answer path but is not free: it sends
-its own DNSSEC queries upstream, spends CPU and fills a queue. That is a
-reasonable thing to switch on for someone installing DNS Daddy today, and not a
-reasonable thing to start doing to a machine that has been running for a year
-because somebody pulled a new image. The decision is recorded in the database
-rather than inferred each start, and the startup log names it.
-
-There is a limitation worth stating plainly: configuration alone cannot tell an
-omitted key from one written out, because the config loader unmarshals YAML
-over the built-in defaults and nothing survives to say which happened. The
-database can — a database with no networks has never run DNS Daddy — so that is
-where the question is asked and answered. Set the key explicitly if you want
-the answer to be yours rather than the installation's.
-
-### Learn does not change any answer
-
-**It does not change any answer.** In Learn mode Daddybound validates the
-same names your clients ask for, records what it concludes, and stops there.
-A `bogus` verdict is a row in a table and a number on a dashboard; the client
-receives exactly the response the resolver produced. There is no configuration
-that makes it do otherwise, and `enforce` is refused at startup rather than
-quietly treated as `observe`.
-
-### Why Learn before Live
-
-An enforcing validator turns "this answer failed validation" into "this query
-gets no answer". That is the right behaviour when the validator is right, and
-an outage when it is not. DNS Daddy has a validator with a great deal of
-laboratory evidence behind it and almost none from production, and the honest
-order is to measure before deciding.
-
-What Learn mode measures is the disagreement between two things you can
-already see side by side in the query log:
-
-- **DNSSEC (upstream)** — the AD bit. Your upstream resolver validated this
-  answer and said so.
-- **DNSSEC (local)** — what Daddybound concluded, independently, from the root
-  down.
-
-They usually agree. Where they do not, one of them is wrong, and the interesting
-question is which — a question nobody can answer from a single measurement.
-
-### What the local statuses mean
-
-`secure`, `insecure`, `bogus` and `indeterminate` are RFC 4033's four states.
-`insecure` is a *proof* that the name lies in an unsigned part of the DNS, not
-a shrug.
-
-`timeout`, `resource_limit`, `unsupported` and `internal_error` are different:
-they say the validator could not reach a verdict. That distinction is
-load-bearing. If an inability to validate were recorded as `insecure`, anyone
-able to drop a packet could manufacture a DNSSEC state.
-
-### What it costs
-
-Observation happens after the answer is decided, on a fixed pool of background
-workers, behind a bounded queue that drops rather than waits. Nothing on the
-answer path ever waits for a validation.
-
-It is not free, though, and the cost is not on the answer path but next to it:
-each observed query causes a chain walk and its own DNSSEC lookups upstream.
-On a single-vCPU box under sustained load that competes for CPU with
-resolution. Measured on the reference deployment, a cache-warm load test ran at
-roughly 28,000 queries per second with observation off and roughly 5,000 with
-it on and validating everything; with the same seam but the observation queue
-kept full — so the answer path does identical work and almost no validation
-happens — throughput returned to baseline. The cost is the validating, and it
-is bounded by `local_dnssec_workers`.
-
-Three numbers on the Assurance page say how complete the picture is:
-
-- **Not observed** — the queue was full, so these queries were never looked at.
-- **Observed but not stored** — validated, then lost before the database.
-- **Observed** — what the counts are actually based on.
-
-A sample that shrank under load would otherwise invite conclusions it cannot
-support.
-
-### What it does not do
-
-No enforcement. No AD bit of DNS Daddy's own — the AD bit on a response to your
-client still means what it always meant, which is what the upstream said.
-
-Trust anchors are managed, not fixed: the IANA root keys are compiled in as the
-seed, `dns.local_dnssec_trust_anchor_file` overrides them, and from there
-Daddybound follows [RFC 5011] — a key the root announces and signs for becomes
-an anchor after the thirty-day hold-down, and a self-signed revocation
-withdraws one. The managed state lives in `daddybound-anchors.json` beside the
-database; losing it costs hold-down progress, never the ability to validate,
-because the compiled-in digests are never discarded. `GET /api/v1/dnssec/status`
-and the Assurance page report each key's state, the last refresh and whether
-the state file is being written.
-
-Learn resolves for itself. Since native recursion landed, the supporting
-queries do not go through your configured upstreams: Daddybound walks from the
-root hints to the authoritative servers over ordinary port 53, in the clear,
-with QNAME minimisation. That is separate from — and not protected by — any
-DoT or DoH upstream you configured for client answers, and the status page
-says so.
-
-If query logging is off, observations are still counted but the per-query rows
-are not written. Turning off the query log is a privacy decision, and a
-validator enabled for a different purpose must not undo it.
-
-## What DNSSEC does not do
-
-Worth being exact about, because it is routinely overstated.
-
-**It does not encrypt anything.** Queries and answers travel in plaintext.
-Anyone on the path sees every name you resolve. DNSSEC is about *authenticity
-and integrity*, not confidentiality — see
-[encrypted-dns.md](encrypted-dns.md).
-
-**It does not make a domain trustworthy.** A phishing site can be perfectly
-signed. DNSSEC proves the answer came from whoever owns the domain; it says
-nothing about whether they deserve your credentials.
-
-**It does not protect the last mile by itself.** Between a validating resolver
-and a stub client, the answer is an ordinary DNS response with an AD bit set —
-and the AD bit is not cryptographic. If the path between your device and your
-resolver is hostile, DNSSEC validation performed upstream of that path does not
-help. Only a client that validates for itself gets an end-to-end guarantee.
-
-**It is not universally deployed.** Most domains are unsigned. An unsigned zone
-is not "insecure" in the DNSSEC sense; it is simply outside the system, and a
-validating resolver returns its data unauthenticated.
-
-## The four validation outcomes
-
-[RFC 4035] defines four states, and the distinctions matter for reading what
-DNS Daddy reports:
-
-| State | Meaning |
-|---|---|
-| **Secure** | A chain of trust exists and validates. |
-| **Insecure** | A chain of trust proves the zone is *unsigned*. Provably outside DNSSEC — not an error. |
-| **Bogus** | A chain should exist but validation failed: bad signature, expired RRSIG, broken delegation. **A validator must not return this data.** |
-| **Indeterminate** | The validator cannot decide, usually for want of a trust anchor. |
-
-Note that **Insecure is a positive result**. Proving a zone is unsigned
-requires validating an authenticated denial of existence for the DS record —
-it is not the same as "we did not check".
-
-That distinction is exactly where DNS Daddy's telemetry stops, and the reason
-its statuses are named the way they are.
-
----
-
-## What DNS Daddy actually does
-
-**DNS Daddy does not enforce DNSSEC.** The answer a client receives is a
-forwarding resolver's: it comes from a configured upstream, and no signature
-is verified on the way to the client. Daddybound, in Learn mode, does walk the
-root zone, hold managed trust anchors and verify signatures — for its own
-observations, described above — and nothing it concludes changes that answer.
-
-What the client-serving path does is **ask the upstream to report its
-verdict, and record the answer.**
-
-### The mechanism
-
-[RFC 6840] §5.7 defines the AD bit in a *query* as the requester saying it
-understands and wants the AD bit in the response. DNS Daddy sets it on every
-outgoing query when `dns.dnssec_telemetry` is on (the default).
-
-This is deliberately **not** the DO bit. DO requests DNSSEC records be included
-in the response, which inflates every answer. AD-in-query asks only for the
-verdict. It costs one bit and changes nothing about the answer.
-
-Two consequences:
-
-**The AD bit is stripped again before answering a client that did not ask for
-it.** [RFC 4035] §3.2.3 says a resolver must not set AD unless the client set
-DO or AD in its own query. Because DNS Daddy now sets AD on every upstream
-query for telemetry, verdicts come back on answers no client requested — and on
-cache hits populated by a different client entirely. Passing that through would
-tell a client its answer was authenticated when it never asked us to check,
-which is precisely the assurance the AD bit is not permitted to give.
-
-**A DNSSEC-aware client is unaffected.** A stub setting DO or AD gets the AD
-bit as normal.
-
-### The three statuses
-
-Recorded per query, visible in the query log, the dashboard and the API:
-
-| Status | What it means | What it does **not** mean |
-|---|---|---|
-| `validated` | The upstream set AD, having authenticated the answer. | That *we* verified anything. |
-| `unvalidated` | No AD bit came back. | **Not** "insecure" in the RFC sense. This covers an unsigned zone *and* an upstream that does not validate, equally. |
-| `servfail` | The upstream could not answer. | **Not** "bogus". Failed validation is one cause among several. |
-
-`unvalidated` is the important one to read correctly. A forwarder cannot
-distinguish "this zone is provably unsigned" from "this upstream does not do
-DNSSEC" — both look like a missing bit. Calling it `insecure` would borrow the
-RFC's specific meaning of *provably unsigned*, which is a stronger claim than
-the measurement supports. Hence the deliberately duller word.
-
-### Why this is worth doing anyway
-
-It converts an untestable claim into a measurement.
-
-"We forward to validating resolvers" is a statement about a configuration file.
-`dnssec: validated` on 78% of your queries is an observation, and if that
-number moves you can go and find out why.
-
-It also gives you a cheap check for the failure mode nobody notices: an
-upstream silently stopping validation. That looks like nothing at all until you
-are watching the number.
-
-### The limit that matters
-
-**The AD bit is self-reported by the upstream, and a malicious upstream will
-happily set it.** This telemetry tells you what the upstream *said*, and it is
-worth exactly as much as your trust in that upstream.
-
-If the upstream is the threat you are worried about, this does not help. Local
-validation is the answer, and it is not implemented — see
-[capabilities.md](../capabilities.md) and [roadmap.md](../roadmap.md).
-
----
-
-## Reading the telemetry
-
-Dashboard: the **Query log** has a DNSSEC column. Hover for what each value
-means.
-
-API:
-
-```bash
-# Validation status across recent queries
-curl -H "Authorization: Bearer dnsd_…" \
-  'https://your-server/api/v1/queries?limit=500' \
-| jq -r '.queries[] | .dnssec' | sort | uniq -c | sort -rn
+```yaml
+dns:
+  local_dnssec_validation: enforce
 ```
 
+A dashboard change uses `PUT /api/v1/dnssec/mode`. Enabling Learn or Live
+requires `acknowledgeNativeTransport: true`. Mode, source of the choice,
+configuration lock and effective runtime are reported by
+`GET /api/v1/dnssec/status`. A failed change does not silently advertise a new
+working mode. The management change journal records its persisted outcome.
+
+The fresh-install default is an explicit product choice. It does **not** mean
+there is independent or long-running production evidence for this validator.
+Existing users are not silently switched from forwarding to Live on upgrade.
+
+## Live: validation governs the native answer
+
+Live performs bounded native recursion over UDP/TCP to authoritative servers.
+It does not use the forwarding answer cache. Validation and the returned
+Answer/SOA records come from the same native result: an independent successful
+lookup is not permission to serve unrelated data supplied in a different
+response.
+
+| Outcome | Live client response |
+| --- | --- |
+| `secure` | The authenticated answer can be served. AD is set only when the client requested AD or DO. |
+| `insecure` | A proven unsigned delegation permits an unauthenticated answer, without AD. This is a validated absence of a signing chain, not an error. |
+| `bogus` | SERVFAIL with DNSSEC Bogus extended error. The untrusted answer is not served. |
+| `indeterminate` | SERVFAIL with DNSSEC Indeterminate extended error. Missing anchors/proofs are not relabelled insecure. |
+| Timeout, capacity or internal work failure | Bounded failure returning SERVFAIL; no fallback to an upstream answer. |
+
+A client that explicitly sets **CD** requests DNSSEC checking to be disabled.
+Live still uses native resolution and clears AD. Local policy, permitted-client
+checks, rate limiting and rebinding protection continue to apply. CD is not an
+allow-list or a way to disable other DNS Daddy controls.
+
+The client DO bit controls auxiliary DNSSEC records in the response. When DO
+is absent, auxiliary DNSSEC records are stripped unless the client explicitly
+queried their type. A valid signature does not grant permission to append
+unrelated unsigned data.
+
+Live can increase latency or fail where a forgiving forwarding resolver would
+return data. Failures can expose real DNSSEC problems, network egress problems,
+resource bounds or implementation defects. Inspect the recorded reason and
+runtime counters before assuming an attack or a broken domain.
+
+## Learn: independent observation
+
+Learn is off the client response path. Its fixed worker pool and bounded queue
+receive allowed questions after their forwarded answers are decided. A full
+queue drops observations rather than delaying the answer. Observed-but-not-
+stored losses are counted separately from queries never observed.
+
+The upstream and native observer can encounter different data, cache state,
+authoritative responses or moments in time. A disagreement is an investigation
+lead; it is not automatically proof that either checked the same records and
+was wrong. Status separates populations by resolution source and comparability.
+
+Learn verdicts do not block or rewrite forwarded answers. The local statistical
+learner is another separate component: it fits traffic baselines and produces
+uncalibrated anomaly findings, without changing answers in any native mode.
+See [local traffic learning](../learning.md).
+
+## Native transport and trust-anchor state
+
+Live and the normal native Learn path send **plaintext UDP/TCP port 53**
+traffic to root and authoritative servers, with QNAME minimisation. The
+configured DNS-over-TLS forwarding upstream does not encrypt or carry this
+native traffic. Deployments that permit only encrypted upstream egress must
+choose the mode and outbound network rules deliberately. Native root/TLD/
+authoritative work has explicit request, delegation, memory and time bounds.
+
+The managed-anchor process starts from the compiled-in root trust anchors, or
+`dns.local_dnssec_trust_anchor_file` when explicitly configured. It maintains
+RFC 5011 lifecycle state in `daddybound-anchors.json` beside the database.
+Losing this file loses persisted lifecycle/hold-down history; it is not a safe
+substitute for a planned anchor recovery procedure. Backups include the managed
+state and any configured custom anchor file.
+
+`GET /api/v1/dnssec/status` reports each anchor's state, last attempted and
+successful refresh, refresh failures, persisted-state failures and effective
+mode. These report what the process knows. They do not certify successful
+future rollovers or a firewall configuration the process cannot inspect.
+
+See [Daddybound](../daddybound/README.md),
+[its security model](../daddybound/security-model.md) and
+[encrypted recovery](../recovery.md).
+
+## Forwarded DNSSEC telemetry
+
+In Off/Learn mode, DNS Daddy requests an upstream AD verdict when
+`dns.dnssec_telemetry` is enabled. AD in a query asks the upstream to report
+that verdict; it does not ask for the full DNSSEC records in the way DO does.
+See [RFC 6840] §5.7.
+
+The recorded status is accompanied by `dnssecSource`:
+
+| Forwarded status | Meaning | Limitation |
+| --- | --- | --- |
+| `validated` | The upstream reported authentication with AD. | DNS Daddy's forwarding path did not verify those signatures itself. |
+| `unvalidated` | The forwarded answer carried no positive AD verdict. | Does not distinguish proven unsigned data from an upstream that did not validate. |
+| `servfail` | The upstream could not return an answer. | A validation failure is one possible cause among several. |
+
+A malicious upstream can falsely set AD. Forwarded telemetry is only the
+upstream's reported conclusion. Native Live provides local validation on a
+different client answer path; an observation in Learn does not retroactively
+validate the forwarded records.
+
+The AD bit is filtered for clients that did not request AD or DO. A checked
+result also does not cryptographically protect the link from DNS Daddy to a
+stub client: a hostile local path can alter plain DNS. Use a protected client
+transport or validation at the client where that is required.
+
+## Reading the operational evidence
+
+Start with the mode and answer-path report, then inspect the affected query,
+its decision record and its correlated native observation where available.
+Do not mix native and upstream validation populations into one percentage.
+
+```sh
+curl -H 'Authorization: Bearer YOUR_MANAGEMENT_TOKEN' \
+  'https://your-server/api/v1/dnssec/status'
+
+curl -H 'Authorization: Bearer YOUR_MANAGEMENT_TOKEN' \
+  'https://your-server/api/v1/queries?limit=100' \
+  | jq '.queries[] | {domain, dnssec, dnssecSource, action, reason}'
 ```
-   340 validated
-   142 unvalidated
-     3 servfail
-```
 
-**A healthy picture** is a solid majority `validated` with a stable
-`unvalidated` tail (unsigned domains — still the majority of the internet) and
-`servfail` near zero.
+There is no universal healthy percentage of signed queries. The mix depends
+on the names clients use, mode, cache behavior, logging choices, losses and
+time window. A change in a clearly scoped baseline is worth investigation; it
+is not a standalone protection score.
 
-**Worth investigating:**
+The `resolution_failure` behavioural detector identifies repeated SERVFAIL
+outcomes. That heuristic does not parse a validation chain and still has a
+broader meaning than DNSSEC failure. In Live mode, use the native observation
+and decision reason to distinguish validation from operational failure. The
+finding itself is an experimental lead and carries no automatic enforcement.
 
-- `validated` dropping towards zero → the upstream stopped validating, or you
-  changed to one that does not.
-- A domain that was `validated` yesterday and is `servfail` today → possible
-  expired signature or broken delegation at that domain.
-- `servfail` rising across *many* domains at once → your upstream or your
-  network, not the domains.
-
-### The resolution-failure finding
-
-The `resolution_failure` detector reports registered domains where most lookups
-return SERVFAIL.
-
-It is **not** called `dnssec_validation_failure`, and that naming is the point.
-DNS Daddy cannot tell a bogus signature from an unreachable nameserver, so the
-finding lists every possible cause in its evidence:
-
-```json
-"possible_causes": [
-  "authoritative nameservers unreachable",
-  "broken delegation",
-  "DNSSEC validation failure at the upstream resolver",
-  "upstream resolver problem"
-],
-"local_dnssec_validation": false
-```
-
-It carries **no ATT&CK mapping**. Infrastructure breakage is not an adversary
-technique, and mapping it to one because DNSSEC failures *can* accompany
-hijacking would be decoration. See [../detection/mitre.md](../detection/mitre.md).
+Query-log privacy controls also govern persisted per-query evidence. Status
+counters can cover more observations than stored rows, and the interface
+reports that distinction. Neither observation nor validation grants permission
+to bypass a policy's logging choice.
 
 ## Investigating a suspected DNSSEC failure
 
-DNS Daddy can tell you a domain is failing. Confirming *why* needs a validating
-resolver, which means tools rather than this dashboard:
+First inspect the local native result and operational status. For a domain you
+are authorised to investigate, an independent validating tool can help compare
+the exact chain and authoritative data:
 
-```bash
-# Does it fail everywhere, or just through your upstream?
-dig +dnssec example.com @9.9.9.9
-dig +dnssec example.com @1.1.1.1
-
-# Full validation trace — this names the broken link
+```sh
+# Independent validation and a chain trace.
 delv +rtrace example.com
 
-# Does it work with validation disabled? If yes, it is DNSSEC.
-dig +cd example.com @9.9.9.9
+# Compare ordinary and checking-disabled requests through the same resolver.
+dig +dnssec example.com @YOUR_RESOLVER_ADDRESS
+dig +cd example.com @YOUR_RESOLVER_ADDRESS
 ```
 
-`+cd` (checking disabled) is the decisive test. If a name fails normally and
-succeeds with `+cd`, validation is the cause.
+Success with checking disabled is a clue that validation or its supporting
+work is involved; it does not by itself identify the broken record or prove
+which implementation is correct. Keep timestamps, errors, cache state and
+actual returned records when comparing systems. Avoid diagnosing by a lone
+AD bit or an unexplained SERVFAIL.
 
-[DNSViz](https://dnsviz.net/) renders the whole chain graphically and is the
-fastest way to show a domain owner what is wrong with theirs.
+An external service such as [DNSViz](https://dnsviz.net/) can visualise a public
+zone's chain, but using it discloses the name to that service. Read-only policy
+preview inside DNS Daddy does not perform that external lookup.
 
-## Algorithms
+## Algorithm policy implemented by this build
 
-Current guidance ([RFC 8624], and its successors):
+Daddybound has an explicit validation policy in
+[`internal/daddybound/dnssec/policy.go`](../../internal/daddybound/dnssec/policy.go).
+The default permits supported signature algorithms 8 (RSA/SHA-256), 10
+(RSA/SHA-512), 13 (ECDSA P-256/SHA-256), 14 (ECDSA P-384/SHA-384) and 15
+(Ed25519). Algorithms 5 and 7 remain verifiable capabilities but are not
+permitted by the default signing-algorithm policy.
 
-**Recommended for signing:** ECDSA P-256 with SHA-256 (algorithm 13), and
-Ed25519 (algorithm 15) where supported. Both give strong security with small
-signatures, which matters because DNSSEC responses are large and large UDP
-responses fragment or force TCP retries.
+DS digest handling is a separate decision from the DNSKEY/RRSIG algorithm.
+The default verifier accepts supported SHA-1, SHA-256 and SHA-384 DS digests.
+This describes the checked-in validator policy; it is not a recommendation
+for choosing a new zone-signing algorithm. See the current standards and
+registries linked by [Daddybound's standards notes](../daddybound/standards.md)
+when reviewing or changing that policy.
 
-**Do not use for new deployments:** RSA/SHA-1 (5, 7) — SHA-1 is broken and
-these are deprecated. DSA (3, 6) — deprecated. RSA/MD5 (1) — must not be used.
-RSA/SHA-256 (8) still validates widely but produces signatures several times
-larger than ECDSA for no security benefit at typical key sizes.
+## Evidence limitations
 
-DNS Daddy does not implement any of this — it does not validate, so it has no
-algorithm policy. This is here because operators reading a DNSSEC page tend to
-want it, and because outdated recommendations circulate widely.
-
-DNS Daddy does **not** currently surface which algorithm signed an answer;
-without local validation it does not see the DNSKEY records. That is on the
-roadmap alongside validation itself.
+The repository includes signed offline laboratories, malformed-response tests,
+resource bounds and optional differential comparisons. These are useful
+implementation evidence. They do not supply independent assurance, weeks of
+production reliability, realistic small-device load results, measured
+production false-positive rates or a longitudinal root-key rollover study.
+Live remains labelled experimental for those reasons even when selected by
+default.
 
 ## Further reading
 
-- [RFC 4033], [RFC 4034], [RFC 4035] — DNSSEC specification
-- [RFC 6840] — clarifications, including the AD-bit-in-query signal
-- [RFC 8624] — algorithm implementation requirements
-- [RFC 9364] — DNSSEC BCP, a good single entry point
-- [DNSViz](https://dnsviz.net/) — visual chain-of-trust debugging
-- [Internet Society DNSSEC basics](https://www.internetsociety.org/deploy360/dnssec/basics/)
+- [RFC 4033], [RFC 4034], [RFC 4035] — DNSSEC protocol
+- [RFC 6840] — protocol clarifications and AD signaling
+- [RFC 5011] — automated trust-anchor updates
+- [RFC 9364] — DNSSEC operational background
+- [Capabilities](../capabilities.md) — implemented and remaining work
+- [Local learning](../learning.md) — statistical baselines are separate evidence
 
 [RFC 4033]: https://www.rfc-editor.org/rfc/rfc4033
 [RFC 4034]: https://www.rfc-editor.org/rfc/rfc4034
 [RFC 4035]: https://www.rfc-editor.org/rfc/rfc4035
 [RFC 6840]: https://www.rfc-editor.org/rfc/rfc6840
-[RFC 8624]: https://www.rfc-editor.org/rfc/rfc8624
-[RFC 9364]: https://www.rfc-editor.org/rfc/rfc9364
 [RFC 5011]: https://www.rfc-editor.org/rfc/rfc5011
+[RFC 9364]: https://www.rfc-editor.org/rfc/rfc9364

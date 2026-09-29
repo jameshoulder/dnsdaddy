@@ -14,11 +14,13 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
+	"github.com/jameshoulder/dnsdaddy/internal/daddybound/native"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/decisions"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
+	"github.com/jameshoulder/dnsdaddy/internal/protection"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
@@ -37,7 +39,10 @@ type Handler struct {
 	// detector receives a copy of every query for behavioural analysis. It is
 	// nil-safe and never blocks: detect.Engine drops observations rather than
 	// delaying a lookup. Nothing it produces can change this handler's answer.
-	detector *detect.Engine
+	detector   *detect.Engine
+	learning   LearningObserver
+	protection *protection.Controller
+	native     NativeSource
 
 	logClientIP     bool
 	queryLogEnabled bool
@@ -100,6 +105,17 @@ type DNSSECObserver interface {
 	Observe(observe.Request) bool
 }
 
+// NativeSource returns one immutable selection for this query. A non-nil
+// client is authoritative for the answer path, including its failures.
+type NativeSource interface{ NativeClient() NativeResolver }
+type NativeRecorder interface {
+	RecordNative(store.QueryEvent, dns.Question, native.ClientResult, bool) string
+}
+type LearningObserver interface {
+	Observe(detect.Observation) bool
+	SkipPrivacy()
+}
+
 // HandlerOptions configures a Handler.
 type HandlerOptions struct {
 	LogClientIP bool
@@ -118,7 +134,10 @@ type HandlerOptions struct {
 	RefuseANY bool
 	// Detector, when set, receives an observation per query. Alert-only: see
 	// Handler.observe.
-	Detector *detect.Engine
+	Detector   *detect.Engine
+	Learning   LearningObserver
+	Protection *protection.Controller
+	Native     NativeSource
 	// Decisions, when set, receives every enforced or alerted decision so it
 	// can be explained later. Nil unless the operator switched it on.
 	Decisions DecisionRecorder
@@ -151,6 +170,9 @@ func NewHandler(
 		refuseANY:       o.RefuseANY,
 		acl:             o.ClientACL,
 		detector:        o.Detector,
+		learning:        o.Learning,
+		protection:      o.Protection,
+		native:          o.Native,
 		decisions:       o.Decisions,
 		dnssec:          o.DNSSEC,
 		timeout:         timeout,
@@ -259,6 +281,10 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		h.refused.Add(1)
 		return errorResponse(req, dns.RcodeRefused)
 	}
+	if h.protection != nil && !h.protection.Allow(meta.clientAddr, meta.networkID, time.Now()) {
+		// No per-query disk writes on the flood rejection path.
+		return protectedResponse(req, dns.ExtendedErrorCodeProhibited, "Client query rate limit exceeded")
+	}
 
 	// RFC 8482: answer ANY with a minimal synthesised response rather than
 	// forwarding it. ANY replies are large, which makes them the classic
@@ -325,7 +351,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		Reason:    decision.Reason,
 	}
 	if h.logClientIP && meta.clientAddr.IsValid() {
-		event.ClientIP = meta.clientAddr.String()
+		event.ClientIP = meta.clientAddr.Unmap().WithZone("").String()
 		event.ClientName = h.engine.ClientName(event.ClientIP)
 	}
 
@@ -337,16 +363,35 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		// After the query log and before the response is built: the recorder's
 		// send is non-blocking and drops rather than waiting, so this cannot
 		// delay an answer. See decisions.Recorder.Record.
-		h.recordDecision(event, match, decision)
+		if persist {
+			h.recordDecision(event, match, decision)
+		}
 		resp := blockResponse(req, decision.BlockMode)
-		h.observe(event, meta, resp.Rcode, 0, false, true)
+		h.observe(event, meta, resp.Rcode, 0, false, true, persist)
 		return resp
 	}
 
 	rctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
 
-	res, err := h.resolver.Resolve(rctx, req, h.lists.Generation())
+	var res resolver.Result
+	var err error
+	var nativeResult *native.ClientResult
+	var nativeClient NativeResolver
+	if h.native != nil {
+		nativeClient = h.native.NativeClient()
+	}
+	if nativeClient != nil {
+		result := nativeClient.ResolveClient(rctx, req)
+		nativeResult = &result
+		res = NativeForwardResult(result)
+		event.DNSSECSource = "native"
+		event.Source = "Daddybound native"
+		event.Reason = result.Reason
+	} else {
+		res, err = h.resolver.Resolve(rctx, req, h.lists.Generation())
+		event.DNSSECSource = "upstream"
+	}
 	event.ElapsedMS = int(time.Since(start).Milliseconds())
 
 	if err != nil {
@@ -358,7 +403,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		// the resolution-failure detector wants to see both.
 		event.DNSSEC = store.DNSSECServfail
 		h.qlog.Record(event, persist)
-		h.observe(event, meta, dns.RcodeServerFailure, 0, false, false)
+		h.observe(event, meta, dns.RcodeServerFailure, 0, false, false, persist)
 		h.log.Debug("resolution failed", "domain", normalized, "error", err)
 		return errorResponse(req, dns.RcodeServerFailure)
 	}
@@ -366,6 +411,38 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	event.Action = store.ActionAllowed
 	event.Cached = res.Cached
 	event.DNSSEC = dnssecStatus(res.Rcode, res.Validated)
+	if nativeResult != nil {
+		if recorder, ok := h.native.(NativeRecorder); ok {
+			event.DNSSECObservationID = recorder.RecordNative(event, q, *nativeResult, persist)
+		}
+	}
+	if res.Rcode != dns.RcodeSuccess && res.Rcode != dns.RcodeNameError {
+		h.errors.Add(1)
+		event.Action = store.ActionError
+		if nativeResult == nil {
+			event.Reason = "Upstream returned " + dns.RcodeToString[res.Rcode]
+		}
+		h.qlog.Record(event, persist)
+		if nativeResult != nil && persist {
+			h.recordDecision(event, match, policy.Decision{Reason: event.Reason, Basis: &policy.Basis{
+				Rule: policy.RuleNativeValidation, PolicyID: match.PolicyID, PolicyName: match.PolicyName, Category: "dnssec"}})
+		}
+		h.observe(event, meta, res.Rcode, 0, false, false, persist)
+		return res.Msg
+	}
+	if h.protection != nil {
+		if reason := h.protection.CheckResponse(normalized, res.Msg); reason != "" {
+			h.blocked.Add(1)
+			event.Action, event.Category, event.Source, event.Reason = store.ActionBlocked, "dns_rebinding", "Local response protection", reason
+			h.qlog.Record(event, persist)
+			if persist {
+				h.recordDecision(event, match, policy.Decision{Blocked: true, Reason: reason, Basis: &policy.Basis{
+					Rule: policy.RuleRebinding, PolicyID: match.PolicyID, PolicyName: match.PolicyName, Category: "dns_rebinding"}})
+			}
+			h.observe(event, meta, dns.RcodeRefused, 0, false, true, persist)
+			return protectedResponse(req, dns.ExtendedErrorCodeBlocked, reason)
+		}
+	}
 	if event.Reason == "" {
 		event.Reason = "Resolved"
 	}
@@ -373,9 +450,14 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	// and after the response is fully decided so it cannot participate in
 	// deciding it. The call is a non-blocking channel send; res.Msg is already
 	// what this function will return, whatever any of this concludes.
-	event.DNSSECObservationID = h.observeDNSSEC(event, q, persist)
+	if nativeResult == nil {
+		event.DNSSECObservationID = h.observeDNSSEC(event, q, persist)
+	}
 	h.qlog.Record(event, persist)
-	h.observe(event, meta, res.Rcode, res.MinTTL, res.Validated, false)
+	if persist {
+		h.recordDecision(event, match, decision)
+	}
+	h.observe(event, meta, res.Rcode, res.MinTTL, res.Validated, false, persist)
 	return res.Msg
 }
 
@@ -477,11 +559,11 @@ func dnssecStatus(rcode int, validated bool) string {
 //
 // detect.Engine.Observe is nil-safe and non-blocking, so this costs one struct
 // copy and a channel send that gives up immediately when the queue is full.
-func (h *Handler) observe(e store.QueryEvent, meta requestMeta, rcode int, minTTL uint32, validated, blocked bool) {
-	if h.detector == nil {
+func (h *Handler) observe(e store.QueryEvent, meta requestMeta, rcode int, minTTL uint32, validated, blocked, persist bool) {
+	if h.detector == nil && h.learning == nil {
 		return
 	}
-	h.detector.Observe(detect.Observation{
+	observation := detect.Observation{
 		Time:              e.Time,
 		ClientIP:          e.ClientIP,
 		ClientName:        e.ClientName,
@@ -494,7 +576,35 @@ func (h *Handler) observe(e store.QueryEvent, meta requestMeta, rcode int, minTT
 		Cached:            e.Cached,
 		AnswerTTL:         minTTL,
 		AuthenticatedData: validated,
-	})
+	}
+	if h.detector != nil && persist {
+		h.detector.Observe(observation)
+	}
+	if h.learning != nil {
+		if persist && h.logClientIP && e.ClientIP != "" {
+			h.learning.Observe(observation)
+		} else {
+			h.learning.SkipPrivacy()
+		}
+	}
+}
+
+// Local protection rejects the entire answer and clears AD. EDE is attached
+// only when the requester supports EDNS; it adds an explanation, not data.
+func protectedResponse(req *dns.Msg, code uint16, reason string) *dns.Msg {
+	m := errorResponse(req, dns.RcodeRefused)
+	if opt := req.IsEdns0(); opt != nil {
+		size := opt.UDPSize()
+		if size < dns.MinMsgSize {
+			size = dns.MinMsgSize
+		}
+		if size > 1232 {
+			size = 1232
+		}
+		m.SetEdns0(size, false)
+		m.IsEdns0().Option = append(m.IsEdns0().Option, &dns.EDNS0_EDE{InfoCode: code, ExtraText: reason})
+	}
+	return m
 }
 
 // Stats reports handler counters.

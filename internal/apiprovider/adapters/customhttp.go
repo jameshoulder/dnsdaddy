@@ -61,7 +61,7 @@ func newCustomHTTP(cfg apiprovider.InstanceConfig) (apiprovider.Provider, error)
 	// Parsed at construction so a malformed URL is a configuration error the
 	// operator sees when they save, not a failure per lookup afterwards.
 	if _, err := url.Parse(strings.ReplaceAll(tmpl, "{subject}", "example.com")); err != nil {
-		return nil, fmt.Errorf("custom provider url is not a valid URL: %w", err)
+		return nil, fmt.Errorf("custom provider url is not a valid URL")
 	}
 
 	method := strings.ToUpper(cfg.Setting("method", http.MethodGet))
@@ -80,6 +80,10 @@ func newCustomHTTP(cfg apiprovider.InstanceConfig) (apiprovider.Provider, error)
 		authQuery:    strings.TrimSpace(cfg.Setting("auth_query", "")),
 		scoreField:   cfg.Setting("score_field", "score"),
 		verdictField: cfg.Setting("verdict_field", ""),
+	}
+	// Prefix whitespace is meaningful: "Bearer " must not become "Bearer".
+	if prefix, ok := cfg.Settings["auth_prefix"]; ok {
+		c.authPrefix = prefix
 	}
 	for _, v := range strings.Split(cfg.Setting("malicious_values", "malicious,bad,block"), ",") {
 		if v = strings.ToLower(strings.TrimSpace(v)); v != "" {
@@ -133,7 +137,7 @@ func (c *customHTTP) Reputation(ctx context.Context, s apiprovider.Subject) (api
 
 	req, err := http.NewRequestWithContext(ctx, c.method, target, nil)
 	if err != nil {
-		return apiprovider.Verdict{}, fmt.Errorf("build request: %w", err)
+		return apiprovider.Verdict{}, fmt.Errorf("provider request could not be constructed")
 	}
 	req.Header.Set("Accept", "application/json")
 	if err := c.authenticate(req); err != nil {
@@ -274,6 +278,8 @@ func init() {
 		SecretLabel:    "API key or token",
 		SecretRequired: false,
 		Fields: []apiprovider.TemplateField{
+			{Key: "allow_private", Label: "Allow internal HTTPS service", Default: "false",
+				Help: "Use true only for your own RFC 1918 / IPv6 ULA service. TLS verification remains required; loopback and metadata are always blocked."},
 			{Key: "url", Label: "URL", Required: true,
 				Placeholder: "https://intel.example.internal/lookup?domain={subject}",
 				Help: "{subject} is replaced with the domain, URL-escaped. " +

@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -83,18 +84,10 @@ func TestCategoryPriorityMatchesCatalogOrder(t *testing.T) {
 	}
 }
 
-func TestObservatoryFeedIsInCatalogAndDisabled(t *testing.T) {
+func TestObservatoryIsNotBundled(t *testing.T) {
 	for _, f := range DefaultFeeds {
-		if f.ID != ObservatoryFeedID {
-			continue
+		if f.ID == ObservatoryFeedID || strings.Contains(f.URL, "threats.dnsdaddy.dev") {
+			t.Fatal("retired DNS Daddy service is still bundled")
 		}
-		if f.Enabled {
-			t.Error("the Threat Observatory ships enabled; a default install must not depend on us")
-		}
-		if !ValidCategory(f.Category) {
-			t.Errorf("Observatory fallback category %q is not a real category", f.Category)
-		}
-		return
 	}
-	t.Fatal("the Threat Observatory feed is missing from DefaultFeeds")
 }

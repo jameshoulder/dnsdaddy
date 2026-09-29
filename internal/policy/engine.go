@@ -61,6 +61,10 @@ const (
 	RuleCategory Rule = "category"
 	// RuleReputation is an external provider's verdict.
 	RuleReputation Rule = "reputation"
+	// RuleNativeValidation is a captured local validation/resolution failure.
+	RuleNativeValidation Rule = "native_validation"
+	// RuleRebinding is an answer rejected by the local address/alias guard.
+	RuleRebinding Rule = "dns_rebinding"
 )
 
 // Basis is what decided, in machine terms, so the decision can be explained

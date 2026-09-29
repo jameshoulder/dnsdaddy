@@ -40,10 +40,10 @@ func TestShippedExampleConfigParses(t *testing.T) {
 	if cfg.Detection.EvalInterval.D().String() != "30s" {
 		t.Errorf("detection.eval_interval = %v, want 30s", cfg.Detection.EvalInterval)
 	}
-	// Decision records are off in the shipped example. A copy-and-paste must
-	// not start writing a second row per block on somebody's resolver.
-	if cfg.Log.DecisionRecords {
-		t.Error("the shipped example config enables decision records")
+	// New installations retain the original explanation for explicit
+	// decisions, subject to their query/per-policy logging controls.
+	if !cfg.Log.DecisionRecords {
+		t.Error("the shipped example config loses original decision evidence")
 	}
 	if cfg.Log.DecisionRetentionDays != 30 {
 		t.Errorf("log.decision_retention_days = %d, want 30", cfg.Log.DecisionRetentionDays)
@@ -85,6 +85,23 @@ func TestShippedExampleConfigParses(t *testing.T) {
 	// The example must never ship a configuration that would refuse to start.
 	if err := cfg.validate(); err != nil {
 		t.Errorf("the shipped example config would fail validation: %v", err)
+	}
+}
+
+func TestSyntheticLabPinsForwardingAndPermitsOnlyItsFixtureAddressRanges(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "labs", "resolver.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DNS.LocalDNSSECMode() != LocalDNSSECOff {
+		t.Fatal("synthetic lab would send reserved names to native authorities")
+	}
+	if !cfg.Protection.RateLimit.Enabled || !cfg.Protection.Rebinding.Enabled {
+		t.Fatal("synthetic lab unnecessarily disables local protections")
+	}
+	ranges := cfg.Protection.Rebinding.AllowCIDRs
+	if len(ranges) != 2 || ranges[0] != "203.0.113.0/24" || ranges[1] != "2001:db8::/32" || len(cfg.Protection.Rebinding.AllowDomains) != 0 {
+		t.Fatalf("lab exceptions exceed its synthetic sink answers: %+v", cfg.Protection.Rebinding)
 	}
 }
 

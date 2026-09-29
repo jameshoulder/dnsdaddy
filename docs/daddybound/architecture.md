@@ -2,21 +2,37 @@
 
 ## The packages
 
-```
-internal/daddybound/
-  dnssec/                  the validation engine
-  lab/                     signed hierarchies built in memory
-  differential/            comparison against a reference validator
-    refunbound/            libunbound, behind a build tag
+| Package | Responsibility |
+| --- | --- |
+| `dnssec` | Chain/proof validation and exact authenticated-RRset receipts |
+| `recursive` | Root priming, iterative lookup, aliases, material cache and bounded transport |
+| `native` | Bind validation to native client content; CD/DO/AD and failure adapter |
+| `trustanchors` | Persisted RFC 5011 trust-point lifecycle |
+| `observe` | Independent bounded Learn workers |
+| `lab` | Deterministically signed test hierarchies |
+| `differential` | Comparison against independent reference validators |
+| `differential/refunbound` | libunbound oracle behind its test build tag |
+
+The native request relationship is:
+
+```mermaid
+flowchart TD
+    H["DNS handler: admission and policy"] --> C["Native client: capacity, flags and failures"]
+    C --> E["Native engine: response projection and binding"]
+    E --> R["Recursive resolver: exact per-hop replies"]
+    E --> V["DNSSEC validator: pinned data and trust"]
+    R --> P["Per-request pinned RRsets"]
+    P --> V
+    V --> A["Authenticated receipts for projected data"]
+    A --> C
 ```
 
-Dependencies run one way and only one way:
-
-```
-lab ─────────┐
-             ├──> dnssec ──> crypto/*, github.com/miekg/dns
-differential ┘         └──> (nothing else in this repository)
-```
+The handler applies rebinding checks before sending a native answer. It
+selects this route before the forwarding cache; no failure transitions from
+native to forwarding. Learn uses the engine separately after a forwarded
+answer is final. The mode controller reuses one native runtime between Live
+and Learn and shuts it down when Off is selected. See
+[ADR 0003](../decisions/0003-daddybound-native-live.md).
 
 `dnssec` imports nothing from DNS Daddy. Not the store, not the config, not
 the resolver. That is enforced by a test rather than by convention — see
@@ -53,7 +69,7 @@ Three interfaces, each with a reason to exist beyond tidiness.
 
 ```go
 type Source interface {
-    Lookup(ctx context.Context, name string, rrtype uint16) ([]dns.RR, error)
+    Lookup(ctx context.Context, name string, rrtype uint16) (Response, error)
 }
 ```
 
@@ -151,3 +167,17 @@ and compares.
 Construction goes through an unexported recorder whose only exits are the
 terminal methods, so there is no path that produces a result without also
 having recorded how it got there.
+
+## Exact client-content receipts
+
+`ValidationResult.Authenticated` contains unexported-content receipts for
+RRsets whose signatures verified. The native engine compares their canonical
+digests against each returned RRset and caps TTL by the accepted signature's
+lifetime. These receipts are excluded from JSON; stored textual traces cannot
+be replayed as permission to authenticate a different packet.
+
+`ValidateQuestions` shares lookup and NSEC3 hash budgets across all projected
+client RRsets. Whole-question pins preserve NXDOMAIN/NODATA proof context;
+individual RRset pins bind alias targets and negative SOA records without
+replacing them with a different lookup's answer. This closes the distinction
+between proving a question and authenticating everything served under AD.

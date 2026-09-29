@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -509,6 +508,9 @@ func (a *API) handleListFeeds(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]row, 0, len(feeds))
 	for _, f := range feeds {
+		if store.RetiredBuiltinFeed(f) {
+			continue
+		}
 		load := loads[f.ID]
 		out = append(out, row{
 			Feed:           f,
@@ -522,11 +524,6 @@ func (a *API) handleListFeeds(w http.ResponseWriter, r *http.Request) {
 		"feeds":               out,
 		"refreshing":          a.Feeds.Refreshing(),
 		"totalIndexedDomains": a.Lists.Load().Len(),
-		// Which of these rows is the Threat Observatory. The dashboard gives
-		// it a dedicated activation card, and naming the ID here keeps the
-		// catalog the single source of truth rather than hardcoding the slug
-		// in JavaScript where nothing would notice it drifting.
-		"observatoryFeedId": catalog.ObservatoryFeedID,
 	})
 }
 
@@ -571,6 +568,10 @@ func (a *API) handleUpdateFeed(w http.ResponseWriter, r *http.Request) {
 	before, err := a.Store.GetFeed(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeStoreError(w, err)
+		return
+	}
+	if store.RetiredBuiltinFeed(before) {
+		writeError(w, http.StatusGone, "the built-in Threat Observatory has been retired; add your own feed or API provider")
 		return
 	}
 	f, err := a.Store.UpdateFeed(r.Context(), r.PathValue("id"), body.toInput())
@@ -653,6 +654,10 @@ func (a *API) handleRefreshFeed(w http.ResponseWriter, r *http.Request) {
 	f, err := a.Store.GetFeed(r.Context(), id)
 	if err != nil {
 		writeStoreError(w, err)
+		return
+	}
+	if store.RetiredBuiltinFeed(f) {
+		writeError(w, http.StatusGone, "the built-in Threat Observatory has been retired; add your own feed or API provider")
 		return
 	}
 	if !f.Enabled {

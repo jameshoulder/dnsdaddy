@@ -291,31 +291,31 @@ func TestFeedFormatValidation(t *testing.T) {
 	}
 }
 
-func TestObservatoryFeedIsSeededDisabledAndBuiltin(t *testing.T) {
-	// The Observatory is the only DNS Daddy-operated source in the catalog. It
-	// is seeded so an operator can find and enable it, and seeded off so that a
-	// default install still depends on nothing we run.
-	st := newTestStore(t)
-	feeds, err := st.ListFeeds(context.Background())
+func TestObservatoryIsNotSeededAndLegacyRowsRetireOnOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dnsdaddy.db")
+	st, err := Open(path)
 	if err != nil {
-		t.Fatalf("ListFeeds: %v", err)
+		t.Fatal(err)
 	}
-	for _, f := range feeds {
-		if f.ID != catalog.ObservatoryFeedID {
-			continue
-		}
-		if f.Enabled {
-			t.Error("the Threat Observatory feed was seeded enabled; it must be opt-in")
-		}
-		if !f.Builtin {
-			t.Error("the Threat Observatory feed should be built-in")
-		}
-		if f.Format != "observatory" {
-			t.Errorf("Observatory feed format = %q, want observatory", f.Format)
-		}
-		return
+	if _, err := st.GetFeed(context.Background(), catalog.ObservatoryFeedID); err != ErrNotFound {
+		t.Fatalf("retired feed still seeded: %v", err)
 	}
-	t.Fatal("the Threat Observatory feed was not seeded")
+	_, err = st.DB().Exec(`INSERT INTO feeds (id,name,url,category,format,enabled,builtin,created_at,updated_at) VALUES ('dnsdaddy-observatory','Historical source','https://threats.dnsdaddy.dev/api/v1/feed.json','malware','observatory',1,1,0,0)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	legacy, err := reopened.GetFeed(context.Background(), catalog.ObservatoryFeedID)
+	if err != nil || legacy.Enabled || !legacy.Builtin {
+		t.Fatalf("upgrade did not preserve disabled history: %+v %v", legacy, err)
+	}
 }
 
 func TestQueryLogAndRollups(t *testing.T) {

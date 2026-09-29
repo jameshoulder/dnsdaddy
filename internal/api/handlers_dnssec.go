@@ -67,12 +67,12 @@ func (a *API) handleDNSSECObservations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"mode": a.Config.DNS.LocalDNSSECMode(),
+		"mode": a.dnssecState().Effective,
 		// Stated in the payload rather than left to the reader, because every
 		// number below is only meaningful alongside it. A dashboard, a script
-		// or a person reading the JSON has to be able to see that these
-		// verdicts changed nothing.
-		"enforcing":    false,
+		// or a person reading the JSON can distinguish auxiliary Learn
+		// observations from exact-answer native_live decisions.
+		"enforcing":    a.dnssecModeStatus().Enforcing,
 		"experimental": true,
 		"summary":      summary,
 		"recent":       recent,
@@ -80,13 +80,13 @@ func (a *API) handleDNSSECObservations(w http.ResponseWriter, r *http.Request) {
 		"windowHours":  hours,
 		// Two scopes, named. `summary` and `recent` are stored rows within
 		// the window, and only rows the query-log settings allowed to be
-		// stored. `runtime` is the process's own counters since it started,
-		// covering every observation whether or not a row was kept. They
+		// stored. `runtime` is the current or most recent Learn activation's
+		// counters, including observations that were lost or not retained. They
 		// are different populations and neither is derivable from the other.
 		"scope": map[string]any{
 			"summary": "stored observations within the window",
 			"recent":  "stored observations within the window, newest first",
-			"runtime": "process counters since start, stored or not",
+			"runtime": "current or most recent Learn activation; active and scope describe whether it is still running",
 			"window": map[string]any{
 				"hours": hours,
 				"from":  since.UTC(),
@@ -105,14 +105,22 @@ func (a *API) handleDNSSECObservations(w http.ResponseWriter, r *http.Request) {
 // load is a statement about the sample, not about whether clients are being
 // answered — and an operator must be able to tell those apart at a glance.
 func (a *API) dnssecRuntime() map[string]any {
+	state := a.dnssecState()
 	out := map[string]any{
-		"available": a.Config.DNS.ObserveDNSSEC(),
+		"available": state.Observer != nil,
+		"active":    state.ObserverActive,
 	}
-	if a.DNSSEC == nil {
+	if state.Observer == nil {
 		return out
 	}
-	s := a.DNSSEC.Stats()
+	s := state.Observer.Stats()
 	out["scope"] = "since_start"
+	if a.DNSSECControl != nil {
+		out["scope"] = "most_recent_learn_activation"
+		if state.ObserverActive {
+			out["scope"] = "since_current_learn_activation"
+		}
+	}
 	out["uptimeSeconds"] = int64(time.Since(a.StartedAt).Seconds())
 	out["observed"] = s.Observed
 	out["dropped"] = s.Dropped
@@ -121,8 +129,8 @@ func (a *API) dnssecRuntime() map[string]any {
 		out["lastAt"] = s.LastAt
 		out["lastStatus"] = string(s.LastStatus)
 	}
-	if a.DNSSECWriter != nil {
-		w := a.DNSSECWriter.Stats()
+	if state.Writer != nil {
+		w := state.Writer.Stats()
 		out["stored"] = w.Written
 		// Completed validations whose result never reached the database.
 		// Reported beside "observed" so a smaller dataset than expected has

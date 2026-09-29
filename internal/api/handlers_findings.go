@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
+	"github.com/jameshoulder/dnsdaddy/internal/learning"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
@@ -307,17 +308,22 @@ const (
 //
 // Oldest first, and paged forward in time: the X-Next-Cursor header names the
 // position after the last line, and passing it back continues from there. A
-// consumer that keeps its last cursor between runs collects every finding
-// exactly once, however many there are and however many the limit allows.
+// consumer follows Link until X-Truncated is false. The window and insertion
+// boundary are frozen across pages; a later collection starts a fresh window
+// and deduplicates by id. Retention and mutable review-state filters still apply.
 func (a *API) handleExportFindings(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-
+	client, err := parseClientParam(q.Get("client"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	filter := store.FindingFilter{
 		Severity:  strings.ToLower(strings.TrimSpace(q.Get("severity"))),
 		EventType: strings.TrimSpace(q.Get("type")),
-		Limit:     boundedParam(q.Get("limit"), 1000, 1, 1000),
-		Cursor:    strings.TrimSpace(q.Get("cursor")),
-		Ascending: true,
+		ClientIP:  client, Domain: strings.TrimSpace(q.Get("domain")),
+		State: strings.ToLower(strings.TrimSpace(q.Get("state"))),
+		Limit: boundedParam(q.Get("limit"), 1000, 1, 1000), Ascending: true,
 	}
 	if filter.Severity != "" {
 		if _, ok := detect.ParseSeverity(filter.Severity); !ok {
@@ -325,58 +331,27 @@ func (a *API) handleExportFindings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if hours := boundedParam(q.Get("hours"), 24, 1, 24*365); hours > 0 {
-		filter.Since = time.Now().Add(-time.Duration(hours) * time.Hour)
-	}
-
-	findings, next, err := a.Store.ListFindings(r.Context(), filter)
-	if err != nil {
-		writeFindingsError(w, err)
+	if filter.State != "" && !store.ValidReviewState(filter.State) {
+		writeError(w, http.StatusBadRequest, "state must be one of "+strings.Join(store.ReviewStates(), ", "))
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set(headerExportCount, strconv.Itoa(len(findings)))
-	w.Header().Set(headerTruncated, strconv.FormatBool(next != ""))
-	if next != "" {
-		w.Header().Set(headerNextCursor, next)
+	walk, err := a.exportWindow(r, "findings")
+	if err != nil {
+		writeExportError(w, err)
+		return
 	}
-	w.WriteHeader(http.StatusOK)
-
-	// Already oldest first: the store walked forward, so the cursor it
-	// returned continues forward too.
+	filter.Since, filter.Until = walk.sinceTime(), walk.untilTime()
+	filter.Cursor, filter.MaxInsertionID = walk.Position, &walk.MaxID
+	findings, next, err := a.Store.ListFindings(r.Context(), filter)
+	if err != nil {
+		writeExportError(w, err)
+		return
+	}
+	docs := make([][]byte, 0, len(findings))
 	for _, f := range findings {
-		line := f.Detail
-		if !json.Valid([]byte(line)) {
-			// Should not happen — detail is written by the engine — but a
-			// malformed row must not corrupt the whole stream for a consumer
-			// parsing line by line.
-			continue
-		}
-		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
-		// NDJSON, not HTML. The body is written a record at a time rather than
-		// marshalled as one array because that is the point of the format — a
-		// consumer processes a line at a time instead of buffering everything.
-		//
-		// Each line was produced by encoding/json in the detection engine and
-		// is re-checked with json.Valid above, so any domain name inside it is
-		// already JSON-escaped. Running it through html/template would corrupt
-		// the JSON rather than protect anyone. Content-Type is
-		// application/x-ndjson with nosniff, so a browser cannot be talked into
-		// reinterpreting it as markup.
-		//
-		// Consumers must still escape these values before rendering them: a
-		// domain name in a finding is an attacker-chosen string, and a SIEM
-		// dashboard that renders it as HTML has the problem this rule is about.
-		// Documented in docs/threat-model.md (T17).
-		if _, err := w.Write([]byte(line)); err != nil {
-			return
-		}
-		if _, err := w.Write([]byte("\n")); err != nil {
-			return
-		}
+		docs = append(docs, []byte(f.Detail))
 	}
+	writeExport(w, r, walk, next, docs)
 }
 
 // handleDetectors returns the detector catalogue.
@@ -389,19 +364,33 @@ func (a *API) handleExportFindings(w http.ResponseWriter, r *http.Request) {
 // signals, its known false positives, its ATT&CK mappings, and whether it can
 // enforce anything — which, for every behavioural detector, is no.
 func (a *API) handleDetectors(w http.ResponseWriter, r *http.Request) {
-	enabled := a.Detector != nil
+	heuristicEnabled := a.Detector != nil
+	learningEnabled := a.Learning != nil || a.LearningError != ""
+	enabled := heuristicEnabled || learningEnabled
+	catalogue := a.Detector.Catalogue()
+	if catalogue == nil {
+		catalogue = []detect.DetectorInfo{}
+	}
+	if learningEnabled {
+		catalogue = append(catalogue, learning.CatalogueInfo())
+	}
 
 	resp := map[string]any{
-		"enabled":     enabled,
-		"enforcement": "none",
-		"description": "Behavioural detectors observe, score and explain. They never block. " +
-			"Blocking is done by the reputation and policy engine, which is driven by curated " +
-			"threat intelligence rather than inference.",
+		"enabled":           enabled,
+		"heuristicEnabled":  heuristicEnabled,
+		"learningEnabled":   learningEnabled,
+		"learningAvailable": a.Learning != nil,
+		"enforcement":       "none",
+		"description": "Behavioural heuristics and the separate fitted local baseline observe, score and explain. They never block. " +
+			"Policy, native DNSSEC validation and configured resolver protections make enforcement decisions independently.",
 		"schemaVersion": detect.SchemaVersion,
-		"detectors":     a.Detector.Catalogue(),
+		"detectors":     catalogue,
 	}
 	if !enabled {
 		resp["detectors"] = []detect.DetectorInfo{}
+	}
+	if a.Learning == nil && a.LearningError != "" {
+		resp["learningError"] = learning.UnavailableStatus().Error
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -436,7 +425,7 @@ func (a *API) handleFindingsSummary(w http.ResponseWriter, r *http.Request) {
 		"days":    days,
 		"total":   total,
 		"byType":  summary,
-		"enabled": a.Detector != nil,
+		"enabled": a.Detector != nil || a.Learning != nil || a.LearningError != "",
 		// Review dispositions over the same period as byType, every state
 		// present at zero. "new" counts findings nobody has reviewed as well
 		// as those returned to new.

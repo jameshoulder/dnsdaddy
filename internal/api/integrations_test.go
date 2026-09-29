@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +60,21 @@ func enableIntegrations(t *testing.T, h *harness, ceiling apiprovider.Reputation
 // createProvider adds a provider through the API and returns its ID.
 func createProvider(t *testing.T, h *harness, body map[string]any) string {
 	t.Helper()
+	if enabled, _ := body["enabled"].(bool); enabled {
+		body["consent"] = true
+	}
+	// Production only permits verified HTTPS. Fixture transports map a
+	// public-looking test URL onto this test's loopback server without DNS.
+	if cfg, ok := body["config"].(map[string]string); ok && strings.HasPrefix(cfg["url"], "http://127.0.0.1:") {
+		u, err := url.Parse(cfg["url"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := *u
+		h.api.Intel.Transport = fixtureProviderTransport{target: &base}
+		u.Scheme, u.Host = "https", "fixture-provider.example"
+		cfg["url"] = u.String()
+	}
 	resp, raw := h.do("POST", "/api/v1/integrations/providers", body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create provider: status %d, body %s", resp.StatusCode, raw)
@@ -127,11 +144,11 @@ func TestNoIntegrationsResponseEverContainsTheCredential(t *testing.T) {
 		{"GET", "/api/v1/integrations/providers/" + id, nil},
 		{"GET", "/api/v1/integrations/providers/" + id + "/health", nil},
 		{"GET", "/api/v1/integrations/templates", nil},
-		{"POST", "/api/v1/integrations/providers/" + id + "/test", nil},
+		{"POST", "/api/v1/integrations/providers/" + id + "/test", map[string]any{"consent": true}},
 		{"POST", "/api/v1/integrations/providers/test", map[string]any{
-			"kind": "customhttp",
+			"kind": "customhttp", "consent": true,
 			"config": map[string]string{
-				"url":        upstream.URL + "/lookup?domain={subject}",
+				"url":        "https://fixture-provider.example/lookup?domain={subject}",
 				"auth_query": "apikey",
 			},
 			"secret": theCredential,
@@ -341,8 +358,8 @@ func TestIntegrationsRoutesAnswerWhenTheFeatureIsOff(t *testing.T) {
 			if resp.StatusCode != http.StatusServiceUnavailable {
 				t.Fatalf("status %d, want 503; body %s", resp.StatusCode, raw)
 			}
-			if !strings.Contains(string(raw), "dnsdaddy.yaml") {
-				t.Errorf("the error does not name the file to change: %s", raw)
+			if !strings.Contains(string(raw), "startup diagnostics") {
+				t.Errorf("the error does not identify the unavailable dependency: %s", raw)
 			}
 		})
 	}
@@ -356,89 +373,65 @@ func TestIntegrationsRoutesAnswerWhenTheFeatureIsOff(t *testing.T) {
 	}
 }
 
-// The security property of the mode ceiling: nothing reachable over the
-// network can put a third party in front of DNS answers on a deployment whose
-// configuration file did not already allow it.
-func TestTheReputationModeCeilingCannotBeRaisedOverTheAPI(t *testing.T) {
+// Sharing and a DNS-path latency budget require distinct explicit choices.
+func TestReputationModeRequiresExplicitConsent(t *testing.T) {
 	h := newHarness(t)
 	h.login()
-	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
-
-	resp, raw := h.do("PUT", "/api/v1/integrations/reputation",
-		map[string]any{"mode": "blocking"})
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status %d, want 403; body %s", resp.StatusCode, raw)
+	enableIntegrations(t, h, apiprovider.ModeOff)
+	for _, body := range []map[string]any{{"mode": "cache_only"}, {"mode": "blocking", "consent": true}} {
+		resp, raw := h.do("PUT", "/api/v1/integrations/reputation", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("missing consent: %d %s", resp.StatusCode, raw)
+		}
+		if h.api.Providers.Mode() != apiprovider.ModeOff {
+			t.Fatal("rejected request changed the mode")
+		}
 	}
-	if !strings.Contains(string(raw), "dnsdaddy.yaml") {
-		t.Errorf("the refusal does not say where blocking mode is set: %s", raw)
+	resp, raw := h.do("PUT", "/api/v1/integrations/reputation", map[string]any{"mode": "blocking", "consent": true, "acceptDnsLatency": true})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("explicit opt-in: %d %s", resp.StatusCode, raw)
 	}
-	if got := h.api.Providers.Mode(); got != apiprovider.ModeCacheOnly {
-		t.Errorf("the live mode became %q despite the refusal", got)
-	}
-
-	// Turning it down is always allowed — that is the affordance an operator
-	// needs during an incident.
 	resp, raw = h.do("PUT", "/api/v1/integrations/reputation", map[string]any{"mode": "off"})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, want 200; body %s", resp.StatusCode, raw)
-	}
-	if got := h.api.Providers.Mode(); got != apiprovider.ModeOff {
-		t.Errorf("the live mode is %q after switching off", got)
+	if resp.StatusCode != http.StatusOK || h.api.Providers.Mode() != apiprovider.ModeOff {
+		t.Fatalf("off must remain available without consent: %d %s", resp.StatusCode, raw)
 	}
 }
 
-// The choice has to survive a restart, and it has to stay under the ceiling
-// after a restart even if the configuration file was lowered in between.
-func TestTheStoredModeIsBoundedByTheConfiguredCeilingAtBoot(t *testing.T) {
+func TestStoredIntegrationChoiceSurvivesRestartWithoutYAMLEdit(t *testing.T) {
 	h := newHarness(t)
 	h.login()
-	enableIntegrations(t, h, apiprovider.ModeBlocking)
-
-	resp, raw := h.do("PUT", "/api/v1/integrations/reputation",
-		map[string]any{"mode": "blocking"})
+	enableIntegrations(t, h, apiprovider.ModeOff)
+	resp, raw := h.do("PUT", "/api/v1/integrations/reputation", map[string]any{"mode": "cache_only", "consent": true})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
+		t.Fatalf("save: %d %s", resp.StatusCode, raw)
 	}
-
-	ctx := context.Background()
-	if got := EffectiveReputationMode(ctx, h.store, "blocking"); got != apiprovider.ModeBlocking {
-		t.Errorf("with a blocking ceiling the stored mode is %q", got)
+	if got := EffectiveReputationMode(context.Background(), h.store, "off"); got != apiprovider.ModeCacheOnly {
+		t.Fatalf("stored choice was lost: %s", got)
 	}
-	// The operator edits dnsdaddy.yaml down to cache_only and restarts. The
-	// stored "blocking" must not survive that.
-	if got := EffectiveReputationMode(ctx, h.store, "cache_only"); got != apiprovider.ModeCacheOnly {
-		t.Errorf("a lowered configuration file was overridden by the stored mode: %q", got)
+	if err := h.store.SetSetting(context.Background(), settingReputationMode, "garbage"); err != nil {
+		t.Fatal(err)
 	}
-	if got := EffectiveReputationMode(ctx, h.store, "off"); got != apiprovider.ModeOff {
-		t.Errorf("a disabled configuration file was overridden by the stored mode: %q", got)
+	if got := EffectiveReputationMode(context.Background(), h.store, "blocking"); got != apiprovider.ModeOff {
+		t.Fatalf("corrupt stored choice must fail inert: %s", got)
 	}
 }
 
-// Off is the default and must stay the default: a deployment that never
-// touches this feature must not find blocking mode selectable.
-func TestBlockingIsNotSelectableUnlessTheFileAllowsIt(t *testing.T) {
+func TestAllModesAreSelectableWithoutChangingTheDefault(t *testing.T) {
 	h := newHarness(t)
 	h.login()
-	enableIntegrations(t, h, apiprovider.ModeCacheOnly)
-
+	enableIntegrations(t, h, apiprovider.ModeOff)
 	_, raw := h.do("GET", "/api/v1/integrations/providers", nil)
 	var out struct {
 		Reputation struct {
 			Mode       string   `json:"mode"`
-			Ceiling    string   `json:"ceiling"`
 			Selectable []string `json:"selectable"`
 		} `json:"reputation"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range out.Reputation.Selectable {
-		if m == "blocking" {
-			t.Fatalf("blocking is offered on a cache_only deployment: %v", out.Reputation.Selectable)
-		}
-	}
-	if len(out.Reputation.Selectable) != 2 {
-		t.Errorf("selectable = %v, want off and cache_only", out.Reputation.Selectable)
+	if out.Reputation.Mode != "off" || len(out.Reputation.Selectable) != 3 {
+		t.Fatalf("unexpected modes: %s", raw)
 	}
 }
 
@@ -467,7 +460,7 @@ func TestConnectionTestReportsWhatActuallyHappened(t *testing.T) {
 	})
 
 	status = http.StatusOK
-	_, raw := h.do("POST", "/api/v1/integrations/providers/"+id+"/test", nil)
+	_, raw := h.do("POST", "/api/v1/integrations/providers/"+id+"/test", map[string]any{"consent": true})
 	var ok struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
@@ -480,7 +473,7 @@ func TestConnectionTestReportsWhatActuallyHappened(t *testing.T) {
 	}
 
 	status = http.StatusUnauthorized
-	_, raw = h.do("POST", "/api/v1/integrations/providers/"+id+"/test", nil)
+	_, raw = h.do("POST", "/api/v1/integrations/providers/"+id+"/test", map[string]any{"consent": true})
 	if err := json.Unmarshal(raw, &ok); err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +506,7 @@ func TestAConnectionTestDoesNotSeedTheVerdictCache(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	if _, raw := h.do("POST", "/api/v1/integrations/providers/"+id+"/test", nil); raw == nil {
+	if _, raw := h.do("POST", "/api/v1/integrations/providers/"+id+"/test", map[string]any{"consent": true}); raw == nil {
 		t.Fatal("no response")
 	}
 	// Anything the test enqueued has landed by the time the queue is empty, so
@@ -1100,4 +1093,19 @@ func TestEditingAProviderDiscardsItsCachedVerdicts(t *testing.T) {
 		v.Disposition == apiprovider.DispositionMalicious {
 		t.Errorf("the provider still reports malicious after answering 0.0: %+v", v)
 	}
+}
+
+// Only fixture-provider.example is rewritten, so this test transport cannot
+// accidentally turn a typo or a hostile provider URL into a real network call.
+type fixtureProviderTransport struct{ target *url.URL }
+
+func (f fixtureProviderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Hostname() != "fixture-provider.example" {
+		return nil, fmt.Errorf("unexpected fixture host")
+	}
+	copy := req.Clone(req.Context())
+	u := *req.URL
+	copy.URL = &u
+	copy.URL.Scheme, copy.URL.Host = f.target.Scheme, f.target.Host
+	return http.DefaultTransport.RoundTrip(copy)
 }

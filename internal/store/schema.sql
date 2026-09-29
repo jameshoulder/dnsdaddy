@@ -123,17 +123,18 @@ CREATE TABLE IF NOT EXISTS query_log (
     proto       TEXT    NOT NULL DEFAULT '',
     elapsed_ms  INTEGER NOT NULL DEFAULT 0,
     cached      INTEGER NOT NULL DEFAULT 0,
-    -- DNSSEC validation status reported by the upstream resolver:
-    -- 'validated', 'unvalidated', 'servfail', or '' where no upstream was
-    -- consulted. DNS Daddy forwards rather than validating locally, so this
-    -- records what the upstream concluded. See docs/dnssec.md.
+    -- Recorded serving-path status. dnssec_source distinguishes a local
+    -- native conclusion from one reported by a forwarding upstream.
+    -- Blank source on old rows remains unknown rather than being backfilled.
     dnssec      TEXT    NOT NULL DEFAULT '',
     -- Correlation id for the local Daddybound observation of this query, or
     -- '' when local validation was off, not attempted, or dropped because the
     -- observation queue was full. Deliberately not a foreign key: the two rows
     -- are written independently and asynchronously, and neither may wait for
     -- the other. A dangling id means "no observation", not an error.
-    dnssec_obs  TEXT    NOT NULL DEFAULT ''
+    dnssec_obs  TEXT    NOT NULL DEFAULT '',
+    -- Origin recorded when this answer was served; blank is legacy/unknown.
+    dnssec_source TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS query_log_ts_idx        ON query_log (ts DESC);

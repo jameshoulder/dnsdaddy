@@ -29,6 +29,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -64,6 +65,11 @@ type Recorder struct {
 	// stopped is checked before every send so a queue that is being drained
 	// does not accept work nobody will do.
 	stopped atomic.Bool
+	// gate coordinates the one shutdown transition. Record uses TryRLock,
+	// so it never waits for shutdown to release this lock.
+	gate            sync.RWMutex
+	drainTimeout    time.Duration
+	shutdownDropped atomic.Uint64
 
 	queued  atomic.Uint64
 	dropped atomic.Uint64
@@ -75,7 +81,10 @@ type Recorder struct {
 type Options struct {
 	// QueueSize bounds the queue. Full means drop and count, never block.
 	QueueSize int
-	Log       *slog.Logger
+	// DrainTimeout bounds queued writes after shutdown. An in-flight write
+	// retains its existing 10-second transaction bound; then this drain starts.
+	DrainTimeout time.Duration
+	Log          *slog.Logger
 }
 
 // New returns a Recorder. Run must be called to start draining.
@@ -88,7 +97,11 @@ func New(st *store.Store, o Options) *Recorder {
 	if lg == nil {
 		lg = slog.Default()
 	}
-	return &Recorder{store: st, log: lg, ch: make(chan Event, size), done: make(chan struct{})}
+	drainTimeout := o.DrainTimeout
+	if drainTimeout <= 0 || drainTimeout > 30*time.Second {
+		drainTimeout = 5 * time.Second
+	}
+	return &Recorder{store: st, log: lg, ch: make(chan Event, size), done: make(chan struct{}), drainTimeout: drainTimeout}
 }
 
 // Record offers a decision to the queue.
@@ -99,13 +112,22 @@ func New(st *store.Store, o Options) *Recorder {
 // disk would become a slow resolver. Dropping and counting is the same
 // behaviour the query log already has, for the same reason.
 func (r *Recorder) Record(e Event) {
-	if r == nil || r.stopped.Load() {
+	if r == nil || !e.Basis.Decided() {
 		return
 	}
-	// An ordinary allowed query has no basis and nothing to explain.
-	if !e.Basis.Decided() {
+	if !r.gate.TryRLock() {
+		r.dropAtShutdown()
 		return
 	}
+	defer r.gate.RUnlock()
+	if r.stopped.Load() {
+		r.dropAtShutdown()
+		return
+	}
+	// Capture the basis before crossing the asynchronous boundary. A caller
+	// may reuse its decision value once Record returns; history must not follow.
+	basis := *e.Basis
+	e.Basis = &basis
 	select {
 	case r.ch <- e:
 		r.queued.Add(1)
@@ -114,25 +136,78 @@ func (r *Recorder) Record(e Event) {
 	}
 }
 
-// Run drains the queue until ctx is cancelled.
+// Run writes queued records and drains them for a bounded period on shutdown.
+// An in-flight transaction is not aborted merely because the service is
+// stopping: it retains its ordinary ten-second bound, then queued records get
+// the separate drain budget. Drops and failed writes remain visible in Stats.
 func (r *Recorder) Run(ctx context.Context) {
 	defer close(r.done)
+	stop := context.AfterFunc(ctx, r.stopAccepting)
+	defer stop()
 	for {
+		if ctx.Err() != nil {
+			r.drain(nil)
+			return
+		}
 		select {
 		case <-ctx.Done():
+			r.drain(nil)
 			return
 		case e := <-r.ch:
-			r.write(ctx, e)
+			if ctx.Err() != nil {
+				r.drain(&e)
+				return
+			}
+			r.write(context.WithoutCancel(ctx), e)
 		}
 	}
 }
 
-// Wait blocks until Run has returned.
+func (r *Recorder) stopAccepting() {
+	r.gate.Lock()
+	r.stopped.Store(true)
+	r.gate.Unlock()
+}
+
+func (r *Recorder) dropAtShutdown() {
+	r.dropped.Add(1)
+	r.shutdownDropped.Add(1)
+}
+
+func (r *Recorder) drain(first *Event) {
+	r.stopAccepting()
+	defer func() {
+		if n := r.shutdownDropped.Load(); n > 0 {
+			r.log.Warn("decision recorder dropped events during bounded shutdown", "dropped", n, "drain_timeout", r.drainTimeout)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), r.drainTimeout)
+	defer cancel()
+	write := func(e Event) {
+		if ctx.Err() != nil {
+			r.dropAtShutdown()
+			return
+		}
+		r.write(ctx, e)
+	}
+	if first != nil {
+		write(*first)
+	}
+	for {
+		select {
+		case e := <-r.ch:
+			write(e)
+		default:
+			return
+		}
+	}
+}
+
+// Wait blocks until Run has returned, including its bounded shutdown drain.
 func (r *Recorder) Wait() {
 	if r == nil {
 		return
 	}
-	r.stopped.Store(true)
 	<-r.done
 }
 
@@ -190,7 +265,11 @@ func (r *Recorder) recordEvidence(ctx context.Context, e Event) ([]store.CitedEv
 	if err != nil {
 		return nil, err
 	}
-	return []store.CitedEvidence{{Evidence: stored, Contributed: true}}, nil
+	// Keep the claim captured from the event, even if another producer
+	// refreshes the mutable row between PutEvidence and its read-back. Only
+	// its canonical ID is needed to link current evidence and the snapshot.
+	ev.ID = stored.ID
+	return []store.CitedEvidence{{Evidence: ev, Contributed: true}}, nil
 }
 
 // evidenceFor turns a basis into the claim it represents.
@@ -201,13 +280,13 @@ func (r *Recorder) recordEvidence(ctx context.Context, e Event) ([]store.CitedEv
 // logic — an operator's own rule and a curated feed are things somebody stands
 // behind, a provider's automated verdict is not quite the same claim.
 func evidenceFor(e Event) (evidence.Evidence, bool) {
+	if e.Basis == nil {
+		return evidence.Evidence{}, false
+	}
 	base := evidence.Evidence{
 		Subject:    evidence.Domain(e.Domain),
 		ObservedAt: e.Time,
 		Category:   e.Basis.Category,
-	}
-	if e.Basis == nil {
-		return evidence.Evidence{}, false
 	}
 	switch e.Basis.Rule {
 	case policy.RuleAllowList:
@@ -242,6 +321,24 @@ func evidenceFor(e Event) (evidence.Evidence, bool) {
 		// weaker claim than a curated listing, and the difference should be
 		// visible to whoever reads the explanation.
 		base.Confidence = evidence.ConfidenceMedium
+
+	case policy.RuleNativeValidation, policy.RuleRebinding:
+		if strings.TrimSpace(e.Reason) == "" {
+			return evidence.Evidence{}, false
+		}
+		base.Kind = evidence.KindLocal
+		base.Source, base.SourceName = "native", "Daddybound"
+		if e.Basis.Rule == policy.RuleRebinding {
+			base.Source, base.SourceName = "protection", "DNS rebinding protection"
+		}
+		base.Claim = e.Reason
+		// Confidence describes the captured local outcome, never the chance
+		// that a domain is malicious. KindLocal is not malicious intel.
+		base.Confidence = evidence.ConfidenceHigh
+		base.Detail = map[string]any{
+			"action": e.Action, "rule": string(e.Basis.Rule),
+			"semantics": "recorded local protocol or address-check outcome, not a maliciousness probability",
+		}
 
 	default:
 		return evidence.Evidence{}, false
@@ -282,12 +379,19 @@ func PolicyPath(e Event) string {
 		parts = append(parts, "block-list")
 	case policy.RuleReputation:
 		parts = append(parts, "external intelligence")
+	case policy.RuleNativeValidation:
+		parts = append(parts, "native validation")
+	case policy.RuleRebinding:
+		parts = append(parts, "DNS rebinding protection")
 	}
 	parts = append(parts, strings.ToUpper(actionWord(e)))
 	return strings.Join(parts, " → ")
 }
 
 func actionWord(e Event) string {
+	if e.Action == store.ActionError {
+		return "error"
+	}
 	if e.Blocked {
 		return "block"
 	}
@@ -307,7 +411,26 @@ func Explain(e Event, cited []store.CitedEvidence) string {
 	var b strings.Builder
 	first := cited[0].Evidence
 
-	if e.Blocked {
+	if first.Kind == evidence.KindLocal {
+		switch {
+		case e.Action == store.ActionError:
+			b.WriteString("Resolution failed. ")
+		case e.Blocked:
+			b.WriteString("Blocked. ")
+		default:
+			b.WriteString("Allowed. ")
+		}
+		b.WriteString(sourceLabel(first))
+		b.WriteString(" reported: ")
+		b.WriteString(first.Claim)
+		if !strings.HasSuffix(first.Claim, ".") {
+			b.WriteString(".")
+		}
+		return b.String()
+	}
+	if e.Action == store.ActionError {
+		b.WriteString("Resolution failed because ")
+	} else if e.Blocked {
 		b.WriteString("Blocked because ")
 	} else {
 		b.WriteString("Allowed because ")
@@ -340,11 +463,12 @@ func othersLabel(n int) string {
 
 // Stats are the recorder's counters, for metrics and the dashboard.
 type Stats struct {
-	Queued  uint64 `json:"queued"`
-	Dropped uint64 `json:"dropped"`
-	Written uint64 `json:"written"`
-	Failed  uint64 `json:"failed"`
-	Depth   int    `json:"queueDepth"`
+	Queued          uint64 `json:"queued"`
+	Dropped         uint64 `json:"dropped"`
+	Written         uint64 `json:"written"`
+	Failed          uint64 `json:"failed"`
+	Depth           int    `json:"queueDepth"`
+	ShutdownDropped uint64 `json:"shutdownDropped"`
 }
 
 // Stats snapshots the counters.
@@ -353,11 +477,12 @@ func (r *Recorder) Stats() Stats {
 		return Stats{}
 	}
 	return Stats{
-		Queued:  r.queued.Load(),
-		Dropped: r.dropped.Load(),
-		Written: r.written.Load(),
-		Failed:  r.failed.Load(),
-		Depth:   len(r.ch),
+		Queued:          r.queued.Load(),
+		Dropped:         r.dropped.Load(),
+		Written:         r.written.Load(),
+		Failed:          r.failed.Load(),
+		Depth:           len(r.ch),
+		ShutdownDropped: r.shutdownDropped.Load(),
 	}
 }
 

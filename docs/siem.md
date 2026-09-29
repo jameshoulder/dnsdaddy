@@ -289,27 +289,38 @@ the headers say whether that was everything:
 
 | Header | Meaning |
 |---|---|
-| `X-Export-Count` | Lines in this body. |
+| `X-Export-Count` | Valid lines actually in this body. |
+| `X-Export-Skipped` | Corrupt stored documents skipped in this page; must be zero for a complete collection. |
+| `Link` | Next-page URL with unchanged filters; absent on the final page. |
 | `X-Truncated` | `true` when matching findings remain beyond this response; `false` when it is complete. |
 | `X-Next-Cursor` | Present only when truncated: pass it back as `?cursor=` to continue from the line after the last one. |
 
-The cursor is a position in time order, not an offset, so a finding written
-while you are paging neither repeats nor displaces a line. A poller that keeps
-the last cursor it received and starts its next run from it collects every
-finding exactly once. An unrecognised cursor is answered `400` rather than
-silently restarted from the top, because a restart nobody noticed would
-re-ingest everything.
+The export cursor preserves the original time window and insertion boundary.
+Follow `Link` or repeat the same filters with `X-Next-Cursor` until
+`X-Truncated: false`. Later collection runs start a new window and deduplicate
+by finding ID; a completed export cursor is not a durable change-feed
+checkpoint. Retention can remove records between pages and review-state
+filters use the current review at each page. See [exports.md](exports.md) for
+the complete filtering, retry, skipped-record and snapshot contract.
 
 ```bash
-# Backfill everything, following the cursor until the server says it is done.
+# Backfill retained history. Supply DNSDADDY_TOKEN through your secret manager.
+set -eu
+headers=$(mktemp)
+page=$(mktemp)
+trap 'rm -f "$headers" "$page"' EXIT
 cursor=
 while :; do
-  resp=$(curl -sS -D headers.txt -H "Authorization: Bearer dnsd_…" \
-    "https://dns.example.co.uk/api/v1/findings/export?hours=8760&limit=1000${cursor:+&cursor=$cursor}")
-  printf '%s\n' "$resp" >> findings.jsonl
-  cursor=$(awk 'tolower($1)=="x-next-cursor:" {print $2}' headers.txt | tr -d '\r')
+  curl --fail --silent --show-error -D "$headers" -o "$page" \
+    -H "Authorization: Bearer $DNSDADDY_TOKEN" \
+    "https://dns.example.co.uk/api/v1/findings/export?hours=0&limit=1000${cursor:+&cursor=$cursor}"
+  skipped=$(awk 'tolower($1)=="x-export-skipped:" {print $2}' "$headers" | tr -d '\r')
+  [ "$skipped" = 0 ] || { echo "Export contains skipped records; inspect the database" >&2; exit 1; }
+  cat "$page" >> findings.jsonl
+  cursor=$(awk 'tolower($1)=="x-next-cursor:" {print $2}' "$headers" | tr -d '\r')
   [ -n "$cursor" ] || break
 done
+# Deduplicate by original finding ID if this collection is retried.
 ```
 
 The file is better for continuous ingestion: it survives a restart of your

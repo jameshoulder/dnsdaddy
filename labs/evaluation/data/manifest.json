@@ -1,0 +1,14 @@
+{
+  "checksumsSha256": {
+    "heldout.ndjson": "04ae36cde019e95468ab05a4ee9879c496d7bb782ffca9a8d2a65085a8b346ed",
+    "training.ndjson": "82686f7c745a42265e4a38590bfe483766df691fbaf3f49e98b57d8f694453ef"
+  },
+  "datasetVersion": 1,
+  "heldoutSeeds": "100000 + specification_index*17",
+  "labels": "scenario intent, not independently investigated outcomes",
+  "reservedNames": ".example",
+  "source": "deterministic author-constructed synthetic traffic",
+  "trainingSeeds": "1000 + window*7 + profile",
+  "trainingWindows": 96,
+  "windowSeconds": 300
+}

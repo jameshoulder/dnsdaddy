@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/daddybound/native"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/trustanchors"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
@@ -46,6 +47,18 @@ type dnssecStatus struct {
 	Experimental bool                   `json:"experimental"`
 	Enforcing    bool                   `json:"enforcing"`
 	MeasuredAt   time.Time              `json:"measuredAt"`
+	Native       dnssecNativeStatus     `json:"native"`
+}
+
+type dnssecNativeStatus struct {
+	native.ClientStats
+	Available    bool   `json:"available"`
+	Enforcing    bool   `json:"enforcing"`
+	Peak         int64  `json:"peak"`
+	CounterScope string `json:"counterScope"`
+	Stored       uint64 `json:"stored"`
+	Unrecorded   uint64 `json:"unrecorded"`
+	WriteErrors  uint64 `json:"writeErrors"`
 }
 
 type dnssecModeStatus struct {
@@ -58,8 +71,11 @@ type dnssecModeStatus struct {
 	ChosenBy     string `json:"chosenBy"`
 	Experimental bool   `json:"experimental"`
 	Enforcing    bool   `json:"enforcing"`
+	Locked       bool   `json:"locked"`
+	Reason       string `json:"reason,omitempty"`
 	Live         struct {
 		Available bool   `json:"available"`
+		Enforcing bool   `json:"enforcing"`
 		Reason    string `json:"reason"`
 	} `json:"live"`
 }
@@ -132,10 +148,11 @@ type dnssecAnchorKey struct {
 
 type dnssecRuntimeStatus struct {
 	Available     bool   `json:"available"`
+	Active        bool   `json:"active"`
 	Scope         string `json:"scope"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
 	// Observed is completed validations; Dropped is queries never observed
-	// because the queue was full; Unrecorded is observations that completed
+	// because the queue was full or the observer stopped; Unrecorded is observations that completed
 	// and were then lost before storage. All three are reported because a
 	// dataset smaller than the traffic has one of those two causes.
 	Observed    uint64            `json:"observed"`
@@ -157,7 +174,7 @@ type dnssecRuntimeStatus struct {
 	Delegations   uint64            `json:"delegations"`
 	LastAt        *time.Time        `json:"lastAt"`
 	LastStatus    string            `json:"lastStatus,omitempty"`
-	// Health is "ok", "degraded" or "unavailable", from the counters above
+	// Health is "ok", "inactive", "degraded" or "unavailable", from the counters above
 	// and nothing else: dropped or unrecorded observations, write errors
 	// or any panic make it degraded.
 	Health     string `json:"health"`
@@ -230,10 +247,15 @@ func (a *API) handleDNSSECStatus(w http.ResponseWriter, r *http.Request) {
 	since := now.Add(-time.Duration(hours) * time.Hour)
 
 	out := dnssecStatus{Experimental: true, Enforcing: false, MeasuredAt: now}
-	out.Mode = a.dnssecModeStatus()
-	out.Resolution = a.dnssecResolutionStatus()
-	out.Anchors = a.dnssecAnchorStatus()
-	out.Runtime = a.dnssecRuntimeStatus(now)
+	state := a.dnssecState()
+	out.Mode = a.dnssecModeStatus(state)
+	out.Enforcing = out.Mode.Enforcing
+	out.Resolution = a.dnssecResolutionStatus(state)
+	out.Anchors = a.dnssecAnchorStatus(state)
+	out.Runtime = a.dnssecRuntimeStatus(now, state)
+	out.Native = dnssecNativeStatus{ClientStats: state.Native, Available: state.NativeAvailable,
+		Enforcing: out.Enforcing, Peak: state.Native.InflightPeak, CounterScope: "native counters since activation; stored/lost/write counters since process start",
+		Stored: state.NativeWriter.Written, Unrecorded: state.NativeWriter.Dropped, WriteErrors: state.NativeWriter.Errors}
 
 	summary, err := a.Store.DNSSECObservationSummarySince(ctx, since)
 	if err != nil {
@@ -279,72 +301,70 @@ func (a *API) handleDNSSECStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (a *API) dnssecModeStatus() dnssecModeStatus {
+func (a *API) selectedDNSSECState(states []DNSSECRuntimeState) DNSSECRuntimeState {
+	if len(states) > 0 {
+		return states[0]
+	}
+	return a.dnssecState()
+}
+
+func (a *API) dnssecModeStatus(states ...DNSSECRuntimeState) dnssecModeStatus {
+	state := a.selectedDNSSECState(states)
 	var m dnssecModeStatus
-	m.Configured = a.Config.DNS.LocalDNSSECValidation
-	if m.Configured == config.LocalDNSSECUnset {
-		m.Configured = "unset"
-	}
-	m.Effective = a.Config.DNS.LocalDNSSECMode()
-	m.ChosenBy = "config"
-	if a.LocalDNSSECModeSource != "" {
-		m.ChosenBy = a.LocalDNSSECModeSource
-	}
+	m.Configured, m.Effective, m.ChosenBy = state.Configured, state.Effective, state.ChosenBy
 	m.Experimental = true
-	m.Enforcing = false
-	m.Live.Available = false
-	m.Live.Reason = "Live requires DNSSEC enforcement in the answer path, which is not implemented; " +
-		"dns.local_dnssec_validation: enforce is refused at startup rather than run as Learn. " +
-		"The evidence enforcement would need is the subject of " + issueReadiness + "."
+	m.Locked, m.Reason = state.Locked, state.Reason
+	m.Enforcing = state.Effective == config.LocalDNSSECEnforce && state.NativeAvailable
+	m.Live.Available = a.DNSSECControl != nil
+	m.Live.Enforcing = m.Enforcing
+	if m.Live.Available {
+		m.Live.Reason = "Daddybound resolves and validates the exact answer natively. Live rejects failed validation and never falls back to an upstream. Native UDP/TCP 53 is plaintext; field reliability remains under evaluation."
+	} else {
+		m.Live.Reason = "Native runtime control is unavailable in this process."
+	}
 	return m
 }
 
-func (a *API) dnssecResolutionStatus() dnssecResolutionStatus {
-	res := dnssecResolutionStatus{
-		ClientPath: "clients are answered by the forwarding resolver through the configured upstreams (" +
-			a.Config.DNS.UpstreamMode + "); Daddybound sees a name only after that answer is final",
-	}
-	if !a.Config.DNS.ObserveDNSSEC() {
+func (a *API) dnssecResolutionStatus(states ...DNSSECRuntimeState) dnssecResolutionStatus {
+	state := a.selectedDNSSECState(states)
+	res := dnssecResolutionStatus{ClientPath: "clients are answered by the forwarding resolver through the configured upstreams (" + a.Config.DNS.UpstreamMode + ")"}
+	if state.Effective == config.LocalDNSSECOff {
 		res.Source = "none"
-		res.Transport = "none: Learn is off, so Daddybound sends nothing"
-		res.Note = "no auxiliary DNS traffic is sent while Learn is off"
+		res.Transport = "none: Daddybound is off and sends no native DNS traffic"
+		res.Note = "Native recursion and trust-anchor refresh are stopped. Local policy, rate limiting and rebinding protection remain independent controls."
 		return res
 	}
 	res.Source = observe.ResolutionNative
-	if a.DNSSEC != nil {
-		if s := a.DNSSEC.Stats(); s.Resolution != "" {
-			res.Source = s.Resolution
+	res.Transport = "plaintext DNS over UDP and TCP port 53 to root and authoritative servers, with QNAME minimisation; this traffic is not protected by configured encrypted upstreams"
+	if state.Effective == config.LocalDNSSECEnforce {
+		res.ClientPath = "Daddybound native recursion; DNSSEC validation is bound to the returned records; no upstream fallback"
+		res.Note = "Live returns authenticated secure or proven insecure answers. Bogus, indeterminate and operational failures return SERVFAIL. A client's CD bit bypasses DNSSEC validation only; policy and rebinding checks still apply."
+	} else {
+		res.Note = "Learn resolves allowed queries independently after the forwarded answer is decided. Its result cannot change that answer and may describe different records."
+		if state.Observer != nil && state.Observer.Stats().Resolution == observe.ResolutionForwarded {
+			res.Source = observe.ResolutionForwarded
+			res.Transport = "supporting lookups through configured upstreams"
 		}
-	}
-	switch res.Source {
-	case observe.ResolutionNative:
-		res.Transport = "plaintext DNS over UDP and TCP port 53 to the root and authoritative servers, " +
-			"with QNAME minimisation; this is separate from, and not protected by, any encrypted upstream"
-		res.Note = "Learn resolves each observed name itself from the root hints, so its evidence is about " +
-			"the code path Live would run. That traffic does not use the configured upstreams and is not " +
-			"encrypted, because authoritative servers do not offer an encrypted transport"
-	default:
-		res.Transport = "supporting lookups through the configured upstreams"
-		res.Note = "Daddybound is checking signatures on records an upstream chose to hand over"
 	}
 	return res
 }
 
-func (a *API) dnssecAnchorStatus() dnssecAnchorStatus {
+func (a *API) dnssecAnchorStatus(states ...DNSSECRuntimeState) dnssecAnchorStatus {
+	runtime := a.selectedDNSSECState(states)
 	var st dnssecAnchorStatus
 	st.Keys = []dnssecAnchorKey{}
-	if a.Anchors == nil {
-		st.Unavailable = "no trust-anchor manager is running: Learn is off"
-		if a.Config.DNS.ObserveDNSSEC() {
+	if runtime.Anchors == nil {
+		st.Unavailable = "no trust-anchor manager is running: Daddybound is off"
+		if runtime.Effective != config.LocalDNSSECOff {
 			st.Unavailable = "the trust-anchor manager is not reporting"
 		}
 		return st
 	}
-	tp := a.Anchors.TrustPoint()
-	health := a.Anchors.Health()
+	tp := runtime.Anchors.TrustPoint()
+	health := runtime.Anchors.Health()
 	st.Available = true
 	st.Zone = tp.Zone
-	st.Viable = a.Anchors.Viable()
+	st.Viable = runtime.Anchors.Viable()
 	st.NeedsIntervention = tp.NeedsIntervention
 	st.InterventionNote = tp.InterventionNote
 	for _, k := range tp.Keys {
@@ -393,13 +413,20 @@ func (a *API) dnssecAnchorStatus() dnssecAnchorStatus {
 	return st
 }
 
-func (a *API) dnssecRuntimeStatus(now time.Time) dnssecRuntimeStatus {
+func (a *API) dnssecRuntimeStatus(now time.Time, states ...DNSSECRuntimeState) dnssecRuntimeStatus {
+	runtime := a.selectedDNSSECState(states)
 	rt := dnssecRuntimeStatus{
-		Scope:         "since_start",
+		Scope:         "since_current_learn_activation",
+		Active:        runtime.ObserverActive,
 		UptimeSeconds: int64(now.Sub(a.StartedAt).Seconds()),
 		ByStatus:      map[string]uint64{},
 		Disagreements: map[string]uint64{},
 		Health:        "unavailable",
+	}
+	if a.DNSSECControl == nil {
+		rt.Scope = "since_start"
+	} else if !rt.Active {
+		rt.Scope = "most_recent_learn_activation"
 	}
 	for _, s := range observe.Statuses() {
 		rt.ByStatus[string(s)] = 0
@@ -407,14 +434,14 @@ func (a *API) dnssecRuntimeStatus(now time.Time) dnssecRuntimeStatus {
 	for _, c := range observe.DisagreementClasses() {
 		rt.Disagreements[c] = 0
 	}
-	if a.DNSSEC == nil {
+	if runtime.Observer == nil {
 		rt.HealthNote = "no observer is running"
-		if a.Config.DNS.ObserveDNSSEC() {
+		if runtime.Effective == config.LocalDNSSECObserve {
 			rt.HealthNote = "Learn is configured but the observer is not reporting"
 		}
 		return rt
 	}
-	s := a.DNSSEC.Stats()
+	s := runtime.Observer.Stats()
 	rt.Available = true
 	rt.Observed, rt.Dropped, rt.Panics = s.Observed, s.Dropped, s.Panics
 	for k, v := range s.ByStatus {
@@ -430,8 +457,8 @@ func (a *API) dnssecRuntimeStatus(now time.Time) dnssecRuntimeStatus {
 	rt.Queries, rt.Delegations = s.Queries, s.Delegations
 	rt.LastAt = optTime(s.LastAt)
 	rt.LastStatus = string(s.LastStatus)
-	if a.DNSSECWriter != nil {
-		w := a.DNSSECWriter.Stats()
+	if runtime.Writer != nil {
+		w := runtime.Writer.Stats()
 		rt.Stored, rt.Unrecorded, rt.WriteErrors = w.Written, w.Dropped, w.Errors
 	}
 	if a.DNS != nil {
@@ -450,6 +477,12 @@ func (a *API) dnssecRuntimeStatus(now time.Time) dnssecRuntimeStatus {
 		rt.HealthNote = "some queries were not observed or not stored; the sample is smaller than the traffic and biased towards quiet periods"
 	default:
 		rt.Health = "ok"
+	}
+	if a.DNSSECControl != nil && !rt.Active {
+		if rt.Health == "ok" {
+			rt.Health = "inactive"
+		}
+		rt.HealthNote = "Learn is stopped; these counters describe its most recent activation, including late and shutdown drops. " + rt.HealthNote
 	}
 	return rt
 }
@@ -565,9 +598,9 @@ func (a *API) dnssecEvidence(st dnssecStatus) dnssecEvidenceStatus {
 	}
 	return dnssecEvidenceStatus{
 		Sufficient: false,
-		Note: "insufficient evidence for enforcement, by definition: the criteria have not been quantified " +
-			"and this software applies no threshold to any figure above. Nothing here is a readiness score. " +
-			"The criteria and the corpus work live in the linked issues.",
+		Note: "These counters provide insufficient field evidence to establish long-term deployment reliability or false-positive rates. " +
+			"Live availability is an implemented capability, not proof of field readiness. Learn comparisons and exact native Live results are separate populations. " +
+			"The software applies no threshold or readiness score to this sample; the corpus and field criteria remain in the linked issues.",
 		Criteria: criteria,
 		Issues:   []string{issueReadiness, issueCorpus},
 	}

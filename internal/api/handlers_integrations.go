@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -26,30 +27,22 @@ import (
 
 // settingReputationMode is where the operator's mode choice is persisted.
 //
-// The effective mode is the lower of this and the ceiling in dnsdaddy.yaml.
-// See reputationCeiling.
+// A saved choice overrides the legacy YAML initial value. No restart is needed.
 const settingReputationMode = "integrations.reputation_mode"
 
-// integrationsAvailable reports whether the feature is wired up at all.
-//
-// A build with no engine — the default configuration, where integrations are
-// switched off — answers 503 rather than 404. The distinction matters to a
-// dashboard: 404 means "this resolver does not have this feature", 503 with a
-// reason means "it has it, and here is the line to change in dnsdaddy.yaml".
+// integrationsAvailable tolerates an unwired dependency in tests or a partial
+// embedding; production always starts the idle engine, even with mode off.
 func (a *API) integrationsAvailable(w http.ResponseWriter) bool {
 	if a.Providers == nil || a.Intel == nil {
-		writeError(w, http.StatusServiceUnavailable,
-			"external API integrations are switched off; set integrations.enabled in dnsdaddy.yaml and restart")
+		writeError(w, http.StatusServiceUnavailable, "external API engine is unavailable; inspect server startup diagnostics")
 		return false
 	}
 	return true
 }
 
-// reputationCeiling is the highest mode this deployment permits, from the
-// configuration file.
-func (a *API) reputationCeiling() apiprovider.ReputationMode {
-	return apiprovider.ParseReputationMode(a.Config.Integrations.ReputationMode)
-}
+// All modes can be configured through the authenticated UI. Enabling sharing
+// requires consent; blocking additionally requires an explicit latency warning.
+func (a *API) reputationCeiling() apiprovider.ReputationMode { return apiprovider.ModeBlocking }
 
 // --- listing ---------------------------------------------------------------
 
@@ -74,7 +67,8 @@ type providerView struct {
 	Verification string `json:"verification,omitempty"`
 	// Stats are the resilient client's counters: calls, mean latency, error
 	// rate, breaker state. Absent for a provider that never built.
-	Stats *apiprovider.Stats `json:"stats,omitempty"`
+	Stats    *apiprovider.Stats  `json:"stats,omitempty"`
+	LastTest *providerTestRecord `json:"lastTest,omitempty"`
 }
 
 func (a *API) handleListProviders(w http.ResponseWriter, r *http.Request) {
@@ -94,20 +88,19 @@ func (a *API) handleListProviders(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]providerView, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, a.viewOf(row, live[row.ID]))
+		v := a.viewOf(row, live[row.ID])
+		v.LastTest = a.providerLastTest(r.Context(), row)
+		out = append(out, v)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"providers": out,
 		"engine":    a.Providers.Stats(),
+		"settings":  a.integrationSettingsView(),
 		"reputation": map[string]any{
 			"mode":    a.Providers.Mode(),
 			"ceiling": a.reputationCeiling(),
-			// Selectable is what the dashboard may offer. Blocking mode is
-			// deliberately absent unless the configuration file already allows
-			// it: it is the only mode that puts a third party's latency in
-			// front of a DNS answer, and that belongs to somebody who read the
-			// documentation, not to a radio button.
+
 			"selectable": selectableModes(a.reputationCeiling()),
 		},
 	})
@@ -149,7 +142,7 @@ func (a *API) viewOf(row store.APIProvider, inst *apiprovider.Instance) provider
 		// A row exists that the engine has not picked up. Almost always a
 		// reload that has not happened yet; saying so beats an empty badge.
 		v.Status = "error"
-		v.Detail = "Not loaded. Restart, or save the provider again to reload it."
+		v.Detail = "Not loaded. Save the provider again and inspect its validation result."
 	case inst.Err != nil:
 		v.Status = "error"
 		// inst.Err comes from an adapter constructor or from the keyring, both
@@ -180,7 +173,9 @@ func (a *API) handleGetProvider(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	writeJSON(w, http.StatusOK, a.viewOf(row, inst))
+	v := a.viewOf(row, inst)
+	v.LastTest = a.providerLastTest(r.Context(), row)
+	writeJSON(w, http.StatusOK, v)
 }
 
 // --- create and update -----------------------------------------------------
@@ -202,6 +197,7 @@ type providerBody struct {
 	CacheTTLSeconds *int               `json:"cacheTtlSeconds"`
 	PolicyScope     *[]string          `json:"policyScope"`
 	Secret          *string            `json:"secret"`
+	Consent         bool               `json:"consent"`
 }
 
 func (a *API) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
@@ -255,8 +251,24 @@ func (a *API) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		in.PolicyScope = *body.PolicyScope
 	}
 
-	created, err := a.Store.CreateAPIProvider(r.Context(), in)
+	if err := validateProviderConfiguration(in, body.Secret); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if in.Enabled && !body.Consent {
+		writeError(w, http.StatusBadRequest, "consent is required before this provider can receive domains")
+		return
+	}
+	// A failed credential write must leave an inert draft, including after a
+	// process restart. Enable only once all configuration has been saved.
+	requestedEnabled := in.Enabled
+	in.Enabled = false
+	created, err := a.Store.CreateManagedAPIProvider(r.Context(), in)
 	if err != nil {
+		if errors.Is(err, store.ErrProviderLimit) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeStoreError(w, err)
 		return
 	}
@@ -280,8 +292,15 @@ func (a *API) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if requestedEnabled {
+		created, err = a.Store.UpdateAPIProvider(r.Context(), created.ID, store.APIProviderUpdate{Enabled: &requestedEnabled})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "provider was saved as a disabled draft; enabling failed")
+			return
+		}
+	}
 	a.reloadProviders(r)
-	writeJSON(w, http.StatusCreated, a.viewOf(created, nil))
+	writeJSON(w, http.StatusCreated, a.currentProviderView(r.Context(), created))
 }
 
 func (a *API) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
@@ -308,6 +327,50 @@ func (a *API) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
+	current, err := a.Store.GetAPIProvider(r.Context(), id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	candidate := current
+	if body.Name != nil {
+		candidate.Name = *body.Name
+	}
+	if body.Enabled != nil {
+		candidate.Enabled = *body.Enabled
+	}
+	if body.Config != nil {
+		candidate.Config = *body.Config
+	}
+	if body.Capabilities != nil {
+		candidate.Capabilities = *body.Capabilities
+	}
+	if body.TimeoutMS != nil {
+		candidate.TimeoutMS = *body.TimeoutMS
+	}
+	if body.RatePerMinute != nil {
+		candidate.RatePerMinute = *body.RatePerMinute
+	}
+	if body.CacheTTLSeconds != nil {
+		candidate.CacheTTLSeconds = *body.CacheTTLSeconds
+	}
+	if body.PolicyScope != nil {
+		candidate.PolicyScope = *body.PolicyScope
+	}
+	onlyDisable := body.Enabled != nil && !*body.Enabled && body.Name == nil && body.Config == nil && body.Capabilities == nil && body.PolicyScope == nil && body.TimeoutMS == nil && body.RatePerMinute == nil && body.CacheTTLSeconds == nil
+	if !onlyDisable {
+		if err := validateProviderConfiguration(candidate, nil); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if candidate.Enabled && ((body.Enabled != nil && *body.Enabled) || body.Config != nil || body.Capabilities != nil || body.PolicyScope != nil) && !body.Consent {
+		writeError(w, http.StatusBadRequest, "consent is required before enabling or changing what this provider receives")
+		return
+	}
+	// Revoke the old generation and let any local result commit finish before
+	// the transaction expires its durable cache. Late HTTP results are ignored.
+	a.Providers.InvalidateProvider(id)
 	updated, err := a.Store.UpdateAPIProvider(r.Context(), id, store.APIProviderUpdate{
 		Name:            body.Name,
 		Enabled:         body.Enabled,
@@ -319,6 +382,7 @@ func (a *API) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 		PolicyScope:     body.PolicyScope,
 	})
 	if err != nil {
+		a.reloadProviders(r)
 		writeStoreError(w, err)
 		return
 	}
@@ -327,9 +391,8 @@ func (a *API) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	// endpoint, a different scoring field, a narrower policy scope. Keeping
 	// them would let a provider the operator has just reconfigured go on
 	// blocking names from its previous configuration.
-	a.Providers.InvalidateProvider(id)
 	a.reloadProviders(r)
-	writeJSON(w, http.StatusOK, a.viewOf(updated, nil))
+	writeJSON(w, http.StatusOK, a.currentProviderView(r.Context(), updated))
 }
 
 func (a *API) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
@@ -337,11 +400,12 @@ func (a *API) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	a.Providers.InvalidateProvider(id)
 	if err := a.Store.DeleteAPIProvider(r.Context(), id); err != nil {
+		a.reloadProviders(r)
 		writeStoreError(w, err)
 		return
 	}
-	a.Providers.InvalidateProvider(id)
 	a.reloadProviders(r)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -367,6 +431,10 @@ func (a *API) handleSetProviderSecret(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	if len(body.Secret) > 16384 || strings.ContainsAny(body.Secret, "\r\n\x00") {
+		writeError(w, http.StatusBadRequest, "credential is too long")
+		return
+	}
 	if strings.TrimSpace(body.Secret) == "" {
 		writeError(w, http.StatusBadRequest,
 			"secret is required; use DELETE to remove the stored credential")
@@ -384,7 +452,9 @@ func (a *API) handleSetProviderSecret(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	a.Providers.InvalidateProvider(id)
 	if err := a.Intel.SealFor(r.Context(), id, body.Secret); err != nil {
+		a.reloadProviders(r)
 		a.Log.Error("could not store provider credential", "provider_id", id, "error", err.Error())
 		writeError(w, http.StatusInternalServerError,
 			"the credential could not be encrypted: "+err.Error())
@@ -394,7 +464,6 @@ func (a *API) handleSetProviderSecret(w http.ResponseWriter, r *http.Request) {
 	// A rotation means every cached verdict was produced with the old key. In
 	// practice they are still valid, but the operator's mental model of "I
 	// rotated the key, everything is fresh from here" should be true.
-	a.Providers.InvalidateProvider(id)
 	a.reloadProviders(r)
 
 	row, err := a.Store.GetAPIProvider(r.Context(), id)
@@ -405,7 +474,7 @@ func (a *API) handleSetProviderSecret(w http.ResponseWriter, r *http.Request) {
 	// The response carries secretSet and the four-character hint, which is
 	// what the dashboard needs to confirm the rotation landed, and nothing
 	// that would let anybody reconstruct the key.
-	writeJSON(w, http.StatusOK, a.viewOf(row, nil))
+	writeJSON(w, http.StatusOK, a.currentProviderView(r.Context(), row))
 }
 
 func (a *API) handleDeleteProviderSecret(w http.ResponseWriter, r *http.Request) {
@@ -413,11 +482,18 @@ func (a *API) handleDeleteProviderSecret(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	id := r.PathValue("id")
-	if err := a.Store.DeleteProviderSecret(r.Context(), id); err != nil {
+	disabled := false
+	a.Providers.InvalidateProvider(id)
+	if _, err := a.Store.UpdateAPIProvider(r.Context(), id, store.APIProviderUpdate{Enabled: &disabled}); err != nil {
+		a.reloadProviders(r)
 		writeStoreError(w, err)
 		return
 	}
-	a.Providers.InvalidateProvider(id)
+	if err := a.Store.DeleteProviderSecret(r.Context(), id); err != nil {
+		a.reloadProviders(r)
+		writeStoreError(w, err)
+		return
+	}
 	a.reloadProviders(r)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -468,11 +544,12 @@ func (a *API) handleProviderTemplates(w http.ResponseWriter, r *http.Request) {
 const testTimeout = 20 * time.Second
 
 type testResult struct {
-	OK         bool   `json:"ok"`
-	LatencyMS  int64  `json:"latencyMs"`
-	Error      string `json:"error,omitempty"`
-	Detail     string `json:"detail,omitempty"`
-	ProviderID string `json:"providerId,omitempty"`
+	TestedAt   time.Time `json:"testedAt"`
+	OK         bool      `json:"ok"`
+	LatencyMS  int64     `json:"latencyMs"`
+	Error      string    `json:"error,omitempty"`
+	Detail     string    `json:"detail,omitempty"`
+	ProviderID string    `json:"providerId,omitempty"`
 }
 
 // handleTestProvider makes one live call to a saved provider.
@@ -484,6 +561,16 @@ type testResult struct {
 // a credential.
 func (a *API) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	if !a.integrationsAvailable(w) {
+		return
+	}
+	var body struct {
+		Consent bool `json:"consent"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if !body.Consent {
+		writeError(w, http.StatusBadRequest, "consent is required before making a live provider test")
 		return
 	}
 	id := r.PathValue("id")
@@ -516,11 +603,20 @@ func (a *API) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 
 	res := a.runProviderTest(r.Context(), enabled)
 	res.ProviderID = row.ID
+	res.TestedAt = time.Now().UTC()
+	record := providerTestRecord{testResult: res, Fingerprint: providerFingerprint(row)}
+	if encoded, err := json.Marshal(record); err == nil {
+		if err := a.Store.SetSetting(r.Context(), "integrations.provider_test."+row.ID, string(encoded)); err != nil {
+			writeError(w, http.StatusInternalServerError, "provider was tested but its result could not be saved")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
 // candidateBody is an unsaved provider the wizard wants to test.
 type candidateBody struct {
+	Consent       bool              `json:"consent"`
 	Kind          string            `json:"kind"`
 	Config        map[string]string `json:"config"`
 	Secret        string            `json:"secret"`
@@ -546,6 +642,14 @@ func (a *API) handleTestCandidate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no adapter for provider kind "+body.Kind+" in this build")
 		return
 	}
+	if !body.Consent {
+		writeError(w, http.StatusBadRequest, "consent is required before making a live provider test")
+		return
+	}
+	if err := validateProviderConfiguration(store.APIProvider{Name: "Candidate", Kind: body.Kind, Config: body.Config, TimeoutMS: body.TimeoutMS, RatePerMinute: body.RatePerMinute}, &body.Secret); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	res := a.runProviderTest(r.Context(), apiprovider.ProviderConfig{
 		ID:            "candidate",
 		Name:          body.Kind,
@@ -556,6 +660,7 @@ func (a *API) handleTestCandidate(w http.ResponseWriter, r *http.Request) {
 		Secret:        body.Secret,
 		TimeoutMS:     body.TimeoutMS,
 		RatePerMinute: body.RatePerMinute,
+		Transport:     a.Intel.Transport,
 	})
 	writeJSON(w, http.StatusOK, res)
 }
@@ -571,13 +676,16 @@ const testSubject = "example.com"
 
 // runProviderTest builds one throwaway provider and calls it once.
 func (a *API) runProviderTest(parent context.Context, cfg apiprovider.ProviderConfig) testResult {
+	if a.Intel != nil {
+		cfg.Transport = a.Intel.Transport
+	}
 	insts := apiprovider.BuildInstances([]apiprovider.ProviderConfig{cfg}, a.Log)
 	if len(insts) == 0 || !insts[0].Usable() {
 		msg := "the provider could not be built"
 		if len(insts) > 0 && insts[0].Err != nil {
 			msg = insts[0].Err.Error()
 		}
-		return testResult{Error: msg}
+		return testResult{Error: msg, TestedAt: time.Now().UTC()}
 	}
 	inst := insts[0]
 
@@ -588,7 +696,7 @@ func (a *API) runProviderTest(parent context.Context, cfg apiprovider.ProviderCo
 	err := probe(ctx, inst.Provider)
 	latency := time.Since(start)
 
-	res := testResult{LatencyMS: latency.Milliseconds()}
+	res := testResult{LatencyMS: latency.Milliseconds(), TestedAt: time.Now().UTC()}
 	switch {
 	case err == nil:
 		res.OK = true
@@ -596,11 +704,9 @@ func (a *API) runProviderTest(parent context.Context, cfg apiprovider.ProviderCo
 	case errors.Is(err, apiprovider.ErrUnauthorised):
 		res.Error = "the provider rejected the credential"
 	case errors.Is(err, apiprovider.ErrRateLimited):
-		// Not a failure of the credential: the key worked well enough to be
-		// counted against a quota.
-		res.OK = true
-		res.Detail = "The credential is accepted, but the provider is rate limiting. " +
-			"Lower the requests-per-minute setting."
+		// A 429 can be emitted before authentication. It does not prove the
+		// credential worked and must not be recorded as a verified connection.
+		res.Error = "the provider rate-limited the test; its credential and response could not be verified"
 	case errors.Is(err, apiprovider.ErrNoCredential):
 		res.Error = "this provider needs a credential"
 	default:
@@ -665,18 +771,13 @@ func (a *API) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
 // --- reputation mode -------------------------------------------------------
 
 type reputationBody struct {
-	Mode string `json:"mode"`
+	Mode             string `json:"mode"`
+	Consent          bool   `json:"consent"`
+	AcceptDNSLatency bool   `json:"acceptDnsLatency"`
 }
 
-// handleSetReputationMode changes how much reach providers have over
-// resolution, within the ceiling the configuration file sets.
-//
-// The ceiling is the point. An operator can turn reputation down or off from
-// here at any time — which is what you want at three in the morning — but
-// cannot raise it above what dnsdaddy.yaml already permits. So a deployment
-// whose configuration says "cache_only" can never be talked into putting a
-// third party in front of its DNS answers by anything reachable over the
-// network, including a stolen session.
+// Retained for API compatibility. The richer settings endpoint also controls
+// explicit investigation enrichment; neither requires editing a YAML file.
 func (a *API) handleSetReputationMode(w http.ResponseWriter, r *http.Request) {
 	if !a.integrationsAvailable(w) {
 		return
@@ -687,31 +788,23 @@ func (a *API) handleSetReputationMode(w http.ResponseWriter, r *http.Request) {
 	}
 	mode := apiprovider.ReputationMode(strings.TrimSpace(body.Mode))
 	if !mode.Valid() {
-		writeError(w, http.StatusBadRequest,
-			"mode must be one of off, cache_only, blocking")
+		writeError(w, http.StatusBadRequest, "mode must be one of off, cache_only, blocking")
 		return
 	}
-	ceiling := a.reputationCeiling()
-	if mode.Rank() > ceiling.Rank() {
-		writeError(w, http.StatusForbidden,
-			"this deployment allows at most "+string(ceiling)+" reputation. "+
-				"Raise integrations.reputation_mode in dnsdaddy.yaml and restart; "+
-				"see docs/external-apis.md for what blocking mode costs.")
+	if mode != apiprovider.ModeOff && !body.Consent {
+		writeError(w, http.StatusBadRequest, "consent is required before external domain sharing is enabled")
 		return
 	}
-
-	if err := a.Store.SetSetting(r.Context(), settingReputationMode, string(mode)); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if mode == apiprovider.ModeBlocking && !body.AcceptDNSLatency {
+		writeError(w, http.StatusBadRequest, "acceptDnsLatency is required for blocking reputation")
+		return
+	}
+	if err := a.Store.SetIntegrationSettings(r.Context(), string(mode), a.Providers.EnrichmentEnabled()); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save integration settings")
 		return
 	}
 	a.Providers.SetMode(mode)
-	a.Log.Info("reputation mode changed", "mode", string(mode), "ceiling", string(ceiling))
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"mode":       mode,
-		"ceiling":    ceiling,
-		"selectable": selectableModes(ceiling),
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"mode": mode, "ceiling": apiprovider.ModeBlocking, "selectable": selectableModes(apiprovider.ModeBlocking)})
 }
 
 // --- reload ----------------------------------------------------------------
@@ -726,33 +819,21 @@ func (a *API) reloadProviders(r *http.Request) {
 		return
 	}
 	if err := a.Providers.Reload(r.Context(), a.Intel); err != nil {
-		// The write already succeeded and the old instances are still serving,
-		// so this is a warning rather than a failed request. The list endpoint
-		// will show the row as "not loaded" until the next successful reload.
+		// A database read failure must not preserve an instance the operator
+		// just disabled or reconfigured. Stop external requests until a later
+		// reload succeeds; local DNS continues without API reputation.
+		a.Providers.SetInstances(nil)
 		a.Log.Warn("could not reload external providers after a write", "error", err.Error())
 	}
 }
 
-// EffectiveReputationMode resolves the boot mode: the operator's stored choice,
-// bounded by the configuration file's ceiling.
-//
-// Exported because the composition root needs it before an API exists, and
-// because putting the rule in one function is the only way both callers can be
-// shown to agree.
+// EffectiveReputationMode uses the last explicit UI choice. The configured
+// value is an initial migration fallback; it cannot silently undo a saved mode.
 func EffectiveReputationMode(ctx context.Context, st *store.Store, configured string) apiprovider.ReputationMode {
-	ceiling := apiprovider.ParseReputationMode(configured)
-	if st == nil {
-		return ceiling
+	if st != nil {
+		if value, err := st.GetSetting(ctx, settingReputationMode); err == nil && value != "" {
+			return apiprovider.ParseReputationMode(value)
+		}
 	}
-	stored, err := st.GetSetting(ctx, settingReputationMode)
-	if err != nil || strings.TrimSpace(stored) == "" {
-		return ceiling
-	}
-	mode := apiprovider.ReputationMode(stored)
-	if !mode.Valid() || mode.Rank() > ceiling.Rank() {
-		// A stored value above the ceiling means the configuration file was
-		// lowered since it was written. The file wins.
-		return ceiling
-	}
-	return mode
+	return apiprovider.ParseReputationMode(configured)
 }

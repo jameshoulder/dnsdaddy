@@ -29,6 +29,7 @@ import (
 	// read, so an adapter is added by writing one file and removing one by
 	// deleting it.
 	_ "github.com/jameshoulder/dnsdaddy/internal/apiprovider/adapters"
+	"github.com/jameshoulder/dnsdaddy/internal/backup"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -38,12 +39,14 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
+	"github.com/jameshoulder/dnsdaddy/internal/learning"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/secrets"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
+	"github.com/jameshoulder/dnsdaddy/internal/webhook"
 )
 
 func main() {
@@ -60,6 +63,18 @@ func main() {
 			return
 		case "daddybound":
 			if err := runDaddybound(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "backup":
+			if err := runBackup(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "restore":
+			if err := runRestore(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
 				os.Exit(1)
 			}
@@ -84,6 +99,8 @@ Usage:
   dnsdaddy [flags]           run the resolver
   dnsdaddy doctor [flags]    diagnose a deployment and exit
   dnsdaddy daddybound ...    the experimental DNSSEC validation engine
+  dnsdaddy backup [flags]    create an encrypted recovery package
+  dnsdaddy restore [flags]   restore offline into a new directory
   dnsdaddy help              show this message
 
 Run flags:
@@ -99,9 +116,9 @@ Doctor flags:
 
 Doctor exits non-zero when a check fails, so it can gate a deployment.
 
-Daddybound is experimental and enforces nothing. It runs a signed laboratory
-built in memory and reports what its validation engine concluded; it cannot be
-pointed at the Internet or at a running deployment. See docs/daddybound/.
+Daddybound Live resolves and validates native answers; Learn observes alongside
+forwarding. Both native modes are experimental. The daddybound subcommand runs
+an offline signed laboratory. See docs/daddybound/ and docs/recovery.md.
 `)
 }
 
@@ -166,24 +183,38 @@ func run() error {
 	// file: Load unmarshals YAML over Default(), so by the time the config
 	// struct exists there is no way to tell an omitted key from a written one.
 	// The installation record, written on first run, can tell the difference —
-	// a fresh install runs Learn, an upgrade that never asked for it stays off.
+	// a fresh install runs Live; an existing installation keeps its recorded choice.
 	//
 	// The resolved value is written back into cfg so that every later reader —
 	// the observer, the API, /metrics, the dashboard — sees one answer instead
 	// of each re-deriving it.
 	dnssecModeSource := "config"
-	if !cfg.DNS.LocalDNSSECConfigured() {
+	dnssecPinned := cfg.DNS.LocalDNSSECConfigured()
+	if !dnssecPinned {
 		installDefault, err := st.GetSetting(context.Background(), store.SettingLocalDNSSECDefault)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("read local DNSSEC installation default: %w", err)
 		}
+		savedMode, savedErr := st.GetSetting(context.Background(), api.DNSSECModeSetting)
+		if savedErr != nil && !errors.Is(savedErr, store.ErrNotFound) {
+			return fmt.Errorf("read Daddybound mode: %w", savedErr)
+		}
+		if savedErr == nil {
+			if savedMode != config.LocalDNSSECOff && savedMode != config.LocalDNSSECObserve && savedMode != config.LocalDNSSECEnforce {
+				return fmt.Errorf("saved Daddybound mode is invalid")
+			}
+			installDefault = savedMode
+			dnssecModeSource = "dashboard"
+		}
 		mode, fromInstall := cfg.ResolveLocalDNSSEC(installDefault)
 		if fromInstall {
-			dnssecModeSource = "installation_default"
+			if dnssecModeSource != "dashboard" {
+				dnssecModeSource = "installation_default"
+			}
 			log.Info("local DNSSEC validation mode chosen by this installation",
 				"mode", mode,
 				"reason", "dns.local_dnssec_validation is not set",
-				"set_explicitly_to_override", "off | observe")
+				"set_explicitly_to_override", "off | observe | enforce")
 		}
 	}
 
@@ -234,6 +265,28 @@ func run() error {
 	defer stop()
 
 	go qlog.Run(ctx)
+
+	protectionController, err := loadProtection(ctx, cfg, st)
+	if err != nil {
+		return fmt.Errorf("local query protection: %w", err)
+	}
+	var learner *learning.Engine
+	var learningObserver dnsserver.LearningObserver
+	var learningStartError string
+	if cfg.Learning.Enabled {
+		learner, err = learning.New(learning.Options{StatePath: filepath.Join(cfg.DataDir, "daddybound-learning.json")}, detect.NewStoreSink(st), log)
+		if err != nil {
+			// A damaged optional model must not take down DNS. Keep the file
+			// untouched and report unavailability explicitly, rather than
+			// manufacturing a fresh baseline or silently showing it disabled.
+			learningStartError = err.Error()
+			log.Warn("local learning unavailable; existing state preserved", "error", err)
+		} else {
+			learningObserver = learner
+			go learner.Run(ctx)
+			defer func() { stop(); <-learner.Done() }()
+		}
+	}
 
 	// --- detection engine ---------------------------------------------------
 	// Built before the listeners open so that no query is served while the
@@ -293,30 +346,57 @@ func run() error {
 	if cfg.Log.DecisionRecords {
 		decisionRecorder = decisions.New(st, decisions.Options{Log: log})
 		go decisionRecorder.Run(ctx)
-		defer decisionRecorder.Wait()
+		defer func() { stop(); decisionRecorder.Wait() }()
 		log.Info("decision records enabled",
 			"retention_days", cfg.Log.DecisionRetentionDays)
 	}
 
-	// Local DNSSEC observation. Off unless the operator asked for it, and
-	// when on it observes without deciding anything: the answer a client
-	// receives is produced entirely by the code above and is not shown to
-	// Daddybound before it is sent. See
-	// docs/decisions/0002-daddybound-observe-mode.md.
-	dnssecObserver, err := startDNSSECObserver(ctx, cfg, st, log)
+	// One runtime selection drives Live native answers or independent Learn
+	// observations. An explicit Off constructs no native resolver. Learn and
+	// Live share one anchor manager, and mode changes are persisted first.
+	dnssecController, err := newDNSSECControl(ctx, cfg, st, log, dnssecPinned, dnssecModeSource)
 	if err != nil {
 		return err
 	}
+	defer dnssecController.Close()
+
+	// Construct the inert provider engine before listeners open. Providers
+	// remain disabled until the operator adds credentials and gives consent.
+	intelSource, providers, err := startIntel(ctx, cfg, st, engine, log)
+	if err != nil {
+		return err
+	}
+	defer providers.Stop()
+	hooks := webhook.New(webhook.Options{Store: st, Keyring: intelSource.Keyring, Log: log})
+	hooks.Start(ctx)
+	defer hooks.Stop()
+	recoveryConfig := cfg
+	if !dnssecPinned {
+		// Saved dashboard/installation choices remain in SQLite. Serializing
+		// the resolved boot value as explicit YAML would pin an obsolete mode
+		// after restore and hide a more recent dashboard selection.
+		recoveryConfig.DNS.LocalDNSSECValidation = config.LocalDNSSECUnset
+	}
+	recovery := backup.New(backup.Options{Config: recoveryConfig, ConfigPath: *configPath, Database: st.DB(), Version: version.String(), FlushLearning: func(context.Context) error {
+		if learner != nil {
+			return learner.Checkpoint()
+		}
+		return nil
+	}})
+	queryTimeout := max(cfg.DNS.Timeout.D(), cfg.DNS.LocalDNSSECTimeout.D()) + time.Second
 
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
-		Timeout:         cfg.DNS.Timeout.D() + time.Second,
+		Timeout:         queryTimeout,
 		ClientACL:       acl,
 		RefuseANY:       cfg.DNS.RefuseANY,
 		Detector:        detector,
+		Learning:        learningObserver,
+		Protection:      protectionController,
+		Native:          dnssecController,
 		Decisions:       recorderOrNil(decisionRecorder),
-		DNSSEC:          observerOrNil(dnssecObserver),
+		DNSSEC:          dnssecController,
 	})
 
 	// Defers run last-in-first-out, so a wait for ctx-driven goroutines has to
@@ -328,7 +408,7 @@ func run() error {
 	// the error being reported. Calling stop twice is harmless.
 	defer func() {
 		stop()
-		dnssecObserver.Wait()
+		dnssecController.Close()
 	}()
 
 	dnsSrv, err := dnsserver.NewServer(cfg.DNS, handler, log)
@@ -368,20 +448,6 @@ func run() error {
 		AllowUntokenized: cfg.HTTP.AllowUntokenizedDoH,
 	})
 
-	// --- external intelligence ---------------------------------------------
-	//
-	// Nil unless the operator switched it on, and every handler that touches
-	// it tolerates nil. That is the whole shape of the feature's cost to a
-	// deployment that does not use it: one nil pointer, and one atomic load
-	// per query inside the policy engine.
-	intelSource, providers, err := startIntel(ctx, cfg, st, engine, log)
-	if err != nil {
-		return err
-	}
-	if providers != nil {
-		defer providers.Stop()
-	}
-
 	restAPI := api.New(api.Deps{
 		Config:         cfg,
 		Store:          st,
@@ -393,6 +459,11 @@ func run() error {
 		DoH:            doh,
 		QueryLog:       qlog,
 		Detector:       detector,
+		Learning:       learner,
+		LearningError:  learningStartError,
+		Protection:     protectionController,
+		Recovery:       recovery,
+		Webhooks:       hooks,
 		Auth:           auth,
 		Log:            log,
 		ClientACL:      acl,
@@ -401,9 +472,7 @@ func run() error {
 		Providers:      providers,
 		Intel:          intelSource,
 		Decisions:      decisionRecorder,
-		DNSSEC:         dnssecStatsOrNil(dnssecObserver),
-		DNSSECWriter:   dnssecWriterOrNil(dnssecObserver),
-		Anchors:        dnssecAnchorsOrNil(dnssecObserver),
+		DNSSECControl:  dnssecController,
 
 		LocalDNSSECModeSource: dnssecModeSource,
 	})
@@ -657,17 +726,9 @@ func buildDetector(cfg config.Config, st *store.Store, log *slog.Logger) (*detec
 	return engine, fileSink, nil
 }
 
-// startIntel brings up the external-intelligence engine, or returns nils.
-//
-// The order here is the whole of the feature's safety story, so it is worth
-// stating: the engine is constructed with the effective mode already resolved
-// (the operator's stored choice, bounded by the configuration file's ceiling),
-// providers are loaded and their credentials opened once, the workers start,
-// and only then is the consultant attached to the policy engine. Attaching it
-// first would give the resolution path a consultant with no providers behind
-// it — harmless, but it would mean the first queries after a restart behave
-// differently from every query after that, which is the kind of difference
-// nobody ever reproduces.
+// startIntel constructs API management with the persisted sharing settings.
+// An Off engine is inert on the query path. Workers and credentials are ready
+// before the consultant is attached and before DNS listeners accept traffic.
 func startIntel(
 	ctx context.Context,
 	cfg config.Config,
@@ -675,9 +736,6 @@ func startIntel(
 	policyEngine *policy.Engine,
 	log *slog.Logger,
 ) (*intel.Source, *apiprovider.Engine, error) {
-	if !cfg.Integrations.Enabled {
-		return nil, nil, nil
-	}
 
 	// The keyring is opened rather than required. A deployment can legitimately
 	// have integrations switched on with no credential stored yet, and a
@@ -689,7 +747,14 @@ func startIntel(
 			"error", err.Error())
 	}
 
-	mode := api.EffectiveReputationMode(ctx, st, cfg.Integrations.ReputationMode)
+	mode, enrichment, preferenceErr := api.InitializeIntegrationSettings(ctx, st,
+		cfg.Integrations.Enabled, cfg.Integrations.ReputationMode, cfg.Integrations.Enrichment)
+	if preferenceErr != nil {
+		// A failed migration must not guess at permission to share domains.
+		// Keep management available so an explicit operator choice can recover.
+		mode, enrichment = apiprovider.ModeOff, false
+		log.Error("could not initialize API sharing preferences; external sharing remains off", "error", preferenceErr.Error())
+	}
 	source := &intel.Source{Store: st, Keyring: keyring, Log: log}
 
 	engine := apiprovider.NewEngine(apiprovider.Options{
@@ -698,7 +763,7 @@ func startIntel(
 		Workers:      cfg.Integrations.Workers,
 		QueueSize:    cfg.Integrations.QueueSize,
 		CacheEntries: cfg.Integrations.CacheEntries,
-		Enrichment:   cfg.Integrations.Enrichment,
+		Enrichment:   enrichment,
 		DefaultTTL:   cfg.Integrations.DefaultCacheTTL.D(),
 		Log:          log,
 		Store:        &intel.VerdictStore{Store: st},
@@ -719,15 +784,12 @@ func startIntel(
 		log.Warn("could not warm the external verdict cache", "error", err.Error())
 	}
 
-	if mode != apiprovider.ModeOff {
-		policyEngine.SetReputation(&intel.Consultant{Engine: engine})
-	}
+	policyEngine.SetReputation(&intel.Consultant{Engine: engine})
 
-	log.Info("external intelligence enabled",
+	log.Info("external API management ready",
 		"reputation_mode", string(mode),
-		"ceiling", cfg.Integrations.ReputationMode,
 		"providers", len(engine.Instances()),
-		"enrichment", cfg.Integrations.Enrichment)
+		"enrichment", enrichment)
 
 	return source, engine, nil
 }

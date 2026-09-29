@@ -2,12 +2,17 @@
 
 ## What Daddybound is trusted with
 
-Nothing, currently. That is the design, not a stage of it.
+Live (`enforce`) supplies native DNS answers and rejects checked Bogus or
+Indeterminate results. This puts recursion, validation, exact-message binding
+and their resource controls in the client answer path. Live is experimental;
+new installs enable it, existing explicit and recorded choices are preserved.
+The full contract is [ADR 0003](../decisions/0003-daddybound-native-live.md).
 
-Daddybound reaches verdicts about signed data. It does not act on them, and
-nothing in DNS Daddy reads them. It cannot be configured to decide a real
-answer for a real client, and no flag, setting or environment variable changes
-that.
+Learn (`observe`) retains its independent observation contract: the forwarded
+client answer is already final, and no Learn result can change it. Off creates
+no native runtime and sends no native traffic. Selecting one mode must never
+silently run another. Native failures in Live return SERVFAIL, not a forwarded
+replacement or an invented Insecure verdict.
 
 ## How that is enforced
 
@@ -18,25 +23,25 @@ Three mechanisms, in decreasing order of how hard they are to defeat.
 `internal/daddybound/isolation_test.go` builds the module's import graph from
 source and asserts two properties:
 
-1. **No package on the query path can reach Daddybound.** `internal/resolver`,
-   `internal/dnsserver`, `internal/policy`, `internal/blocklist`,
-   `internal/api`, `internal/querylog` and `internal/store` are checked
-   transitively.
+1. **Only the explicit native and observation seams reach Daddybound from the
+   query handler.** The forwarding resolver, policy, blocklist, query log and
+   store remain isolated. Lab signers, network corpus sources and reference
+   oracle packages cannot be reached from the live query path.
 2. **Daddybound cannot reach deployment state.** No package under
    `internal/daddybound` may reach the store, the config, the resolver, the
    policy engine, the query log, the API or the secrets keyring.
 
-The first stops a verdict from an engine labelled experimental reaching a real
-answer. The second stops a verdict from depending on deployment state, which
-would make it unreproducible from a recorded trace.
+The first keeps test authorities and reference implementations out of live
+resolution. The second makes verdicts depend on explicit records, trust,
+policy and clock values rather than hidden deployment state.
 
 The test reads imports **ignoring build constraints**, deliberately. A
 property that holds only because of a build tag is one flag away from not
 holding.
 
-Both directions were checked by breaking them: adding a blank import of
-`daddybound/dnssec` to `internal/resolver`, and of `internal/store` to the
-chain walk, each fails the corresponding test.
+The test also asserts that both authorized runtime seams exist, so an
+accidentally disconnected Live implementation does not satisfy isolation by
+doing nothing.
 
 ### The build
 
@@ -60,11 +65,9 @@ failed to compile without the tag would break `go build ./...` for everyone.
 ### The command surface
 
 `dnsdaddy daddybound` runs the in-memory laboratory and prints what the engine
-concluded. There is no flag that points it at a running deployment. Adding a
-switch that appeared to wire Daddybound into the query path would be the most
-misleading thing the command could offer, and the isolation it would seem to
-break is asserted over the import graph rather than left to the absence of a
-flag.
+concluded. There is no flag that points this lab command at a running
+deployment. Runtime mode controls are separate, authenticated, and explicit
+about native transport. A YAML/environment mode locks dashboard changes.
 
 Real Internet names are reachable — the live differential corpus points the
 engine at a recursive resolver — but through a test rather than a subcommand.
@@ -141,7 +144,8 @@ justification and thereby rebut a false-Bogus classification; it can never
 rebut a false Secure, because `Classify` has already returned by then. No case
 added below that line can quiet it.
 
-Current count against **both** reference validators: **0 false secures**,
+The previously recorded comparison against **both** reference validators found
+**0 false secures**,
 across 78 laboratory scenarios and 612 questions put to the live Internet.
 Sabotaging the verifier to accept a signature because one was present — the
 classic form of this bug — makes four scenarios report it, which is how we
@@ -159,14 +163,17 @@ cover — and it is a sample of the DNS, not a survey of it.
 
 ## Trust anchors
 
-Anchors are supplied as values, from configuration or from a test. There is no
-code path that observes a DNSKEY in a response and decides to trust it.
+Bootstrap anchors come from local configuration or compiled IANA digests.
+The RFC 5011 manager can learn a successor only from DNSKEY material signed
+by existing trust and only after the hold-down period. Self-signed revocation
+withdraws an eligible key; total trust loss remains Indeterminate and requires
+operator attention. State and hold-down progress are persisted separately.
 
-That single rule is what the rest rests on: a validator able to promote an
-observed key into an anchor validates only that an attacker is self-consistent.
-
-Runtime code downloads neither trust anchors nor algorithm policy. Both are
-code and configuration, reviewed as changes.
+The current anchor snapshot is read for each checked native answer, including
+answers whose DNS material was cached. A cached Secure status is never used
+to bypass a later revocation. Refresh failures and persistence health are
+reported; failed refreshes do not create trust. Algorithm policy remains local
+code/configuration, and external intelligence providers cannot change it.
 
 ## Policy is never decided by reading text
 
@@ -177,8 +184,10 @@ the comparator branches on it — a validator that decided anything by matching
 another implementation's error text would be deriving its behaviour from that
 implementation, which is the thing this project exists not to do.
 
-## No model decides anything
+## Models do not decide DNSSEC trust
 
-No language model produces, reviews, overrides or influences a DNSSEC verdict.
-The engine is deterministic code. There is no path by which a probabilistic
-judgement about "probably safe" can reach a status.
+No language model or statistical learner produces, overrides or influences a
+DNSSEC verdict. The validator is deterministic code. The separate local
+behavioural learner can fit baselines and generate findings, but a probability
+of benign behaviour cannot authenticate data, create anchors or overrule a
+Bogus/Indeterminate result.

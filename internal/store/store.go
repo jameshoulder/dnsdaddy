@@ -102,6 +102,18 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("seed defaults: %w", err)
 	}
+	if err := s.RetireLegacyObservatory(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("retire legacy Observatory: %w", err)
+	}
+	if err := s.EnsureAuditSchema(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize change history: %w", err)
+	}
+	if err := s.InitWebhooks(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize webhook delivery: %w", err)
+	}
 	return s, nil
 }
 
@@ -175,6 +187,8 @@ var addedColumns = []struct{ table, column, definition string }{
 	// DNSSEC validation status as reported by the upstream. See
 	// docs/dnssec.md for what each value can and cannot tell you.
 	{"query_log", "dnssec", "TEXT NOT NULL DEFAULT ''"},
+	// Origin is captured per query. Existing rows remain legacy/unknown.
+	{"query_log", "dnssec_source", "TEXT NOT NULL DEFAULT ''"},
 	// When a feed last downloaded successfully, as opposed to when it was last
 	// attempted. last_refreshed_at moves on a failure too, so on its own it
 	// cannot answer the question an operator actually asks of a feed that is
@@ -227,6 +241,12 @@ var addedColumns = []struct{ table, column, definition string }{
 const SettingStatsErrorsSince = "stats.errors_since"
 
 func migrate(db *sql.DB) error {
+	if err := migrateDecisionSnapshots(db); err != nil {
+		return err
+	}
+	if err := migrateExportSequences(db); err != nil {
+		return err
+	}
 	for _, c := range addedColumns {
 		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.definition)
 		if _, err := db.Exec(stmt); err != nil {
@@ -244,6 +264,9 @@ func migrate(db *sql.DB) error {
 				return fmt.Errorf("migrate stats_hourly.errors: record start: %w", err)
 			}
 		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_query_log_dnssec_obs ON query_log(dnssec_obs) WHERE dnssec_obs <> ''`); err != nil {
+		return fmt.Errorf("index query observation correlation: %w", err)
 	}
 	return nil
 }

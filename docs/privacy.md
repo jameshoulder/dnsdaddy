@@ -1,281 +1,236 @@
-# What DNS Daddy stores
+# Privacy, outbound traffic and retained data
 
-DNS query logs are among the most revealing records a business holds. They show
-which sites each device visited, when, and how often — including health,
-finance, job-hunting, and union activity. In the UK and EU, when a query is
-linked to an identifiable person, that is personal data under UK GDPR and the
-GDPR.
+DNS Daddy processes requested domain names, client attribution and resolution
+outcomes. A query can reveal sensitive interests or activity, but it does not
+prove that a person visited a website: applications, prefetching and background
+services also make DNS requests. Findings and learned baselines are inferences
+from that traffic, not verified statements about a person or device.
 
-This document states exactly what is stored so you can answer that question
-honestly, and shows how to store less.
+This guide describes the implemented data paths and controls. It covers more
+than the query log because decisions, findings, external integrations and
+recovery files can retain related information independently.
 
-Nothing here is legal advice. If you log DNS for a workforce, your DPIA and your
-employee privacy notice are your responsibility.
+## Defaults and the effective configuration
 
----
+Fresh installations select Daddybound Live for native resolution and enable
+local statistical learning and decision recording. Existing installation
+choices and explicit mode pins are preserved. The dashboard reports the
+**effective** mode and which setting selected it; do not infer it from an old
+configuration example.
 
-## Nothing leaves your server
+External reputation, investigation enrichment and webhook delivery start off.
+Every installation supplies its own external accounts and credentials. A newly
+saved provider is disabled unless deliberately enabled. There is no shared
+DNS Daddy intelligence account or external model-training service behind the
+local learner.
 
-Self-hosted DNS Daddy makes exactly three kinds of outbound connection:
+## What leaves the host
 
-1. **Upstream DNS**, for names it does not block — over DNS-over-TLS by default,
-   so your ISP cannot read or tamper with it.
-2. **Feed downloads**, to the public URLs in
-   [threat-intel.md](threat-intel.md), on a schedule you control.
-3. Nothing else.
+| Path | What may be disclosed | Control |
+|---|---|---|
+| Native DNS resolution | Names needed to walk from root to authoritative servers, source IP and DNS protocol metadata. Native traffic uses plaintext UDP/TCP port 53. QNAME minimisation limits which labels each delegation sees; it does not encrypt them. | Daddybound Live uses this for client answers. Learn also performs independent native lookups after forwarded resolution. Off stops this native runtime and its trust-anchor refreshes. |
+| Forwarded DNS | Requested names and DNS metadata go to the configured upstreams. The transport follows their configured UDP, TCP, DoT or DoH URLs. | Used in Learn and Off. Live does not silently fall back to forwarding after a native failure. Encrypting client-to-resolver traffic does not encrypt native authoritative traffic. |
+| Threat-feed downloads | The configured feed service sees the resolver host's connection, request URL, user agent and refresh cadence. A bulk download does not upload the query log or the list of matching clients. | Enabled feed URLs, scheduled/startup refresh settings and explicit refresh actions. Local file feeds avoid the corresponding HTTP download. The bundled Threat Observatory connector is retired. |
+| External API providers | The requested domain and protocol/account metadata required by the selected adapter. Providers can retain these requests or charge for them. The provider API is separate from ordinary DNS resolution. | Own credentials, provider enablement, policy scopes and global reputation/enrichment settings. Tests and manual enrichment require explicit consent. |
+| Webhooks | Selected finding summaries can contain domains, client IPs and network IDs. Selected review events contain operator notes and actor labels. | Own receiver and signing secret, selected event types and explicit sharing consent. Receiver tests send a synthetic event without real query/finding data. |
+| Operator exports and backups | Retained datasets or a recovery package are transferred to the authenticated management client; any subsequent sharing is controlled by the operator. | Explicit export/download/backup action and the operator's storage and retention procedures. |
 
-There is no telemetry, no analytics, no licence check, and no call home. Set
-`feeds.refresh_interval` to `0` and configure a `file://` feed and it will run
-with no outbound HTTP at all. You can verify this with `tcpdump` — please do.
+**Cache-only reputation still permits external sharing:** a cache miss can
+queue a background provider lookup. It avoids waiting for that lookup on the
+DNS answer path. Reputation Off does not disable independently enabled manual
+enrichment. A provider test is a real outbound request even while normal
+reputation is off; where needed it uses the fixed name `example.com`.
 
-**On the one DNS Daddy-operated feed.** The catalog includes our own DNS Daddy
-Threat Observatory, and it ships **disabled** precisely so that the paragraph
-above stays true out of the box. Every URL a stock install fetches belongs to
-somebody else.
+GET investigation, policy preview, provider settings/templates/health and
+learning/status routes read local state. They do not resolve the investigated
+name, contact providers or train a model. Domain enrichment is a separate
+consented POST. Provider workers recheck enablement before starting queued
+work; a request already transmitted cannot be recalled. See
+[external APIs](external-apis.md) and [webhooks](webhooks.md).
 
-If you enable it, that becomes an outbound HTTPS request from your server to
-ours on each refresh, and we see what any feed provider sees: your server's IP
-address, its `dnsdaddy/<version>` User-Agent, and the refresh cadence. We do
-not see your queries, your clients, or which indicators matched — the feed is a
-file download and matching happens on your server. Disabling the feed ends it.
-See [threat-intel.md](threat-intel.md#the-dns-daddy-threat-observatory).
+Turning off query logging controls **retention and local analysis admission**.
+It does not stop the DNS exchange needed to answer a query, withdraw consent
+from separately enabled providers, or erase their caches or remote copies.
+To prevent provider disclosure for a policy, also remove that policy from
+provider scopes or turn the relevant provider modes off.
+
+## Which privacy switches apply to new observations
+
+Both the instance's `log.query_log` setting and the matched policy's
+`logQueries` setting must permit a per-query record. The handler carries that
+same decision into the following paths:
+
+| Data path | Query logging off globally or for this policy | Client-IP logging off |
+|---|---|---|
+| Query rows and client-presence rows | No new rows for these requests | Query rows omit client IP/name; no client-presence row |
+| Decision records and captured evidence | No new records from these requests | Recorded domain/policy decision omits client IP/name |
+| Stored Daddybound observations | No row naming these requests; operational aggregate counters can still increase | Observation has no client identity; query correlation cannot reconstruct an address that was not stored |
+| Heuristic detector admission | These requests do not enter the detector or create findings | Permitted traffic can still produce network-attributed findings without a client address/name |
+| Statistical learner admission | These requests do not enter the learner | These requests also do not enter the learner, because its baseline requires client attribution |
+| Resolution statistics | Aggregate counts still update | Aggregate counts still update |
+
+`log.decision_records: false`, `detection.enabled: false` and
+`learning.enabled: false` independently disable those components. Turning off
+heuristic detection does not disable the separate statistical learner or DNS
+validation. The learner's score alone never changes a DNS answer.
+
+Privacy changes prevent new admission. They do not retroactively erase saved
+records, completed model parameters, already accepted work or remote copies.
+A previously accepted detector window may finish after a policy change.
+Native aggregate counters and per-client rate-limit state still support DNS
+availability; rate-limit state is bounded runtime memory, not a query-history
+table or a source of client-address metric labels.
 
 ## What is written to disk
 
-Everything lives in one SQLite database in your data directory.
+The main database is `dnsdaddy.db` in the data directory. SQLite WAL files can
+contain committed recent changes. The database is **not encrypted as a whole**
+by the application; restrict access to its directory and to the service
+account. Credentials have separate field encryption, described below.
 
-### Per-query rows — `query_log`
+| Retained data | Contents and default lifetime |
+|---|---|
+| `query_log` | Requested name/type, time, outcome/reason, policy network, optional client address/name, protocol, elapsed time and cache status. `dnssecSource` records native/upstream provenance; an empty legacy value means unknown. Default 7 days via `log.retention_days`. |
+| `client_hourly` | Client address and the hour it was seen, only for privacy-permitted attributed query rows. Uses the same 7-day query retention. |
+| `dnssec_observations` | Domain, local verdict/reason, native/forwarded provenance and timing/work measurements. Historical Learn rows and `native_live` rows remain distinguishable. Uses query-log retention. It is written asynchronously; missing correlation is not evidence of a successful validation. |
+| `stats_hourly` and `blocked_domain_stats` | Per-network/category counts and blocked-domain counts. No client-IP column, but blocked names and network identifiers remain sensitive context. Default 90 days via `log.rollup_days`. |
+| `decisions`, capture manifests and evidence snapshots | Original policy or local-protection outcome, explanation, attributed context and immutable cited evidence. Default 30 days via `log.decision_retention_days`. Captures expire with their decision. Legacy decisions explicitly disclose mutable-reference limitations. |
+| `findings`, `finding_reviews`, `finding_review_history` | Measured signals and bounded example names, confidence/score limitations, domain/device/network context, operator classifications, notes and authenticated actor labels. Default finding retention 30 days; associated review rows cascade when the finding is removed. Reviewing does not rewrite original evidence. |
+| `evidence`, `intel_verdicts`, `intel_enrichment` | Local/feed/provider claims, queried subjects and bounded provider response excerpts/context. Expiring records are pruned by their expiry; non-expiring operator/local claims can remain. These tables are not erased merely by switching query logging off. |
+| Configuration and authentication | Networks/CIDRs, client names, policies/rules, enabled feeds, provider/webhook settings, password/token hashes, sessions and credential ciphertext. Some configuration values themselves are sensitive. Retained until explicitly changed, removed or expired as applicable. |
+| `config_change_history` | Actor, action, target, times, pending/completed/error outcome and redacted configuration differences. It currently has no automatic pruning. It does not include request bodies, authorization headers or plaintext credentials. |
+| `webhook_outbox` and `webhook_stats` | Pending bounded event payloads, retry/lease state and durable delivery counters. Delivered or terminally failed payloads are removed. Any saved webhook configuration change discards pending payloads and counts the drops. This queue has its own lifecycle, independent of finding retention. |
+| `export_sequences` | Three non-identifying insertion counters that preserve export boundaries and prevent new query-ID reuse after pruning or restart. They contain no names, client identities or per-query ledger. |
 
-One row per DNS question, when query logging is on:
+The normal retention sweep runs shortly after startup and hourly thereafter.
+Bounded asynchronous queues can drop records under load; counters report these
+losses. Retained data is not a guaranteed complete reconstruction of traffic.
 
-| Field | Example | Notes |
-|---|---|---|
-| `ts` | `2026-07-28T14:22:03Z` | |
-| `client_ip` | `10.0.4.23` | Omitted entirely if `log_client_ip: false` |
-| `client_name` | `laptop-07` | Only if you named that IP yourself |
-| `network_id` | `n_hq` | |
-| `qname` | `login.example.com` | **The domain requested** |
-| `qtype` | `A` | |
-| `action` | `blocked` | |
-| `reason` | `Domain is on a phishing list` | |
-| `category`, `source` | `phishing`, `Phishing Army` | |
-| `dnssec` | `validated` | The upstream's validation verdict |
-| `proto`, `elapsed_ms`, `cached` | | |
+### Files outside SQLite
 
-This is the sensitive table. `qname` plus `client_ip` is a browsing history.
+- **`daddybound-learning.json`** retains completed per-client baseline keys,
+  timestamps, counts, means and variances. It omits raw queried names and
+  client display names, but is still sensitive behavioural metadata. It uses
+  mode `0600`, bounded size, version checks and atomic checkpoint replacement.
+  The default client idle lifetime is 24 hours; actively used models adapt
+  across restarts. Disabling learning does not delete an existing checkpoint.
+  See [learning](learning.md).
+- **`daddybound-anchors.json`** retains public trust anchors, their lifecycle
+  and hold-down progress. It contains DNSSEC trust state, not an operator's
+  private signing key. Native material/answer caches remain in memory.
+- **`secrets.key`** is the credential encryption key. Provider credentials and
+  the webhook signing secret are AES-256-GCM ciphertext in separate database
+  fields, bound to their identities. API reads return only status/hints. A
+  database copy plus this key can decrypt them; key-file access therefore
+  matters as much as database access.
+- **Optional findings JSONL output** is a second copy of findings for a log
+  shipper, disabled unless `detection.findings_file` is configured. It is
+  written with mode `0640` and rotated. A shipper or SIEM manages its own copy.
+- **Configuration, feed caches/local feeds and referenced TLS files** can be
+  stored outside the database. Original YAML can retain a bootstrap password;
+  a TLS key is a private credential. Do not put provider tokens in readable
+  endpoint/configuration fields: use the separate secret input.
+- **Operational logs** can include domain names, failure context or host paths,
+  particularly at debug level or when reporting an internal error. Apply
+  separate access and retention controls to service/container/proxy logs.
+- **Exports and recovery files** are independent copies. Ordinary NDJSON
+  exports are plaintext. `.ddbackup` is passphrase-encrypted and includes the
+  database, matching credential key, relevant configuration, native/learner
+  state and referenced recovery files. The passphrase is not stored by DNS
+  Daddy. Original source YAML inside a backup may contain old secrets. See
+  [recovery](recovery.md) for exact inclusions and exclusions.
 
-**Default retention: 7 days.**
+The query table does not store full DNS response packets or subsequent web
+connections. Evidence reasons and provider excerpts can still contain names,
+addresses or other response-derived context, so that is not a promise that
+only query-table columns hold sensitive information.
 
-### Aggregates — `stats_hourly`, `blocked_domain_stats`
+## Reducing collection
 
-Counts per hour per network per category — queries, blocks and failed
-resolutions — and per-day counts of blocked domains. No client IPs, no
-per-device attribution.
-
-`blocked_domain_stats` does retain blocked *domain names* with counts. Those are
-names your network attempted to reach and DNS Daddy stopped — the evidence that
-makes reporting useful — but they are not tied to a device.
-
-**Default retention: 90 days.**
-
-Because aggregates are separate from the raw log, you can cut query-log
-retention to a day and keep your charts and reports for three months. That is
-the single most useful privacy dial in the product.
-
-### Client presence — `client_hourly`
-
-One row per client address per hour it was seen: `(hour, client_ip)` and
-nothing else. It exists so the overview can say how many devices used the
-resolver in the last day without scanning every query-log row in that day.
-
-It follows the query log, not the aggregates: a row is written only when a
-per-query row is also written — so `log_client_ip: false` writes nothing, and
-`query_log: false` or a policy with `logQueries` off writes nothing for those
-queries — and it is pruned on `retention_days`, not `rollup_days`. It names
-devices, and the retention setting for data that names devices is the
-query log's. Erasing a client from the query log (below) should also erase it
-here: `DELETE FROM client_hourly WHERE client_ip = '10.0.4.23';`
-
-**Default retention: 7 days.**
-
-### Behavioural findings — `findings`
-
-One row per security finding raised by the detection engine.
-
-| Field | Example | Notes |
-|---|---|---|
-| `event_type`, `severity`, `confidence` | `dns_tunnel_suspected`, `high`, `0.87` | |
-| `client_ip`, `client_name` | `10.0.4.23`, `laptop-07` | Empty if `log_client_ip: false` |
-| `domain` | `example.com` | **The registered domain involved** |
-| `summary` | `laptop-07 queried 187 distinct subdomains of…` | |
-| `detail` | *(JSON)* | The full finding, including example names in its evidence |
-
-**This is sensitive, and in one respect more so than the query log.** A finding
-is a condensed, pre-analysed statement about a named device's behaviour —
-exactly the shape of thing that is useful to an investigator and awkward in a
-subject access request. The `detail` JSON also contains example domain names
-drawn from the traffic.
-
-**Default retention: 30 days** (`detection.retention_days`), deliberately
-longer than the query log, because "has this host done this before?" is a
-months-scale question and a finding is a few kilobytes where the traffic behind
-it was thousands of rows.
-
-Findings inherit the `log_client_ip` switch: with device attribution off, they
-are attributed to the network rather than the device, and the finding says so
-instead of quietly carrying an address you chose not to record.
-
-### The findings file — `findings.jsonl`
-
-**Off by default.** When `detection.findings_file` is set, every finding is
-*also* written as newline-delimited JSON for a log shipper to collect.
-
-That is a second copy of browsing-history-derived data, in a place designed to
-be forwarded off the box. It is off by default for exactly that reason: sending
-it to a SIEM should be a decision somebody makes, not something that happens
-because a config file had a sensible-looking default. The file is written 0640
-and rotated in place.
-
-Whatever consumes it inherits the retention question. Your SIEM's retention
-policy, not `detection.retention_days`, governs the copy it holds.
-
-### Configuration
-
-Networks, policies, allow and block lists, feed settings, hashed API tokens, and
-the bcrypt hash of the admin password. No plaintext secrets.
-
-## What is never stored
-
-- Response contents. DNS Daddy records *that* `example.com` was resolved, not
-  what it resolved to.
-- Anything about the traffic that follows a lookup. It sees the question, not
-  the connection.
-- Cached answers are in memory only and disappear on restart.
-- Behavioural detection state. The detectors hold counters and bounded sets in
-  memory for a few minutes at a time and never write them to disk; only the
-  resulting findings are persisted.
-
-## Turning it down
-
-### Keep statistics, drop per-query rows
-
-The best default for most SMEs. You keep dashboards, reports, and category
-breakdowns; you stop holding a per-device browsing history.
+To keep aggregate statistics while withholding new query rows, decisions,
+stored DNSSEC observations, heuristic admission and learning admission:
 
 ```yaml
 log:
   query_log: false
 ```
 
-Or per policy — useful when the finance VLAN needs less logging than the guest
-network:
-
-*Policies → [policy] → Log individual queries* (off)
-
-### Keep query rows, drop device attribution
-
-You can still see which domains were requested and blocked, but not by whom.
+For one network policy, turn off **Policies → Log individual queries**. To
+retain permitted query rows without recorded client addresses or statistical
+client learning:
 
 ```yaml
 log:
   log_client_ip: false
 ```
 
-### Shorten retention
-
-```yaml
-log:
-  retention_days: 1     # per-query rows
-  rollup_days: 90       # statistics
-```
-
-Pruning runs hourly and a minute after startup, so an install that has been off
-for a while reclaims disk before it starts writing again.
-
-### Delete what is already there
-
-```bash
-sudo systemctl stop dnsdaddy
-sudo -u dnsdaddy sqlite3 /var/lib/dnsdaddy/dnsdaddy.db \
-  "DELETE FROM query_log; VACUUM;"
-sudo systemctl start dnsdaddy
-```
-
-For a single device, before deleting:
-
-```sql
-DELETE FROM query_log WHERE client_ip = '10.0.4.23';
-```
-
-### Turn off behavioural detection entirely
+To disable both analytical components while retaining DNS protection:
 
 ```yaml
 detection:
   enabled: false
+learning:
+  enabled: false
 ```
 
-Nothing is analysed and no findings are stored. Blocking and query logging are
-unaffected — detection is a separate, alert-only layer.
+These YAML options apply on restart. Native serving mode and external API
+modes have their own dashboard controls. If reducing outbound sharing, disable
+reputation, enrichment and webhook delivery separately, and review enabled
+feed URLs and the selected DNS transport. For shorter retention, set the
+query, rollup, decision and finding windows deliberately; one setting does not
+change all four.
 
-A middle setting keeps the detection but stores less of it:
+## Investigation, exports and removing retained data
 
-```yaml
-detection:
-  min_severity: high     # only the strongest findings are kept
-  retention_days: 7      # matching the query log
-  findings_file: ""      # no second copy for a shipper
-```
+Investigation is a bounded view, not a complete subject export. For retained
+query, decision and finding data, use the authenticated exports with the
+appropriate client filter and `hours=0`, follow every `Link` continuation, and
+check `X-Export-Skipped` on each page. A full first page is not the full
+population. See [exports](exports.md); review history, configuration history,
+provider caches and model state require their corresponding local records.
 
-## Subject access and erasure
+There is currently **no all-copies client erasure endpoint**. Deleting only
+`query_log WHERE client_ip = ...` leaves other potentially attributable data.
+Before planned removal, prevent new collection/delivery, stop the service for
+an offline change and identify the relevant copies:
 
-If someone asks what you hold about their device use, and you log client IPs
-with an IP you can tie to a person:
+1. Query rows and correlated DNSSEC observation IDs, captured before removing
+   the query-to-observation link; client-presence rows and friendly names.
+2. Decisions and their captures, findings and associated review history,
+   client model entries and any related current evidence. Domain-only evidence
+   may be shared with other subjects and cannot always be attributed to one
+   client after logs were pruned or anonymised.
+3. Pending webhook payloads, exported files, JSONL output and operational
+   logs. Disabling/reconfiguring the webhook clears its pending queue, but
+   cannot withdraw an already delivered event.
+4. Backups, restored installations and copies held by external providers or
+   receivers. Database retention and local deletion do not control them.
 
-```bash
-# Everything for one device
-curl -H "Authorization: Bearer dnsd_…" \
-  'https://dns.example.co.uk/api/v1/queries?clientIp=10.0.4.23&limit=500'
-```
+Keep the database, key files and learner state in a consistent, usable state
+when making offline changes. Do not describe a single SQL deletion or a
+successful backup download as complete erasure. Protect exports collected for
+review and give them a defined retention period as well.
 
-Erasure is the SQL above. Note that `stats_hourly` counts are not
-device-attributable and generally need not be deleted to satisfy an erasure
-request — but confirm that reasoning against your own advice.
+## Management and deployment access
 
-## Telling your staff
+Management API authentication protects these read and write routes. It does
+not protect files from a host administrator, stop a permitted API token from
+reading the data it can access, or secure a downloaded export afterward. Use a
+protected management connection, limit host/service-account access, and keep
+backup passphrases separate from the files they unlock.
 
-Whatever you configure, tell people. A one-paragraph addition to your
-acceptable-use policy is usually enough, and it is far better than a discovery
-during a grievance:
+Hosting the resolver in a particular region locates its local files there;
+external DNS, feeds, opted-in providers, receivers and operator-held backups
+can introduce other recipients or copies. Explain the actual chosen settings
+and recipients to the people whose traffic is processed. This software's
+reports and controls do not by themselves establish compliance with a legal,
+insurance or certification requirement.
 
-> Our network uses protective DNS filtering to block malicious and fraudulent
-> websites. Records of the domains requested from company devices are retained
-> for N days for security purposes and are reviewed only when investigating a
-> security incident. We do not monitor individual browsing for performance or
-> disciplinary purposes.
+Report unintended disclosure through [SECURITY.md](../SECURITY.md).
 
-Make that statement true, then keep it true.
-
-## Compliance notes
-
-**Cyber Essentials.** Protective DNS supports several controls, particularly
-malware protection and boundary firewalls. The Markdown report
-(`/api/v1/reports/summary?format=markdown`) is written to be attachable to an
-assessment.
-
-**ISO 27001.** Relevant to A.8.20 (network security), A.8.21 (network services
-security), and A.8.7 (protection against malware). The report also serves as
-evidence of ongoing monitoring.
-
-**Cyber insurance.** Insurers increasingly ask whether protective DNS is
-deployed. "Yes, self-hosted, with N days of query retention and monthly
-reporting" is a stronger answer than a product name.
-
-**Data residency.** Self-hosted, your data is wherever your server is. If you
-need UK or EU residency, put the VPS in a UK or EU region. There is no other
-copy.
-
-## Reporting a privacy problem
-
-If you find a bug that exposes query data beyond what this document describes —
-a log leaking domains, an unauthenticated endpoint returning query rows — treat
-it as a security issue: [SECURITY.md](../SECURITY.md).
+Implementation references: [DNS admission and recording](../internal/dnsserver/handler.go),
+[database schema](../internal/store/schema.sql),
+[retention sweep](../cmd/dnsdaddy/main.go),
+[learner persistence](../internal/learning/persistence.go),
+[webhook queue](../internal/store/webhooks.go), and
+[configuration history](../internal/store/audit.go).

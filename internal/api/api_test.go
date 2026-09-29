@@ -200,19 +200,6 @@ func newHarness(t *testing.T) *harness {
 	}
 }
 
-// reopen opens a second store over the same database file, which is what a
-// restart amounts to: the schema is reapplied and the defaults are re-seeded.
-// Anything the operator chose has to survive that.
-func (h *harness) reopen(t *testing.T) *store.Store {
-	t.Helper()
-	st, err := store.Open(filepath.Join(h.dir, "test.db"))
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
-	return st
-}
-
 // cookieJar is a minimal same-origin jar; net/http/cookiejar needs a
 // public-suffix list to behave for 127.0.0.1.
 type cookieJar struct{ cookies map[string]*http.Cookie }

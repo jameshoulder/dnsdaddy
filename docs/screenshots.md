@@ -1,8 +1,10 @@
-# Screenshots worth capturing
+# Screenshots and capture guidance
 
-There are no screenshots in this repository. That is a gap: a protective DNS
-tool is largely judged on whether its interface makes a decision
-understandable, and nobody can judge that from prose.
+The README uses current screenshots of the running light interface. The
+[image inventory and capture provenance](images/SCREENSHOTS.md) document the
+six canonical README views and the additional native-resolution, learning,
+external-API, recovery and protection views. They were captured from a real
+instance using isolated synthetic traffic and ordinary management actions.
 
 **No mock-ups.** A fabricated dashboard would be worse than none at all — it
 would misrepresent both what the software looks like and how much data a real
@@ -10,9 +12,9 @@ deployment produces. Everything below should come from a real instance with
 real traffic, or from the offline lab, which produces genuine findings from
 synthetic traffic.
 
-If you run DNS Daddy, capturing any one of these is a genuinely useful
-contribution. Open a PR adding the image under `docs/images/` and referencing
-it from the README.
+For a future interface change, refresh the affected views under `docs/images/`
+and update their provenance, dimensions and hashes. Include the application
+revision, browser, capture conditions and any synthetic traffic recipe.
 
 ## The five that matter
 

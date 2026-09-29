@@ -6,14 +6,20 @@ configured trust anchor to an authenticated answer, an authenticated absence
 or an authenticated redirection — and is honest about every case where it
 cannot.
 
-**Daddybound is not a production DNSSEC validator and must not be relied upon
-as one.** It enforces no policy. Since v0.4 it can validate real DNS Daddy
-traffic in **Learn** mode (`dns.local_dnssec_validation: observe`; on for new
-installations, unchanged by an upgrade) and record what it concludes, but no
-verdict it reaches can change, delay or fail the answer a client receives — asserted by a test that forces each verdict in turn
-and requires the client's bytes to be identical every time. See
-[security-model.md](security-model.md) and
-[ADR 0002](../decisions/0002-daddybound-observe-mode.md).
+**Daddybound now supplies native client answers in experimental Live mode.**
+It validates the exact returned data, returns Secure/proved Insecure answers,
+and fails closed for Bogus, Indeterminate and operational failures without
+falling back to an upstream. Live (`dns.local_dnssec_validation: enforce`) is
+the default for a new installation; existing recorded Learn/off choices and
+explicit configuration are preserved. Longer operational evaluation is still
+required before claiming production readiness.
+
+Learn (`observe`) continues to validate independently after the forwarded
+answer is final, so its verdict cannot change that answer. Off constructs no
+native runtime. Both enabled modes use plaintext authoritative UDP/TCP 53,
+independently of any encrypted forwarder. See
+[ADR 0003](../decisions/0003-daddybound-native-live.md) for mode controls,
+CD/DO/AD behaviour, failure outcomes, split-DNS limits and evidence provenance.
 
 ## What "first principles" means here
 
@@ -77,6 +83,13 @@ with no identifier is either a bug or an invention.
   against the zone.
 - Produces a deterministic, structured trace of every step, with typed
   reasons rather than English strings.
+- Binds every authenticated client RRset to a cryptographic receipt for its
+  exact canonical data, including negative SOA data; an independent response's
+  verdict cannot authenticate it. Unsigned aliases do not exempt signed
+  targets from validation. Cached material is checked against current anchors
+  and time, with accepted-signature lifetime constraining TTLs.
+- Applies bounded native client admission and end-to-end deadlines; failures
+  have explicit reasons and Extended DNS Errors for EDNS clients.
 - Runs a deterministic signed laboratory offline, and compares its verdicts
   against two independent reference validators — libunbound and BIND's
   `delv` — over the same served records.
@@ -104,10 +117,12 @@ being complete:
   ordinary DNS over port 53. There is no DoT or DoH to the root or to a TLD,
   because authoritative servers do not offer it; QNAME minimisation limits what
   each server on the path learns, and does not remove the exposure.
-- **No enforcement.** There is no configuration that makes Daddybound decide a
-  real answer for a real client. Learn mode resolves and validates alongside
-  the forwarding resolver and records what it found; the answer a client
-  receives is unchanged, whatever Daddybound concludes.
+- **No native conditional forwarding.** Native Live does not route private
+  split-DNS names to configured forwarders. Deployments that require that path
+  should select Learn or Off until conditional forwarding is implemented.
+- **No production-readiness claim.** New deterministic client tests establish
+  specific correctness properties. They do not replace target-device load
+  testing, extended field use, independent review or real rollover evidence.
 - **No ENS, no CCIP Read, no blockchain naming.**
 
 What it does do that this list used to deny: it resolves for itself, from root
@@ -129,12 +144,13 @@ dnsdaddy daddybound validate -scenario tampered-answer -trace
 ```
 
 These commands build a signed hierarchy in memory. They cannot be pointed at
-a running deployment. Learn mode is what runs against real traffic, and it is
-wired in at exactly one point — after a client's answer is final — so nothing
-Daddybound concludes can reach the answer path; the isolation is checked as a
-property of the import graph rather than promised here. The Assurance page and
-`GET /api/v1/dnssec/status` report what a running instance's Learn mode is
-doing.
+a running deployment. Runtime mode is controlled separately by configuration
+or the dashboard; the Assurance page and `GET /api/v1/dnssec/status` report
+effective mode, native counters, anchor lifecycle and observation losses.
+Learn rows use `resolution: native`; Live rows use `resolution: native_live`
+and describe the exact native client result. Changing mode does not relabel
+historical evidence. The import-graph test permits only the narrow native and
+observation seams and keeps lab/oracle packages out of the query path.
 
 The live differential corpus is a separate, opt-in test rather than a
 subcommand, for the same reason it is not in CI — it needs the network, both
@@ -153,5 +169,6 @@ make corpus
 | [standards.md](standards.md) | Which RFCs were read, what they say, and the identifier each rule is cited by |
 | [architecture.md](architecture.md) | The packages, the dependency direction, and why the seams are where they are |
 | [security-model.md](security-model.md) | What Daddybound is trusted with, what it is not, and how that is enforced |
+| [ADR 0003](../decisions/0003-daddybound-native-live.md) | Native Live answer binding, mode controls, failure semantics and limits |
 | [validation-lab.md](validation-lab.md) | The laboratory, the scenarios, and the differential comparison |
 | [roadmap.md](roadmap.md) | What comes next, and what each step unblocks |

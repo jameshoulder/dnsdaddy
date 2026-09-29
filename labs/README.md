@@ -24,6 +24,13 @@ upstream is a small responder that ships with the lab and serves a made-up
 zone. No query leaves the machine, and there is no malicious infrastructure
 involved because there is none to involve.
 
+The Compose resolver mounts [resolver.yaml](resolver.yaml), which explicitly
+selects native **Off** and permits only the sink's documentation-address ranges
+through rebinding protection. This lab choice is separate from the fresh
+installation's Live default. Rate limiting and all other local protections
+retain their defaults. Previously saved lab protection settings still take
+precedence; recreate only the lab volume if its older settings conflict.
+
 That is a design constraint, not a shortcut. A detection lab built on live
 malware command-and-control is one that breaks when the infrastructure is
 seized, produces different results every time you run it, and asks you to
@@ -94,6 +101,13 @@ bin/dnsdaddy-lab -server 127.0.0.1:5353 -scenario dns-tunnelling -speed 10
 bin/dnsdaddy-lab                                   # list the scenarios
 bin/dnsdaddy-lab -scenario dga-simulation -dry-run # see the names, send nothing
 ```
+
+For that separate development instance, merge the native Off and rebinding
+exceptions from [resolver.yaml](resolver.yaml) into its configuration and set
+`dns.upstreams` to `["udp://127.0.0.1:5300"]`. Changing the upstream alone is
+insufficient in Live mode, because Live performs native recursion. The
+time-compressed heuristic lab also does not accelerate the local learner's
+five-minute windows or its sample/time warm-up gates.
 
 > **Never aim this at a live resolver.** The generator defaults to
 > `127.0.0.1:5354` — the port the compose lab publishes — specifically *not*

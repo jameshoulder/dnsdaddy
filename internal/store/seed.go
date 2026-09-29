@@ -14,16 +14,15 @@ import (
 //
 // It exists because the question cannot be answered from configuration alone.
 // Load starts from Default() and unmarshals YAML over it, so an omitted
-// local_dnssec_validation key is indistinguishable at runtime from one written
-// out explicitly — there is no "unset" to detect once the struct is populated.
+// local_dnssec_validation key must stay unset until the installation is known.
 // The database can tell the difference the config file cannot: a database with
 // no networks in it has never run DNS Daddy before.
 //
 // So the decision is made once, at the moment the difference is still visible,
-// and recorded. Fresh installs get Learn; an upgrade of an installation that
-// never asked for it keeps it off, because Learn sends real DNSSEC queries
-// upstream and consumes CPU, and inheriting that from a release upgrade is a
-// change to someone's traffic that they did not ask for.
+// and recorded. Fresh installs get native Live. Existing recorded Learn/off
+// choices stay unchanged; an older unmarked installation gets off. Native
+// authoritative recursion changes egress and availability semantics, which an
+// existing installation must not inherit without an operator decision.
 const SettingLocalDNSSECDefault = "install.local_dnssec_default"
 
 // installMarkerKey records that first-run decisions have been taken for this
@@ -145,7 +144,7 @@ func (s *Store) seed(ctx context.Context) error {
 	if decided == 0 {
 		dnssecDefault := "off"
 		if freshInstall {
-			dnssecDefault = "observe"
+			dnssecDefault = "enforce"
 		}
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO settings (key, value) VALUES (?, ?)",

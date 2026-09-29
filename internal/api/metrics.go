@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
+	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/observe"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
@@ -55,6 +56,9 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// exists and reads zero would tell an operator their providers answered
 	// nothing, when in fact they have none.
 	a.writeIntelMetrics(&b)
+	a.writeLearningMetrics(&b)
+	a.writeProtectionMetrics(&b)
+	a.writeWebhookMetrics(r.Context(), &b)
 
 	metric(&b, "dnsdaddy_cache_entries", "Answers currently cached", "gauge",
 		fmt.Sprintf("dnsdaddy_cache_entries %d", cacheSize))
@@ -258,6 +262,7 @@ func (a *API) writeIntelMetrics(b *strings.Builder) {
 	var (
 		calls    []string
 		failures []string
+		rejected []string
 		latency  []string
 		breaker  []string
 		usable   []string
@@ -272,6 +277,7 @@ func (a *API) writeIntelMetrics(b *strings.Builder) {
 		s := inst.Client.Stats()
 		calls = append(calls, fmt.Sprintf("dnsdaddy_intel_provider_calls_total{provider_id=%q} %d", id, s.Calls))
 		failures = append(failures, fmt.Sprintf("dnsdaddy_intel_provider_failures_total{provider_id=%q} %d", id, s.Failures))
+		rejected = append(rejected, fmt.Sprintf("dnsdaddy_intel_provider_rejected_total{provider_id=%q} %d", id, s.Rejected))
 		latency = append(latency, fmt.Sprintf("dnsdaddy_intel_provider_mean_latency_ms{provider_id=%q} %d", id, s.MeanLatencyMS))
 		breaker = append(breaker, fmt.Sprintf("dnsdaddy_intel_provider_circuit_open{provider_id=%q} %d",
 			id, boolGauge(s.Breaker != apiprovider.BreakerClosed)))
@@ -285,6 +291,7 @@ func (a *API) writeIntelMetrics(b *strings.Builder) {
 	if len(calls) > 0 {
 		metric(b, "dnsdaddy_intel_provider_calls_total", "Requests sent to a provider", "counter", calls...)
 		metric(b, "dnsdaddy_intel_provider_failures_total", "Requests to a provider that failed", "counter", failures...)
+		metric(b, "dnsdaddy_intel_provider_rejected_total", "Provider requests rejected by an open circuit before an attempt", "counter", rejected...)
 		metric(b, "dnsdaddy_intel_provider_mean_latency_ms", "Mean round-trip time to a provider", "gauge", latency...)
 		metric(b, "dnsdaddy_intel_provider_circuit_open", "1 when a provider is being skipped because its circuit breaker is open", "gauge", breaker...)
 	}
@@ -309,21 +316,31 @@ func escapeLabel(v string) string {
 // invites an operator to build an alert on a feature nobody enabled, and the
 // absence of the series is a clearer statement than a zero.
 func (a *API) dnssecMetricLines() []string {
-	if a.DNSSEC == nil && a.Anchors == nil {
-		return nil
-	}
-
+	state := a.dnssecState()
 	var b strings.Builder
-	if a.DNSSEC != nil {
-		a.writeObserverMetrics(&b)
+	for _, mode := range []string{config.LocalDNSSECOff, config.LocalDNSSECObserve, config.LocalDNSSECEnforce} {
+		// One closed label set, read from the effective runtime selection.
+		// YAML can be overridden by a persisted operator choice.
+		if mode == config.LocalDNSSECOff {
+			b.WriteString("# HELP dnsdaddy_dnssec_mode Effective Daddybound runtime mode\n# TYPE dnsdaddy_dnssec_mode gauge\n")
+		}
+		fmt.Fprintf(&b, "dnsdaddy_dnssec_mode{mode=%q} %d\n", mode, boolGauge(state.Effective == mode))
 	}
-	a.writeAnchorMetrics(&b)
+	metric(&b, "dnsdaddy_dnssec_native_available", "Whether a native client runtime is available", "gauge", fmt.Sprintf("dnsdaddy_dnssec_native_available %d", boolGauge(state.NativeAvailable)))
+	metric(&b, "dnsdaddy_dnssec_native_enforcing", "Whether the selected native client can enforce DNSSEC results", "gauge", fmt.Sprintf("dnsdaddy_dnssec_native_enforcing %d", boolGauge(state.NativeAvailable && state.Effective == config.LocalDNSSECEnforce)))
+	if state.Observer != nil {
+		a.writeObserverMetrics(&b, state.Observer, state.Writer)
+	}
+	a.writeAnchorMetrics(&b, state.Anchors)
+	if state.NativeAvailable {
+		a.writeNativeMetrics(&b, state)
+	}
 	return []string{b.String()}
 }
 
 // writeObserverMetrics renders the observer's own counters.
-func (a *API) writeObserverMetrics(b *strings.Builder) {
-	st := a.DNSSEC.Stats()
+func (a *API) writeObserverMetrics(b *strings.Builder, observer DNSSECObserverStats, writer DNSSECWriterStats) {
+	st := observer.Stats()
 
 	// Every status appears, including at zero, so a dashboard has a stable
 	// set of series from the first scrape rather than growing one the first
@@ -364,8 +381,8 @@ func (a *API) writeObserverMetrics(b *strings.Builder) {
 	// without a counter: a validation that completed and then failed to reach
 	// the database because the write queue was full behind the query log.
 	// dropped_total says "we did not look"; this says "we looked and lost it".
-	if a.DNSSECWriter != nil {
-		w := a.DNSSECWriter.Stats()
+	if writer != nil {
+		w := writer.Stats()
 		metric(b, "dnsdaddy_dnssec_local_stored_total",
 			"Observations written to the database", "counter",
 			fmt.Sprintf("dnsdaddy_dnssec_local_stored_total %d", w.Written))
@@ -382,11 +399,11 @@ func (a *API) writeObserverMetrics(b *strings.Builder) {
 // writeAnchorMetrics renders the trust-anchor facts as counts with a closed
 // label set. The one to alert on is viable dropping to 0, which means nothing
 // can be authenticated until an operator supplies an anchor.
-func (a *API) writeAnchorMetrics(b *strings.Builder) {
-	if a.Anchors != nil {
-		tp := a.Anchors.TrustPoint()
+func (a *API) writeAnchorMetrics(b *strings.Builder, anchors DNSSECAnchors) {
+	if anchors != nil {
+		tp := anchors.TrustPoint()
 		viable := 0
-		if a.Anchors.Viable() {
+		if anchors.Viable() {
 			viable = 1
 		}
 		metric(b, "dnsdaddy_dnssec_anchor_viable",
@@ -401,7 +418,7 @@ func (a *API) writeAnchorMetrics(b *strings.Builder) {
 			keys = append(keys, fmt.Sprintf("dnsdaddy_dnssec_anchor_keys{state=%q} %d", st, byState[st]))
 		}
 		metric(b, "dnsdaddy_dnssec_anchor_keys", "Managed trust-anchor keys by RFC 5011 state", "gauge", keys...)
-		health := a.Anchors.Health()
+		health := anchors.Health()
 		metric(b, "dnsdaddy_dnssec_anchor_save_errors_total",
 			"Trust-anchor state writes that failed since start; the anchors in force are unaffected",
 			"counter", fmt.Sprintf("dnsdaddy_dnssec_anchor_save_errors_total %d", health.SaveErrors))

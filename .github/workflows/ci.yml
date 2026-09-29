@@ -205,6 +205,9 @@ jobs:
             listen_udp: "127.0.0.1:15353"
             listen_tcp: "127.0.0.1:15353"
             upstreams: ["udp://1.1.1.1:53"]
+            # This smoke fixture exercises the configured forwarding path.
+            # Native Live's serving and trust semantics have dedicated tests.
+            local_dnssec_validation: "off"
           http:
             listen: "127.0.0.1:18080"
             admin_password: "ci-test-password-longer-than-twelve"
@@ -339,6 +342,7 @@ jobs:
             listen_udp: "127.0.0.1:15354"
             listen_tcp: "127.0.0.1:15354"
             upstreams: ["udp://1.1.1.1:53"]
+            local_dnssec_validation: "off"
             # Deliberately excludes loopback, so this instance refuses the very
             # client the dashboard is about to permit.
             allowed_client_cidrs: ["10.99.0.0/16"]
@@ -450,6 +454,12 @@ jobs:
             listen_udp: "127.0.0.1:15363"
             listen_tcp: "127.0.0.1:15363"
             upstreams: ["udp://127.0.0.1:15300"]
+            # Synthetic .example answers must stay inside this local lab.
+            local_dnssec_validation: "off"
+          protection:
+            rebinding:
+              # The synthetic sink returns only these documentation ranges.
+              allow_cidrs: ["203.0.113.0/24", "2001:db8::/32"]
           http:
             listen: "127.0.0.1:18090"
             admin_password: "ci-test-password-longer-than-twelve"

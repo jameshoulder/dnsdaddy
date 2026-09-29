@@ -30,11 +30,16 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 	defer tx.Rollback()
 
 	if persist {
+		// Allocate from a persistent counter rather than MAX(id): retention
+		// may remove the newest insertion, and reusing its ID would collide
+		// with previously exported queries. The insert trigger advances the
+		// counter in this transaction, including between rows in one batch.
 		stmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO query_log (ts, client_ip, client_name, network_id, qname, qtype,
+			INSERT INTO query_log (id, ts, client_ip, client_name, network_id, qname, qtype,
 			                       action, reason, category, source, proto, elapsed_ms, cached,
-			                       dnssec, dnssec_obs)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			                       dnssec, dnssec_obs, dnssec_source)
+			VALUES ((SELECT value + 1 FROM export_sequences WHERE dataset = 'queries'),
+			        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return err
 		}
@@ -43,7 +48,7 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		for _, e := range events {
 			if _, err := stmt.ExecContext(ctx, unixMilli(e.Time), e.ClientIP, e.ClientName, e.NetworkID,
 				e.Domain, e.QType, e.Action, e.Reason, e.Category, e.Source, e.Proto,
-				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID); err != nil {
+				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID, e.DNSSECSource); err != nil {
 				return err
 			}
 		}
@@ -259,8 +264,10 @@ type QueryFilter struct {
 	ClientIP    string
 	Since       time.Time
 	Until       time.Time
-	Cursor      int64 // return rows with id < cursor; 0 means start at the newest
+	Cursor      int64 // exclusive insertion position; 0 starts at the beginning
 	Limit       int
+	Ascending   bool   // exports walk insertion order, including backdated events
+	MaxID       *int64 // frozen export boundary; nil is an ordinary list
 }
 
 // ListQueries returns query-log rows newest-first, plus the cursor to pass in
@@ -306,9 +313,24 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 		where = append(where, "ts <= ?")
 		args = append(args, unixMilli(f.Until))
 	}
+	if f.Cursor < 0 {
+		return nil, 0, ErrInvalidCursor
+	}
 	if f.Cursor > 0 {
-		where = append(where, "id < ?")
+		if f.Ascending {
+			where = append(where, "id > ?")
+		} else {
+			where = append(where, "id < ?")
+		}
 		args = append(args, f.Cursor)
+	}
+	if f.MaxID != nil {
+		where = append(where, "id <= ?")
+		args = append(args, *f.MaxID)
+	}
+	order := "id DESC"
+	if f.Ascending {
+		order = "id ASC"
 	}
 	args = append(args, limit+1)
 
@@ -316,9 +338,9 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 	// ("network_id = ?"); every filter value is bound as a parameter in args.
 	// Never append a fragment built from input here.
 	q := `SELECT id, ts, client_ip, client_name, network_id, qname, qtype, action,
-	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs
+	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs, dnssec_source
 	      FROM query_log WHERE ` + strings.Join(where, " AND ") + `
-	      ORDER BY id DESC LIMIT ?`
+	      ORDER BY ` + order + ` LIMIT ?`
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -335,7 +357,7 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 		)
 		if err := rows.Scan(&e.ID, &ts, &e.ClientIP, &e.ClientName, &e.NetworkID, &e.Domain,
 			&e.QType, &e.Action, &e.Reason, &e.Category, &e.Source, &e.Proto, &e.ElapsedMS,
-			&cached, &e.DNSSEC, &e.DNSSECObservationID); err != nil {
+			&cached, &e.DNSSEC, &e.DNSSECObservationID, &e.DNSSECSource); err != nil {
 			return nil, 0, err
 		}
 		e.Time = fromUnixMilli(ts)

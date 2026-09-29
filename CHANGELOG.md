@@ -22,6 +22,63 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Native protection and investigation workflows
+
+Daddybound Live is now implemented. A fresh installation selects the experimental
+native recursive resolver by default; stored Off/Learn selections and explicit
+YAML modes keep their precedence. Authenticated dashboard controls can change an
+unpinned mode after the operator acknowledges native plaintext UDP/TCP port 53
+traffic. Live validates the exact records it returns, honours DNSSEC AD/CD/DO
+semantics, fails closed on validation or resolution failure, and never silently
+falls back to forwarding. Learn and Live share one native engine and anchor
+manager. Live still requires authoritative-server reachability and does not
+provide conditional forwarding for private or split DNS.
+
+- Local per-client learning is enabled by default. Bounded, persisted fitted
+  baselines score eligible windows before accepting training updates. Warm-up,
+  privacy exclusions, queue loss, model availability and sample limitations are
+  visible. These uncalibrated scores produce reviewable findings and never block
+  a domain by themselves. Synthetic holdout and drift experiments are included;
+  they are not production accuracy claims.
+- Domain/client investigation now correlates original query decisions, immutable
+  captured evidence, current evidence, findings, review history, native
+  observations and learning state. Read-only policy preview never starts a
+  provider lookup. Finding reviews preserve the original evidence.
+- Per-client token buckets and IPv4/IPv6 rebinding protection are enabled by
+  default when no override exists, including on upgrade. Operators can configure
+  bounded limits and explicit internal-domain/CIDR exceptions. This is an
+  intentional new protection default; check legitimate internal DNS deployments.
+- Decision recording defaults on when not explicitly configured off. Global or
+  policy query-recording opt-outs also suppress decision records and heuristic
+  observations; per-client learning additionally requires client-IP recording.
+- External API onboarding is available in the dashboard with operator-owned,
+  encrypted, write-only credentials. Drafts start disabled and domain sharing
+  requires explicit consent. Configuration changes cancel obsolete work and
+  invalidate cached policy verdicts. Provider network errors do not retain
+  credential-bearing URLs. The built-in Threat Observatory feed is retired;
+  custom compatible feeds remain supported.
+- Queries, decisions and findings have stable keyset pagination and complete
+  bounded NDJSON exports. Export insertion boundaries survive retention and
+  prevent later backdated inserts from entering a continuing walk. Optional
+  signed webhooks use a durable bounded outbox, finite retries and explicit
+  delivery metrics.
+- Redacted configuration history records durable intent and actual persisted
+  changes. Encrypted backups include consistent SQLite state, credential keys,
+  managed native state and completed learning checkpoints; offline restore
+  verifies them into a new directory and revokes restored sessions.
+- The redesigned dashboard exposes Daddybound mode/transport/anchor health,
+  observation and storage loss, resolver protections, integration consent,
+  recovery and complete exports. README screenshots are captured from the
+  running interface with explicitly synthetic local traffic.
+
+See [the implementation status](docs/feature-increment-status.md),
+[native Live decision](docs/decisions/0003-daddybound-native-live.md),
+[learning](docs/learning.md), [protection](docs/protection.md),
+[external APIs](docs/external-apis.md), [exports](docs/exports.md),
+[webhooks](docs/webhooks.md) and [recovery](docs/recovery.md) for contracts and
+remaining limitations. The earlier Learn-only entries below describe the
+foundation superseded by this increment.
+
 ### The overview says what it measured
 
 `GET /api/v1/overview` gains a `measured` block. Every field it had keeps its

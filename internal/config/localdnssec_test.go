@@ -1,7 +1,6 @@
 package config
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
@@ -26,24 +25,20 @@ func TestTheShippedConfigLeavesTheModeToTheInstallation(t *testing.T) {
 	}
 }
 
-// TestAFreshInstallRunsLearn is the product default.
-//
-// Learn is safe to switch on for someone who has just installed DNS Daddy:
-// it runs out of band, records what it concludes and can never alter a client
-// response. What it is not safe to do is arrive unannounced on a machine that
-// has been running for a year, which is the case below it.
-func TestAFreshInstallRunsLearn(t *testing.T) {
+// Fresh installation state enables real native client answers. A product
+// default must not accidentally select the independent Learn observer.
+func TestAFreshInstallRunsNativeLive(t *testing.T) {
 	cfg := Default()
-	mode, fromInstall := cfg.ResolveLocalDNSSEC(LocalDNSSECObserve)
+	mode, fromInstall := cfg.ResolveLocalDNSSEC(LocalDNSSECEnforce)
 
-	if mode != LocalDNSSECObserve {
-		t.Fatalf("a fresh installation resolved to %q, want %q", mode, LocalDNSSECObserve)
+	if mode != LocalDNSSECEnforce {
+		t.Fatalf("a fresh installation resolved to %q, want %q", mode, LocalDNSSECEnforce)
 	}
 	if !fromInstall {
 		t.Fatal("the mode was not reported as coming from the installation record")
 	}
-	if !cfg.DNS.ObserveDNSSEC() {
-		t.Fatal("the resolved configuration does not start Learn mode")
+	if cfg.DNS.ObserveDNSSEC() {
+		t.Fatal("Live was silently downgraded to independent Learn observations")
 	}
 }
 
@@ -72,7 +67,7 @@ func TestAnUpgradeThatNeverAskedForItStaysOff(t *testing.T) {
 // An unreadable or absent installation record is not evidence that this is a
 // new install, so it must not be treated as one.
 func TestAnUnreadableInstallationRecordFallsBackToOff(t *testing.T) {
-	for _, record := range []string{"", "learn", "enforce", "yes", "  observe"} {
+	for _, record := range []string{"", "learn", "live", "yes", "  observe"} {
 		cfg := Default()
 		if mode, _ := cfg.ResolveLocalDNSSEC(record); mode != LocalDNSSECOff {
 			t.Errorf("installation record %q resolved to %q, want %q", record, mode, LocalDNSSECOff)
@@ -86,6 +81,10 @@ func TestAnExplicitModeIsNeverOverriddenByTheInstallation(t *testing.T) {
 	for _, tc := range []struct{ configured, record string }{
 		{LocalDNSSECOff, LocalDNSSECObserve},
 		{LocalDNSSECObserve, LocalDNSSECOff},
+		{LocalDNSSECOff, LocalDNSSECEnforce},
+		{LocalDNSSECObserve, LocalDNSSECEnforce},
+		{LocalDNSSECEnforce, LocalDNSSECOff},
+		{LocalDNSSECEnforce, LocalDNSSECObserve},
 	} {
 		cfg := Default()
 		cfg.DNS.LocalDNSSECValidation = tc.configured
@@ -105,7 +104,7 @@ func TestAnExplicitModeIsNeverOverriddenByTheInstallation(t *testing.T) {
 // call would be a very unpleasant surprise.
 func TestResolvingIsIdempotent(t *testing.T) {
 	cfg := Default()
-	first, _ := cfg.ResolveLocalDNSSEC(LocalDNSSECObserve)
+	first, _ := cfg.ResolveLocalDNSSEC(LocalDNSSECEnforce)
 	second, fromInstall := cfg.ResolveLocalDNSSEC(LocalDNSSECOff)
 	if second != first {
 		t.Fatalf("a second resolve changed the mode from %q to %q", first, second)
@@ -129,32 +128,15 @@ func TestAZeroValueModeIsOffRatherThanAnError(t *testing.T) {
 	}
 }
 
-// TestEnforceIsRefusedRatherThanDowngraded is the rule this whole function
-// exists for.
-//
-// "enforce" is a word an operator can reasonably expect to work, and it does
-// not. The dangerous failure is not rejecting it — it is accepting it and
-// running in observe, which leaves someone believing their resolver refuses
-// forged answers while it forwards them unchanged. Refusing to start is the
-// only honest outcome, and the message has to say so rather than just naming
-// a valid set.
-func TestEnforceIsRefusedRatherThanDowngraded(t *testing.T) {
+func TestEnforceIsAcceptedWithoutDowngrade(t *testing.T) {
 	cfg := Default()
 	cfg.DNS.LocalDNSSECValidation = LocalDNSSECEnforce
 
-	err := cfg.validateLocalDNSSEC()
-	if err == nil {
-		t.Fatal("enforce was accepted; a mode that is not implemented must fail startup")
+	if err := cfg.validateLocalDNSSEC(); err != nil {
+		t.Fatalf("implemented native Live mode was rejected: %v", err)
 	}
-	msg := err.Error()
-	for _, want := range []string{"not implemented", LocalDNSSECObserve, LocalDNSSECOff} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("the error does not mention %q, so it does not explain what happened: %s", want, msg)
-		}
-	}
-	// And the mode must not have been quietly rewritten on the way out.
-	if cfg.DNS.ObserveDNSSEC() {
-		t.Fatal("a refused mode still reports as observing")
+	if cfg.DNS.LocalDNSSECMode() != LocalDNSSECEnforce || cfg.DNS.ObserveDNSSEC() {
+		t.Fatal("explicit Live mode was silently changed")
 	}
 }
 
@@ -205,6 +187,40 @@ func TestNegativeBudgetsAreRejectedEvenWhenOff(t *testing.T) {
 	}
 }
 
+func TestNativeBudgetsStayBoundedEvenWhenOff(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*Config)
+	}{
+		{"workers", func(c *Config) { c.DNS.LocalDNSSECWorkers = 65 }},
+		{"queue", func(c *Config) { c.DNS.LocalDNSSECQueue = 16385 }},
+		{"timeout", func(c *Config) { c.DNS.LocalDNSSECTimeout = Duration(time.Minute + time.Nanosecond) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.DNS.LocalDNSSECValidation = LocalDNSSECOff
+			tc.apply(&cfg)
+			if err := cfg.validateLocalDNSSEC(); err == nil {
+				t.Fatalf("oversized %s budget accepted", tc.name)
+			}
+		})
+	}
+	for _, budget := range []struct {
+		workers, queue int
+		timeout        time.Duration
+	}{
+		{0, 0, 0}, {64, 16384, time.Minute},
+	} {
+		cfg := Default()
+		cfg.DNS.LocalDNSSECWorkers = budget.workers
+		cfg.DNS.LocalDNSSECQueue = budget.queue
+		cfg.DNS.LocalDNSSECTimeout = Duration(budget.timeout)
+		if err := cfg.validateLocalDNSSEC(); err != nil {
+			t.Fatalf("valid boundary budget rejected: %v", err)
+		}
+	}
+}
+
 // TestTelemetryAndLocalValidationAreIndependent guards the field ADR 0002 §9
 // says must not be repurposed.
 //
@@ -220,6 +236,10 @@ func TestTelemetryAndLocalValidationAreIndependent(t *testing.T) {
 	}
 	if !cfg.DNS.ObserveDNSSEC() {
 		t.Fatal("switching telemetry off switched observation off too")
+	}
+	cfg.DNS.LocalDNSSECValidation = LocalDNSSECEnforce
+	if err := cfg.validateLocalDNSSEC(); err != nil || cfg.DNS.LocalDNSSECMode() != LocalDNSSECEnforce {
+		t.Fatalf("Live depends on forwarded upstream telemetry: %v", err)
 	}
 
 	cfg = Default()

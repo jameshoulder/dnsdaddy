@@ -103,9 +103,9 @@ dns:
   # it authenticated each answer (RFC 6840 s5.7), recorded per query as
   # validated / unvalidated / servfail.
   #
-  # This is NOT DNSSEC validation. DNS Daddy forwards rather than validating
-  # locally, so what this records is the upstream's verdict — a weaker
-  # statement, made honestly. It does not request DNSSEC records, so response
+  # This is upstream telemetry for the forwarding path in Off/Learn modes.
+  # Native Live validates locally and does not use this switch. It does not
+  # request DNSSEC records from a forwarder, so forwarded response
   # sizes are unchanged, and the AD bit is stripped again before answering a
   # client that did not ask for it (RFC 4035 s3.2.3).
   #
@@ -118,32 +118,34 @@ dns:
   #   off      nothing is constructed and no extra query is sent.
   #   observe  validate alongside resolution and record what it concludes.
   #            The dashboard calls this Learn mode.
+  #   enforce  native Live: answer from native authoritative recursion and
+  #            validate the exact returned data. Bogus/indeterminate answers
+  #            return SERVFAIL; there is no fallback to upstream forwarders.
   #
-  # Leave the key out entirely and the installation decides: a new install
-  # runs Learn, and upgrading an installation that never configured this
-  # leaves it off — because Learn sends its own DNSSEC queries upstream, and
-  # that is not a change to inherit from a version bump. The decision is taken
-  # once, on first run, and recorded in the database; setting the key here
-  # always overrides it.
+  # Empty or omitted lets the installation decide: a NEW installation runs
+  # native Live. Existing recorded Learn/off choices are preserved; an older
+  # installation without a first-run record stays off. An explicit mode here
+  # or in DNSDADDY_LOCAL_DNSSEC_VALIDATION overrides dashboard mode changes.
   #
-  # Observe mode does NOT change any answer. A bogus verdict is recorded and
-  # reported; the client still receives the response the resolver produced.
-  # There is no enforcement, and "enforce" is refused at startup rather than
-  # quietly treated as "observe".
+  # Live and Learn contact authoritative servers directly over plaintext
+  # UDP/TCP 53, even if the configured forwarders use DoH/DoT. Native Live is
+  # experimental; longer field evaluation and target-device load evidence are
+  # still needed. For split DNS that requires a private forwarder, explicitly
+  # select Learn or off until native conditional forwarding is supported.
   #
-  # It is not free. Each observed query causes its own DNSSEC lookups upstream
-  # and a chain walk on a background worker, which on a single-vCPU box
-  # competes with resolution for CPU. Nothing on the answer path waits for it.
-  # See docs/dns-security/dnssec.md.
-  local_dnssec_validation: off
+  # Learn records an independent native validation without changing the
+  # forwarded answer. Off constructs no native runtime and sends no native
+  # queries. See docs/decisions/0003-daddybound-native-live.md.
+  local_dnssec_validation: ""
 
-  # Only read in observe (Learn) mode.
-  local_dnssec_workers: 2      # concurrent validations
-  local_dnssec_queue: 256      # queries waiting to be observed; drops when full
-  local_dnssec_timeout: 2s     # per observation, including its lookups
+  # Learn-only queue controls; both are bounded even when currently off.
+  local_dnssec_workers: 2      # concurrent observations; maximum 64
+  local_dnssec_queue: 256      # waiting observations; maximum 16384; drops counted
+  local_dnssec_timeout: 5s     # complete Live answer / Learn walk; maximum 1m
 
-  # Replaces the compiled-in IANA root anchors. Normally empty. Anchors are
-  # never fetched over the network.
+  # Replaces the compiled-in IANA root bootstrap anchors. Normally empty.
+  # RFC 5011 refreshes authenticate against existing trust and preserve their
+  # hold-down/lifecycle state in the data directory; back that state up too.
   # local_dnssec_trust_anchor_file: /etc/dnsdaddy/root.key
 
 http:
@@ -228,15 +230,16 @@ log:
   # which feed or provider was behind it, which policy was in force, and the
   # explanation as it stood at that moment.
   #
-  # OFF BY DEFAULT. It is one extra write per BLOCKED query — not per query —
-  # so the cost scales with how much you block rather than with your traffic.
+  # ON BY DEFAULT. Retains explicit decision evidence, including block rules,
+  # native failures and local protection decisions, for investigation.
+  # Query logging and per-policy privacy controls still gate retention.
   # Nothing is written on the resolution path: the record is queued and
   # written by a separate worker, and a full queue drops and counts rather
   # than making a lookup wait.
   #
   # The point of storing it rather than reconstructing it later is that a feed
   # refreshing must not be able to change why something was blocked last week.
-  decision_records: false
+  decision_records: true      # set false to disable these additional records
 
   # How long those records are kept. Longer than the query log by default: the
   # log answers "what happened", and this answers "why", which is the question
@@ -382,21 +385,53 @@ detection:
   # signals noisier without making anything more sensitive.
   window_scale: 1.0
 
+# --- Resolver protection ----------------------------------------------------
+# Local admission and answer checks. Defaults apply until a versioned dashboard
+# setting is saved; saved Settings → Resolver protection values then prevail.
+# Both protections also run when native DNS validation is Off.
+protection:
+  rate_limit:
+    enabled: true
+    qps: 50
+    burst: 100
+    max_clients: 4096
+    idle_seconds: 300
+  rebinding:
+    enabled: true
+    # Original question domains that may legitimately resolve internally.
+    # Use narrowly owned suffixes, such as corp.example; not a public suffix.
+    allow_domains: []
+    # Explicit address ranges permitted in otherwise protected answers.
+    # Native Live has no conditional forwarding: exceptions alone cannot make
+    # an internal zone resolvable. See docs/protection.md.
+    allow_cidrs: []
+
+# --- Local traffic learning -------------------------------------------------
+# Explainable, experimental per-client anomaly findings. This does not enable
+# provider sharing or automatically turn anomaly scores into blocking rules.
+# Learning requires both query recording and client-IP recording. Completed
+# baselines persist in data_dir; warm-up and loss are visible in Daddybound.
+learning:
+  enabled: true
+
 # --- External API integrations ----------------------------------------------
 #
 # "Bring your own intelligence": reputation and enrichment services you have
-# chosen to consult, configured from Integrations → External APIs.
+# chosen to consult, configured from External APIs.
 #
 # OFF BY DEFAULT, and worth understanding before switching on. Enabling this
 # changes what leaves your network: on a cache miss, the domain a client is
-# resolving is sent to a third party. Read docs/external-apis.md §5 — it is the
-# threat-model delta, not marketing.
+# resolving is sent to a third party. Read docs/external-apis.md for sharing,
+# consent, credentials and the limits of provider responses.
 #
 # Nothing here is verified against any vendor's live service. Every adapter is
 # exercised in CI against captured responses. Use Test connection.
 integrations:
-  # The whole subsystem. Off means no workers start, no table is read, and the
-  # resolution path costs one atomic load per query.
+  # Legacy startup preference, retained for configuration compatibility.
+  # External API management is always available in the dashboard. On upgrade,
+  # the prior effective sharing choice is migrated once; thereafter explicit
+  # saved dashboard choices take precedence. Merely opening the page never
+  # sends a provider request.
   enabled: false
 
   # Workers draining the lookup queue.
@@ -412,19 +447,17 @@ integrations:
   # bounds memory rather than deciding what is remembered.
   cache_entries: 4096
 
-  # The CEILING on how much say providers have over resolution — not a default.
-  # The dashboard can lower this at any time; nothing reachable over the
-  # network can raise it above what is written here.
+  # Initial sharing preference, used for the one-time legacy migration when
+  # enabled above. Thereafter the authenticated dashboard manages this choice
+  # with explicit sharing consent; this YAML value is no longer a UI ceiling.
   #
   #   off         never consulted from the resolution path
   #   cache_only  read the local cache, never wait; a miss queues a lookup and
   #               answers immediately, so the verdict is there next time
   #   blocking    on a cache miss, wait up to reputation_budget for an answer
   #
-  # blocking IS DELIBERATELY NOT OFFERED IN THE DASHBOARD. It is the only mode
-  # that puts somebody else's latency in front of a DNS answer, and it belongs
-  # to a person who read docs/external-apis.md rather than to a radio button.
-  # Setting it here is that decision.
+  # The dashboard offers all three modes. Blocking also requires an explicit
+  # acknowledgement that provider latency can delay DNS within the budget.
   reputation_mode: "off"
 
   # The hard ceiling on how long a query may wait in blocking mode. On expiry

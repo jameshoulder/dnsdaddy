@@ -205,7 +205,7 @@ func (v *virusTotal) usernameForQuota() string {
 func (v *virusTotal) get(ctx context.Context, path string) (*apiprovider.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.baseURL+path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("provider request could not be constructed")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("x-apikey", v.cfg.Secret)

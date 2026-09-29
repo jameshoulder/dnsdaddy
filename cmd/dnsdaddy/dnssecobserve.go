@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jameshoulder/dnsdaddy/internal/api"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/dnssec"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/native"
@@ -216,34 +215,4 @@ func observerOrNil(d *dnssecObservation) dnsserver.DNSSECObserver {
 		return nil
 	}
 	return d.observer
-}
-
-// dnssecStatsOrNil exposes the observer's counters to the API without handing
-// it a non-nil interface wrapping a nil pointer.
-func dnssecStatsOrNil(d *dnssecObservation) api.DNSSECObserverStats {
-	if d == nil || d.observer == nil {
-		return nil
-	}
-	return d.observer
-}
-
-// dnssecWriterOrNil exposes the writer's counters to the API, so an
-// observation that completed and was then lost before storage is visible
-// rather than only implied by a smaller dataset.
-func dnssecWriterOrNil(d *dnssecObservation) api.DNSSECWriterStats {
-	if d == nil || d.writer == nil {
-		return nil
-	}
-	return d.writer
-}
-
-// dnssecAnchorsOrNil exposes the trust-anchor manager's reporting face to the
-// API, so the status page can show the keys in force, the refresh schedule
-// and whether the state file is being written — without handing it a non-nil
-// interface wrapping a nil pointer.
-func dnssecAnchorsOrNil(d *dnssecObservation) api.DNSSECAnchors {
-	if d == nil || d.anchors == nil {
-		return nil
-	}
-	return d.anchors
 }

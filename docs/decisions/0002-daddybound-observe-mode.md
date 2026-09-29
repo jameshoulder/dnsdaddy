@@ -1,6 +1,8 @@
 # ADR 0002 — Daddybound observe mode
 
-**Status:** accepted; §4 superseded in part (see the note below)
+**Status:** accepted for Learn; enforcement refusal superseded by
+[ADR 0003](0003-daddybound-native-live.md). §4's old transport is also
+superseded as described below. This ADR records the original design.
 **Date:** 2026-09-09
 **Implements:** [issue #63](https://github.com/jameshoulder/dnsdaddy/issues/63)
 **Builds on:** [ADR 0001](0001-local-dnssec-validation.md),

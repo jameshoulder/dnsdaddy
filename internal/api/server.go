@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
+	"github.com/jameshoulder/dnsdaddy/internal/backup"
 	"github.com/jameshoulder/dnsdaddy/internal/blocklist"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -21,11 +22,14 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
+	"github.com/jameshoulder/dnsdaddy/internal/learning"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
+	"github.com/jameshoulder/dnsdaddy/internal/protection"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/web"
+	"github.com/jameshoulder/dnsdaddy/internal/webhook"
 )
 
 // Deps are everything the API needs to serve.
@@ -42,20 +46,28 @@ type Deps struct {
 	// Detector is the behavioural detection engine, or nil when detection is
 	// switched off. Every handler that touches it must tolerate nil.
 	Detector *detect.Engine
-	Auth     *Auth
-	Log      *slog.Logger
+	Learning *learning.Engine
+	// LearningError reports a failed optional learner startup. The API returns
+	// an actionable generic message; full details stay in local logs.
+	LearningError string
+	Protection    *protection.Controller
+	Recovery      *backup.Manager
+	Webhooks      *webhook.Service
+	Auth          *Auth
+	Log           *slog.Logger
 
-	// Providers and Intel are the external-intelligence feature. Both are nil
-	// unless integrations.enabled is set, and every handler that touches them
-	// must tolerate that: the default deployment has no external providers and
-	// must not acquire a code path that assumes one.
+	// Providers and Intel support configuration from the dashboard. They are
+	// constructed without enabling outbound lookups; every provider still
+	// requires the operator's configuration and consent. Nil is tolerated in
+	// embedded/test deployments where management is unavailable.
 	Providers *apiprovider.Engine
 	Intel     *intel.Source
 
-	// DNSSEC reports what local validation has observed, or nil when local
-	// validation is off — which is the default. Read-only: the API reports
-	// observations, it never makes or acts on one.
-	DNSSEC DNSSECObserverStats
+	// DNSSEC is the optional fixed Learn reporting face. The daemon supplies
+	// DNSSECControl instead so mode changes and all runtime readers share the
+	// current selection. Reading either face performs no DNS query.
+	DNSSEC        DNSSECObserverStats
+	DNSSECControl DNSSECControl
 
 	// DNSSECWriter reports what became of completed observations. Nil
 	// whenever local validation is off.
@@ -115,6 +127,7 @@ type API struct {
 	// The remaining writer is the seed, which runs once at startup before
 	// anything is served.
 	networkWrites sync.Mutex
+	configWrites  sync.Mutex
 }
 
 // New returns an API bound to deps.
@@ -156,9 +169,17 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/threats/categories", a.handleThreatsByCategory)
 	api.HandleFunc("GET /api/v1/threats/top-domains", a.handleTopBlocked)
 	api.HandleFunc("GET /api/v1/queries", a.handleQueryLog)
+	api.HandleFunc("GET /api/v1/queries/export", a.handleExportQueries)
 	api.HandleFunc("GET /api/v1/categories", a.handleCategories)
 	api.HandleFunc("GET /api/v1/resolvers", a.handleResolvers)
 	api.HandleFunc("GET /api/v1/settings", a.handleSettings)
+	api.HandleFunc("GET /api/v1/protection", a.handleProtection)
+	api.HandleFunc("PUT /api/v1/protection", a.handleProtection)
+	api.HandleFunc("GET /api/v1/learning/status", a.handleLearningStatus)
+	api.HandleFunc("GET /api/v1/learning/clients", a.handleLearningClients)
+	api.HandleFunc("GET /api/v1/config/history", a.handleConfigHistory)
+	api.HandleFunc("GET /api/v1/recovery/status", a.handleRecoveryStatus)
+	api.HandleFunc("POST /api/v1/recovery/backup", a.handleRecoveryBackup)
 	api.HandleFunc("GET /api/v1/reports/summary", a.handleReportSummary)
 
 	// Behavioural findings. Read-only: there is nothing to configure here
@@ -176,10 +197,11 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/detectors", a.handleDetectors)
 	api.HandleFunc("GET /api/v1/dnssec/observations", a.handleDNSSECObservations)
 	// The Daddybound runtime as a bounded snapshot: mode, resolution source,
-	// trust anchors, observer counters, stored populations, and the plain
-	// statement that the evidence is insufficient for enforcement. Polling
+	// trust anchors, native/observer counters, stored populations and the
+	// limits of the measured evidence. Polling
 	// it resolves nothing and mutates no trust state.
 	api.HandleFunc("GET /api/v1/dnssec/status", a.handleDNSSECStatus)
+	api.HandleFunc("PUT /api/v1/dnssec/mode", a.handleDNSSECMode)
 
 	api.HandleFunc("GET /api/v1/networks", a.handleListNetworks)
 	api.HandleFunc("POST /api/v1/networks", a.handleCreateNetwork)
@@ -203,9 +225,8 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/feeds/refresh", a.handleRefreshFeeds)
 	api.HandleFunc("POST /api/v1/feeds/{id}/refresh", a.handleRefreshFeed)
 
-	// External intelligence providers. Every route answers 503 when the
-	// feature is switched off, so a dashboard can tell "not configured" from
-	// "not in this build".
+	// External API configuration is available without editing YAML or a
+	// restart. Providers and domain sharing remain explicitly opt-in.
 	//
 	// The credential is write-only across this whole group: it goes in through
 	// POST providers and POST providers/{id}/secret, and there is no route
@@ -222,11 +243,18 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/integrations/providers/{id}/health", a.handleProviderHealth)
 	api.HandleFunc("GET /api/v1/integrations/templates", a.handleProviderTemplates)
 	api.HandleFunc("PUT /api/v1/integrations/reputation", a.handleSetReputationMode)
+	api.HandleFunc("GET /api/v1/integrations/settings", a.handleGetIntegrationSettings)
+	api.HandleFunc("PUT /api/v1/integrations/settings", a.handleSetIntegrationSettings)
+	api.HandleFunc("GET /api/v1/integrations/webhook", a.handleGetWebhook)
+	api.HandleFunc("PUT /api/v1/integrations/webhook", a.handleSetWebhook)
+	api.HandleFunc("POST /api/v1/integrations/webhook/test", a.handleTestWebhook)
+	api.HandleFunc("DELETE /api/v1/integrations/webhook/secret", a.handleDeleteWebhookSecret)
 
 	// Decision records: why the resolver did what it did. Read-only by
 	// design — a management API that could rewrite a decision would make the
 	// record worthless as evidence.
 	api.HandleFunc("GET /api/v1/decisions", a.handleListDecisions)
+	api.HandleFunc("GET /api/v1/decisions/export", a.handleExportDecisions)
 	api.HandleFunc("GET /api/v1/decisions/{id}", a.handleGetDecision)
 	api.HandleFunc("GET /api/v1/evidence/domain/{domain}", a.handleDomainEvidence)
 
@@ -249,7 +277,7 @@ func (a *API) Handler() http.Handler {
 
 	api.HandleFunc("GET /metrics", a.handleMetrics)
 
-	mux.Handle("/api/v1/", a.requireAuth(api))
+	mux.Handle("/api/v1/", a.requireAuth(a.withConfigAudit(api)))
 	mux.Handle("/metrics", a.requireAuth(api))
 
 	// --- Dashboard ----------------------------------------------------------

@@ -3,7 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/evidence"
@@ -36,6 +39,10 @@ type Decision struct {
 
 	// Cited is populated by DecisionWithEvidence, not by the list queries.
 	Cited []CitedEvidence `json:"evidence,omitempty"`
+	// EvidenceSource is set by the detail/export path. Legacy decisions only
+	// have mutable references, which must never be described as a snapshot.
+	EvidenceSource string `json:"evidenceSource,omitempty"`
+	EvidenceNote   string `json:"evidenceNote,omitempty"`
 }
 
 // CitedEvidence is one piece of evidence a decision referred to.
@@ -88,9 +95,20 @@ func (s *Store) RecordDecision(ctx context.Context, d Decision, cited []CitedEvi
 		return Decision{}, err
 	}
 
+	seen := make(map[string]bool, len(cited))
 	for _, c := range cited {
-		if c.Evidence.ID == "" {
+		if c.Evidence.ID == "" || seen[c.Evidence.ID] {
 			continue
+		}
+		seen[c.Evidence.ID] = true
+		snapshot, err := json.Marshal(c.Evidence)
+		if err != nil {
+			return Decision{}, fmt.Errorf("capture decision evidence: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO decision_evidence_snapshots
+			(decision_id, evidence_id, contributed, snapshot) VALUES (?, ?, ?, ?)`,
+			d.ID, c.Evidence.ID, boolToInt(c.Contributed), string(snapshot)); err != nil {
+			return Decision{}, err
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO decision_evidence (decision_id, evidence_id, contributed)
@@ -99,65 +117,112 @@ func (s *Store) RecordDecision(ctx context.Context, d Decision, cited []CitedEvi
 			return Decision{}, err
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO decision_evidence_captures (decision_id, evidence_count) VALUES (?, ?)`, d.ID, len(seen)); err != nil {
+		return Decision{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Decision{}, err
 	}
+	d.EvidenceSource = "recorded_snapshot"
 	d.Cited = cited
 	return d, nil
 }
 
 // DecisionFilter bounds a decision listing.
 type DecisionFilter struct {
-	Subject  string
-	ClientIP string
-	Action   string
-	Limit    int
+	Subject   string
+	ClientIP  string
+	Action    string
+	Since     time.Time
+	Until     time.Time
+	Limit     int
+	Cursor    string
+	Ascending bool
+	// MaxInsertionID freezes an export's insertion boundary; nil is an ordinary list.
+	MaxInsertionID *int64
 }
 
 // ListDecisions returns recent decisions, newest first, without their
 // evidence. The detail endpoint fetches that; a list of fifty decisions each
 // carrying six evidence rows is a payload nobody reads.
 func (s *Store) ListDecisions(ctx context.Context, f DecisionFilter) ([]Decision, error) {
+	rows, _, err := s.ListDecisionsPage(ctx, f)
+	return rows, err
+}
+
+// ListDecisionsPage uses (time, id) as a total order, including decisions
+// recorded within the same millisecond. A full final page has no cursor.
+func (s *Store) ListDecisionsPage(ctx context.Context, f DecisionFilter) ([]Decision, string, error) {
 	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	q := `
-		SELECT id, ts, query_log_id, subject_type, subject, action, category,
-		       rule, policy_path, policy_id, network_id, client_ip, client_name,
-		       qtype, explanation, explanation_version
-		  FROM decisions WHERE 1=1`
+	where := []string{"1 = 1"}
 	args := []any{}
+	if f.Cursor != "" {
+		c, err := parseCursor(f.Cursor)
+		if err != nil {
+			return nil, "", err
+		}
+		if f.Ascending {
+			where = append(where, "(ts > ? OR (ts = ? AND id > ?))")
+		} else {
+			where = append(where, "(ts < ? OR (ts = ? AND id < ?))")
+		}
+		args = append(args, c.ts, c.ts, c.id)
+	}
 	if f.Subject != "" {
-		q += ` AND subject = ?`
+		where = append(where, "subject = ?")
 		args = append(args, evidence.Domain(f.Subject).Value)
 	}
 	if f.ClientIP != "" {
-		q += ` AND client_ip = ?`
+		where = append(where, "client_ip = ?")
 		args = append(args, f.ClientIP)
 	}
 	if f.Action != "" {
-		q += ` AND action = ?`
+		where = append(where, "action = ?")
 		args = append(args, f.Action)
 	}
-	q += ` ORDER BY ts DESC LIMIT ?`
-	args = append(args, limit)
-
+	if !f.Since.IsZero() {
+		where = append(where, "ts >= ?")
+		args = append(args, unixMilli(f.Since))
+	}
+	if !f.Until.IsZero() {
+		where = append(where, "ts <= ?")
+		args = append(args, unixMilli(f.Until))
+	}
+	if f.MaxInsertionID != nil {
+		where = append(where, "insertion_seq <= ?")
+		args = append(args, *f.MaxInsertionID)
+	}
+	order := "ts DESC, id DESC"
+	if f.Ascending {
+		order = "ts ASC, id ASC"
+	}
+	args = append(args, limit+1)
+	// #nosec G202 -- predicates and order are literal fragments; every value is bound.
+	q := `SELECT id, ts, query_log_id, subject_type, subject, action, category,
+	       rule, policy_path, policy_id, network_id, client_ip, client_name,
+	       qtype, explanation, explanation_version
+	       FROM decisions WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
-
-	out := make([]Decision, 0, 16)
+	out := make([]Decision, 0, limit)
 	for rows.Next() {
 		d, err := scanDecision(rows)
 		if err != nil {
-			return nil, err
+			return nil, "", err
+		}
+		if len(out) == limit {
+			last := out[len(out)-1]
+			return out, encodeCursor(findingCursor{ts: unixMilli(last.Time), id: last.ID}), rows.Err()
 		}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	return out, "", rows.Err()
 }
 
 // DecisionWithEvidence returns one decision and everything it cited.
@@ -180,8 +245,46 @@ func (s *Store) DecisionWithEvidence(ctx context.Context, id string) (Decision, 
 		return Decision{}, err
 	}
 
+	var expected int
+	err = s.db.QueryRowContext(ctx, `SELECT evidence_count FROM decision_evidence_captures WHERE decision_id = ?`, id).Scan(&expected)
+	if err == nil {
+		rows, err := s.db.QueryContext(ctx, `SELECT contributed, snapshot FROM decision_evidence_snapshots WHERE decision_id = ? ORDER BY evidence_id`, id)
+		if err != nil {
+			return Decision{}, err
+		}
+		defer rows.Close()
+		d.Cited = make([]CitedEvidence, 0, expected)
+		for rows.Next() {
+			var c CitedEvidence
+			var contributed int
+			var raw string
+			if err := rows.Scan(&contributed, &raw); err != nil {
+				return Decision{}, err
+			}
+			if err := json.Unmarshal([]byte(raw), &c.Evidence); err != nil {
+				return Decision{}, fmt.Errorf("read captured decision evidence: %w", err)
+			}
+			c.Contributed = contributed != 0
+			d.Cited = append(d.Cited, c)
+		}
+		if err := rows.Err(); err != nil {
+			return Decision{}, err
+		}
+		if len(d.Cited) != expected {
+			return Decision{}, fmt.Errorf("decision evidence snapshot is incomplete")
+		}
+		d.EvidenceSource = "recorded_snapshot"
+		return d, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Decision{}, err
+	}
+	// No attempt to backfill. A reference may have been refreshed or pruned
+	// before this upgrade; even an intact reference is not historical proof.
+	d.EvidenceSource = "legacy_current_reference"
+	d.EvidenceNote = "This decision predates evidence snapshots. The explanation is original; surviving evidence references reflect current stored rows and may have changed or been removed."
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT evidence_id, contributed FROM decision_evidence WHERE decision_id = ?`, id)
+		`SELECT evidence_id, contributed FROM decision_evidence WHERE decision_id = ? ORDER BY evidence_id`, id)
 	if err != nil {
 		return Decision{}, err
 	}

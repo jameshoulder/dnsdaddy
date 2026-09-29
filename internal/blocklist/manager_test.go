@@ -650,46 +650,22 @@ func TestObservatoryRejectsNonFeedBodyServedAs200(t *testing.T) {
 	}
 }
 
-func TestObservatoryFeedIsSeededDisabled(t *testing.T) {
-	// Every source a default install blocks from is one an operator can fetch
-	// themselves. Ours is opt-in, and a refactor must not quietly flip that.
+func TestRetiredObservatoryIsNotSeededOrOfferedByTheCatalog(t *testing.T) {
 	h := newManagerHarness(t)
-
-	found := false
 	for _, f := range catalog.DefaultFeeds {
-		if f.ID != catalog.ObservatoryFeedID {
-			continue
-		}
-		found = true
-		if f.Enabled {
-			t.Error("the Threat Observatory feed is seeded enabled; it must be opt-in")
-		}
-		if f.Format != string(FormatObservatory) {
-			t.Errorf("Observatory feed format = %q, want %q", f.Format, FormatObservatory)
-		}
-		if f.URL != catalog.ObservatoryFeedURL {
-			t.Errorf("Observatory feed URL = %q, want %q", f.URL, catalog.ObservatoryFeedURL)
+		if f.ID == catalog.ObservatoryFeedID {
+			t.Fatal("retired built-in feed remains in the shipped catalog")
 		}
 	}
-	if !found {
-		t.Fatal("the Threat Observatory feed is not in the shipped catalog")
-	}
-
-	// It is seeded into the database too, so it appears in the dashboard for an
-	// operator to turn on.
 	feeds, err := h.store.ListFeeds(context.Background())
 	if err != nil {
-		t.Fatalf("ListFeeds: %v", err)
+		t.Fatal(err)
 	}
 	for _, f := range feeds {
 		if f.ID == catalog.ObservatoryFeedID {
-			if !f.Builtin {
-				t.Error("the Observatory feed should be marked built-in")
-			}
-			return
+			t.Fatal("fresh install seeded the retired built-in feed")
 		}
 	}
-	t.Error("the Observatory feed was not seeded into the store")
 }
 
 func TestObservatoryDoesNotDowngradeAnotherFeedsClaim(t *testing.T) {

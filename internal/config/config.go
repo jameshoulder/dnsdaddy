@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/protection"
 )
 
 // Config is the fully resolved runtime configuration.
@@ -29,18 +31,27 @@ type Config struct {
 	Detection Detection `yaml:"detection"`
 	// Integrations is the external API provider subsystem. Off by default.
 	Integrations Integrations `yaml:"integrations"`
+	// Protection is local admission/rebinding protection, enabled by default.
+	Protection protection.Config `yaml:"protection"`
+	// Learning fits bounded, local per-client behavioural baselines.
+	Learning Learning `yaml:"learning"`
+}
+
+type Learning struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // Integrations configures the "bring your own intelligence" subsystem: the
 // external threat-intelligence, reputation and enrichment APIs an operator
 // attaches themselves.
 //
-// Every value here defaults to the inert one. A deployment that never opens
-// the Integrations page starts no workers, reads no provider table, and
-// resolves exactly as it did before. See docs/external-apis.md.
+// External sharing defaults off. Management and bounded workers are always
+// available so operators can configure their own providers in the dashboard;
+// merely constructing them or reading their status sends no provider request.
+// See docs/external-apis.md for consent and legacy-setting migration.
 type Integrations struct {
-	// Enabled starts the engine. With it off, no worker runs and the provider
-	// tables are never read — the feature costs nothing at all.
+	// Enabled is the legacy startup preference used during the one-time
+	// migration to dashboard-managed sharing. It no longer hides management.
 	Enabled bool `yaml:"enabled"`
 
 	// Workers drain the lookup queue. Two is right for a small VPS: the work
@@ -65,11 +76,8 @@ type Integrations struct {
 	//   blocking    reads the cache and, on a miss, waits up to
 	//               reputation_budget before failing open.
 	//
-	// blocking is deliberately not offered in the dashboard. It is the only
-	// mode that puts a third party's latency in front of a DNS answer, and
-	// that should be a decision somebody made while reading the
-	// documentation rather than a radio button they clicked past. Setting it
-	// here is exactly that decision.
+	// This is a legacy initial preference. Dashboard changes persist explicit
+	// consent and, for blocking mode, an acknowledgement of added DNS latency.
 	ReputationMode string `yaml:"reputation_mode"`
 
 	// ReputationBudget is the hard ceiling on a blocking-mode wait. A
@@ -118,45 +126,42 @@ type DNS struct {
 
 	// LocalDNSSECValidation selects what Daddybound, DNS Daddy's own DNSSEC
 	// validation engine, does with real traffic. See
-	// docs/decisions/0002-daddybound-observe-mode.md.
+	// docs/decisions/0003-daddybound-native-live.md.
 	//
 	//	off      no validator is constructed and no supporting DNSSEC query is
 	//	         sent. Behaviourally identical to a build without the feature.
 	//	observe  presented as Learn in the dashboard. Daddybound validates
 	//	         alongside resolution and records the verdict. The answer a
 	//	         client receives is unchanged, whatever it concludes.
+	//	enforce  presented as Live. Native authoritative recursion supplies
+	//	         the client answer and validates its exact data. Bogus and
+	//	         indeterminate answers fail closed without upstream fallback.
 	//
-	// Left empty, the installation decides: a fresh install runs Learn, and an
+	// Left empty, the installation decides: a fresh install runs Live, and an
 	// upgrade of an installation that never configured this keeps it off,
-	// because Learn sends extra DNSSEC queries upstream and inheriting that
-	// from a release upgrade would change someone's traffic without them
-	// asking. That decision is recorded in the database on first run — see
-	// store.SettingLocalDNSSECDefault — because it is the only place the
-	// difference between "omitted" and "written out" still exists.
-	//
-	// "enforce" is recognised and refused at startup. Accepting it and
-	// behaving as "observe" would leave an operator believing their resolver
-	// rejects forged answers when it does not, which is worse than not
-	// offering the word.
+	// while recorded Learn/off choices are preserved. Native recursion sends
+	// plaintext DNS to authoritative servers instead of using the configured
+	// encrypted forwarders. An upgrade must not silently change that traffic.
+	// The installation decision is recorded once in the database; an explicit
+	// file or environment mode always wins. Live remains experimental pending
+	// longer operational evaluation; it never silently downgrades to Learn.
 	LocalDNSSECValidation string `yaml:"local_dnssec_validation"`
 
-	// LocalDNSSECWorkers bounds how many observations run at once. This is
-	// the concurrency limit for the whole feature: whatever the query rate,
-	// at most this many chain walks are in progress.
+	// LocalDNSSECWorkers bounds concurrent Learn observations (maximum 64).
+	// Live uses its own bounded client admission, at most 128 concurrent
+	// resolutions, reduced further by DNS.MaxInflight when configured lower.
 	LocalDNSSECWorkers int `yaml:"local_dnssec_workers"`
 
 	// LocalDNSSECQueue is how many queries may be waiting to be observed.
 	// Enqueueing is non-blocking and drops when the queue is full, so this
 	// bounds memory and keeps the answer path free of any wait. Drops are
-	// counted and exposed: a sample that silently shrinks under load would
-	// invite conclusions it cannot support.
+	// counted and exposed. At most 16384 observations may wait in this queue.
 	LocalDNSSECQueue int `yaml:"local_dnssec_queue"`
 
-	// LocalDNSSECTimeout bounds one observation: the whole native resolution
-	// from the root plus every supporting DNSSEC query. On expiry the walk is
-	// cancelled and the observation is recorded as a timeout — never as a
-	// DNSSEC state, because an attacker who can cause a timeout must not be
-	// able to manufacture one.
+	// LocalDNSSECTimeout bounds one Live answer or Learn observation: native
+	// resolution from the root plus every supporting DNSSEC query. On expiry
+	// the walk is cancelled. Live returns SERVFAIL; timeout remains an
+	// operational result, never an Insecure DNSSEC state. Maximum one minute.
 	LocalDNSSECTimeout Duration `yaml:"local_dnssec_timeout"`
 
 	// LocalDNSSECTrustAnchorFile replaces the compiled-in IANA root anchors.
@@ -164,8 +169,8 @@ type DNS struct {
 	// Empty is the normal case. The escape hatch exists for a root key
 	// rollover that happens before a release ships, and for a deployment
 	// validating against something other than the public root. The anchors
-	// are never fetched over the network: a validator that asked the network
-	// what to trust would be trusting the thing DNSSEC exists to distrust.
+	// bootstrap is local. Later RFC 5011 refreshes must authenticate against an
+	// existing trusted key and complete the hold-down before adding trust.
 	LocalDNSSECTrustAnchorFile string `yaml:"local_dnssec_trust_anchor_file"`
 
 	// DNSSECTelemetry sets the AD bit on outgoing queries so a validating
@@ -315,10 +320,11 @@ type HTTP struct {
 
 // Logging controls query logging and retention.
 type Logging struct {
-	// DecisionRecords stores why each blocked query was blocked, with the
-	// evidence that was true at the time. Off by default: it is a second
-	// write per blocked query, and a deployment that never opens the
-	// explanation should not pay for one.
+	// DecisionRecords retains the original basis for explicit decisions,
+	// including native failures and local protection blocks. Enabled by
+	// default so investigation has contemporaneous evidence. The bounded
+	// asynchronous writer still honours query/per-policy privacy gates, and
+	// an explicit false disables these additional retained records.
 	DecisionRecords bool `yaml:"decision_records"`
 	// DecisionRetentionDays bounds how long those records are kept.
 	DecisionRetentionDays int  `yaml:"decision_retention_days"`
@@ -394,7 +400,9 @@ var DefaultAllowedClientCIDRs = []string{
 // Default returns the built-in configuration.
 func Default() Config {
 	return Config{
-		DataDir: "/var/lib/dnsdaddy",
+		DataDir:    "/var/lib/dnsdaddy",
+		Protection: protection.Default(),
+		Learning:   Learning{Enabled: true},
 		DNS: DNS{
 			ListenUDP: ":53",
 			ListenTCP: ":53",
@@ -460,7 +468,7 @@ func Default() Config {
 		Log: Logging{
 			QueryLog:              true,
 			LogClientIP:           true,
-			DecisionRecords:       false,
+			DecisionRecords:       true,
 			DecisionRetentionDays: 30,
 			RetentionDays:         7,
 			RollupDays:            90,
@@ -697,6 +705,9 @@ func (c *Config) validate() error {
 	}
 	if err := c.validateLocalDNSSEC(); err != nil {
 		return err
+	}
+	if _, err := protection.New(c.Protection, nil); err != nil {
+		return fmt.Errorf("protection: %w", err)
 	}
 	if c.DNS.ListenUDP == "" && c.DNS.ListenTCP == "" && c.DNS.ListenDoT == "" {
 		return fmt.Errorf("no DNS listener configured")
@@ -1023,42 +1034,32 @@ const (
 	// records what it concludes. The client's answer is unaffected. The UI
 	// calls this Learn mode.
 	LocalDNSSECObserve = "observe"
-	// LocalDNSSECEnforce is recognised so that configuring it fails loudly.
-	// It is not implemented. See validateLocalDNSSEC.
+	// LocalDNSSECEnforce supplies locally validated native answers. The UI
+	// calls this Live mode. It never silently falls back to forwarding.
 	LocalDNSSECEnforce = "enforce"
 )
 
-// validateLocalDNSSEC checks the local validation mode and its budgets.
-//
-// The "enforce" case is the point of this function. A mode that is understood
-// but unimplemented has to fail startup, because the alternative — accepting
-// it and running in observe — tells an operator their resolver rejects forged
-// answers when it does nothing of the kind. A resolver that silently does less
-// than its configuration says is worse than one that refuses to start.
+// validateLocalDNSSEC checks both mode and finite resource budgets. An explicit
+// enforce mode is preserved; runtime construction must fail if unavailable.
 func (c *Config) validateLocalDNSSEC() error {
 	switch c.DNS.LocalDNSSECValidation {
-	case "", LocalDNSSECOff, LocalDNSSECObserve:
-	case LocalDNSSECEnforce:
-		return fmt.Errorf(
-			"local_dnssec_validation: %q is not implemented and will not be treated as %q; "+
-				"local DNSSEC validation is experimental and can only observe. Set %q or %q",
-			LocalDNSSECEnforce, LocalDNSSECObserve, LocalDNSSECOff, LocalDNSSECObserve)
+	case LocalDNSSECUnset, LocalDNSSECOff, LocalDNSSECObserve, LocalDNSSECEnforce:
 	default:
-		return fmt.Errorf("local_dnssec_validation must be %q or %q, got %q",
-			LocalDNSSECOff, LocalDNSSECObserve, c.DNS.LocalDNSSECValidation)
+		return fmt.Errorf("local_dnssec_validation must be %q, %q or %q, got %q",
+			LocalDNSSECOff, LocalDNSSECObserve, LocalDNSSECEnforce, c.DNS.LocalDNSSECValidation)
 	}
 
-	// The budgets are only read in observe mode, but they are validated
-	// unconditionally: a nonsense value that only fails when somebody later
-	// switches the mode on is a trap laid for a future operator.
-	if c.DNS.LocalDNSSECWorkers < 0 {
-		return fmt.Errorf("local_dnssec_workers must not be negative, got %d", c.DNS.LocalDNSSECWorkers)
+	// Validate while off as well, so a later authenticated mode change cannot
+	// activate unbounded work that passed startup validation. Zero uses the
+	// runtime's bounded defaults rather than disabling the limit.
+	if c.DNS.LocalDNSSECWorkers < 0 || c.DNS.LocalDNSSECWorkers > 64 {
+		return fmt.Errorf("local_dnssec_workers must be between 0 and 64, got %d", c.DNS.LocalDNSSECWorkers)
 	}
-	if c.DNS.LocalDNSSECQueue < 0 {
-		return fmt.Errorf("local_dnssec_queue must not be negative, got %d", c.DNS.LocalDNSSECQueue)
+	if c.DNS.LocalDNSSECQueue < 0 || c.DNS.LocalDNSSECQueue > 16384 {
+		return fmt.Errorf("local_dnssec_queue must be between 0 and 16384, got %d", c.DNS.LocalDNSSECQueue)
 	}
-	if c.DNS.LocalDNSSECTimeout < 0 {
-		return fmt.Errorf("local_dnssec_timeout must not be negative, got %s", c.DNS.LocalDNSSECTimeout.D())
+	if c.DNS.LocalDNSSECTimeout < 0 || c.DNS.LocalDNSSECTimeout.D() > time.Minute {
+		return fmt.Errorf("local_dnssec_timeout must be between 0 and 1m, got %s", c.DNS.LocalDNSSECTimeout.D())
 	}
 	return nil
 }
@@ -1093,7 +1094,7 @@ func (c *Config) ResolveLocalDNSSEC(installDefault string) (mode string, fromIns
 		return c.DNS.LocalDNSSECMode(), false
 	}
 	switch installDefault {
-	case LocalDNSSECOff, LocalDNSSECObserve:
+	case LocalDNSSECOff, LocalDNSSECObserve, LocalDNSSECEnforce:
 		c.DNS.LocalDNSSECValidation = installDefault
 	default:
 		c.DNS.LocalDNSSECValidation = LocalDNSSECOff
