@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title"><title id="title">DNS Daddy standalone mark, monochrome-ink</title><g opacity="1" transform="translate(256.000 256.000) scale(8.800000) translate(-20.7 -21.9)"><defs><mask id="m6-g" maskUnits="userSpaceOnUse" x="-4" y="-4" width="48" height="48"><rect x="-4" y="-4" width="48" height="48" fill="white"/><path d="M29 22.2 l7.4 2.6 v5.1 c0 4.6-3.3 7.7-7.4 8.9 -4.1-1.2-7.4-4.3-7.4-8.9 v-5.1 Z" fill="black" stroke="black" stroke-width="2.4" stroke-linejoin="round"/></mask>
+        <mask id="m6-s" maskUnits="userSpaceOnUse" x="18" y="18" width="24" height="26"><rect x="18" y="18" width="24" height="26" fill="white"/><path d="M25.6 30.2 l2.6 2.6 4.5-5.2" fill="none" stroke="black" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></mask></defs>
+        <g mask="url(#m6-g)"><g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="18" cy="18" r="13" stroke="#202B3E" stroke-width="2.4"/>
+      <ellipse cx="18" cy="18" rx="5.6" ry="13" stroke="#202B3E" stroke-width="1.5" opacity="1"/>
+      <path d="M5.4 18h25.2" stroke="#202B3E" stroke-width="1.5" opacity="1"/>
+      <path d="M11.2 10.6L18 13.4L25.4 10.2M18 13.4L13.4 24.6" stroke="#202B3E" stroke-width="1.4"/>
+    </g><g fill="#202B3E"><circle cx="11.2" cy="10.6" r="1.9"/><circle cx="25.4" cy="10.2" r="1.7"/><circle cx="13.4" cy="24.6" r="1.7"/></g>
+    <circle cx="18" cy="13.4" r="2.3" fill="#202B3E"/></g><path d="M29 22.2 l7.4 2.6 v5.1 c0 4.6-3.3 7.7-7.4 8.9 -4.1-1.2-7.4-4.3-7.4-8.9 v-5.1 Z" fill="#202B3E" mask="url(#m6-s)"/></g></svg>

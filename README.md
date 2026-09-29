@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/dnsdaddy-banner.png" alt="DNS Daddy — Protect. Observe. Respond." width="100%">
+<img src="docs/images/dnsdaddy-banner.png" alt="DNS Daddy — Protective DNS. Clearly explained." width="100%">
 
 # DNS Daddy
 
@@ -11,7 +11,7 @@ Block malicious domains at the resolver. See which device asked for what, why it
 **Free & Open Source · No Account · No Trial · No Subscription**
 
 [![Go](https://img.shields.io/badge/Go-1.25.13+-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License](https://img.shields.io/badge/license-Apache--2.0-BFED6D)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-205AC9)](LICENSE)
 [![CI](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml)
 [![Security](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml)
 
@@ -28,35 +28,62 @@ Block malicious domains at the resolver. See which device asked for what, why it
 
 ## See DNS Daddy in action
 
-<p align="center">
-  <img src="docs/images/dashboard.png" alt="DNS Daddy dashboard showing protection status, blocked threats, activity and threat intelligence feeds" width="100%">
-</p>
-
-The dashboard keeps the important questions in one place: **is the resolver healthy, what is being blocked, what needs attention, and what has the network been asking for?**
-
-### Protective DNS with a usable control plane
+Actual application screenshots from the current light interface, using synthetic lab data. [Capture details and source revision](docs/images/SCREENSHOTS.md).
 
 <p align="center">
-  <img src="docs/images/sign-in.png" alt="DNS Daddy sign-in screen" width="100%">
+  <img src="docs/images/dashboard.png" alt="DNS Daddy overview showing synthetic query activity, blocks, findings and resolver setup" width="100%">
 </p>
 
-DNS Daddy is designed to be self-hosted without feeling like a collection of configuration files. The web control plane provides a straightforward way to configure, observe and investigate the resolver.
+The overview brings together **query activity, blocks, findings and resolver setup**. It also makes loopback-only resolver access explicit, so you can see when access still needs configuring for other devices.
+
+### Understand a blocked query
+
+<p align="center">
+  <img src="docs/images/queries.png" alt="DNS Daddy query log filtered to blocked queries, with a synthetic query expanded to show its explanation" width="100%">
+</p>
+
+Filter the query log, open a decision and inspect the client, network, source and reason in context. The example above uses a clearly labelled synthetic threat feed.
 
 ### Explainable behavioural detections
 
 <p align="center">
-  <img src="docs/images/detections.png" alt="DNS Daddy behavioural detections page" width="100%">
+  <img src="docs/images/detections.png" alt="DNS Daddy Findings page with a synthetic beaconing finding expanded to show measurements and evidence" width="100%">
 </p>
 
 DNS Daddy includes six experimental behavioural detectors for DNS tunnelling, beaconing, NXDOMAIN anomalies, DGA-like domains, unusual TXT activity and repeated resolution failures. **They alert and explain; they do not block.**
 
+<details>
+<summary>More interface previews: sign-in, assurance and mobile</summary>
+
+### A straightforward control plane
+
+<p align="center">
+  <img src="docs/images/sign-in.png" alt="DNS Daddy sign-in screen in the light interface, with the password field empty" width="100%">
+</p>
+
+The web control plane provides a consistent place to configure, observe and investigate a self-hosted resolver.
+
 ### Assurance you can inspect
 
 <p align="center">
-  <img src="docs/images/assurance.png" alt="DNS Daddy assurance page showing automated checks, security testing and project limitations" width="100%">
+  <img src="docs/images/assurance.png" alt="Full DNS Daddy Assurance page showing evidence categories, automated checks, experimental features and project limitations" width="100%">
 </p>
 
-The **Assurance** page deliberately separates what is *verified*, *tested*, *experimental* and *not verified*. DNS Daddy is AI-assisted and early-stage; rather than hiding that, the project links claims to CI, security testing, threat modelling and documented limitations.
+The **Assurance** page separates what is *verified*, *tested*, *experimental* and *not verified*. DNS Daddy is AI-assisted and early-stage; the project links claims to CI, security testing, threat modelling and documented limitations.
+
+### Useful on a smaller screen
+
+<p align="center">
+  <img src="docs/images/mobile.png" alt="DNS Daddy overview on a 390-pixel-wide phone viewport" width="390">
+</p>
+
+The same overview adapts to a phone viewport, with navigation available from the menu.
+
+</details>
+
+### Brand assets
+
+The light blue-and-silver identity follows the current interface. [Logo masters, colours and repository artwork](docs/brand/README.md) are available in the **Brand Package 3.0** assets. This is the brand edition, not a software version.
 
 ## What is DNS Daddy?
 
