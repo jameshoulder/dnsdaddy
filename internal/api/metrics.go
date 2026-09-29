@@ -309,12 +309,21 @@ func escapeLabel(v string) string {
 // invites an operator to build an alert on a feature nobody enabled, and the
 // absence of the series is a clearer statement than a zero.
 func (a *API) dnssecMetricLines() []string {
-	if a.DNSSEC == nil {
+	if a.DNSSEC == nil && a.Anchors == nil {
 		return nil
 	}
-	st := a.DNSSEC.Stats()
 
 	var b strings.Builder
+	if a.DNSSEC != nil {
+		a.writeObserverMetrics(&b)
+	}
+	a.writeAnchorMetrics(&b)
+	return []string{b.String()}
+}
+
+// writeObserverMetrics renders the observer's own counters.
+func (a *API) writeObserverMetrics(b *strings.Builder) {
+	st := a.DNSSEC.Stats()
 
 	// Every status appears, including at zero, so a dashboard has a stable
 	// set of series from the first scrape rather than growing one the first
@@ -324,7 +333,7 @@ func (a *API) dnssecMetricLines() []string {
 		status = append(status, fmt.Sprintf("dnsdaddy_dnssec_local_validation_total{status=%q} %d",
 			string(s), st.ByStatus[s]))
 	}
-	metric(&b, "dnsdaddy_dnssec_local_validation_total",
+	metric(b, "dnsdaddy_dnssec_local_validation_total",
 		"Local DNSSEC observations completed, by outcome. Observational only: these verdicts do not affect DNS answers",
 		"counter", status...)
 
@@ -333,21 +342,21 @@ func (a *API) dnssecMetricLines() []string {
 		disagree = append(disagree, fmt.Sprintf("dnsdaddy_dnssec_local_disagreement_total{class=%q} %d",
 			c, st.Disagreements[c]))
 	}
-	metric(&b, "dnsdaddy_dnssec_local_disagreement_total",
+	metric(b, "dnsdaddy_dnssec_local_disagreement_total",
 		"Observations where the local verdict and the upstream's assertion differ",
 		"counter", disagree...)
 
 	// The one to alert on. Dropped observations are a gap in the sample, not
 	// a gap in DNS service — and reading the counts above without this one
 	// invites a conclusion the sample cannot support.
-	metric(&b, "dnsdaddy_dnssec_local_dropped_total",
+	metric(b, "dnsdaddy_dnssec_local_dropped_total",
 		"Queries not observed because the observation queue was full",
 		"counter", fmt.Sprintf("dnsdaddy_dnssec_local_dropped_total %d", st.Dropped))
 
 	// Should be zero. Anything else is a defect in the validator rather than
 	// a property of the traffic, which is why it is a metric and not a log
 	// line nobody reads.
-	metric(&b, "dnsdaddy_dnssec_local_panics_total",
+	metric(b, "dnsdaddy_dnssec_local_panics_total",
 		"Validator panics contained by the observer. Any value above zero is a defect",
 		"counter", fmt.Sprintf("dnsdaddy_dnssec_local_panics_total %d", st.Panics))
 
@@ -357,16 +366,51 @@ func (a *API) dnssecMetricLines() []string {
 	// dropped_total says "we did not look"; this says "we looked and lost it".
 	if a.DNSSECWriter != nil {
 		w := a.DNSSECWriter.Stats()
-		metric(&b, "dnsdaddy_dnssec_local_stored_total",
+		metric(b, "dnsdaddy_dnssec_local_stored_total",
 			"Observations written to the database", "counter",
 			fmt.Sprintf("dnsdaddy_dnssec_local_stored_total %d", w.Written))
-		metric(&b, "dnsdaddy_dnssec_local_unrecorded_total",
+		metric(b, "dnsdaddy_dnssec_local_unrecorded_total",
 			"Completed observations discarded before storage because the write queue was full",
 			"counter", fmt.Sprintf("dnsdaddy_dnssec_local_unrecorded_total %d", w.Dropped))
-		metric(&b, "dnsdaddy_dnssec_local_write_errors_total",
+		metric(b, "dnsdaddy_dnssec_local_write_errors_total",
 			"Batches of observations that failed to write", "counter",
 			fmt.Sprintf("dnsdaddy_dnssec_local_write_errors_total %d", w.Errors))
 	}
 
-	return []string{b.String()}
+}
+
+// writeAnchorMetrics renders the trust-anchor facts as counts with a closed
+// label set. The one to alert on is viable dropping to 0, which means nothing
+// can be authenticated until an operator supplies an anchor.
+func (a *API) writeAnchorMetrics(b *strings.Builder) {
+	if a.Anchors != nil {
+		tp := a.Anchors.TrustPoint()
+		viable := 0
+		if a.Anchors.Viable() {
+			viable = 1
+		}
+		metric(b, "dnsdaddy_dnssec_anchor_viable",
+			"Whether the trust point has at least one usable anchor (1) or none (0)",
+			"gauge", fmt.Sprintf("dnsdaddy_dnssec_anchor_viable %d", viable))
+		byState := map[string]int{}
+		for _, k := range tp.Keys {
+			byState[string(k.State)]++
+		}
+		var keys []string
+		for _, st := range []string{"addpend", "valid", "missing", "revoked", "removed"} {
+			keys = append(keys, fmt.Sprintf("dnsdaddy_dnssec_anchor_keys{state=%q} %d", st, byState[st]))
+		}
+		metric(b, "dnsdaddy_dnssec_anchor_keys", "Managed trust-anchor keys by RFC 5011 state", "gauge", keys...)
+		health := a.Anchors.Health()
+		metric(b, "dnsdaddy_dnssec_anchor_save_errors_total",
+			"Trust-anchor state writes that failed since start; the anchors in force are unaffected",
+			"counter", fmt.Sprintf("dnsdaddy_dnssec_anchor_save_errors_total %d", health.SaveErrors))
+		failed := 0
+		if tp.LastError != "" {
+			failed = 1
+		}
+		metric(b, "dnsdaddy_dnssec_anchor_refresh_failing",
+			"Whether the most recent RFC 5011 refresh failed (1) or succeeded (0)",
+			"gauge", fmt.Sprintf("dnsdaddy_dnssec_anchor_refresh_failing %d", failed))
+	}
 }

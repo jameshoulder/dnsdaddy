@@ -319,3 +319,70 @@ func placeholders(n int) string {
 	}
 	return string(b)
 }
+
+// DNSSECPopulationCell is one cell of the population breakdown: how the
+// records were obtained, whether the client's answer came from cache, what
+// the upstream asserted and what Daddybound concluded.
+//
+// Kept as the raw cross-tabulation so a reader can separate the populations
+// that are comparable from those that are not. A disagreement reached
+// through a forwarder is a different claim from one reached natively, and a
+// disagreement about a name whose client answer was minutes old is not
+// evidence about that answer at all.
+type DNSSECPopulationCell struct {
+	Resolution   string `json:"resolution"`
+	Cached       bool   `json:"cached"`
+	Upstream     string `json:"upstream"`
+	Status       string `json:"status"`
+	Disagreement string `json:"disagreement,omitempty"`
+	Count        int64  `json:"count"`
+}
+
+// DNSSECPopulationsSince cross-tabulates stored observations in a window.
+func (s *Store) DNSSECPopulationsSince(ctx context.Context, since time.Time) ([]DNSSECPopulationCell, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT resolution, cached, upstream, status, disagreement, COUNT(*)
+		  FROM dnssec_observations WHERE ts >= ?
+		 GROUP BY resolution, cached, upstream, status, disagreement`, unixMilli(since))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []DNSSECPopulationCell{}
+	for rows.Next() {
+		var (
+			c      DNSSECPopulationCell
+			cached int
+		)
+		if err := rows.Scan(&c.Resolution, &cached, &c.Upstream, &c.Status, &c.Disagreement, &c.Count); err != nil {
+			return nil, err
+		}
+		c.Cached = cached != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// DNSSECObservationSpan reports the oldest and newest stored observation and
+// how many there are, over everything retention has kept.
+//
+// Bounded reads on the ts index. "Observing since" is the honest measure of
+// how long the evidence has been accumulating, and it is bounded by
+// retention rather than by uptime: a restart does not shorten it, and a long
+// retention setting does not lengthen it past the first row.
+func (s *Store) DNSSECObservationSpan(ctx context.Context) (first, last time.Time, count int64, err error) {
+	var minTS, maxTS sql.NullInt64
+	err = s.db.QueryRowContext(ctx,
+		`SELECT MIN(ts), MAX(ts), COUNT(*) FROM dnssec_observations`).Scan(&minTS, &maxTS, &count)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, err
+	}
+	if minTS.Valid {
+		first = fromUnixMilli(minTS.Int64)
+	}
+	if maxTS.Valid {
+		last = fromUnixMilli(maxTS.Int64)
+	}
+	return first, last, count, nil
+}

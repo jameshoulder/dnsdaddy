@@ -76,6 +76,8 @@ const {
   localDnssecBadge,
   localDnssecCard,
   daddyboundModes,
+  daddyboundStatusCard,
+  anchorKeyRows,
   networkRow,
   adHocBadge,
   DEFAULT_NETWORK_ID,
@@ -3417,4 +3419,110 @@ test('the finding loader pages by cursor and respects route ownership', async ()
   current = false;
   assert.equal(await loader.load(), false);
   assert.equal(calls.length, 2);
+});
+
+/* ---------- Daddybound runtime status --------------------------------- */
+
+function runtimeStatus(o = {}) {
+  return {
+    experimental: true, enforcing: false,
+    mode: { configured: 'unset', effective: 'observe', chosenBy: 'installation_default', experimental: true, enforcing: false, live: { available: false, reason: 'Live requires enforcement in the answer path, which is not implemented' } },
+    resolution: { source: 'native', transport: 'plaintext DNS over UDP and TCP port 53 to authoritative servers; separate from, and not protected by, any encrypted upstream', clientPath: 'clients are answered by the forwarding resolver', note: '' },
+    anchors: { available: true, zone: '.', viable: true, needsIntervention: false, trustedKeys: 1,
+      keys: [{ keyTag: 20326, algorithm: 8, flags: 257, state: 'valid', trusted: true, seeded: true, firstSeen: hoursAgo(900), lastSeen: now() },
+             { keyTag: 38696, algorithm: 8, flags: 257, state: 'addpend', trusted: false, firstSeen: hoursAgo(48), lastSeen: now(), addHoldDownUntil: new Date(Date.now() + 28 * 86400000).toISOString() }],
+      refresh: { lastAttempt: now(), lastSuccess: hoursAgo(1), lastError: '', next: new Date(Date.now() + 3600000).toISOString() },
+      persistence: { state: 'ok', file: 'daddybound-anchors.json', saves: 3, saveErrors: 0 } },
+    runtime: { available: true, scope: 'since_start', uptimeSeconds: 3600, observed: 120, dropped: 0, stored: 118, unrecorded: 2, writeErrors: 0, panics: 0, seamPanics: 0, timeouts: 3, resourceLimit: 0, unreachable: 1, queries: 900, delegations: 300, health: 'degraded', healthNote: 'some queries were not stored' },
+    stored: { windowHours: 168, total: 118, retainedRows: 118, retentionDays: 7, observingSince: hoursAgo(20), observedUntil: now() },
+    populations: [
+      { resolution: 'native', cached: false, comparable: true, total: 100, disagreements: { local_bogus_upstream_validated: 1 }, note: 'each disagreement is a case to investigate individually' },
+      { resolution: 'native', cached: true, comparable: true, total: 10, disagreements: { local_bogus_upstream_validated: 2 }, note: 'not evidence that the answer the client received was forged' },
+      { resolution: 'native', cached: false, comparable: false, total: 8, disagreements: {}, note: 'not comparable' },
+    ],
+    evidence: { sufficient: false, note: 'insufficient evidence for enforcement, by definition', criteria: [
+      { id: 'disagreement', title: 'local_bogus_upstream_validated among comparable native observations', measured: '1 of 100 comparable native, non-cached observations in the window; no rate or interval is claimed', status: 'not_quantified' },
+    ], issues: ['https://github.com/jameshoulder/dnsdaddy/issues/67', 'https://github.com/jameshoulder/dnsdaddy/issues/65'] },
+    ...o,
+  };
+}
+
+test('the runtime status card never scores readiness and keeps Live unavailable', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.match(out, /Live — unavailable/);
+  assert.match(out, /Learn — active/);
+  assert.match(out, />insufficient</);
+  assert.match(out, /No number on this page is a readiness score/);
+  assert.match(out, /not quantified/);
+  assert.doesNotMatch(out, /\d+(\.\d+)?%/);
+  assert.doesNotMatch(out, /safe to enforce|ready to enforce/i);
+  assert.match(out, /issues\/67/);
+  assert.match(out, /issues\/65/);
+});
+
+test('the runtime status card names the transport as separate from the encrypted upstream and keeps scopes apart', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.match(out, /port 53/);
+  assert.match(out, /not protected by/);
+  assert.match(out, /since this process started/);
+  assert.match(out, /rows within the last 168h/);
+  // Runtime and stored figures are both present and labelled.
+  assert.match(out, /Observed<\/dt>/);
+  assert.match(out, /In window<\/dt>/);
+  assert.match(out, /2 lost before storage/);
+  assert.match(out, /3 timeout · 0 limit · 1 unreachable/);
+  assert.match(out, /operational outcomes, not DNSSEC states/);
+});
+
+test('cached and non-comparable populations are shown as such rather than as disagreements', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.match(out, /from cache/);
+  assert.match(out, /not evidence that the answer the client received was forged/);
+  // The non-comparable row shows a dash, not a count, in the disagreement column.
+  const rows = out.split('<tr>').filter((r) => r.includes('not comparable'));
+  assert.equal(rows.length, 1);
+  assert.match(rows[0], /<td class="num">—<\/td>/);
+});
+
+test('anchor keys are listed by tag and state, with no key material and no host path', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.match(out, /20326/);
+  assert.match(out, />valid</);
+  assert.match(out, />addpend</);
+  assert.match(out, /add hold-down until/);
+  assert.match(out, /daddybound-anchors\.json/);
+  assert.doesNotMatch(out, /AwEAA|\/var\/lib|\/home\//);
+  assert.match(anchorKeyRows([]), /No managed keys yet/);
+
+  const broken = daddyboundStatusCard(runtimeStatus({ anchors: { available: true, zone: '.', viable: false, needsIntervention: true, interventionNote: 'every key has been revoked', trustedKeys: 0, keys: [], refresh: { lastError: 'fetching the . DNSKEY RRset: timeout' }, persistence: { state: 'failing', file: 'daddybound-anchors.json', lastSaveError: 'read-only file system' } } }));
+  assert.match(broken, />not viable</);
+  assert.match(broken, /intervention required/);
+  assert.match(broken, /last attempt failed: fetching the \. DNSKEY RRset: timeout/);
+  assert.match(broken, /state file cannot be written/);
+  assert.match(broken, /read-only file system/);
+});
+
+test('a missing or off runtime status is unavailable, never a healthy zero', () => {
+  const missing = daddyboundStatusCard(null);
+  assert.match(missing, /Runtime status unavailable/);
+  assert.doesNotMatch(missing, />0</);
+  const off = daddyboundStatusCard(runtimeStatus({
+    mode: { configured: 'off', effective: 'off', chosenBy: 'config', live: { available: false, reason: 'not implemented' } },
+    resolution: { source: 'none', transport: 'none: Learn is off, so Daddybound sends nothing', clientPath: 'clients are answered by the forwarding resolver' },
+    anchors: { available: false, unavailable: 'no trust-anchor manager is running: Learn is off' },
+    runtime: { available: false, health: 'unavailable', healthNote: 'no observer is running' },
+    stored: { windowHours: 168, total: 0, retainedRows: 0, retentionDays: 7 },
+    populations: [],
+  }));
+  assert.match(off, /Learn — off/);
+  assert.match(off, /no trust-anchor manager is running/);
+  assert.match(off, /no observer is running/);
+  assert.match(off, /no stored observations/);
+  assert.match(off, />insufficient</);
+});
+
+test('runtime status text from the server is escaped', () => {
+  const out = daddyboundStatusCard(runtimeStatus({ anchors: { available: true, zone: '<b>.</b>', viable: true, trustedKeys: 1, keys: [], refresh: { lastError: '<img src=x>' }, persistence: { state: 'ok', file: 'x' } } }));
+  assert.doesNotMatch(out, /<b>\.|<img/);
+  assert.match(out, /&lt;b&gt;/);
 });

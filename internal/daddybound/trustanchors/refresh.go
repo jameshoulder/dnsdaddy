@@ -136,10 +136,16 @@ func (m *Manager) failed(res *RefreshResult, now time.Time, err error) RefreshRe
 // would be an outage.
 func (m *Manager) persist() {
 	if err := m.cfg.Store.Save(m.tp); err != nil {
+		m.health.SaveErrors++
+		m.health.LastSaveError = err.Error()
 		m.cfg.Log.Error("DNSSEC trust anchor state could not be saved; "+
 			"the anchors in force are unaffected, but hold-down progress will be lost on restart",
 			"zone", m.cfg.Zone, "error", err)
+		return
 	}
+	m.health.Saves++
+	m.health.LastSaveError = ""
+	m.health.LastSaveAt = m.cfg.Now()
 }
 
 func (m *Manager) validatorConfig() dnssec.Config {

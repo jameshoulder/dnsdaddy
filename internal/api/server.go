@@ -61,6 +61,15 @@ type Deps struct {
 	// whenever local validation is off.
 	DNSSECWriter DNSSECWriterStats
 
+	// Anchors is the reporting face of the RFC 5011 trust-anchor manager,
+	// or nil when local validation is off. Read-only: the API reports the
+	// trust point and never refreshes or edits it.
+	Anchors DNSSECAnchors
+
+	// LocalDNSSECModeSource says who chose the effective mode: "config" or
+	// "installation_default". Informational; empty reads as config.
+	LocalDNSSECModeSource string
+
 	// Decisions is the decision recorder, or nil when decision records are
 	// switched off. Read-only here: the API never records a decision, it only
 	// reports what the resolver already decided.
@@ -166,6 +175,11 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/findings/{id}/review/history", a.handleFindingReviewHistory)
 	api.HandleFunc("GET /api/v1/detectors", a.handleDetectors)
 	api.HandleFunc("GET /api/v1/dnssec/observations", a.handleDNSSECObservations)
+	// The Daddybound runtime as a bounded snapshot: mode, resolution source,
+	// trust anchors, observer counters, stored populations, and the plain
+	// statement that the evidence is insufficient for enforcement. Polling
+	// it resolves nothing and mutates no trust state.
+	api.HandleFunc("GET /api/v1/dnssec/status", a.handleDNSSECStatus)
 
 	api.HandleFunc("GET /api/v1/networks", a.handleListNetworks)
 	api.HandleFunc("POST /api/v1/networks", a.handleCreateNetwork)

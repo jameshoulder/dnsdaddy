@@ -4915,6 +4915,115 @@ function localDnssecCard(data) {
     </div>`;
 }
 
+/*
+ * The Daddybound status block: what the runtime holds, section by section,
+ * with every scope named. The rule for the wording is the rule for the API
+ * it reads: say what was measured, say when it is not enough, never turn a
+ * count into a readiness score. A missing status is rendered as unavailable
+ * rather than as a healthy zero.
+ */
+function anchorKeyRows(keys) {
+  if (!keys || !keys.length) return html`<p class="muted small">No managed keys yet. The configured anchors are in force until the first RFC 5011 refresh seeds the trust point.</p>`;
+  return html`<div class="table-wrap"><table>
+    <thead><tr><th>Key tag</th><th>Algorithm</th><th>State</th><th>Trusted</th><th>Seen</th><th>Timer</th></tr></thead>
+    <tbody>${raw(keys.map((k) => html`<tr>
+      <td class="mono">${k.keyTag}${k.seeded ? html` <span class="badge">seeded</span>` : ''}</td>
+      <td class="mono">${k.algorithm}</td>
+      <td><span class="badge ${k.trusted ? 'ok' : k.state === 'revoked' || k.state === 'removed' ? 'bad' : 'warn'}">${k.state}</span></td>
+      <td>${k.trusted ? 'yes' : 'no'}</td>
+      <td class="muted small">${relTime(k.firstSeen)} → ${relTime(k.lastSeen)}</td>
+      <td class="muted small">${k.addHoldDownUntil ? `add hold-down until ${new Date(k.addHoldDownUntil).toLocaleDateString('en-GB')}` : k.removeHoldDownUntil ? `remove hold-down until ${new Date(k.removeHoldDownUntil).toLocaleDateString('en-GB')}` : '—'}</td>
+    </tr>`).join(''))}</tbody></table></div>`;
+}
+
+function daddyboundStatusCard(status) {
+  if (!status) {
+    return html`
+      <div class="card section">
+        <div class="card-head"><div><div class="card-eyebrow">Experimental</div><h2>Daddybound runtime</h2></div></div>
+        ${raw(unavailableState('Runtime status unavailable', 'The status request failed. Nothing here is inferred from an older reading.'))}
+      </div>`;
+  }
+  const mode = status.mode || {};
+  const res = status.resolution || {};
+  const an = status.anchors || {};
+  const rt = status.runtime || {};
+  const st = status.stored || {};
+  const ev = status.evidence || {};
+  const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${note ? html` <span class="muted small">${note}</span>` : ''}</dd></div>`;
+  const n = (v) => (typeof v === 'number' ? num(v) : '—');
+  const persistence = an.persistence || {};
+  const persistenceBadge = { ok: ['ok', 'state file written'], not_yet_written: ['', 'state file not yet written'], failing: ['bad', 'state file cannot be written'], load_failed: ['warn', 'stored state could not be read'] }[persistence.state] || ['warn', String(persistence.state || 'unknown')];
+
+  return html`
+    <div class="card section" id="daddybound-status">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">Experimental · enforces nothing</div>
+        <h2>Daddybound runtime ${raw(claimChip('experimental'))}</h2>
+        <p>What the process holds about local validation, with each figure's scope named. Reading this page resolves nothing and changes no trust state.</p>
+      </div></div>
+
+      <dl class="claim-key">
+        ${raw(stat('Mode', html`<span class="badge ${mode.effective === 'observe' ? 'ok' : ''}">${mode.effective === 'observe' ? 'Learn — active' : 'Learn — off'}</span> <span class="badge">Live — unavailable</span>`, `configured: ${mode.configured || '—'} · chosen by ${mode.chosenBy === 'installation_default' ? 'the installation default' : 'configuration'}`))}
+        ${raw(stat('Live', html`<span class="muted small">${mode.live && mode.live.reason ? mode.live.reason : 'not implemented'}</span>`))}
+        ${raw(stat('Resolution source', html`<span class="badge">${res.source || '—'}</span>`, res.transport || ''))}
+        ${raw(stat('Client answers', html`<span class="muted small">${res.clientPath || ''}</span>`))}
+      </dl>
+
+      <h4>Trust anchors (RFC 5011)</h4>
+      ${raw(!an.available
+        ? html`<p class="muted small">${an.unavailable || 'No trust-anchor manager is running.'}</p>`
+        : html`<dl class="claim-key">
+            ${raw(stat('Trust point', html`<span class="mono">${an.zone}</span> <span class="badge ${an.viable ? 'ok' : 'bad'}">${an.viable ? 'viable' : 'not viable'}</span>`, `${n(an.trustedKeys)} trusted key${an.trustedKeys === 1 ? '' : 's'}`))}
+            ${raw(an.needsIntervention ? stat('Needs an operator', html`<span class="badge bad">intervention required</span>`, an.interventionNote || '') : '')}
+            ${raw(stat('Last refresh', html`${an.refresh && an.refresh.lastSuccess ? `succeeded ${relTime(an.refresh.lastSuccess)}` : 'no successful refresh yet'}`, an.refresh && an.refresh.lastError ? `last attempt failed: ${an.refresh.lastError}` : an.refresh && an.refresh.next ? `next ${relTime(an.refresh.next)}` : ''))}
+            ${raw(stat('Persistence', html`<span class="badge ${persistenceBadge[0]}">${persistenceBadge[1]}</span>`, `${persistence.file || ''}${persistence.lastSaveError ? ` · ${persistence.lastSaveError}` : ''}${persistence.loadError ? ` · ${persistence.loadError}` : ''}`))}
+          </dl>
+          ${raw(anchorKeyRows(an.keys))}`)}
+
+      <h4>Runtime <span class="muted small">since this process started</span></h4>
+      ${raw(!rt.available
+        ? html`<p class="muted small">${rt.healthNote || 'No observer is running.'}</p>`
+        : html`<dl class="claim-key">
+            ${raw(stat('Health', html`<span class="badge ${rt.health === 'ok' ? 'ok' : rt.health === 'degraded' ? 'warn' : ''}">${rt.health}</span>`, rt.healthNote || ''))}
+            ${raw(stat('Observed', html`<span class="mono">${n(rt.observed)}</span>`, `${n(rt.dropped)} not observed (queue full) · ${n(rt.unrecorded)} lost before storage · ${n(rt.writeErrors)} write errors`))}
+            ${raw(stat('Could not conclude', html`<span class="mono">${n(rt.timeouts)} timeout · ${n(rt.resourceLimit)} limit · ${n(rt.unreachable)} unreachable</span>`, 'operational outcomes, not DNSSEC states'))}
+            ${raw(stat('Native work', html`<span class="mono">${n(rt.queries)}</span> queries to authoritative servers`, `${n(rt.delegations)} zone cuts crossed`))}
+            ${raw(rt.panics || rt.seamPanics ? stat('Defects', html`<span class="badge bad">${n((rt.panics || 0) + (rt.seamPanics || 0))} contained panics</span>`, 'a defect in the validator, not a property of your traffic — please report it') : '')}
+          </dl>`)}
+
+      <h4>Stored <span class="muted small">rows within the last ${st.windowHours || '—'}h</span></h4>
+      <dl class="claim-key">
+        ${raw(stat('In window', html`<span class="mono">${n(st.total)}</span>`, `${n(st.retainedRows)} retained in total · retention ${n(st.retentionDays)} day(s)`))}
+        ${raw(stat('Observing since', html`${st.observingSince ? relTime(st.observingSince) : 'no stored observations'}`, st.observedUntil ? `latest ${relTime(st.observedUntil)}` : ''))}
+      </dl>
+
+      <h4>Disagreement populations <span class="muted small">stored rows, by how they were obtained</span></h4>
+      ${raw((status.populations || []).length
+        ? html`<div class="table-wrap"><table>
+            <thead><tr><th>Resolution</th><th>Client answer</th><th>Comparable</th><th class="num">Rows</th><th class="num">Local bogus, upstream validated</th><th>Reading</th></tr></thead>
+            <tbody>${raw(status.populations.map((p) => html`<tr>
+              <td class="mono">${p.resolution}</td>
+              <td>${p.cached ? 'from cache' : 'fresh'}</td>
+              <td>${p.comparable ? 'yes' : 'no'}</td>
+              <td class="num">${n(p.total)}</td>
+              <td class="num">${p.comparable ? n(p.disagreements && p.disagreements.local_bogus_upstream_validated) : '—'}</td>
+              <td class="muted small">${p.note}</td></tr>`).join(''))}</tbody></table></div>`
+        : html`<p class="muted small">No stored observations in the window.</p>`)}
+
+      <h4>Evidence for enforcement</h4>
+      <p><span class="badge warn">${ev.sufficient ? 'sufficient' : 'insufficient'}</span> <span class="muted small">${ev.note || ''}</span></p>
+      ${raw((ev.criteria || []).length
+        ? html`<div class="table-wrap"><table>
+            <thead><tr><th>Criterion</th><th>Measured</th><th>Status</th></tr></thead>
+            <tbody>${raw(ev.criteria.map((c) => html`<tr><td>${c.title}</td><td class="muted small">${c.measured}</td><td><span class="badge">${String(c.status || '').replace('_', ' ')}</span></td></tr>`).join(''))}</tbody></table></div>`
+        : '')}
+      <p class="muted small">The criteria and the corpus work are tracked in
+        ${raw((ev.issues || []).map((u) => html`<a href="${u}" target="_blank" rel="noopener noreferrer">${u.replace('https://github.com/', '')}</a>`).join(' and '))}.
+        No number on this page is a readiness score.</p>
+    </div>`;
+}
+
 pages.assurance = {
   title: 'Assurance',
   subtitle: 'What is checked, by what, and what that does not prove.',
@@ -4923,6 +5032,7 @@ pages.assurance = {
     // Best-effort: the Assurance page must render even when local DNSSEC
     // observation is off, unreachable, or has never recorded anything.
     const dnssec = await apiGet('/dnssec/observations?hours=168').catch(() => null);
+    const runtime = await apiGet('/dnssec/status?hours=168').catch(() => null);
 
     return html`
       <div class="card lead section">
@@ -4946,6 +5056,7 @@ pages.assurance = {
       </div>
 
       ${raw(localDnssecCard(dnssec))}
+      ${raw(daddyboundStatusCard(runtime))}
 
       <div class="card section">
         <div class="card-head">
@@ -5734,6 +5845,8 @@ if (typeof module !== 'undefined' && module.exports) {
     localDnssecBadge,
     localDnssecCard,
     daddyboundModes,
+    daddyboundStatusCard,
+    anchorKeyRows,
     networkRow,
     adHocBadge,
     isDefaultNetwork,

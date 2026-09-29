@@ -66,6 +66,41 @@ process's lifetime error counter by the last day's queries, which on a
 long-running resolver with a quiet day read as degraded for a fault weeks
 past.
 
+### Daddybound reports what it is actually doing
+
+`GET /api/v1/dnssec/status` and a new block on the Assurance page expose the
+facts the Learn runtime already held and nobody could see:
+
+- the configured and effective mode, who chose it (the file or the
+  installation default), `experimental: true`, `enforcing: false`, and Live
+  reported as unavailable with the reason;
+- the resolution source and its transport — native, from the root hints to
+  the authoritative servers over plaintext port 53 with QNAME minimisation —
+  stated as separate from, and not protected by, the encrypted upstream that
+  answers clients;
+- the RFC 5011 trust point: every managed key with its lifecycle state and
+  hold-down timers, whether the trust point is viable, the last refresh
+  attempt and success and the last error, and whether the state file is
+  being written. Key material and host paths are not included;
+- the observer's counters since start beside the stored rows within a window,
+  never merged: observed, dropped, stored, unrecorded, write errors, panics,
+  timeouts, resource limits and unreachable outcomes;
+- the stored disagreement populations separated by resolution source, cache
+  state and comparability. A disagreement about a cached answer says nothing
+  about the answer the client received, and an operational outcome never
+  counts as a disagreement; each population says which it is.
+
+It also says, in its own payload, that the evidence is insufficient for
+enforcement. There is no readiness percentage and no threshold in the code;
+each criterion from the readiness issue is reported as a measurement with the
+status `not_quantified`, and the payload links to the two issues where the
+criteria and the corpus work live. Polling it resolves nothing and mutates no
+trust state. Four `dnsdaddy_dnssec_anchor_*` metrics carry the anchor facts
+with closed label sets.
+
+`docs/dns-security/dnssec.md` no longer says there is no RFC 5011 rollover;
+there has been since native recursion landed, and the page now describes it.
+
 ### Findings can be reviewed
 
 A finding now carries a review beside it: **new**, **acknowledged**,

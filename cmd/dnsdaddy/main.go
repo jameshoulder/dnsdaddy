@@ -171,6 +171,7 @@ func run() error {
 	// The resolved value is written back into cfg so that every later reader —
 	// the observer, the API, /metrics, the dashboard — sees one answer instead
 	// of each re-deriving it.
+	dnssecModeSource := "config"
 	if !cfg.DNS.LocalDNSSECConfigured() {
 		installDefault, err := st.GetSetting(context.Background(), store.SettingLocalDNSSECDefault)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -178,6 +179,7 @@ func run() error {
 		}
 		mode, fromInstall := cfg.ResolveLocalDNSSEC(installDefault)
 		if fromInstall {
+			dnssecModeSource = "installation_default"
 			log.Info("local DNSSEC validation mode chosen by this installation",
 				"mode", mode,
 				"reason", "dns.local_dnssec_validation is not set",
@@ -401,6 +403,9 @@ func run() error {
 		Decisions:      decisionRecorder,
 		DNSSEC:         dnssecStatsOrNil(dnssecObserver),
 		DNSSECWriter:   dnssecWriterOrNil(dnssecObserver),
+		Anchors:        dnssecAnchorsOrNil(dnssecObserver),
+
+		LocalDNSSECModeSource: dnssecModeSource,
 	})
 
 	httpSrv := &http.Server{

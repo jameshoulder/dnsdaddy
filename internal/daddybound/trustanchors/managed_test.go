@@ -237,3 +237,61 @@ func trusts(t *testing.T, m *trustanchors.Manager, z *zone, tag uint16) bool {
 	}
 	return false
 }
+
+// The status surface reports persistence separately from the anchors in
+// force, because the two fail independently: a state file that cannot be
+// written costs hold-down progress on restart while every validation keeps
+// working, and a manager that reported only the latter would hide the former.
+func TestHealthReportsLoadAndSaveFailures(t *testing.T) {
+	anchors, err := trustanchors.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &trustanchors.MemoryStore{}
+	m, err := trustanchors.NewManager(trustanchors.ManagerConfig{Zone: ".", Configured: anchors, Store: store,
+		Policy: dnssec.DefaultPolicy(), Verifier: dnssec.StdVerifier(), Limits: dnssec.DefaultLimits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := m.Health()
+	if !h.Seeded || h.LoadError != "" || h.Saves != 0 {
+		t.Errorf("fresh manager health = %+v, want seeded with nothing loaded or saved", h)
+	}
+
+	// A refresh with no key source fails before touching the keys, and its
+	// failure is persisted — so a save happens, and its outcome is visible.
+	m.Refresh(context.Background())
+	if h := m.Health(); h.Saves != 1 || h.SaveErrors != 0 || h.LastSaveAt.IsZero() {
+		t.Errorf("after one persisted refresh: %+v, want one save", h)
+	}
+
+	store.SaveErr = errors.New("read-only file system")
+	m.Refresh(context.Background())
+	if h := m.Health(); h.SaveErrors != 1 || h.LastSaveError != "read-only file system" || h.Saves != 1 {
+		t.Errorf("after a failed save: %+v", h)
+	}
+	if !m.Viable() {
+		t.Error("a failed save cost the anchors in force")
+	}
+
+	store.SaveErr = nil
+	m.Refresh(context.Background())
+	if h := m.Health(); h.LastSaveError != "" || h.Saves != 2 {
+		t.Errorf("after recovery: %+v, want the error cleared", h)
+	}
+
+	// A stored trust point for another zone is a load error, not silently
+	// adopted, and the health says so.
+	other := &trustanchors.MemoryStore{}
+	if err := other.Save(trustanchors.TrustPoint{Zone: "example."}); err != nil {
+		t.Fatal(err)
+	}
+	m2, err := trustanchors.NewManager(trustanchors.ManagerConfig{Zone: ".", Configured: anchors, Store: other,
+		Policy: dnssec.DefaultPolicy(), Verifier: dnssec.StdVerifier(), Limits: dnssec.DefaultLimits()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := m2.Health(); h.LoadError == "" || h.Seeded {
+		t.Errorf("manager over a foreign trust point: %+v, want a load error", h)
+	}
+}

@@ -1623,6 +1623,38 @@ paths:
                       unrecorded: { type: integer, format: int64 }
                       writeErrors: { type: integer, format: int64 }
 
+  /api/v1/dnssec/status:
+    get:
+      tags: [Detections]
+      summary: The Daddybound runtime as a bounded snapshot
+      description: |
+        What the process already holds about local DNSSEC validation:
+        the configured and effective mode, how records are obtained and over
+        what transport, the RFC 5011 trust anchors with each key's lifecycle
+        state and the refresh and persistence outcomes, the observer's
+        counters since start, the stored observations within a window, the
+        stored disagreement populations separated by resolution source and
+        comparability, and a plain statement that the evidence is not
+        sufficient for enforcement.
+
+        Polling this changes nothing: it resolves no name, refreshes no
+        anchor and touches no trust state. Key material and host paths are
+        not included. `experimental` is always true and `enforcing` always
+        false; Live is reported as unavailable with the reason.
+
+        There is no readiness percentage and no threshold in this
+        endpoint. Each criterion under `evidence` reports a measurement and
+        the status `not_quantified`; the criteria themselves are the subject
+        of the linked issues.
+      parameters:
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 2160 }, description: Window for the stored counts and populations, default 168. }
+      responses:
+        "200":
+          description: The snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DNSSECStatus" }
+
   /api/v1/detectors:
     get:
       tags: [Detections]
@@ -3084,6 +3116,149 @@ components:
         activity: { $ref: "#/components/schemas/InvestigationActivity" }
         decisions: { $ref: "#/components/schemas/InvestigationDecisions" }
         findings: { $ref: "#/components/schemas/InvestigationFindings" }
+    DNSSECStatus:
+      type: object
+      properties:
+        experimental: { type: boolean, enum: [true] }
+        enforcing: { type: boolean, enum: [false] }
+        measuredAt: { type: string, format: date-time }
+        mode:
+          type: object
+          properties:
+            configured: { type: string, description: "`off`, `observe` or `unset`." }
+            effective: { type: string, enum: [off, observe] }
+            chosenBy: { type: string, enum: [config, installation_default] }
+            experimental: { type: boolean }
+            enforcing: { type: boolean, enum: [false] }
+            live:
+              type: object
+              properties:
+                available: { type: boolean, enum: [false] }
+                reason: { type: string }
+        resolution:
+          type: object
+          description: How Daddybound obtains records, as distinct from how clients are answered.
+          properties:
+            source: { type: string, enum: [native, forwarded, none] }
+            transport: { type: string, description: In Learn, plaintext DNS over port 53 to authoritative servers, separate from any encrypted upstream. }
+            clientPath: { type: string }
+            note: { type: string }
+        anchors:
+          type: object
+          properties:
+            available: { type: boolean }
+            unavailable: { type: string }
+            zone: { type: string }
+            viable: { type: boolean, description: The trust point has at least one usable anchor. }
+            needsIntervention: { type: boolean }
+            interventionNote: { type: string }
+            trustedKeys: { type: integer }
+            keys:
+              type: array
+              description: Every managed key with its RFC 5011 state. No key material.
+              items:
+                type: object
+                properties:
+                  keyTag: { type: integer }
+                  algorithm: { type: integer }
+                  flags: { type: integer }
+                  state: { type: string, enum: [addpend, valid, missing, revoked, removed] }
+                  trusted: { type: boolean }
+                  seeded: { type: boolean }
+                  firstSeen: { type: [string, "null"], format: date-time }
+                  lastSeen: { type: [string, "null"], format: date-time }
+                  addHoldDownUntil: { type: string, format: date-time }
+                  revokedAt: { type: string, format: date-time }
+                  removeHoldDownUntil: { type: string, format: date-time }
+            refresh:
+              type: object
+              properties:
+                lastAttempt: { type: [string, "null"], format: date-time }
+                lastSuccess: { type: [string, "null"], format: date-time }
+                lastError: { type: string }
+                next: { type: [string, "null"], format: date-time }
+            persistence:
+              type: object
+              description: Whether what the resolver has learned survives a restart. Independent of whether the anchors in force work.
+              properties:
+                state: { type: string, enum: [ok, not_yet_written, failing, load_failed] }
+                file: { type: string, description: The state file's name, without its directory. }
+                seeded: { type: boolean }
+                loadError: { type: string }
+                lastSaveError: { type: string }
+                saves: { type: integer, format: int64 }
+                saveErrors: { type: integer, format: int64 }
+                lastSaveAt: { type: [string, "null"], format: date-time }
+        runtime:
+          type: object
+          description: The observer's counters since process start. Not within the window.
+          properties:
+            available: { type: boolean }
+            scope: { type: string, enum: [since_start] }
+            uptimeSeconds: { type: integer, format: int64 }
+            observed: { type: integer, format: int64 }
+            dropped: { type: integer, format: int64, description: Queries never observed because the queue was full. }
+            stored: { type: integer, format: int64 }
+            unrecorded: { type: integer, format: int64, description: Observations completed and then lost before storage. }
+            writeErrors: { type: integer, format: int64 }
+            panics: { type: integer, format: int64 }
+            seamPanics: { type: integer, format: int64 }
+            byStatus: { type: object, additionalProperties: { type: integer, format: int64 } }
+            timeouts: { type: integer, format: int64 }
+            resourceLimit: { type: integer, format: int64 }
+            unreachable: { type: integer, format: int64 }
+            disagreements: { type: object, additionalProperties: { type: integer, format: int64 } }
+            resolution: { type: string }
+            queries: { type: integer, format: int64 }
+            delegations: { type: integer, format: int64 }
+            lastAt: { type: [string, "null"], format: date-time }
+            lastStatus: { type: string }
+            health: { type: string, enum: [ok, degraded, unavailable], description: From the counters alone. Any drop, loss, write error or panic is degraded. }
+            healthNote: { type: string }
+        stored:
+          type: object
+          description: Stored observations within the window, and the span of everything retained.
+          properties:
+            windowHours: { type: integer }
+            total: { type: integer, format: int64 }
+            byStatus: { type: object, additionalProperties: { type: integer, format: int64 } }
+            disagreements: { type: object, additionalProperties: { type: integer, format: int64 } }
+            observingSince: { type: [string, "null"], format: date-time }
+            observedUntil: { type: [string, "null"], format: date-time }
+            retainedRows: { type: integer, format: int64 }
+            retentionDays: { type: integer }
+        populations:
+          type: array
+          description: |
+            Stored observations in the window, grouped by how the records
+            were obtained, whether the client's answer came from cache, and
+            whether the two sides made comparable claims. A disagreement in
+            a cached population is not evidence that the client's answer was
+            forged, and a non-comparable population never counts one.
+          items:
+            type: object
+            properties:
+              resolution: { type: string }
+              cached: { type: boolean }
+              comparable: { type: boolean }
+              total: { type: integer, format: int64 }
+              disagreements: { type: object, additionalProperties: { type: integer, format: int64 } }
+              note: { type: string }
+        evidence:
+          type: object
+          properties:
+            sufficient: { type: boolean, enum: [false], description: Always false in this release; no threshold exists that could make it true. }
+            note: { type: string }
+            criteria:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  title: { type: string }
+                  measured: { type: string }
+                  status: { type: string, enum: [not_quantified] }
+            issues: { type: array, items: { type: string } }
     DNSSECObservation:
       type: object
       description: |
