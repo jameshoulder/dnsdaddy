@@ -57,7 +57,8 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Capability | Notes |
 |---|---|
 | Per-query logging with plain-English reasons | Non-blocking and batched; drops rather than delaying a lookup. |
-| Hourly and daily rollups | Survive query-log pruning, so reporting history outlives browsing history. |
+| Hourly and daily rollups | Survive query-log pruning, so reporting history outlives browsing history. Failed resolutions are counted in the same hourly rows as the queries they are a fraction of. |
+| Overview measurements | `GET /api/v1/overview` carries a `measured` block stating each count separately with its window and scope: configured, enabled, permitted and traffic-bearing networks; attributed clients in the window or the reason there is no count; feeds enabled, loaded, failing and never downloaded; blocking policies and whether any enabled network uses one; blocked queries split into security, precaution, preference, custom and unclassified; and an error rate derived from one window, or the reason it cannot be. No field combines two scopes and none is a verdict about protection. |
 | DNSSEC status per query | The **upstream's** verdict. See below and [dns-security/dnssec.md](dns-security/dnssec.md). |
 | Prometheus metrics | Hand-rolled, no client library. |
 | Markdown reports | A period summary written for someone who does not run the network. |

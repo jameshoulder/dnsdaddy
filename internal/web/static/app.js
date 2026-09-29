@@ -1180,6 +1180,74 @@ function toneBadgeClass(tone) {
  * Nothing here relies on colour: every state that has a colour also has a word
  * beside it, and the dot's shape changes with severity.
  */
+/**
+ * The class split under "Blocked queries".
+ *
+ * A blocked query is an outcome, not proof that the name was malicious: an
+ * ads block and a C2 block are both blocks. The server splits the total by
+ * the category recorded on each query, and this line states the security
+ * share on its own so the headline total is never read as a threat count.
+ * Rendered only from a measured split the server actually sent — an older
+ * server sends none, and nothing is inferred from the total.
+ */
+function blockedSplit(measured) {
+  const by = measured && measured.outcomes && measured.outcomes.blockedByClass;
+  if (!by || typeof by.security !== 'number') return '';
+  const other = ['precaution', 'preference', 'custom', 'unclassified']
+    .reduce((sum, k) => sum + (typeof by[k] === 'number' ? by[k] : 0), 0);
+  return html`<span class="hero-split">${num(by.security)} security · ${num(other)} other</span>`;
+}
+
+/**
+ * The resolver card's facts, from the measured block where the server sent
+ * one and from the legacy fields where it did not.
+ *
+ * Each cell is one measurement with its scope in the label. "Unmeasured" and
+ * "Unavailable" are rendered as words rather than as a zero, because a zero
+ * says something happened and was counted, and these say nobody counted.
+ */
+function measuredFacts(overview) {
+  const m = overview && overview.measured;
+  // `value` is already-escaped markup and `note` is plain text. The note's
+  // own span is built with html`` — which escapes the text once — and then
+  // marked raw, because interpolating one html`` result into another escapes
+  // it a second time and the reader sees the markup as text.
+  const cell = (label, value, note) => html`<div><div class="label muted small">${label}</div><div>${raw(value)}${raw(note ? html` <span class="muted small">${note}</span>` : '')}</div></div>`;
+  if (!m) {
+    return html`
+      ${raw(cell('Configured networks', html`${num(overview.protectedNetworks)}`))}
+      ${raw(cell('Policies', html`${num(overview.activePolicies)}`))}`;
+  }
+  const n = m.networks || {};
+  const c = m.clients || {};
+  const f = m.filtering || {};
+  const feeds = m.feeds || {};
+  const rate = (m.resolver && m.resolver.errorRate) || {};
+  const errors = (m.outcomes && m.outcomes.errors) || {};
+  const hours = m.window && m.window.hours ? `${m.window.hours}h` : 'window';
+
+  const clients = c.attribution && typeof c.observedInWindow === 'number'
+    ? html`${num(c.observedInWindow)}`
+    : html`<span class="muted is-unavailable">Not recorded</span>`;
+  const rateText = rate.available
+    ? html`${rate.ratio >= 0.0005 || rate.ratio === 0 ? rate.ratio === 0 ? '0%' : `${(rate.ratio * 100).toFixed(1)}%` : '<0.1%'}`
+    : html`<span class="muted is-unavailable">Unmeasured</span>`;
+  const rateNote = rate.available
+    ? `${num(rate.numerator)} of ${num(rate.denominator)}`
+    : (rate.unavailable || '');
+  const errorNote = errors.complete === false && errors.measuredSince
+    ? `counted since ${new Date(errors.measuredSince).toLocaleString('en-GB')}`
+    : '';
+
+  return html`
+    ${raw(cell('Networks', html`${num(n.configured)} configured`, `${num(n.enabled)} enabled · ${num(n.resolverPermitted)} permitted · ${num(n.withTrafficInWindow)} with traffic (${hours})`))}
+    ${raw(cell(`Clients seen (${hours})`, clients, c.attribution ? '' : (c.unavailable || 'client addresses are not recorded')))}
+    ${raw(cell('Blocking policies in use', html`${num(f.blockingPoliciesAssigned)} of ${num(f.blockingPolicies)}`, `${num(n.monitorOnly)} enabled network${n.monitorOnly === 1 ? '' : 's'} monitor-only`))}
+    ${raw(cell('Feeds', html`${num(feeds.loaded)} of ${num(feeds.enabled)} loaded`, `${num(feeds.failing)} failing · ${num(feeds.neverDownloaded)} never downloaded${f.categoryBlockingAvailable ? '' : ' · index empty'}`))}
+    ${raw(cell(`Resolution failures (${hours})`, rateText, rateNote))}
+    ${raw(cell('Failed queries', html`${num(errors.count)}`, errorNote || `in the last ${hours}`))}`;
+}
+
 function statusHero(overview, feedsData, detections) {
   const state = protectionState(overview.protectionStatus);
   const intel = feedHealth(feedsData);
@@ -1216,7 +1284,7 @@ function statusHero(overview, feedsData, detections) {
       </div>
       <div class="hero-stats">
         <div class="hero-stat"><span class="n">${num(overview.queries24h)}</span><span class="k">DNS queries</span></div>
-        <div class="hero-stat is-blocked"><span class="n">${num(overview.threatsBlocked24h)}</span><span class="k">Blocked queries</span></div>
+        <div class="hero-stat is-blocked"><span class="n">${num(overview.threatsBlocked24h)}</span><span class="k">Blocked queries</span>${raw(blockedSplit(overview.measured))}</div>
         <!-- No queries in the period means no rate to state. Zero per cent is
              a measurement; this is the absence of one. -->
         <div class="hero-stat">
@@ -1549,12 +1617,12 @@ pages.dashboard = {
         <div class="section grid grid-2">
           ${raw(threatIntelPanel(feeds))}
           <div class="card">
-            <div class="card-head"><div><h2>Resolver</h2><p>This instance and its configured scope.</p></div></div>
+            <div class="card-head"><div><h2>Resolver</h2><p>This instance, its configured scope and what was measured. Each figure names its own window.</p></div></div>
             <div class="grid grid-3">
               <div><div class="label muted small">Status</div><div>${raw(statusBadge(overview.resolverStatus))}</div></div>
               <div><div class="label muted small">Uptime</div><div>${duration(overview.uptimeSeconds)}</div></div>
               <div><div class="label muted small">Feeds refreshed</div><div>${relTime(overview.lastFeedRefresh)}</div></div>
-              <div><div class="label muted small">Configured networks</div><div>${num(overview.protectedNetworks)}</div></div>
+              ${raw(measuredFacts(overview))}
               <div><div class="label muted small">Policies</div><div>${num(overview.activePolicies)}</div></div>
               <div><div class="label muted small">Version</div><div class="mono small">${overview.version}</div></div>
             </div>
@@ -4893,6 +4961,8 @@ if (typeof module !== 'undefined' && module.exports) {
     emptyState,
     protectionState,
     statusHero,
+    blockedSplit,
+    measuredFacts,
     attentionItems,
     attentionPanel,
     recentlyBlocked,

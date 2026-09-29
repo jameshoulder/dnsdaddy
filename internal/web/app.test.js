@@ -37,6 +37,8 @@ const {
   protectionState,
   feedHealth,
   statusHero,
+  blockedSplit,
+  measuredFacts,
   attentionItems,
   attentionPanel,
   recentlyBlocked,
@@ -3038,4 +3040,101 @@ test('an absent or non-Boolean cache observation is omitted rather than stated a
   for (const cached of [undefined, null, 0, 'false']) {
     assert.doesNotMatch(queryRow(q({ cached })), /<dt>Cache hit<\/dt>|Answered from/);
   }
+});
+
+/* ---------- the measured block ------------------------------------------ */
+
+function measured(o = {}) {
+  return {
+    window: { hours: 24, source: 'hourly_rollups', rollupRetentionDays: 90 },
+    networks: { configured: 3, enabled: 2, resolverPermitted: 1, adHocAccess: true, withBlockingPolicy: 1, monitorOnly: 1, withTrafficInWindow: 1 },
+    clients: { attribution: true, observedInWindow: 41, everSeen: true },
+    filtering: { policies: 3, blockingPolicies: 2, blockingPoliciesAssigned: 1, monitorOnlyPolicies: 1, customBlockingPolicies: 1, categoryBlockingAvailable: true, indexedDomains: 412345 },
+    feeds: { configured: 6, enabled: 4, loaded: 3, failing: 1, neverDownloaded: 1, lastSuccessAt: now(), lastAttemptAt: now(), refreshing: false },
+    outcomes: { queries: 128491, blocked: 327, blockedByClass: { security: 12, precaution: 3, preference: 300, custom: 10, unclassified: 2 }, errors: { count: 64, measuredSince: null, complete: true } },
+    resolver: { errorRate: { available: true, numerator: 64, denominator: 128491, ratio: 0.000498, windowHours: 24 }, sinceStart: { uptimeSeconds: 90061, queries: 1, blocked: 0, errors: 0, refused: 0, coversWindow: true } },
+    ...o,
+  };
+}
+
+test('blocked queries are split by class only when the server measured it', () => {
+  // The headline total counts an ads block and a C2 block alike. The split is
+  // what stops "327 blocked" being read as 327 threats, and it comes from the
+  // server's own classification of each recorded category — never from the
+  // total, and never from a server that sent no split.
+  const withSplit = statusHero(overview({ measured: measured() }), healthyFeeds, { enabled: true, total: 6 });
+  assert.match(withSplit, /327/);
+  assert.match(withSplit, /12 security · 315 other/);
+
+  const legacy = statusHero(overview(), healthyFeeds, { enabled: true, total: 6 });
+  assert.doesNotMatch(legacy, /security ·/);
+  assert.equal(blockedSplit(undefined), '');
+  assert.equal(blockedSplit({ outcomes: { blockedByClass: {} } }), '');
+});
+
+test('clients seen is stated as not recorded when attribution is off, never as zero', () => {
+  const on = measuredFacts(overview({ measured: measured() }));
+  assert.match(on, /Clients seen \(24h\)/);
+  assert.match(on, />41</);
+
+  const off = measuredFacts(overview({ measured: measured({
+    clients: { attribution: false, observedInWindow: null, unavailable: 'client addresses are not recorded (log.log_client_ip is off)', everSeen: false },
+  }) }));
+  assert.match(off, /Not recorded/);
+  assert.match(off, /log\.log_client_ip is off/);
+  assert.doesNotMatch(off, /Clients seen \(24h\)<\/div><div>0/);
+});
+
+test('the resolution failure rate is shown as unmeasured with the reason when it cannot be computed', () => {
+  const measuredRate = measuredFacts(overview({ measured: measured() }));
+  assert.match(measuredRate, /Resolution failures \(24h\)/);
+  assert.match(measuredRate, /&lt;0\.1%/); // escaped once, as text
+  assert.match(measuredRate, /64 of 128,491/);
+
+  const noTraffic = measuredFacts(overview({ measured: measured({
+    outcomes: { queries: 0, blocked: 0, blockedByClass: {}, errors: { count: 0, measuredSince: null, complete: true } },
+    resolver: { errorRate: { available: false, unavailable: 'no queries in the window', numerator: 0, denominator: 0, ratio: 0, windowHours: 24 }, sinceStart: { uptimeSeconds: 5, coversWindow: false } },
+  }) }));
+  assert.match(noTraffic, /Unmeasured/);
+  assert.match(noTraffic, /no queries in the window/);
+  assert.doesNotMatch(noTraffic, /Resolution failures \(24h\)<\/div><div>0%/);
+
+  // Partial counting after an upgrade is stated as such, not rendered as a
+  // clean rate.
+  const partial = measuredFacts(overview({ measured: measured({
+    outcomes: { queries: 10, blocked: 0, blockedByClass: {}, errors: { count: 1, measuredSince: '2026-09-29T09:00:00Z', complete: false } },
+    resolver: { errorRate: { available: false, unavailable: 'errors have only been counted since 2026-09-29T09:00:00Z; the window is not fully covered', numerator: 1, denominator: 10, ratio: 0, windowHours: 24 }, sinceStart: {} },
+  }) }));
+  assert.match(partial, /Unmeasured/);
+  assert.match(partial, /counted since/);
+});
+
+test('an unused blocking policy is not counted as in use, and networks are counted by state', () => {
+  const out = measuredFacts(overview({ measured: measured({
+    filtering: { policies: 2, blockingPolicies: 2, blockingPoliciesAssigned: 0, monitorOnlyPolicies: 0, customBlockingPolicies: 0, categoryBlockingAvailable: false, indexedDomains: 0 },
+    networks: { configured: 3, enabled: 2, resolverPermitted: 1, withBlockingPolicy: 0, monitorOnly: 2, withTrafficInWindow: 0 },
+    feeds: { configured: 6, enabled: 4, loaded: 0, failing: 4, neverDownloaded: 4 },
+  }) }));
+  assert.match(out, /Blocking policies in use<\/div><div>0 of 2/);
+  assert.match(out, /2 enabled networks monitor-only/);
+  assert.match(out, /3 configured/);
+  assert.match(out, /2 enabled · 1 permitted · 0 with traffic \(24h\)/);
+  // A feed that downloaded is not a feed in the index, and an empty index is
+  // said in words.
+  assert.match(out, /0 of 4 loaded/);
+  assert.match(out, /4 failing · 4 never downloaded · index empty/);
+});
+
+test('an older server without a measured block still renders the legacy facts', () => {
+  const out = measuredFacts(overview());
+  assert.match(out, /Configured networks<\/div><div>2/);
+  assert.doesNotMatch(out, /Clients seen|Unmeasured|Not recorded/);
+});
+
+test('measured facts escape server-supplied text', () => {
+  const out = measuredFacts(overview({ measured: measured({
+    clients: { attribution: false, observedInWindow: null, unavailable: '<img src=x onerror=alert(1)>' },
+  }) }));
+  assert.doesNotMatch(out, /<img/);
+  assert.match(out, /&lt;img/);
 });

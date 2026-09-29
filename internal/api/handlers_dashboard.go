@@ -216,12 +216,21 @@ type Overview struct {
 	// and being refused, which is a different problem from no queries at all
 	// and has a different fix.
 	RefusedClients uint64 `json:"refusedClients"`
+
+	// Measured is the factual block: every count above, restated as the
+	// specific thing it measures, with its window and scope, plus the
+	// measurements the headline fields blur together. See
+	// handlers_overview_measured.go. The headline fields keep their names
+	// and meanings; this is where a reader goes to find out what they mean.
+	Measured OverviewMeasured `json:"measured"`
 }
 
 func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	now := time.Now()
+	const window = 24 * time.Hour
 
-	totals, err := a.Store.TotalsSince(ctx, time.Now().Add(-24*time.Hour))
+	totals, err := a.Store.TotalsSince(ctx, now.Add(-window))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -262,12 +271,25 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 		protection = "degraded"
 	}
 
-	_, _, resolverErrors := a.DNS.Stats()
+	measured, err := a.measuredOverview(ctx, overviewInputs{
+		now: now, window: window, totals: totals,
+		networks: networks, policies: policies, everSeen: seenClients,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Derived from one window and one scope: failed resolutions in the last
+	// 24 hours over queries in the last 24 hours. It used to divide the
+	// process's lifetime error counter by the last day's queries, which on a
+	// long-running resolver with a quiet day read as degraded for a fault
+	// weeks past. When the rate cannot be measured — no traffic, or an
+	// upgraded database whose error column does not yet cover the window —
+	// this reads operational and Measured.Resolver.ErrorRate says why.
 	resolverStatus := "operational"
-	if resolverErrors > 0 && totals.Queries > 0 {
-		if float64(resolverErrors)/float64(totals.Queries) > 0.05 {
-			resolverStatus = "degraded"
-		}
+	if rate := measured.Resolver.ErrorRate; rate.Available && rate.Ratio > 0.05 {
+		resolverStatus = "degraded"
 	}
 
 	var blockRate float64
@@ -302,6 +324,7 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 		UnrestrictedAccess: a.ClientACL.Current().Unrestricted(),
 		ServesOnlyLoopback: a.ClientACL.Current().ServesOnlyLoopback(),
 		RefusedClients:     a.DNS.RefusedClients(),
+		Measured:           measured,
 	})
 }
 

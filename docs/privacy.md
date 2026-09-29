@@ -68,8 +68,9 @@ This is the sensitive table. `qname` plus `client_ip` is a browsing history.
 
 ### Aggregates — `stats_hourly`, `blocked_domain_stats`
 
-Counts per hour per network per category, and per-day counts of blocked domains.
-No client IPs, no per-device attribution.
+Counts per hour per network per category — queries, blocks and failed
+resolutions — and per-day counts of blocked domains. No client IPs, no
+per-device attribution.
 
 `blocked_domain_stats` does retain blocked *domain names* with counts. Those are
 names your network attempted to reach and DNS Daddy stopped — the evidence that
@@ -80,6 +81,22 @@ makes reporting useful — but they are not tied to a device.
 Because aggregates are separate from the raw log, you can cut query-log
 retention to a day and keep your charts and reports for three months. That is
 the single most useful privacy dial in the product.
+
+### Client presence — `client_hourly`
+
+One row per client address per hour it was seen: `(hour, client_ip)` and
+nothing else. It exists so the overview can say how many devices used the
+resolver in the last day without scanning every query-log row in that day.
+
+It follows the query log, not the aggregates: a row is written only when a
+per-query row is also written — so `log_client_ip: false` writes nothing, and
+`query_log: false` or a policy with `logQueries` off writes nothing for those
+queries — and it is pruned on `retention_days`, not `rollup_days`. It names
+devices, and the retention setting for data that names devices is the
+query log's. Erasing a client from the query log (below) should also erase it
+here: `DELETE FROM client_hourly WHERE client_ip = '10.0.4.23';`
+
+**Default retention: 7 days.**
 
 ### Behavioural findings — `findings`
 

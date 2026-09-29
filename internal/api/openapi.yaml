@@ -1461,7 +1461,16 @@ components:
           description: |
             `offline` means no blocklist is loaded. `degraded` means a blocklist
             is loaded but no policy is enforcing anything.
-        resolverStatus: { type: string, enum: [operational, degraded] }
+        resolverStatus:
+          type: string
+          enum: [operational, degraded]
+          description: |
+            `degraded` when more than 5% of the last 24 hours' queries failed
+            to resolve, measured from the same hourly rollups as
+            `queries24h`. Reads `operational` when that rate cannot be
+            measured — no queries in the window, or an upgraded database
+            whose error counting does not yet cover it — and
+            `measured.resolver.errorRate` says which.
         queries24h: { type: integer, format: int64 }
         threatsBlocked24h: { type: integer, format: int64 }
         blockRate24h: { type: number, format: double }
@@ -1530,6 +1539,137 @@ components:
 
             The refused addresses themselves are deliberately not recorded — an
             unauthorised source could otherwise fill the log.
+        measured:
+          $ref: "#/components/schemas/OverviewMeasured"
+
+    OverviewMeasured:
+      type: object
+      description: |
+        The overview's factual companion. Every headline field above keeps
+        its name and its meaning; this block states each underlying
+        measurement separately, with the window and the scope it was taken
+        over, and gives a reason wherever a number cannot be measured
+        instead of a zero.
+
+        Nothing here is a verdict about whether anything is protected. A
+        configured network is not an observed device, a blocking policy
+        nobody is assigned to protects nobody, a feed that downloaded is not
+        a feed in the index, and a blocked query is an outcome rather than
+        proof the name was malicious. The fields are cut so that none of
+        those can be read into another.
+      required: [window, networks, clients, filtering, feeds, outcomes, resolver]
+      properties:
+        window:
+          type: object
+          description: The period every windowed count in this block covers.
+          properties:
+            hours: { type: integer }
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+            measuredAt: { type: string, format: date-time }
+            source:
+              type: string
+              enum: [hourly_rollups]
+              description: Rollups are written whether or not per-query rows are, so disabling the query log does not blank these counts.
+            rollupRetentionDays: { type: integer }
+        networks:
+          type: object
+          properties:
+            configured: { type: integer, description: Every network row, the built-in catch-all included. }
+            enabled: { type: integer }
+            resolverPermitted:
+              type: integer
+              description: Enabled networks carrying their own permission to query. The catch-all is excluded, as for `permittedNetworks`.
+            adHocAccess: { type: boolean, description: Whether unmatched clients inside the configured pool are served. }
+            withBlockingPolicy: { type: integer, description: Enabled networks whose policy has any category or domain blocking configured. }
+            monitorOnly: { type: integer, description: Enabled networks whose policy blocks nothing. }
+            withTrafficInWindow: { type: integer, description: Configured networks that recorded at least one query in the window. }
+        clients:
+          type: object
+          properties:
+            attribution: { type: boolean, description: Whether client addresses are recorded at all. }
+            observedInWindow:
+              type: [integer, "null"]
+              format: int64
+              description: Distinct attributed client addresses seen in the window, or null when not measurable. Never a zero standing in for "not recorded".
+            unavailable: { type: string, description: Why `observedInWindow` is null. Absent otherwise. }
+            everSeen: { type: boolean, description: "`hasSeenClients`, restated beside the other client fact." }
+        filtering:
+          type: object
+          description: What is configured, as distinct from what happened.
+          properties:
+            policies: { type: integer }
+            blockingPolicies: { type: integer, description: Policies with at least one category or block-list entry. }
+            blockingPoliciesAssigned: { type: integer, description: Blocking policies that some enabled network actually uses. }
+            monitorOnlyPolicies: { type: integer }
+            customBlockingPolicies: { type: integer, description: Policies carrying operator block-list entries, which block with or without a feed index. }
+            categoryBlockingAvailable: { type: boolean, description: The feed index holds anything. Category selections block nothing while it is empty. }
+            indexedDomains: { type: integer }
+        feeds:
+          type: object
+          properties:
+            configured: { type: integer }
+            enabled: { type: integer }
+            loaded: { type: integer, description: Enabled feeds whose cached copy is in the index answering queries now. The only feed count that says a feed is contributing. }
+            failing: { type: integer, description: Enabled feeds whose most recent refresh attempt failed. Such a feed may still be loaded from an earlier download. }
+            neverDownloaded: { type: integer, description: Enabled feeds with no successful download. }
+            lastSuccessAt: { type: [string, "null"], format: date-time }
+            lastAttemptAt: { type: [string, "null"], format: date-time }
+            refreshing: { type: boolean }
+        outcomes:
+          type: object
+          properties:
+            queries: { type: integer, format: int64 }
+            blocked: { type: integer, format: int64 }
+            blockedByClass:
+              type: object
+              description: |
+                `blocked` split by what kind of decision each block was, from
+                the category recorded on the query. Every class is present,
+                at zero where nothing happened, and the values sum to
+                `blocked`.
+
+                `security`: malware, phishing, C2 and cryptomining listings.
+                `precaution`: newly-registered domains — a risk indicator,
+                not a verdict. `preference`: ads, adult and gambling content
+                the operator chose not to serve. `custom`: the operator's own
+                block-list. `unclassified`: a category this build does not
+                recognise (one an external provider named, or one a newer
+                build wrote) or no category at all; counted rather than
+                dropped, and never counted as security.
+              additionalProperties: { type: integer, format: int64 }
+            errors:
+              type: object
+              properties:
+                count: { type: integer, format: int64, description: Queries that failed to resolve, from the same rollup rows as `queries`. }
+                measuredSince:
+                  type: [string, "null"]
+                  format: date-time
+                  description: When this database began counting errors, on an upgraded installation. Null when every retained hour has been counted.
+                complete: { type: boolean, description: Every hour in the window was counted. }
+        resolver:
+          type: object
+          properties:
+            errorRate:
+              type: object
+              description: Failed resolutions over queries, both from the window, or a stated reason it could not be computed.
+              properties:
+                available: { type: boolean }
+                unavailable: { type: string, description: Why the rate is unavailable. Absent when it is available. }
+                numerator: { type: integer, format: int64 }
+                denominator: { type: integer, format: int64 }
+                ratio: { type: number, format: double, description: 0 to 1. Meaningful only when `available`. }
+                windowHours: { type: integer }
+            sinceStart:
+              type: object
+              description: The process's own lifetime counters, scoped to its uptime and nothing else. Not comparable with the windowed counts unless `coversWindow`.
+              properties:
+                uptimeSeconds: { type: integer, format: int64 }
+                queries: { type: integer, format: int64 }
+                blocked: { type: integer, format: int64 }
+                errors: { type: integer, format: int64 }
+                refused: { type: integer, format: int64 }
+                coversWindow: { type: boolean }
 
     ActivityBucket:
       type: object
@@ -1974,6 +2114,10 @@ components:
           properties:
             queries: { type: integer, format: int64 }
             blocked: { type: integer, format: int64 }
+            errors:
+              type: integer
+              format: int64
+              description: Queries that failed to resolve in the period. Zero for hours recorded before this build began counting them.
         blockRate: { type: number, format: double }
         blocklistDomains: { type: integer }
         categories:

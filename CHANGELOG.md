@@ -22,6 +22,50 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### The overview says what it measured
+
+`GET /api/v1/overview` gains a `measured` block. Every field it had keeps its
+name and its meaning — `protectedNetworks` still counts configured networks,
+`threatsBlocked24h` still counts every block, `protectionStatus` is still the
+same coarse derivation — because a v1 field is never repurposed. The new block
+is where each of those is stated as the specific thing it measures, with its
+window and scope:
+
+- **Networks** configured, enabled, permitted to resolve on their own, on a
+  blocking policy, monitor-only, and with traffic in the window. A configured
+  network is not an observed device.
+- **Clients** observed in the window, or `null` with a reason when client
+  addresses are not recorded. Never a zero standing in for "not measured".
+- **Filtering**: blocking policies, and how many of them an enabled network
+  actually uses. A blocking policy nobody is assigned to protects nobody, and
+  the headline still calls that "protected".
+- **Feeds** enabled, loaded into the index, failing their refresh, and never
+  downloaded — four different facts that one "feeds refreshed" timestamp
+  blurred.
+- **Outcomes**: blocks split into `security`, `precaution`, `preference`,
+  `custom` and `unclassified` from the category recorded on each query, so an
+  ads block is no longer a "threat". The classes always sum to the total.
+- **Resolver**: an error rate whose numerator and denominator come from the
+  same 24 hours of rollups, or a stated reason it cannot be computed. The
+  process's lifetime counters are reported separately, with whether its
+  uptime even covers the window.
+
+Two additive storage changes make that possible. `stats_hourly` gains an
+`errors` column, so failed resolutions are counted in the same rows as the
+queries they are a fraction of; on an upgraded database the moment counting
+began is recorded, hours before it read zero, and both the block and the
+`resolverStatus` derivation say so rather than dividing a partial numerator by
+a full denominator. `client_hourly` records which client addresses were seen
+in which hour, bounded by clients × hours, so the count of devices in a day is
+a few rows rather than a scan of the day's query log. It is written only when
+a per-query row is, and pruned on the query log's retention; see
+`docs/privacy.md`.
+
+`resolverStatus` is now derived from that windowed rate. It used to divide the
+process's lifetime error counter by the last day's queries, which on a
+long-running resolver with a quiet day read as degraded for a fault weeks
+past.
+
 ### Policy attribution is decided per CIDR
 
 A client is now attributed to the network owning the **most specific prefix

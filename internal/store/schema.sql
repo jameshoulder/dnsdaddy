@@ -204,7 +204,28 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
     category   TEXT    NOT NULL,
     total      INTEGER NOT NULL DEFAULT 0,
     blocked    INTEGER NOT NULL DEFAULT 0,
+    -- Queries that failed to resolve, counted in the same row as the queries
+    -- they are a fraction of. An error rate is only meaningful when its
+    -- numerator and denominator share a window and a scope, and these two
+    -- columns are the only pair in the database that do.
+    errors     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (hour, network_id, category)
+);
+
+-- Which attributed clients were seen in which hour. One row per (hour, client),
+-- so "how many devices used the resolver today" is a count over at most
+-- clients × 24 rows rather than a scan of every query-log row in the window —
+-- on the reference deployment the latter is a million rows per dashboard load.
+--
+-- Written only when a per-query row would also be written: an operator who
+-- switched query logging off, instance-wide or per policy, has asked for
+-- client addresses not to be kept, and an hourly presence table would keep
+-- them. Pruned on log.retention_days for the same reason, never on the longer
+-- rollup window.
+CREATE TABLE IF NOT EXISTS client_hourly (
+    hour       INTEGER NOT NULL,
+    client_ip  TEXT    NOT NULL,
+    PRIMARY KEY (hour, client_ip)
 );
 
 CREATE TABLE IF NOT EXISTS blocked_domain_stats (

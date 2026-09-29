@@ -21,6 +21,59 @@ type Category struct {
 	Reason string `json:"reason"`
 	// DefaultOn marks categories included in the seeded "Standard business" policy.
 	DefaultOn bool `json:"defaultOn"`
+	// Class says what kind of decision blocking this category is. See the
+	// Class* constants: a security category names something a curator judged
+	// hostile, a preference category is content the operator chose not to
+	// serve. A "threats blocked" figure that counted both would be the
+	// overstatement this field exists to prevent.
+	Class string `json:"class"`
+}
+
+// What kind of decision a block in a category is.
+//
+// The split is presentation-facing and deliberately coarse. It decides which
+// headline a blocked query is counted under, and nothing else: enforcement
+// treats every enabled category the same.
+const (
+	// ClassSecurity: a curated source asserts the domain is hostile —
+	// malware, phishing, command and control, cryptojacking.
+	ClassSecurity = "security"
+	// ClassPrecaution: a risk indicator rather than a verdict. A domain
+	// registered last week is over-represented in attacks and is also every
+	// new business; blocking it is a precaution the operator chose.
+	ClassPrecaution = "precaution"
+	// ClassPreference: content the operator chose not to serve. Not a threat.
+	ClassPreference = "preference"
+	// ClassCustom: an operator's own block-list entry. Recorded on a query
+	// as the category "custom"; it is not a catalogue category.
+	ClassCustom = "custom"
+	// ClassUnclassified: a category this build does not recognise — one a
+	// newer build wrote, or one an external provider named — or no category
+	// at all. Counted rather than dropped, so the classes still sum to the
+	// total, and never counted as security.
+	ClassUnclassified = "unclassified"
+)
+
+// BlockClasses is every class, in report order, so a consumer can render a
+// stable set of rows and a count of zero is distinguishable from an absent
+// class.
+func BlockClasses() []string {
+	return []string{ClassSecurity, ClassPrecaution, ClassPreference, ClassCustom, ClassUnclassified}
+}
+
+// ClassOfBlock says which class a blocked query's recorded category falls in.
+//
+// From the recorded category and nothing else: the classification is of the
+// string the query log holds, so a report over old rows classifies them by
+// what was written at the time, not by what a feed says today.
+func ClassOfBlock(category string) string {
+	if category == ClassCustom {
+		return ClassCustom
+	}
+	if c, ok := CategoryByID(category); ok && c.Class != "" {
+		return c.Class
+	}
+	return ClassUnclassified
 }
 
 // Categories is the canonical, ordered category list.
@@ -31,6 +84,7 @@ var Categories = []Category{
 		Description: "Domains distributing malicious payloads or hosting exploit kits.",
 		Reason:      "Domain is on a malware distribution list",
 		DefaultOn:   true,
+		Class:       ClassSecurity,
 	},
 	{
 		ID:          "phishing",
@@ -38,6 +92,7 @@ var Categories = []Category{
 		Description: "Credential harvesting and brand-impersonation domains.",
 		Reason:      "Domain is on a phishing list",
 		DefaultOn:   true,
+		Class:       ClassSecurity,
 	},
 	{
 		ID:          "c2",
@@ -45,6 +100,7 @@ var Categories = []Category{
 		Description: "Command-and-control infrastructure that compromised devices call home to.",
 		Reason:      "Domain is known command-and-control infrastructure",
 		DefaultOn:   true,
+		Class:       ClassSecurity,
 	},
 	{
 		ID:          "cryptomining",
@@ -52,6 +108,7 @@ var Categories = []Category{
 		Description: "Mining pools and in-browser cryptojacking scripts.",
 		Reason:      "Domain is a cryptomining pool or cryptojacking host",
 		DefaultOn:   true,
+		Class:       ClassSecurity,
 	},
 	{
 		ID:          "newly-registered",
@@ -59,6 +116,7 @@ var Categories = []Category{
 		Description: "Domains registered in the last 30 days, heavily over-represented in attacks.",
 		Reason:      "Domain was registered very recently",
 		DefaultOn:   false,
+		Class:       ClassPrecaution,
 	},
 	{
 		ID:          "ads",
@@ -66,6 +124,7 @@ var Categories = []Category{
 		Description: "Advertising and cross-site tracking endpoints.",
 		Reason:      "Domain is an advertising or tracking endpoint",
 		DefaultOn:   false,
+		Class:       ClassPreference,
 	},
 	{
 		ID:          "adult",
@@ -73,6 +132,7 @@ var Categories = []Category{
 		Description: "Pornography and adult material.",
 		Reason:      "Domain serves adult content",
 		DefaultOn:   false,
+		Class:       ClassPreference,
 	},
 	{
 		ID:          "gambling",
@@ -80,6 +140,7 @@ var Categories = []Category{
 		Description: "Online casinos, betting, and gambling affiliates.",
 		Reason:      "Domain is a gambling site",
 		DefaultOn:   false,
+		Class:       ClassPreference,
 	},
 }
 
