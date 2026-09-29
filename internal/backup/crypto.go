@@ -20,6 +20,7 @@ import (
 const (
 	FormatVersion         = 1
 	chunkSize             = 1 << 20
+	gcmTagSize            = 16
 	saltSize              = 32
 	headerSize            = 16 + saltSize + 4
 	MaxArchiveBytes int64 = 1 << 30
@@ -52,7 +53,16 @@ func derive(p, salt []byte) (cipher.AEAD, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cipher.NewGCM(block)
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	// These sizes are part of version 1's wire format. Do not derive integer
+	// bounds from the signed return value of an arbitrary AEAD implementation.
+	if aead.NonceSize() != 12 || aead.Overhead() != gcmTagSize {
+		return nil, errors.New("unsupported backup AEAD parameters")
+	}
+	return aead, nil
 }
 
 // sealWriter is a bounded record stream using standard AES-256-GCM. Each
@@ -118,10 +128,16 @@ func (s *sealWriter) Write(p []byte) (int, error) {
 }
 
 func (s *sealWriter) record(p []byte) error {
+	plainSize := len(p)
+	if plainSize < 0 || plainSize > chunkSize {
+		return ErrLimit
+	}
+	// The checked 0..1 MiB plaintext plus the fixed 16-byte GCM tag fits
+	// the uint32 record field on every supported architecture.
+	size := uint32(plainSize) + gcmTagSize
 	var nonce [12]byte
 	copy(nonce[:4], s.header[16+saltSize:])
 	binary.BigEndian.PutUint64(nonce[4:], s.index)
-	size := uint32(len(p) + s.aead.Overhead())
 	aad := recordAAD(s.header[:], s.index, size)
 	sealed := s.aead.Seal(nil, nonce[:], p, aad)
 	var prefix [4]byte
@@ -204,7 +220,7 @@ func (d *openReader) Read(p []byte) (int, error) {
 		return 0, ErrAuthentication
 	}
 	size := binary.BigEndian.Uint32(prefix[:])
-	if size < uint32(d.aead.Overhead()) || size > chunkSize+uint32(d.aead.Overhead()) {
+	if size < gcmTagSize || size > chunkSize+gcmTagSize {
 		return 0, ErrAuthentication
 	}
 	sealed := make([]byte, int(size))

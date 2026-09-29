@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	// This offline lab uses fixed seeds only for reproducible synthetic DNS
+	// fixtures. Its random values are neither secrets nor security decisions.
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -210,7 +213,7 @@ func run(dir string, generate bool) error {
 	if err := writeJSON(filepath.Join(dir, "report.json"), r); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "RESULTS.md"), []byte(markdown(r)), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "RESULTS.md"), []byte(markdown(r)), 0600); err != nil {
 		return err
 	}
 	fmt.Printf("Training: %d windows / %d queries. Held out: %d windows / %d queries.\n", r.TrainingWindows, r.TrainingQueries, r.Learned.Windows, r.HeldOutQueries)
@@ -293,6 +296,9 @@ func datasetSpecs() []spec {
 }
 
 func observations(s spec) []detect.Observation {
+	// #nosec G404 -- Fixed seeds reproduce the published synthetic corpus and
+	// held-out evaluation exactly. No credentials, tokens or security decisions
+	// use this generator; this offline command makes no network requests.
 	rng := rand.New(rand.NewSource(s.seed))
 	words := []string{"portal", "mail", "assets", "updates", "calendar", "login", "search", "storage"}
 	out := make([]detect.Observation, 0, s.count)
@@ -353,7 +359,7 @@ func randomLabel(rng *rand.Rand, n int, alphabet string) string {
 }
 
 func generateFiles(dir string) error {
-	if err := os.MkdirAll(filepath.Join(dir, "data"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "data"), 0700); err != nil {
 		return err
 	}
 	specs := datasetSpecs()
@@ -379,7 +385,10 @@ func generateFiles(dir string) error {
 			name = "training.ndjson"
 		}
 		path := filepath.Join(dir, "data", name)
-		f, err := os.Create(path)
+		// #nosec G304 -- The offline operator selects -dir; the remaining path
+		// components are fixed fixture names. No server request controls this
+		// file access, and newly created synthetic fixtures are owner-only.
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 		if err != nil {
 			return err
 		}
@@ -393,6 +402,8 @@ func generateFiles(dir string) error {
 		if err = f.Close(); err != nil {
 			return err
 		}
+		// #nosec G304 -- Read back this command's fixture in the operator's
+		// chosen -dir only to record its checksum; there is no remote input.
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -404,6 +415,8 @@ func generateFiles(dir string) error {
 }
 
 func readWindows(path, split string) ([]window, error) {
+	// #nosec G304 -- This standalone offline CLI intentionally reads the
+	// operator's -dir fixtures. It is not called by the daemon or an API route.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -450,7 +463,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	return os.WriteFile(path, append(data, '\n'), 0600)
 }
 
 func number(p *float64) string {

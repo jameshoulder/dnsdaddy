@@ -85,7 +85,7 @@ func (e *Engine) load() error {
 		return fmt.Errorf("local learning state exceeds configured client bounds or has invalid metadata")
 	}
 	for _, c := range saved.Clients {
-		if c == nil || c.Client == "" || len(c.Client) > 136 || len(c.NetworkID) > 128 || c.LastSeen.IsZero() || strings.ContainsAny(c.Client, "\r\n\x00") || c.Baseline.Windows > 1<<40 || c.Baseline.Queries > 1<<53 {
+		if c == nil || c.Client == "" || len(c.Client) > 136 || len(c.NetworkID) > 128 || c.LastSeen.IsZero() || strings.ContainsAny(c.Client, "\r\n\x00") || c.Baseline.Windows > maxBaselineWindows || c.Baseline.Queries > maxBaselineQueries {
 			return fmt.Errorf("local learning state has invalid client metadata")
 		}
 		if c.Client != "unattributed" && !strings.HasPrefix(c.Client, "network:") {
@@ -99,7 +99,7 @@ func (e *Engine) load() error {
 			return fmt.Errorf("local learning state has duplicate clients")
 		}
 		b := &c.Baseline
-		if (b.Windows > 0 && (b.FirstAt.IsZero() || !b.LastAt.After(b.FirstAt) || b.LastAt.After(c.LastClosed))) || (b.Windows == 0 && b.Queries != 0) || b.Queries < b.Windows*uint64(e.opts.MinWindowQueries) || b.Queries > b.Windows*uint64(e.opts.MaxWindowQueries) {
+		if (b.Windows > 0 && (b.FirstAt.IsZero() || !b.LastAt.After(b.FirstAt) || b.LastAt.After(c.LastClosed))) || !validPersistedSampleCounts(b.Windows, b.Queries, e.opts.MinWindowQueries, e.opts.MaxWindowQueries) {
 			return fmt.Errorf("local learning state has invalid sample counts or chronology")
 		}
 		upper := [FeatureCount]float64{math.Log1p(float64(e.opts.MaxWindowQueries) / e.opts.Window.Minutes()), 63, 6, 1, 1, 127}
@@ -114,6 +114,21 @@ func (e *Engine) load() error {
 	e.persistence.LastSavedAt = saved.SavedAt
 	e.model.windows.RestartDiscarded = uint64(saved.PendingWindows)
 	return nil
+}
+
+// Validate signed configuration bounds locally before converting them, then
+// prove both products fit before multiplying untrusted saved window counts.
+// The maximum product check also covers the minimum because min <= max.
+func validPersistedSampleCounts(windows, queries uint64, minWindowQueries, maxWindowQueries int) bool {
+	if minWindowQueries < 2 || minWindowQueries > 65536 || maxWindowQueries < 2 || maxWindowQueries > 65536 || minWindowQueries > maxWindowQueries {
+		return false
+	}
+	minimum := uint64(minWindowQueries)
+	maximum := uint64(maxWindowQueries)
+	if windows > math.MaxUint64/maximum {
+		return false
+	}
+	return queries >= windows*minimum && queries <= windows*maximum
 }
 
 // Checkpoint flushes completed baselines only. It is safe for the backup API
@@ -191,10 +206,20 @@ func atomicWrite(path string, data []byte) error {
 	}
 	// Sync the directory entry as well as the file contents. A successful
 	// rename alone does not guarantee persistence across a power failure.
+	// #nosec G304 -- This is the parent of the operator-configured state path,
+	// never a DNS name or API request path. Open read-only solely for directory
+	// fsync; Stat below verifies the opened descriptor before using it.
 	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
 	defer d.Close()
+	dirInfo, err := d.Stat()
+	if err != nil {
+		return err
+	}
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("learning checkpoint parent is not a directory")
+	}
 	return d.Sync()
 }

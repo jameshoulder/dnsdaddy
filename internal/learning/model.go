@@ -12,6 +12,13 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 )
 
+// Keep fitted counters within the persisted format's accepted range and the
+// exact-integer range used by floating-point parameter updates.
+const (
+	maxBaselineWindows uint64 = 1 << 40
+	maxBaselineQueries uint64 = 1 << 53
+)
+
 type baseline struct {
 	Windows  uint64                `json:"windows"`
 	Queries  uint64                `json:"queries"`
@@ -23,12 +30,27 @@ type baseline struct {
 }
 
 func (b *baseline) ready(o Options) bool {
-	return b.Windows >= uint64(o.WarmupWindows) && b.LastAt.Sub(b.FirstAt) >= o.WarmupDuration
+	warmup := o.WarmupWindows
+	if warmup < 2 || warmup > 10000 {
+		return false
+	}
+	return b.Windows >= uint64(warmup) && b.LastAt.Sub(b.FirstAt) >= o.WarmupDuration
 }
-func (b *baseline) train(v [FeatureCount]float64, w Window, o Options) {
+func (b *baseline) train(v [FeatureCount]float64, w Window, o Options) bool {
+	eligible := w.EligibleQueries
+	if eligible < 2 || eligible > 65536 || eligible < o.MinWindowQueries || eligible > o.MaxWindowQueries {
+		return false
+	}
+	queries := uint64(eligible)
+	// Check before either counter or any fitted parameter changes. The query
+	// delta is at most 65536, so the subtraction cannot underflow; bounding the
+	// existing counters this way also prevents their additions from wrapping.
+	if b.Windows >= maxBaselineWindows || b.Queries > maxBaselineQueries-queries {
+		return false
+	}
 	ready := b.ready(o)
 	b.Windows++
-	b.Queries += uint64(w.EligibleQueries)
+	b.Queries += queries
 	if b.FirstAt.IsZero() {
 		b.FirstAt = w.Start
 	}
@@ -53,6 +75,7 @@ func (b *baseline) train(v [FeatureCount]float64, w Window, o Options) {
 		b.Mean[i] += o.Alpha * delta
 		b.Variance[i] = (1 - o.Alpha) * (b.Variance[i] + o.Alpha*delta*delta)
 	}
+	return true
 }
 
 type aggregate struct {
@@ -320,10 +343,14 @@ func (m *Model) complete(c *clientState) Result {
 		r.ExcludedReasons = append(r.ExcludedReasons, "extreme_feature_quarantine")
 	}
 	if len(r.ExcludedReasons) == 0 {
-		c.Baseline.train(v, r.Window, m.opts)
-		r.Trained = true
-		m.windows.Trained++
-	} else {
+		if c.Baseline.train(v, r.Window, m.opts) {
+			r.Trained = true
+			m.windows.Trained++
+		} else {
+			r.ExcludedReasons = append(r.ExcludedReasons, "baseline_sample_limit")
+		}
+	}
+	if len(r.ExcludedReasons) > 0 {
 		m.windows.Quarantined++
 		if r.State != "anomaly" {
 			r.State = "excluded"

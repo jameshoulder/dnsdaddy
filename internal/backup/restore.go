@@ -148,7 +148,9 @@ func Restore(ctx context.Context, src io.Reader, passphrase []byte, destination 
 			return result, err
 		}
 		hash := sha256.New()
-		n, copyErr := io.Copy(io.MultiWriter(file, hash), tarReader)
+		// The manifest and tar header agree on this nonnegative size, and
+		// both per-file and total archive limits were checked before writing.
+		n, copyErr := io.CopyN(io.MultiWriter(file, hash), tarReader, want.Size)
 		syncErr := file.Sync()
 		closeErr := file.Close()
 		if copyErr != nil {
@@ -204,7 +206,7 @@ func Restore(ctx context.Context, src io.Reader, passphrase []byte, destination 
 	if err := writeRootFile(root, "RESTORE.txt", []byte(note)); err != nil {
 		return result, err
 	}
-	if err := syncDirectory(abs); err != nil {
+	if err := syncDirectory(root); err != nil {
 		return result, err
 	}
 	ok = true
@@ -419,8 +421,10 @@ func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest)
 	return revoked, nil
 }
 
-func syncDirectory(name string) error {
-	f, err := os.Open(name)
+func syncDirectory(root *os.Root) error {
+	// Sync the already opened restore directory, without resolving its
+	// operator-supplied path again after extraction.
+	f, err := root.Open(".")
 	if err != nil {
 		return err
 	}

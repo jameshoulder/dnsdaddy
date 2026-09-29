@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -55,9 +56,15 @@ func TestEncryptedStreamAuthenticatesAllRecordsAndTerminator(t *testing.T) {
 		"appended_data":       append(append([]byte{}, encoded...), 42),
 		"tampered_ciphertext": append([]byte{}, encoded...),
 		"tampered_salt":       append([]byte{}, encoded...),
+		"undersized_record":   append([]byte{}, encoded...),
+		"oversized_record":    append([]byte{}, encoded...),
+		"max_uint32_record":   append([]byte{}, encoded...),
 	}
 	cases["tampered_ciphertext"][headerSize+50] ^= 1
 	cases["tampered_salt"][18] ^= 1
+	binary.BigEndian.PutUint32(cases["undersized_record"][headerSize:], gcmTagSize-1)
+	binary.BigEndian.PutUint32(cases["oversized_record"][headerSize:], chunkSize+gcmTagSize+1)
+	binary.BigEndian.PutUint32(cases["max_uint32_record"][headerSize:], ^uint32(0))
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
 			r, err := newOpenReader(bytes.NewReader(data), testPassphrase)

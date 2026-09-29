@@ -132,7 +132,7 @@ func readRecoveryPassphrase(filename string, stdin bool, r io.Reader) ([]byte, e
 		if !before.Mode().IsRegular() || before.Mode().Perm()&0o077 != 0 {
 			return nil, errors.New("passphrase file must be a regular file with owner-only permissions (for example chmod 600)")
 		}
-		f, err := os.Open(filename)
+		f, err := os.Open(filename) // #nosec G304 -- Operator-selected private regular file; inode is verified below before the bounded read.
 		if err != nil {
 			return nil, err
 		}

@@ -328,8 +328,7 @@ func (e *Engine) SetMode(m ReputationMode) {
 	}
 	e.workMu.Unlock()
 	if m == ModeOff {
-		e.commitMu.Lock()
-		e.commitMu.Unlock()
+		e.waitForLocalCommits()
 	}
 }
 
@@ -346,9 +345,18 @@ func (e *Engine) SetEnrichment(enabled bool) {
 	}
 	e.workMu.Unlock()
 	if !enabled {
-		e.commitMu.Lock()
-		e.commitMu.Unlock()
+		e.waitForLocalCommits()
 	}
+}
+
+// waitForLocalCommits is a barrier after permission revocation. Acquiring the
+// mutex waits for any result already being persisted; later workers reject
+// the revoked generation under this same mutex before publishing a result.
+// It never waits for an external HTTP request to finish.
+func (e *Engine) waitForLocalCommits() {
+	e.commitMu.Lock()
+	//lint:ignore SA2001 The lock/unlock pair intentionally synchronizes with active local result commits; no protected state needs changing.
+	e.commitMu.Unlock()
 }
 
 func (e *Engine) EnrichmentEnabled() bool { return e.enrichment.Load() }

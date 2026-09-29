@@ -131,7 +131,7 @@ func (m *Manager) Create(ctx context.Context, passphrase []byte, dst io.Writer) 
 		return Manifest{}, err
 	}
 	defer os.RemoveAll(dir)
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- Private staging directory needs owner traversal.
 		return Manifest{}, err
 	}
 	dbPath := filepath.Join(dir, "dnsdaddy.db")

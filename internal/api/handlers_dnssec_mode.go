@@ -12,7 +12,7 @@ import (
 
 const DNSSECModeSetting = "dnssec.mode"
 
-var ErrDNSSECModeLocked = errors.New("Daddybound mode is pinned by dns.local_dnssec_validation; remove that setting to manage the mode here")
+var ErrDNSSECModeLocked = errors.New("daddybound mode is pinned by dns.local_dnssec_validation; remove that setting to manage the mode here")
 
 // DNSSECRuntimeState captures one published mode. The interfaces reference
 // concurrency-safe runtime counters; none starts a lookup when read.

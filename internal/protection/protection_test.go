@@ -27,8 +27,13 @@ func TestRateClientAttributionAndRefill(t *testing.T) {
 	c := controller(t, cfg)
 	now := time.Unix(1000, 0)
 	a := netip.MustParseAddr("192.0.2.1")
-	if !c.Allow(a, "site-a", now) || !c.Allow(a, "site-a", now) || c.Allow(a, "site-a", now) {
-		t.Fatal("burst bound not enforced")
+	for i := 0; i < 2; i++ {
+		if !c.Allow(a, "site-a", now) {
+			t.Fatalf("initial burst request %d was refused", i+1)
+		}
+	}
+	if c.Allow(a, "site-a", now) {
+		t.Fatal("exhausted burst was replenished without elapsed time")
 	}
 	if c.Allow(netip.MustParseAddr("::ffff:192.0.2.1"), "site-a", now) {
 		t.Fatal("mapped address obtained a fresh bucket")

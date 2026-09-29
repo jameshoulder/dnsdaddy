@@ -145,8 +145,10 @@ func TestCancelledRunAccountsForPrequeuedRequestsWithoutValidation(t *testing.T)
 	})
 	o := observe.New(v, nil, observe.Options{Workers: 1, Queue: 2, Log: quietLog()})
 	r := request("prequeued.test.")
-	if !o.Observe(r) || !o.Observe(r) {
-		t.Fatal("bounded pre-Run queue rejected work")
+	for i := 0; i < 2; i++ {
+		if !o.Observe(r) {
+			t.Fatalf("bounded pre-Run queue rejected request %d", i)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
