@@ -1100,6 +1100,10 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .hero-stat.is-detect .n  { color: var(--violet); }
 .hero-split { display: block; margin-top: 4px; font-size: 12px; color: var(--muted-foreground); }
 .inv-raw { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; margin: 0; }
+/* The investigated name is untrusted and can be 253 characters long: it must wrap, never widen the page. */
+.inv-head { align-items: flex-start; flex-wrap: wrap; }
+.inv-subject { min-width: 0; flex: 1 1 20rem; }
+.inv-subject h2, .inv-subject p { overflow-wrap: anywhere; }
 .ev-row.is-expired .ev-claim { color: var(--muted-foreground); text-decoration: line-through; }
 .finding-links { margin: 0 0 var(--s3); gap: var(--s2); flex-wrap: wrap; }
 .review-form { margin: var(--s3) 0 var(--s4); padding: var(--s3) var(--s4); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); }

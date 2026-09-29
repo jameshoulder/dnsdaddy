@@ -3281,6 +3281,10 @@ test('recorded activity states why it is unavailable rather than showing zeroes'
     recentCursor: 99, recentLimit: 100,
   });
   assert.match(some, /9 allowed · 3 blocked · 0 failed/);
+  // The notes beside each figure are markup, not text: a leaked "<span" means
+  // a nested template was escaped instead of inserted.
+  assert.doesNotMatch(some, /&lt;span/);
+  assert.match(some, /<span class="muted small">9 allowed/);
   assert.match(some, /A 8 · AAAA 4/);
   assert.match(some, /Clients that asked/);
   assert.match(some, /laptop/);
@@ -3446,6 +3450,16 @@ function runtimeStatus(o = {}) {
     ...o,
   };
 }
+
+test('the runtime status card inserts its notes as markup rather than escaped text', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.doesNotMatch(out, /&lt;span/);
+  assert.doesNotMatch(out, /&lt;p class/);
+  assert.match(out, /<span class="muted small">configured: /);
+  const off = daddyboundStatusCard(runtimeStatus({ mode: { configured: 'off', effective: 'off', chosenBy: 'config', experimental: true, enforcing: false, live: { available: false, reason: 'not implemented' } }, resolution: { source: 'none', transport: 'none: Learn is off, so Daddybound sends nothing', clientPath: 'clients are answered by the forwarding resolver', note: '' } }));
+  assert.doesNotMatch(off, /&lt;span/);
+  assert.match(off, /Learn is off, so Daddybound sends nothing/);
+});
 
 test('the runtime status card never scores readiness and keeps Live unavailable', () => {
   const out = daddyboundStatusCard(runtimeStatus());

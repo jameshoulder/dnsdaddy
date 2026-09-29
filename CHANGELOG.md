@@ -101,6 +101,11 @@ with closed label sets.
 `docs/dns-security/dnssec.md` no longer says there is no RFC 5011 rollover;
 there has been since native recursion landed, and the page now describes it.
 
+Fixed on the same page: the notes beside the runtime counters, the "verdicts
+counted but not stored" paragraph, the panic notice and the "seeded" badge on
+a managed key were escaped rather than inserted, so a browser showed the
+literal tag text. A test now fails on any leaked `<span` in the card.
+
 ### Findings can be reviewed
 
 A finding now carries a review beside it: **new**, **acknowledged**,

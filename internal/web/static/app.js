@@ -2795,7 +2795,7 @@ function activitySection(act, { client = false } = {}) {
   }
   const s = act.summary || {};
   const qtypes = Object.entries(s.qtypes || {}).sort((a, b) => b[1] - a[1]);
-  const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${note ? html` <span class="muted small">${note}</span>` : ''}</dd></div>`;
+  const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${raw(note ? html` <span class="muted small">${note}</span>` : '')}</dd></div>`;
   const clients = (act.clients || []).length
     ? html`<h4>Clients that asked</h4>
         <div class="table-wrap"><table>
@@ -2995,7 +2995,7 @@ function observationsSection(ob) {
                 <td>${raw(localDnssecBadge(o))}</td>
                 <td>${o.disagreement || '—'}</td>
                 <td class="muted small">${o.reason || ''}</td></tr>`).join(''))}
-              </tbody></table></div>${ob.truncated ? html`<p class="muted small">Only the newest observations are shown.</p>` : ''}`
+              </tbody></table></div>${raw(ob.truncated ? html`<p class="muted small">Only the newest observations are shown.</p>` : '')}`
           : emptyState('No observation for this name', 'Daddybound observes only resolved queries, and only those the queue accepted.', { icon: '○' }))}
     </div>`;
 }
@@ -3013,7 +3013,7 @@ function rawJsonSection(data) {
 function investigationHeader(subject, w) {
   return html`
     <div class="card section">
-      <div class="card-head"><div>
+      <div class="card-head inv-head"><div class="inv-subject">
         <div class="card-eyebrow">${subject.kind}</div>
         <h2 class="mono">${subject.title}</h2>
         ${raw(subject.sub ? html`<p>${subject.sub}</p>` : '')}
@@ -4866,7 +4866,7 @@ function localDnssecCard(data) {
   const withheld = (observed || 0) > 0 && stored === 0;
 
   const stat = (label, value, note) => html`
-    <div class="qfact"><dt>${label}</dt><dd><span class="mono">${value ?? 0}</span>${note ? html` <span class="muted small">${note}</span>` : ''}</dd></div>`;
+    <div class="qfact"><dt>${label}</dt><dd><span class="mono">${value ?? 0}</span>${raw(note ? html` <span class="muted small">${note}</span>` : '')}</dd></div>`;
 
   return html`
     <div class="card section">
@@ -4897,14 +4897,14 @@ function localDnssecCard(data) {
         ${raw(stat('p95 latency', (s.p95DurationMs || 0).toFixed(1) + ' ms'))}
       </dl>
 
-      ${withheld ? html`<p class="muted small">Verdicts are being counted but no rows are being stored, so the
+      ${raw(withheld ? html`<p class="muted small">Verdicts are being counted but no rows are being stored, so the
         counts by status stay at zero. Query logging is off, and an observation row names the domain it
         validated — recording it anyway would undo that setting through a feature you enabled to measure
-        DNSSEC. The totals here are aggregate and name nothing.</p>` : ''}
+        DNSSEC. The totals here are aggregate and name nothing.</p>` : '')}
 
-      ${runtime.panics ? html`<p class="muted small"><span class="badge bad">${runtime.panics}</span>
+      ${raw(runtime.panics ? html`<p class="muted small"><span class="badge bad">${runtime.panics}</span>
         validator panics were contained. That is a defect in the validator, not a property of your traffic —
-        please report it.</p>` : ''}
+        please report it.</p>` : '')}
 
       <p class="muted small note-tight">
         "Differs from upstream" is not a fault in either side. Your upstream and Daddybound
@@ -4927,7 +4927,7 @@ function anchorKeyRows(keys) {
   return html`<div class="table-wrap"><table>
     <thead><tr><th>Key tag</th><th>Algorithm</th><th>State</th><th>Trusted</th><th>Seen</th><th>Timer</th></tr></thead>
     <tbody>${raw(keys.map((k) => html`<tr>
-      <td class="mono">${k.keyTag}${k.seeded ? html` <span class="badge">seeded</span>` : ''}</td>
+      <td class="mono">${k.keyTag}${raw(k.seeded ? html` <span class="badge">seeded</span>` : '')}</td>
       <td class="mono">${k.algorithm}</td>
       <td><span class="badge ${k.trusted ? 'ok' : k.state === 'revoked' || k.state === 'removed' ? 'bad' : 'warn'}">${k.state}</span></td>
       <td>${k.trusted ? 'yes' : 'no'}</td>
@@ -4950,7 +4950,7 @@ function daddyboundStatusCard(status) {
   const rt = status.runtime || {};
   const st = status.stored || {};
   const ev = status.evidence || {};
-  const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${note ? html` <span class="muted small">${note}</span>` : ''}</dd></div>`;
+  const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${raw(note ? html` <span class="muted small">${note}</span>` : '')}</dd></div>`;
   const n = (v) => (typeof v === 'number' ? num(v) : '—');
   const persistence = an.persistence || {};
   const persistenceBadge = { ok: ['ok', 'state file written'], not_yet_written: ['', 'state file not yet written'], failing: ['bad', 'state file cannot be written'], load_failed: ['warn', 'stored state could not be read'] }[persistence.state] || ['warn', String(persistence.state || 'unknown')];
