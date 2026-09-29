@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -217,7 +218,11 @@ func (c *dnssecControl) transition(ctx context.Context, mode, source string, per
 	if old.runtime != nil && next.runtime != old.runtime {
 		old.runtime.close()
 	}
-	c.log.Info("Daddybound mode active", "mode", mode, "source", source, "enforcing", mode == config.LocalDNSSECEnforce,
+	logMode := strings.ReplaceAll(mode, "\n", "")
+	logMode = strings.ReplaceAll(logMode, "\r", "")
+	logSource := strings.ReplaceAll(source, "\n", "")
+	logSource = strings.ReplaceAll(logSource, "\r", "")
+	c.log.Info("Daddybound mode active", "mode", logMode, "source", logSource, "enforcing", mode == config.LocalDNSSECEnforce,
 		"transport", "enabled modes use native plaintext UDP/TCP 53; no upstream fallback in Live")
 	return nil
 }
