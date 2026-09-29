@@ -1053,12 +1053,12 @@ test('every navigation icon resolves to a symbol defined in the sprite', () => {
 });
 
 test('the navigation is grouped with real headings a screen reader can use', () => {
-  // Five labelled groups, each a heading with a list that points back at it.
+  // Three labelled groups, each a heading with a list that points back at it.
   // The old markup hid the group labels with aria-hidden, which left twelve
   // undifferentiated links for anyone not looking at them.
   const headings = [...indexHtml.matchAll(/<h2 class="nav-group" id="([a-z-]+)">/g)].map((m) => m[1]);
   const labelled = [...indexHtml.matchAll(/<ul class="nav-list" aria-labelledby="([a-z-]+)">/g)].map((m) => m[1]);
-  assert.equal(headings.length, 5);
+  assert.equal(headings.length, 3);
   assert.deepEqual(labelled, headings, 'every nav list must be labelled by its own heading');
   assert.doesNotMatch(indexHtml, /nav-group" aria-hidden/);
 });
@@ -1125,11 +1125,11 @@ test('an unrecognised protection status is reported, not silently called healthy
 
 test('the hero states its status in words as well as colour', () => {
   const out = statusHero(overview(), healthyFeeds, { enabled: true, total: 6 });
-  assert.match(out, />Protected</);
+  assert.match(out, />Filtering configured</);
   assert.match(out, /class="hero is-ok"/);
   // The dot is decorative; removing every class attribute must still leave the
   // status legible.
-  assert.match(out.replace(/class="[^"]*"/g, ''), /Protected/);
+  assert.match(out.replace(/class="[^"]*"/g, ''), /Filtering configured/);
 });
 
 test('the hero reports the numbers the server gave it and invents none', () => {
@@ -1154,8 +1154,8 @@ test('a fresh install with no traffic shows zeroes, not sample data', () => {
 test('detection switched off reads as off, never as zero detections', () => {
   // A zero would say "nothing suspicious happened". Nobody measured that.
   const out = statusHero(overview(), healthyFeeds, { enabled: false, total: 0 });
-  assert.match(out, /Off<\/span><span class="k">Detections/);
-  assert.doesNotMatch(out, />0<\/span><span class="k">Detections/);
+  assert.match(out, /Off<\/span><span class="k">Findings/);
+  assert.doesNotMatch(out, />0<\/span><span class="k">Findings/);
 });
 
 test('a real detection count is rendered as a count', () => {
@@ -1167,8 +1167,8 @@ test('a detections request that failed does not become a zero either', () => {
   // A zero here would say "nothing suspicious happened in 24 hours". Nothing
   // measured that; the request did not come back.
   const out = statusHero(overview(), healthyFeeds, null);
-  assert.match(out, /—<\/span><span class="k">Detections/);
-  assert.doesNotMatch(out, />0<\/span><span class="k">Detections/);
+  assert.match(out, /Unavailable<\/span><span class="k">Findings/);
+  assert.doesNotMatch(out, />0<\/span><span class="k">Findings/);
 });
 
 test('feed health in the hero is stated separately from protection status', () => {
@@ -1177,11 +1177,11 @@ test('feed health in the hero is stated separately from protection status', () =
     feeds: [{ ...healthyFeeds.feeds[0], lastError: 'HTTP 500' }],
   };
   const out = statusHero(overview(), stale, { enabled: true, total: 0 });
-  // Protection is still what the server said it was...
+  // Filtering configuration is stated independently of the failed refresh...
   assert.match(out, /class="hero is-ok"/);
-  assert.match(out, />Protected</);
+  assert.match(out, />Filtering configured</);
   // ...and the feed problem is stated in its own badge rather than folded into
-  // the headline, which would produce an amber dot over the word "Protected".
+  // the headline, so configuration and freshness remain separate facts.
   assert.match(out, /1 of 1 feeds stale/);
 });
 
@@ -1309,7 +1309,7 @@ function blocked(o = {}) {
 
 test('blocked domains are rendered in monospace so a typosquat is visible as one', () => {
   const out = recentlyBlocked([blocked({ domain: 'paypaI-login.example' })]);
-  assert.match(out, /class="dom-name">paypaI-login\.example</);
+  assert.match(out, /class="dom-name"[^>]*>paypaI-login\.example</);
 });
 
 test('a blocked row invents no enrichment it was not given', () => {
@@ -1435,7 +1435,7 @@ test('the domain is monospace and the row is keyboard reachable', () => {
   // <details>/<summary> rather than a click handler, so focus, Enter and
   // find-in-page all work without reimplementing them.
   assert.match(out, /<details class="qrow/);
-  assert.match(out, /<summary>/);
+  assert.match(out, /<summary(?: [^>]*)?>/);
 });
 
 test('every field a hostile server or client could influence is escaped', () => {
@@ -2677,5 +2677,365 @@ test('token-based DoH and DoT are described separately from the address ACL', ()
     });
     assert.match(note, /identified by\s+their network token/);
     assert.match(note, /work from anywhere/);
+  }
+});
+
+
+/* ---------- Neo Aqua workspace behaviour -------------------------------- */
+
+const {
+  queryFilters, queryHash, queryFilterForm, createQueryLoader, createRenderGate,
+  shouldAutoRefresh, shouldFocusSearch, sidebarStatus, areaChart,
+} = require('./static/app.js');
+
+test('query filters survive a bookmark round trip including IPv6 and hostile-looking text', () => {
+  const filters = {
+    domain: 'a&b<".example', clientIp: '2001:db8::1', action: 'blocked', networkId: 'net one', hours: '24',
+  };
+  const hash = queryHash(filters);
+  assert.ok(hash.startsWith('#/queries?'));
+  assert.ok(!hash.includes('<'), 'untrusted input must be URL encoded before it becomes an href');
+  assert.deepEqual(queryFilters(hash), filters);
+  assert.equal(routeName(hash), 'queries');
+  assert.equal(queryHash({}), '#/queries', 'clearing filters must restore the unfiltered route');
+});
+
+test('query bookmarks only forward filters actually supported by the HTTP endpoint', () => {
+  const filters = queryFilters('#/queries?domain=test&clientIp=10.0.0.4&action=blocked&networkId=net1&hours=168&since=yesterday&until=today');
+  assert.deepEqual(filters, { domain: 'test', clientIp: '10.0.0.4', action: 'blocked', networkId: 'net1', hours: '168' });
+  assert.doesNotMatch(queryHash(filters), /since|until/);
+  assert.equal(queryFilters('#/queries?hours=-1&action=anything').hours, '');
+  assert.equal(queryFilters('#/queries?hours=-1&action=anything').action, '');
+});
+
+test('every query filter has a visible label and the current values are reflected in the form', () => {
+  const filters = queryFilters('#/queries?domain=example&clientIp=10.0.0.4&action=blocked&networkId=office&hours=24');
+  const out = queryFilterForm([{ id: 'office', name: 'Office' }], filters);
+  for (const id of ['q-domain', 'q-client', 'q-action', 'q-network', 'q-hours']) {
+    assert.match(out, new RegExp(`<label for="${id}">[^<]+</label>`));
+    assert.match(out, new RegExp(`id="${id}"`));
+  }
+  assert.match(out, /value="10\.0\.0\.4"/);
+  assert.match(out, /value="blocked" selected/);
+  assert.match(out, /value="office" selected/);
+  assert.match(out, /value="24" selected/);
+  assert.match(out, /type="submit"[^>]*id="q-apply"/);
+  assert.match(out, /id="q-clear"/);
+  assert.match(out, /Client IP must match exactly/);
+});
+
+test('a failed networks lookup preserves the requested filter and states that names are unavailable', () => {
+  const filters = queryFilters('#/queries?networkId=old-network');
+  const out = queryFilterForm(null, filters);
+  assert.match(out, /Network names unavailable/);
+  assert.match(out, /value="old-network" selected/);
+  assert.match(out, /Existing network filters still apply/);
+  assert.match(out, /data-page-retry/);
+});
+
+test('native domain and client links open the real query log filters', () => {
+  const row = queryRow(q({ domain: 'a&b.example', clientIp: '2001:db8::1' }));
+  assert.match(row, /href="#\/queries\?domain=a%26b\.example"/);
+  assert.match(row, /href="#\/queries\?clientIp=2001%3Adb8%3A%3A1"/);
+  const recent = recentlyBlocked([blocked({ domain: 'malware.example' })]);
+  assert.match(recent, /href="#\/queries\?domain=malware\.example&amp;action=blocked"/);
+});
+
+test('a failed recent-blocks request is unavailable rather than an empty success', () => {
+  const out = recentlyBlocked(null);
+  assert.match(out, /Recent blocks unavailable/);
+  assert.match(out, /data-page-retry/);
+  assert.doesNotMatch(out, /Nothing blocked in the log yet/);
+  assert.match(recentlyBlocked([]), /Nothing blocked in the log yet/);
+});
+
+test('filtering has a different empty state from an unfiltered empty log', () => {
+  assert.match(queryTable([], { filtered: true }), /No matching queries/);
+  assert.match(queryTable([], { filtered: true }), /Only queries retained/);
+  assert.match(queryTable([]), /No queries recorded/);
+});
+
+test('an unrecognised query outcome is never quietly labelled allowed', () => {
+  const out = queryRow(q({ action: 'future-outcome' }));
+  assert.match(out, />Unknown</);
+  assert.doesNotMatch(out, />Allowed</);
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function queryLoader(options = {}) {
+  return createQueryLoader({
+    read: async () => ({ queries: [], nextCursor: 0 }), filters: {}, isCurrent: () => true,
+    onLoading() {}, onData() {}, onError() {}, ...options,
+  });
+}
+
+test('a late query response cannot replace a different route or filter', async () => {
+  const gate = createRenderGate();
+  const previous = deferred();
+  const painted = [];
+  const old = queryLoader({
+    filters: { domain: 'old.example' }, isCurrent: gate.begin(), read: () => previous.promise,
+    onData: (state) => painted.push(state.rows[0].domain),
+  });
+  const pending = old.load();
+  const current = queryLoader({
+    filters: { domain: 'new.example' }, isCurrent: gate.begin(),
+    read: async () => ({ queries: [{ domain: 'new.example' }], nextCursor: 0 }),
+    onData: (state) => painted.push(state.rows[0].domain),
+  });
+  assert.equal(await current.load(), true);
+  previous.resolve({ queries: [{ domain: 'old.example' }], nextCursor: 42 });
+  assert.equal(await pending, false);
+  assert.deepEqual(painted, ['new.example']);
+  assert.deepEqual(old.state.rows, [], 'the stale request must not even replace its stored result');
+});
+
+test('repeated pagination clicks cannot append the same cursor twice', async () => {
+  const next = deferred();
+  const requests = [];
+  const loader = queryLoader({
+    filters: { domain: 'example', clientIp: '10.0.0.4', action: 'blocked', networkId: 'office', hours: '24' },
+    read: (url) => {
+      requests.push(url);
+      return requests.length === 1
+        ? Promise.resolve({ queries: [{ id: 10 }], nextCursor: 10 })
+        : next.promise;
+    },
+  });
+  assert.equal(await loader.load(), true);
+  const pending = loader.load(true);
+  assert.equal(await loader.load(true), false);
+  next.resolve({ queries: [{ id: 9 }], nextCursor: 0 });
+  assert.equal(await pending, true);
+  assert.equal(requests.length, 2);
+  const params = new URLSearchParams(requests[1].split('?')[1]);
+  for (const [key, value] of Object.entries({ domain: 'example', clientIp: '10.0.0.4', action: 'blocked', networkId: 'office', hours: '24', cursor: '10', limit: '100' })) {
+    assert.equal(params.get(key), value, `${key} was lost during pagination`);
+  }
+  assert.deepEqual(loader.state.rows, [{ id: 10 }, { id: 9 }]);
+  assert.equal(await loader.load(true), false, 'no next cursor means no further request');
+});
+
+test('a pagination failure preserves the existing rows and permits an explicit retry', async () => {
+  const errors = [];
+  let attempt = 0;
+  const loader = queryLoader({
+    read: async () => {
+      attempt++;
+      if (attempt === 1) return { queries: [{ id: 10 }], nextCursor: 10 };
+      if (attempt === 2) throw new Error('temporarily unavailable');
+      return { queries: [{ id: 9 }], nextCursor: 0 };
+    },
+    onError: (err, append) => errors.push([err.message, append]),
+  });
+  await loader.load();
+  assert.equal(await loader.load(true), false);
+  assert.deepEqual(loader.state.rows, [{ id: 10 }]);
+  assert.equal(loader.state.cursor, 10);
+  assert.equal(loader.state.loading, false);
+  assert.deepEqual(errors, [['temporarily unavailable', true]]);
+  assert.equal(await loader.load(true), true);
+  assert.deepEqual(loader.state.rows, [{ id: 10 }, { id: 9 }]);
+});
+
+test('unreadable query data produces an error instead of claiming no queries', async () => {
+  const errors = [];
+  let rendered = false;
+  const loader = queryLoader({ read: async () => ({ unexpected: true }), onData: () => { rendered = true; }, onError: (e) => errors.push(e.message) });
+  assert.equal(await loader.load(), false);
+  assert.equal(rendered, false);
+  assert.match(errors[0], /unreadable response/);
+});
+
+test('cancelled route ownership cannot be revived by an old completion', () => {
+  const gate = createRenderGate();
+  const first = gate.begin();
+  const second = gate.begin();
+  assert.equal(first(), false);
+  assert.equal(second(), true);
+  gate.cancel();
+  assert.equal(second(), false);
+  assert.equal(gate.begin()(), true);
+});
+
+test('automatic refresh pauses for user input, open details, pending requests and hidden pages', () => {
+  const ready = { route: 'dashboard', paused: false, hidden: false, authenticated: true, busy: false, interacting: false };
+  assert.equal(shouldAutoRefresh(ready), true);
+  assert.equal(shouldAutoRefresh({ ...ready, route: 'threats' }), true);
+  for (const state of [{ paused: true }, { hidden: true }, { authenticated: false }, { busy: true }, { interacting: true }, { route: 'queries' }, { route: 'settings' }]) {
+    assert.equal(shouldAutoRefresh({ ...ready, ...state }), false, JSON.stringify(state));
+  }
+});
+
+test('search requires Control or Meta K and never intercepts editable fields or other modifier shortcuts', () => {
+  const event = { key: 'k', ctrlKey: true, target: { closest: () => null } };
+  assert.equal(shouldFocusSearch(event), true);
+  assert.equal(shouldFocusSearch({ ...event, ctrlKey: false, metaKey: true }), true);
+  for (const change of [{ ctrlKey: false }, { key: '/' }, { altKey: true }, { shiftKey: true }, { repeat: true }, { defaultPrevented: true }, { key: 'x' }, { target: { closest: () => ({}) } }]) {
+    assert.equal(shouldFocusSearch({ ...event, ...change }), false);
+  }
+});
+
+test('a failed sidebar status read is unavailable and cannot retain a green claim', () => {
+  assert.equal(sidebarStatus(overview()).text, 'Filtering configured');
+  const failed = sidebarStatus(null);
+  assert.equal(failed.text, 'Status unavailable');
+  assert.notEqual(failed.tone, 'ok');
+  assert.equal(failed.version, '—');
+  assert.notEqual(sidebarStatus(overview({ protectionStatus: 'new-state' })).tone, 'ok');
+});
+
+test('the filtering headline describes configuration without claiming coverage of every network', () => {
+  const out = statusHero(overview(), healthyFeeds, { enabled: true, total: 0 });
+  assert.match(out, /Filtering configured/);
+  assert.match(out, /Each query follows its matched policy/);
+  assert.match(out, /Blocked queries/);
+  assert.doesNotMatch(out, />Protected<|Threats blocked/);
+  const noIndex = protectionState('offline');
+  assert.match(noIndex.line, /Configured domain rules may still apply/);
+  assert.doesNotMatch(noIndex.line, /without checking any|nothing is being blocked/);
+});
+
+test('unavailable feed health is distinguished from a successfully read disabled configuration', () => {
+  const health = feedHealth(null);
+  assert.equal(health.unavailable, true);
+  assert.match(health.label, /unavailable/);
+  const items = attentionItems({ checks: [] }, null);
+  assert.equal(items.length, 1);
+  assert.match(items[0].title, /unavailable/);
+  assert.doesNotMatch(attentionPanel(items), /No threat intelligence is enabled/);
+  assert.match(threatIntelPanel(null), /Threat intelligence unavailable/);
+});
+
+test('attention disclosures retain fault evidence and the server-provided next step', () => {
+  const out = attentionPanel(attentionItems({ checks: [{
+    status: 'fail', name: 'Client access', summary: 'Queries are being refused.',
+    evidence: ['10.0.0.4 is outside permitted ranges', '<script>bad</script>'], action: 'Review the network permission.',
+  }] }, healthyFeeds));
+  assert.match(out, />Fault</);
+  assert.match(out, /<strong>Client access</);
+  assert.match(out, /<details class="attn-details">/);
+  assert.match(out, /Queries are being refused/);
+  assert.match(out, /Review the network permission/);
+  assert.match(out, /10\.0\.0\.4 is outside permitted ranges/);
+  assert.match(out, /&lt;script&gt;/);
+  assert.doesNotMatch(out, /<script>/);
+});
+
+test('the overview remains useful when an optional endpoint fails and names what is missing', async () => {
+  const previous = global.fetch;
+  global.fetch = async (url) => {
+    const path = url.replace('/api/v1', '');
+    const replies = {
+      '/overview': overview(),
+      '/activity/queries?hours=24': { buckets: [{ label: '09:00', total: 128491, blocked: 327 }] },
+      '/diagnostics': { checks: [] },
+      '/findings/summary?days=1': { enabled: false },
+    };
+    const ok = Object.prototype.hasOwnProperty.call(replies, path);
+    return { status: ok ? 200 : 503, ok, text: async () => JSON.stringify(ok ? replies[path] : { error: 'unavailable' }) };
+  };
+  try {
+    const out = await pages.dashboard.render();
+    assert.match(out, /overview-workspace/);
+    assert.match(out, /overview-primary/);
+    assert.match(out, /overview-activity/);
+    assert.match(out, /overview-attention/);
+    assert.match(out, /Configured networks/);
+    assert.match(out, /Policies/);
+    assert.match(out, /Recent blocks unavailable/);
+    assert.match(out, /Block categories unavailable/);
+    assert.match(out, /Threat intelligence unavailable/);
+    assert.match(out, /128,491/);
+    assert.match(out, /View hourly values/);
+    assert.doesNotMatch(out, /Nothing needs your attention|No threat intelligence is enabled/);
+  } finally {
+    global.fetch = previous;
+  }
+});
+
+test('the activity chart uses shared theme colours and retains full counts', () => {
+  const out = areaChart([{ label: '09:00', total: 128491, blocked: 327 }]);
+  assert.match(out, /var\(--brand-cyan\)/);
+  assert.match(out, /var\(--danger\)/);
+  assert.match(out, /peak 128,491\/h/);
+  assert.doesNotMatch(out, /#22D3EE|#1E2C42|#FF6B7A/);
+});
+
+
+test('connection guidance collapses while the measured client state remains visible', () => {
+  for (const state of [{}, { refusedClients: 12 }, { servesOnlyLoopback: true }]) {
+    const out = withHostname('192.168.1.75', () => firstClientCard(ready(state)));
+    const visible = out.split('<details')[0];
+    assert.match(visible, /first-client-title/);
+    assert.match(visible, /<p class="muted small">/);
+    assert.match(out, /<details class="first-client-guide"><summary>Connection steps<\/summary>/);
+    assert.doesNotMatch(out, /first-client-guide"[^>]*\bopen/);
+    assert.match(out, /dnsdaddy doctor/);
+    assert.match(out, /Allow this network to use DNS Daddy/);
+    if (state.refusedClients) {
+      assert.match(visible, /12 queries have/);
+      assert.match(visible, /REFUSED/);
+      assert.match(visible, /not permitted to use this resolver/);
+    }
+    if (state.servesOnlyLoopback) {
+      assert.match(visible, /ordinary DNS/);
+      assert.match(out, /DNS-over-HTTPS and DNS-over-TLS clients holding a network.s token/);
+    }
+  }
+});
+
+test('query summaries retain client and time labels for assistive technology', () => {
+  const summary = queryRow(q()).split('</summary>')[0];
+  assert.match(summary, /<span class="sr-only">Client: <\/span>/);
+  assert.match(summary, /<span class="sr-only">Time: <\/span>/);
+});
+
+
+test('a row domain shortcut preserves the current client, outcome, network and time filters', () => {
+  const filters = queryFilters('#/queries?domain=example&clientIp=10.0.0.4&action=blocked&networkId=office&hours=24');
+  const original = { ...filters };
+  const out = queryTable([q({ domain: 'malware.example', clientIp: '10.0.0.4' })], { filtered: true, filters });
+  const href = out.match(/href="([^"]+)"[^>]*>Filter this domain</)[1].replace(/&amp;/g, '&');
+  assert.deepEqual(queryFilters(href), { ...filters, domain: 'malware.example' });
+  assert.deepEqual(filters, original, 'rendering a shortcut must not mutate the current filters');
+});
+
+test('a row client shortcut changes only the client while retaining the current domain and scope', () => {
+  const filters = queryFilters('#/queries?domain=malware&clientIp=10.0.0.3&action=blocked&networkId=office&hours=168');
+  const out = queryTable([q({ domain: 'malware.example', clientIp: '2001:db8::1' })], { filtered: true, filters });
+  const href = out.match(/href="([^"]+)"[^>]*>Filter this client</)[1].replace(/&amp;/g, '&');
+  assert.deepEqual(queryFilters(href), { ...filters, clientIp: '2001:db8::1' });
+  assert.equal(queryFilters(href).domain, 'malware', 'client filtering must not silently narrow or clear the domain filter');
+});
+
+test('blocked and failed queries never infer an upstream answer from a cache miss', () => {
+  for (const action of ['blocked', 'error']) {
+    const out = queryRow(q({ action, cached: false }));
+    assert.match(out, /<dt>Cache hit<\/dt><dd>No<\/dd>/);
+    assert.doesNotMatch(out, /Answered from|an upstream resolver/);
+  }
+});
+
+test('the cache fact reports recorded Boolean values for allowed queries without inferring answer origin', () => {
+  for (const cached of [true, false]) {
+    const out = queryRow(q({ action: 'allowed', cached }));
+    assert.match(out, new RegExp(`<dt>Cache hit</dt><dd>${cached ? 'Yes' : 'No'}</dd>`));
+    assert.doesNotMatch(out, /Answered from|an upstream resolver/);
+  }
+});
+
+test('an absent or non-Boolean cache observation is omitted rather than stated as a cache miss', () => {
+  const missing = q();
+  delete missing.cached;
+  assert.doesNotMatch(queryRow(missing), /<dt>Cache hit<\/dt>|Answered from/);
+  for (const cached of [undefined, null, 0, 'false']) {
+    assert.doesNotMatch(queryRow(q({ cached })), /<dt>Cache hit<\/dt>|Answered from/);
   }
 });
