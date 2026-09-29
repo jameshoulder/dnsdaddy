@@ -493,7 +493,8 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 		return Decision{LogQuery: true, BlockMode: store.BlockNXDOMAIN}
 	}
 
-	d := evaluateLocal(e.lists, p, domain)
+	var d Decision
+	evaluateLocal(e.lists, p, domain, &d)
 	if d.Basis.Decided() {
 		return d
 	}
@@ -532,7 +533,7 @@ func (e *Engine) Preview(policyID, domain string) Preview {
 	}
 
 	out := Preview{PolicyID: p.id, PolicyName: p.name}
-	out.Decision = evaluateLocal(e.lists, p, domain)
+	evaluateLocal(e.lists, p, domain, &out.Decision)
 	rep := e.reputation.Load()
 	out.External.Configured = rep != nil
 	if out.Decision.Basis.Decided() || rep == nil {
@@ -588,19 +589,24 @@ func applyReputation(d *Decision, p *compiledPolicy, v ReputationVerdict) {
 	d.Reason = "Blocked by external threat intelligence (" + v.ProviderName + ")"
 }
 
-// evaluateLocal runs the three local rules and returns the decision they
-// reached, with Basis set when one of them fired.
+// evaluateLocal runs the three local rules and writes the decision they
+// reached into d, with Basis set when one of them fired.
 //
 // Shared by the live path and the preview so the two cannot disagree. It
 // allocates nothing on the miss path: see the note on Decision.Basis.
-func evaluateLocal(lists *blocklist.Holder, p *compiledPolicy, domain string) Decision {
-	d := Decision{BlockMode: p.blockMode, LogQuery: p.logQueries}
+//
+// It fills the caller's value rather than returning one because a Decision
+// is several strings wide and this function is too large to inline: returning
+// it by value put a copy on the miss path that the hot-path benchmark could
+// see, and the miss path is nearly every query.
+func evaluateLocal(lists *blocklist.Holder, p *compiledPolicy, domain string, d *Decision) {
+	*d = Decision{BlockMode: p.blockMode, LogQuery: p.logQueries}
 
 	if len(p.allow) > 0 && matchSuffix(p.allow, domain) {
 		d.Reason = "Allowed by policy allow-list"
 		d.Source = "allow-list"
 		d.Basis = &Basis{Rule: RuleAllowList, PolicyID: p.id, PolicyName: p.name}
-		return d
+		return
 	}
 
 	if len(p.block) > 0 && matchSuffix(p.block, domain) {
@@ -612,7 +618,7 @@ func evaluateLocal(lists *blocklist.Holder, p *compiledPolicy, domain string) De
 			Rule: RuleBlockList, Category: "custom",
 			PolicyID: p.id, PolicyName: p.name,
 		}
-		return d
+		return
 	}
 
 	if len(p.categories) > 0 {
@@ -630,11 +636,10 @@ func evaluateLocal(lists *blocklist.Holder, p *compiledPolicy, domain string) De
 				FeedID: entry.FeedID, FeedName: entry.FeedName,
 				PolicyID: p.id, PolicyName: p.name,
 			}
-			return d
+			return
 		}
 	}
 
-	return d
 }
 
 // PolicyLogsQueries reports whether the named policy records per-query rows.
