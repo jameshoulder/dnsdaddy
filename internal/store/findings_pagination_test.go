@@ -120,7 +120,6 @@ func TestFindingsInsertedDuringAWalkNeitherRepeatNorDisplaceRows(t *testing.T) {
 	for _, r := range first {
 		seen[r.ID] = true
 	}
-	var rest []string
 	for next != "" {
 		var rows []Finding
 		rows, next, err = st.ListFindings(ctx, FindingFilter{Limit: 4, Cursor: next})
@@ -132,7 +131,6 @@ func TestFindingsInsertedDuringAWalkNeitherRepeatNorDisplaceRows(t *testing.T) {
 				t.Errorf("row %s repeated after a concurrent insert", r.ID)
 			}
 			seen[r.ID] = true
-			rest = append(rest, r.ID)
 		}
 	}
 	// Every original row not on the first page turned up exactly once, and
