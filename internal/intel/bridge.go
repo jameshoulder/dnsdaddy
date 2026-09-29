@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
@@ -30,6 +31,9 @@ type Source struct {
 	Store   *store.Store
 	Keyring *secrets.Keyring
 	Log     *slog.Logger
+	// Transport is an optional trusted dependency for fixture tests. Runtime
+	// startup leaves it nil, selecting the provider's guarded HTTPS transport.
+	Transport http.RoundTripper
 }
 
 // LoadProviders implements apiprovider.ProviderSource.
@@ -57,6 +61,7 @@ func (s *Source) LoadProviders(ctx context.Context) ([]apiprovider.ProviderConfi
 			RatePerMinute:   row.RatePerMinute,
 			CacheTTLSeconds: row.CacheTTLSeconds,
 			PolicyScope:     row.PolicyScope,
+			Transport:       s.Transport,
 		}
 		if row.SecretSet {
 			secret, err := s.openSecret(ctx, row.ID)

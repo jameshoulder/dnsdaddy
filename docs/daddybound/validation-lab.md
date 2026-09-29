@@ -446,8 +446,12 @@ validate. A Secure verdict there is a forged chain of trust and fails the run.
 - One NSEC3 hash algorithm and a narrow iteration regime per hierarchy. The
   parameter space a real validator meets is wider than the scenarios cover,
   and the corpus samples it rather than enumerating it.
-- Aggressive use of NSEC and NSEC3 (RFC 8198), RFC 5011 rollover, and
-  recursive resolution: not implemented, so not tested.
+- Aggressive use of NSEC and NSEC3 (RFC 8198) remains unimplemented.
+- Native recursion, RFC 5011 lifecycle management and experimental native
+  client enforcement now have deterministic regression suites. The historical
+  corpus numbers above do not cover their production operation. In particular,
+  real rollover/clock events, extended field time and target-device load
+  remain evidence gaps; see [ADR 0003](../decisions/0003-daddybound-native-live.md).
 - The corpus runs against one public resolver's view. A resolver that
   minimised qnames differently, or cached differently, would hand Daddybound a
   different set of responses for the same names.

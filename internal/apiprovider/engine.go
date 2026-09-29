@@ -53,12 +53,8 @@ func (m ReputationMode) Valid() bool {
 // Rank orders the modes by how much reach a third party has over resolution:
 // none, then the cache, then the DNS path itself.
 //
-// It exists so the mode can be a ceiling rather than a switch. The
-// configuration file names the highest mode a deployment will ever use, and
-// nothing reachable over the network can raise it — an operator can turn
-// reputation down or off from the dashboard during an incident, but putting a
-// provider's latency in front of DNS answers stays a decision somebody made
-// while reading dnsdaddy.yaml.
+// The management API requires explicit sharing and latency acknowledgement
+// before selecting a more intrusive mode.
 func (m ReputationMode) Rank() int {
 	switch m {
 	case ModeCacheOnly:
@@ -181,6 +177,9 @@ type task struct {
 	subject  Subject
 	instance *Instance
 	kind     Capability
+	// permission belongs to the exact provider and capability generation at
+	// enqueue time. A later disable/reload cannot revive this queued task.
+	permission context.Context
 	// done, when non-nil, receives the verdict. Buffered by the sender, so a
 	// worker never blocks writing to a caller that has already given up.
 	done chan Verdict
@@ -199,10 +198,17 @@ type Engine struct {
 
 	// mode is read on every query in cache_only and blocking mode, so it is
 	// atomic rather than behind the instance lock.
-	mode atomic.Pointer[ReputationMode]
+	mode       atomic.Pointer[ReputationMode]
+	enrichment atomic.Bool
 
 	mu        sync.RWMutex
 	instances []*Instance
+	// Worker permission/commit locks are never taken by cache-only reads.
+	// commitMu serializes result persistence against revocation, so old work
+	// cannot repopulate a cache after a settings/credential write expires it.
+	workMu      sync.Mutex
+	commitMu    sync.Mutex
+	permissions map[*Instance]*providerPermission
 
 	queue   chan task
 	wg      sync.WaitGroup
@@ -217,6 +223,25 @@ type Engine struct {
 	completed atomic.Uint64
 	cacheHits atomic.Uint64
 	cacheMiss atomic.Uint64
+}
+
+type providerPermission struct {
+	reputation, enrichment             context.Context
+	cancelReputation, cancelEnrichment context.CancelFunc
+	revoked                            bool
+}
+
+func (e *Engine) newPermission() *providerPermission {
+	p := &providerPermission{}
+	p.reputation, p.cancelReputation = context.WithCancel(context.Background())
+	p.enrichment, p.cancelEnrichment = context.WithCancel(context.Background())
+	if e.Mode() == ModeOff {
+		p.cancelReputation()
+	}
+	if !e.enrichment.Load() {
+		p.cancelEnrichment()
+	}
+	return p
 }
 
 // NewEngine returns a stopped engine. Call Start to run the workers.
@@ -244,13 +269,15 @@ func NewEngine(o Options) *Engine {
 	}
 
 	e := &Engine{
-		opts:  o,
-		log:   o.Log,
-		cache: NewMemoryCache(o.CacheEntries),
-		queue: make(chan task, o.QueueSize),
+		opts:        o,
+		log:         o.Log,
+		cache:       NewMemoryCache(o.CacheEntries),
+		queue:       make(chan task, o.QueueSize),
+		permissions: make(map[*Instance]*providerPermission),
 	}
 	mode := o.Mode
 	e.mode.Store(&mode)
+	e.enrichment.Store(o.Enrichment)
 	return e
 }
 
@@ -267,7 +294,7 @@ func (e *Engine) Start(ctx context.Context) {
 		"workers", e.opts.Workers,
 		"queue_size", e.opts.QueueSize,
 		"reputation_mode", string(*e.mode.Load()),
-		"enrichment", e.opts.Enrichment)
+		"enrichment", e.enrichment.Load())
 }
 
 // Stop drains and shuts down. Safe to call more than once.
@@ -289,8 +316,42 @@ func (e *Engine) SetMode(m ReputationMode) {
 	if !m.Valid() {
 		m = ModeOff
 	}
+	e.workMu.Lock()
+	old := e.Mode()
 	e.mode.Store(&m)
+	for _, p := range e.permissions {
+		if m == ModeOff {
+			p.cancelReputation()
+		} else if old == ModeOff && !p.revoked {
+			p.reputation, p.cancelReputation = context.WithCancel(context.Background())
+		}
+	}
+	e.workMu.Unlock()
+	if m == ModeOff {
+		e.commitMu.Lock()
+		e.commitMu.Unlock()
+	}
 }
+
+// SetEnrichment updates the opt-in pipeline without restarting the resolver.
+func (e *Engine) SetEnrichment(enabled bool) {
+	e.workMu.Lock()
+	old := e.enrichment.Swap(enabled)
+	for _, p := range e.permissions {
+		if !enabled {
+			p.cancelEnrichment()
+		} else if !old && !p.revoked {
+			p.enrichment, p.cancelEnrichment = context.WithCancel(context.Background())
+		}
+	}
+	e.workMu.Unlock()
+	if !enabled {
+		e.commitMu.Lock()
+		e.commitMu.Unlock()
+	}
+}
+
+func (e *Engine) EnrichmentEnabled() bool { return e.enrichment.Load() }
 
 // SetInstances replaces the provider list.
 //
@@ -299,22 +360,36 @@ func (e *Engine) SetMode(m ReputationMode) {
 // swap is under a write lock the DNS path never takes: it reads the cache and
 // the mode, neither of which is behind this.
 func (e *Engine) SetInstances(list []*Instance) {
+	e.workMu.Lock()
+	current := make(map[*Instance]*providerPermission, len(list))
+	for _, inst := range list {
+		p := e.permissions[inst]
+		if p == nil || p.revoked {
+			p = e.newPermission()
+		}
+		current[inst] = p
+	}
+	var stale []*Instance
+	for inst, p := range e.permissions {
+		if _, exists := current[inst]; !exists {
+			p.cancelReputation()
+			p.cancelEnrichment()
+			stale = append(stale, inst)
+		}
+	}
+	e.permissions = current
 	e.mu.Lock()
-	old := e.instances
 	e.instances = list
 	e.mu.Unlock()
+	e.workMu.Unlock()
 
 	// Cached answers from a provider that is gone, or whose credential has
 	// been rotated, are answers nobody can trace to a live source.
-	present := make(map[string]bool, len(list))
-	for _, i := range list {
-		present[i.ID] = true
+	e.commitMu.Lock()
+	for _, i := range stale {
+		e.cache.Forget(i.ID)
 	}
-	for _, i := range old {
-		if !present[i.ID] {
-			e.cache.Forget(i.ID)
-		}
-	}
+	e.commitMu.Unlock()
 }
 
 // Instances returns the current provider list.
@@ -336,8 +411,23 @@ func (e *Engine) Instance(id string) (*Instance, bool) {
 	return nil, false
 }
 
-// InvalidateProvider drops a provider's cached answers.
-func (e *Engine) InvalidateProvider(id string) { e.cache.Forget(id) }
+// InvalidateProvider revokes this generation before a management write. It
+// waits only for any local result commit, never for the external HTTP call.
+// Reload publishes fresh permissions once the persisted change is complete.
+func (e *Engine) InvalidateProvider(id string) {
+	e.workMu.Lock()
+	for inst, p := range e.permissions {
+		if inst.ID == id {
+			p.revoked = true
+			p.cancelReputation()
+			p.cancelEnrichment()
+		}
+	}
+	e.workMu.Unlock()
+	e.commitMu.Lock()
+	e.cache.Forget(id)
+	e.commitMu.Unlock()
+}
 
 // WarmCache loads unexpired verdicts from the persistent store into memory.
 //
@@ -364,7 +454,7 @@ func (e *Engine) WarmCache(ctx context.Context) (int, error) {
 
 	known := make(map[string]bool)
 	for _, inst := range e.Instances() {
-		known[inst.ID] = true
+		known[inst.ID] = inst.Usable()
 	}
 
 	now := time.Now()
@@ -589,16 +679,24 @@ func (e *Engine) warm(subject Subject, misses []*Instance) {
 
 // Enrich queues enrichment for a subject. Never waits, and never called from
 // the resolution path.
-func (e *Engine) Enrich(domain string) {
-	if !e.opts.Enrichment {
-		return
+func (e *Engine) Enrich(domain string) int { return e.EnrichForPolicy(domain, "") }
+
+// EnrichForPolicy honours the same per-provider policy scope as reputation.
+// The return value is the number actually accepted by the bounded queue.
+func (e *Engine) EnrichForPolicy(domain, policyID string) int {
+	if !e.enrichment.Load() {
+		return 0
 	}
+	queued := 0
 	subject := DomainSubject(domain)
 	for _, inst := range e.Instances() {
-		if inst.HasCapability(CapEnrichment) {
-			e.enqueue(task{subject: subject, instance: inst, kind: CapEnrichment})
+		if inst.HasCapability(CapEnrichment) && inst.AppliesTo(policyID) {
+			if e.enqueue(task{subject: subject, instance: inst, kind: CapEnrichment}) {
+				queued++
+			}
 		}
 	}
+	return queued
 }
 
 // enqueue offers a task to the queue, dropping it if the queue is full.
@@ -610,6 +708,20 @@ func (e *Engine) Enrich(domain string) {
 // counting is the behaviour the query log already has for the same reason.
 func (e *Engine) enqueue(t task) bool {
 	if e.stopped.Load() {
+		return false
+	}
+	e.workMu.Lock()
+	p := e.permissions[t.instance]
+	if p != nil && !p.revoked {
+		if t.kind == CapReputation {
+			t.permission = p.reputation
+		}
+		if t.kind == CapEnrichment {
+			t.permission = p.enrichment
+		}
+	}
+	e.workMu.Unlock()
+	if t.permission == nil || t.permission.Err() != nil {
 		return false
 	}
 	select {
@@ -637,6 +749,19 @@ func (e *Engine) worker(ctx context.Context) {
 // run performs one queued lookup.
 func (e *Engine) run(ctx context.Context, t task) {
 	defer e.completed.Add(1)
+	// Revoked consent applies to queued work as well as future enqueues. A
+	// task holds its old instance, so reload/disable/rotation must invalidate
+	// it before any new request is sent with those old settings.
+	if t.permission == nil || t.permission.Err() != nil {
+		e.deliver(t, Verdict{Disposition: DispositionUnknown})
+		return
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(t.permission, cancel)
+	defer func() { stop(); cancel() }()
+	if t.permission.Err() != nil {
+		cancel()
+	}
 
 	switch t.kind {
 	case CapReputation:
@@ -654,6 +779,10 @@ func (e *Engine) runReputation(ctx context.Context, t task) {
 	}
 
 	v, err := rep.Reputation(ctx, t.subject)
+	if ctx.Err() != nil || t.permission.Err() != nil {
+		e.deliver(t, Verdict{Disposition: DispositionUnknown})
+		return
+	}
 	if err != nil {
 		// An open circuit is expected operation, not an incident: it is the
 		// breaker doing exactly what it is for, and logging it per query would
@@ -683,6 +812,12 @@ func (e *Engine) runReputation(ctx context.Context, t task) {
 		ttl = e.opts.DefaultTTL
 	}
 	expires := time.Now().Add(ttl)
+	e.commitMu.Lock()
+	defer e.commitMu.Unlock()
+	if ctx.Err() != nil || t.permission.Err() != nil {
+		e.deliver(t, Verdict{Disposition: DispositionUnknown})
+		return
+	}
 
 	e.cache.Put(t.subject.Value, CachedVerdict{
 		Verdict: v, ProviderID: t.instance.ID, ExpiresAt: expires,
@@ -701,6 +836,9 @@ func (e *Engine) runEnrichment(ctx context.Context, t task) {
 		return
 	}
 	data, err := enr.Enrich(ctx, t.subject)
+	if ctx.Err() != nil || t.permission.Err() != nil {
+		return
+	}
 	if err != nil {
 		if !errors.Is(err, ErrCircuitOpen) && !errors.Is(err, ErrNotSupported) {
 			e.log.Warn("provider enrichment failed",
@@ -718,6 +856,11 @@ func (e *Engine) runEnrichment(ctx context.Context, t task) {
 	}
 	if ttl <= 0 {
 		ttl = e.opts.DefaultTTL
+	}
+	e.commitMu.Lock()
+	defer e.commitMu.Unlock()
+	if ctx.Err() != nil || t.permission.Err() != nil {
+		return
 	}
 	if err := e.opts.Store.SaveEnrichment(ctx, t.subject.Value, t.instance.ID, data, time.Now().Add(ttl)); err != nil {
 		e.log.Warn("could not persist enrichment", "provider_id", t.instance.ID, "error", err.Error())
@@ -769,6 +912,6 @@ func (e *Engine) Stats() EngineStats {
 		CacheHits:   e.cacheHits.Load(),
 		CacheMisses: e.cacheMiss.Load(),
 		CacheSize:   e.cache.Len(),
-		Enrichment:  e.opts.Enrichment,
+		Enrichment:  e.enrichment.Load(),
 	}
 }

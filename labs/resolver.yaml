@@ -1,0 +1,11 @@
+# Only for the isolated synthetic Compose lab. Production keeps its own defaults.
+dns:
+  # Never resolve the generator's reserved .example/.test names natively.
+  # Compose supplies the local synthetic forwarding upstream.
+  local_dnssec_validation: "off"
+
+protection:
+  rebinding:
+    # The lab sink returns documentation-only addresses. Keep the protection
+    # enabled and exempt precisely those fixture ranges.
+    allow_cidrs: ["203.0.113.0/24", "2001:db8::/32"]

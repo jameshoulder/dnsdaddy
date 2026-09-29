@@ -11,6 +11,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
+	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
 // captureDetector records the events the engine enriched, so the handler's
@@ -98,6 +99,31 @@ func TestHandlerObservesResolvedQueries(t *testing.T) {
 	// needs that to tell a poll from a cache refresh.
 	if e.AnswerTTL != 60 {
 		t.Errorf("answer TTL = %d, want 60", e.AnswerTTL)
+	}
+}
+
+func TestHeuristicObservationHonorsGlobalAndPolicyRecordingOptOut(t *testing.T) {
+	for _, scope := range []string{"global", "policy"} {
+		t.Run(scope, func(t *testing.T) {
+			h, cap, drain := newDetectingHarness(t, nil)
+			if scope == "global" {
+				h.handler.queryLogEnabled = false
+			} else {
+				no := false
+				if _, err := h.store.UpdatePolicy(context.Background(), "p_standard", store.PolicyInput{LogQueries: &no}); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.engine.Reload(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.handler.Handle(context.Background(), query("private.example.", dns.TypeA),
+				requestMeta{proto: "udp", clientAddr: mustAddr("192.168.1.42")})
+			drain()
+			if len(cap.events) != 0 {
+				t.Fatal("query recording opt-out still admitted an event to persistent heuristic findings")
+			}
+		})
 	}
 }
 

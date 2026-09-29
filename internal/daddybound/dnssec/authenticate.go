@@ -183,6 +183,9 @@ func (w *walk) authenticateSigned(set RRset, sigs []*dns.RRSIG, zone string, key
 			note(w.rec.fail(step, reason))
 		}
 		if verified {
+			if receipt, ok := authenticatedRRset(set, sig, w.now); ok {
+				w.rec.authenticated = append(w.rec.authenticated, receipt)
+			}
 			return sig, ReasonNone
 		}
 	}

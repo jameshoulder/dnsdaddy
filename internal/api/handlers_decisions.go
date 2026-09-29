@@ -2,8 +2,8 @@ package api
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/evidence"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
@@ -19,25 +19,24 @@ import (
 
 // handleListDecisions returns recent decisions, newest first.
 func (a *API) handleListDecisions(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-
-	rows, err := a.Store.ListDecisions(r.Context(), store.DecisionFilter{
-		Subject:  strings.TrimSpace(q.Get("domain")),
-		ClientIP: strings.TrimSpace(q.Get("client")),
-		Action:   strings.TrimSpace(q.Get("action")),
-		Limit:    limit,
-	})
+	f, err := decisionFilterFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeExportError(w, err)
 		return
 	}
-
+	f.Cursor = strings.TrimSpace(r.URL.Query().Get("cursor"))
+	f.Since, f.Until, err = requestTimeWindow(r.URL.Query(), time.Now(), 0)
+	if err != nil {
+		writeExportError(w, err)
+		return
+	}
+	rows, next, err := a.Store.ListDecisionsPage(r.Context(), f)
+	if err != nil {
+		writeExportError(w, err)
+		return
+	}
 	body := map[string]any{
-		"decisions": rows,
-		// Whether the feature is on at all, so a dashboard can tell "nothing
-		// has been blocked" from "nothing is being recorded". Those look
-		// identical in an empty list and mean opposite things.
+		"decisions": rows, "nextCursor": next, "count": len(rows), "limit": f.Limit,
 		"recording": a.Decisions != nil,
 	}
 	if a.Decisions != nil {

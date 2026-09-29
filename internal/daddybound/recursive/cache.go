@@ -2,6 +2,7 @@ package recursive
 
 import (
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -107,7 +108,9 @@ func NewCache(opt CacheOptions) *Cache {
 }
 
 func answerKey(name string, rrtype uint16) string {
-	return dns.CanonicalName(name) + "\x00" + dns.TypeToString[rrtype]
+	// Unknown/private-use RR types have no TypeToString entry. Keying by
+	// that empty string would make every such type share one cache entry.
+	return dns.CanonicalName(name) + "\x00" + strconv.FormatUint(uint64(rrtype), 10)
 }
 
 // GetMsg returns a cached answer whose TTL has not expired.
@@ -219,10 +222,14 @@ func (c *Cache) BestDelegation(name string) (string, []netip.AddrPort, bool) {
 			return "", nil, false
 		}
 		i := strings.IndexByte(n, '.')
-		if i < 0 || i+1 >= len(n) {
+		if i < 0 {
 			return "", nil, false
 		}
-		n = n[i+1:]
+		if i+1 >= len(n) {
+			n = "."
+		} else {
+			n = n[i+1:]
+		}
 	}
 }
 

@@ -962,10 +962,10 @@ being complete and blunt.
 - **No aggressive use of NSEC/NSEC3 (RFC 8198).** Denial proofs are validated
   when a response carries them; they are never used to synthesise an answer to
   a question that was not asked.
-- **No recursive resolution.** Daddybound validates responses something else
-  supplies. The live differential corpus points it at a recursive resolver
-  with CD set; that is a harness reading records, not Daddybound discovering
-  them.
+- **Native recursive resolution is implemented.** Live/Learn use the native
+  resolver's exact replies and followed referrals. The older live differential
+  corpus still reads through a public resolver with CD set, so its historical
+  results do not by themselves cover the native transport path.
 - **No YXDOMAIN handling.** A DNAME substitution that would overflow the legal
   name length is refused (`R-DNAME-06`) rather than reported as the RCODE
   RFC 6672 §2.2 has a *server* return.
@@ -981,9 +981,11 @@ being complete and blunt.
   validated. §8.2 agrees about what follows either way: an out-of-band update
   is required.
 - **No encrypted transports** as part of the validation engine.
-- **No production enforcement.** Daddybound cannot be configured to decide a
-  real DNS answer for a real client. That is a deliberate structural property,
-  not an unfinished feature.
+- **Experimental Live enforcement is implemented.** Exact native client data
+  is validated before it is returned; Bogus/Indeterminate and operational
+  failures are refused without forwarding fallback. This is not a claim of
+  production readiness. See [ADR 0003](../decisions/0003-daddybound-native-live.md)
+  for wire semantics and remaining operational evidence.
 - **No ENS, no CCIP Read, no blockchain naming of any kind.**
 
 ## 9. Standing rules that follow from all of the above
@@ -992,7 +994,9 @@ being complete and blunt.
    IDs in §4 first. "libunbound says so" is not a finding.
 2. Policy is never decided by matching an English error string. Reasons are
    typed values; text is for humans.
-3. Trust anchors and algorithm policy are code and configuration, reviewed as
-   changes. Runtime code downloads neither.
+3. Bootstrap trust and algorithm policy are local code/configuration. RFC 5011
+   can add trust only through authenticated updates and hold-down, with its
+   lifecycle state persisted. Observed keys and external providers cannot
+   bypass that process.
 4. A verdict Daddybound cannot derive from a rule in §4 is Indeterminate with a
    reason, never a guess in either direction.

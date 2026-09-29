@@ -134,6 +134,9 @@ type Answer struct {
 	// link in the same-answer guarantee, so a zero here on an answer that had
 	// records is a defect worth noticing.
 	Pinned int
+	// Cached means the answer material was obtained without an outgoing
+	// answer lookup. Its security status is nevertheless revalidated now.
+	Cached bool
 
 	// ResolveElapsed and ValidateElapsed split the cost, because they fail
 	// for different reasons and are tuned by different limits.
@@ -159,6 +162,10 @@ func (e *Engine) Resolve(ctx context.Context, name string, rrtype uint16) (*Answ
 		return nil, err
 	}
 	resolved := time.Now()
+	msg, questions, synthetic, err := clientContent(res, name, rrtype)
+	if err != nil {
+		return nil, err
+	}
 
 	// The pin is built from the resolution's own per-hop replies, which is
 	// what makes this exact rather than approximate. An aliased answer is
@@ -167,12 +174,12 @@ func (e *Engine) Resolve(ctx context.Context, name string, rrtype uint16) (*Answ
 	// again — the second fetch usually agrees, and "usually" is not a
 	// guarantee anybody should build a resolver on.
 	p := newPin(res).bind(e.src)
-	v := dnssec.New(p, e.configFor())
-	verdict := v.Validate(ctx, name, rrtype)
+	verdict := validateContent(ctx, p, e.configFor(), msg, questions, synthetic)
+	verdict.Name, verdict.RRType = dns.CanonicalName(name), rrtype
 
 	lookups, pinned := p.counts()
 	return &Answer{
-		Msg:             res.Msg,
+		Msg:             msg,
 		Validation:      verdict,
 		Zone:            res.Zone,
 		Delegations:     res.Delegations,
@@ -180,6 +187,7 @@ func (e *Engine) Resolve(ctx context.Context, name string, rrtype uint16) (*Answ
 		Queries:         res.Queries,
 		Lookups:         lookups,
 		Pinned:          pinned,
+		Cached:          res.Queries == 0,
 		ResolveElapsed:  resolved.Sub(start),
 		ValidateElapsed: time.Since(resolved),
 	}, nil
@@ -249,7 +257,9 @@ func newPin(res *recursive.Result) *pin {
 			Authority: hop.Msg.Ns,
 		}
 	}
-	return &pin{answers: answers}
+	p := &pin{answers: answers}
+	p.pinSets(res)
+	return p
 }
 
 // bind attaches the live source. Split from newPin only so the Engine can hold

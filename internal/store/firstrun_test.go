@@ -35,8 +35,8 @@ func TestAFreshDatabaseSeedsAdHocAccessOff(t *testing.T) {
 	}
 	if got, err := st.GetSetting(context.Background(), SettingLocalDNSSECDefault); err != nil {
 		t.Fatalf("GetSetting(%s): %v", SettingLocalDNSSECDefault, err)
-	} else if got != "observe" {
-		t.Fatalf("fresh installation DNSSEC default = %q, want observe (Learn)", got)
+	} else if got != "enforce" {
+		t.Fatalf("fresh installation DNSSEC default = %q, want enforce (native Live)", got)
 	}
 }
 
@@ -86,7 +86,39 @@ func TestAnUpgradePreservesTheAccessItAlreadyHad(t *testing.T) {
 	if got, err := st.GetSetting(ctx, SettingLocalDNSSECDefault); err != nil {
 		t.Fatalf("GetSetting: %v", err)
 	} else if got != "off" {
-		t.Fatalf("upgrade DNSSEC default = %q, want off — Learn must not arrive unannounced", got)
+		t.Fatalf("upgrade DNSSEC default = %q, want off; native egress must not arrive unannounced", got)
+	}
+}
+
+// A previous Learn installation and an operator's explicit off choice must
+// not be promoted to Live on reopen. The original installation decision stays
+// authoritative across seed refreshes, even when the product default changes.
+func TestRecordedDNSSECModesSurviveUpgrades(t *testing.T) {
+	for _, mode := range []string{"observe", "off", "enforce"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "test.db")
+			st, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.SetSetting(ctx, SettingLocalDNSSECDefault, mode); err != nil {
+				st.Close()
+				t.Fatal(err)
+			}
+			st.Close()
+			for restart := 0; restart < 3; restart++ {
+				st, err = Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := st.GetSetting(ctx, SettingLocalDNSSECDefault)
+				st.Close()
+				if err != nil || got != mode {
+					t.Fatalf("restart %d changed stored mode %q to %q: %v", restart, mode, got, err)
+				}
+			}
+		})
 	}
 }
 

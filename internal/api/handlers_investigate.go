@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
+	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 	"github.com/jameshoulder/dnsdaddy/internal/evidence"
+	"github.com/jameshoulder/dnsdaddy/internal/learning"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -33,7 +35,7 @@ import (
 //	evidence    what is on file now, and whether any of it ever decided
 //	findings    what the experimental detectors inferred, which enforces
 //	            nothing
-//	observations what Daddybound concluded locally, which enforces nothing
+//	observations retained local verdicts with their recorded provenance
 //
 // A "historical reason" is never re-rendered from today's policy: decisions
 // are the stored rows, and the preview is labelled as a preview.
@@ -80,10 +82,11 @@ type investigationActivity struct {
 type investigationDecisions struct {
 	// Recording reports whether decision records are switched on at all,
 	// so an empty list can be told from a feature that is off.
-	Recording bool             `json:"recording"`
-	Items     []store.Decision `json:"items"`
-	Truncated bool             `json:"truncated"`
-	Note      string           `json:"note"`
+	Recording  bool             `json:"recording"`
+	Items      []store.Decision `json:"items"`
+	Truncated  bool             `json:"truncated"`
+	NextCursor string           `json:"nextCursor"`
+	Note       string           `json:"note"`
 }
 
 // investigationPreview is the current-policy-preview section.
@@ -174,6 +177,7 @@ type investigationFindings struct {
 type investigationObservations struct {
 	Mode         string                    `json:"mode"`
 	Available    bool                      `json:"available"`
+	Active       bool                      `json:"active"`
 	Enforcing    bool                      `json:"enforcing"`
 	Experimental bool                      `json:"experimental"`
 	Items        []store.DNSSECObservation `json:"items"`
@@ -207,10 +211,20 @@ type clientInvestigation struct {
 		// historical; the recorded rows carry their own network id.
 		Attribution previewContext `json:"attribution"`
 	} `json:"subject"`
-	Window    investigationWindow    `json:"window"`
-	Activity  investigationActivity  `json:"activity"`
-	Decisions investigationDecisions `json:"decisions"`
-	Findings  investigationFindings  `json:"findings"`
+	Window       investigationWindow       `json:"window"`
+	Activity     investigationActivity     `json:"activity"`
+	Decisions    investigationDecisions    `json:"decisions"`
+	Findings     investigationFindings     `json:"findings"`
+	Learning     investigationLearning     `json:"learning"`
+	Observations investigationObservations `json:"observations"`
+}
+
+type investigationLearning struct {
+	Enabled   bool                 `json:"enabled"`
+	Available bool                 `json:"available"`
+	Found     *bool                `json:"found"`
+	Client    *learning.ClientView `json:"client,omitempty"`
+	Note      string               `json:"note"`
 }
 
 // Bounds on what one request may pull.
@@ -289,7 +303,7 @@ func (a *API) handleInvestigateDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- historical decisions ------------------------------------------------
-	if out.Decisions, err = a.decisionsFor(ctx, store.DecisionFilter{Subject: domain, ClientIP: client}); err != nil {
+	if out.Decisions, err = a.decisionsFor(ctx, store.DecisionFilter{Subject: domain, ClientIP: client, Since: since, Until: out.Window.To}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -307,13 +321,13 @@ func (a *API) handleInvestigateDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- related findings ----------------------------------------------------
-	if out.Findings, err = a.findingsForDomain(ctx, domain, client, since); err != nil {
+	if out.Findings, err = a.findingsForDomain(ctx, domain, client, since, out.Window.To); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	// --- Daddybound observations ---------------------------------------------
-	if out.Observations, err = a.observationsFor(ctx, domain, since); err != nil {
+	if out.Observations, err = a.observationsFor(ctx, domain, client, since, out.Window.To); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -339,6 +353,23 @@ func (a *API) handleInvestigateClient(w http.ResponseWriter, r *http.Request) {
 	out.Subject.Name = a.Engine.ClientName(client)
 	out.Window = a.investigationWindowFor(r, now)
 	since := out.Window.From
+	foundBaseline := false
+	out.Learning = investigationLearning{
+		Enabled:   a.Learning != nil,
+		Available: a.Learning != nil,
+		Found:     &foundBaseline,
+		Note:      "current bounded local baseline, separate from recorded query history; no baseline or anomaly is proof of a benign or malicious device. Reading this view does not train the model",
+	}
+	if a.Learning != nil {
+		if view, found := a.Learning.Inspect(client); found {
+			foundBaseline = true
+			out.Learning.Client = &view
+		}
+	} else if a.LearningError != "" {
+		out.Learning.Enabled = true
+		out.Learning.Found = nil
+		out.Learning.Note = learning.UnavailableStatus().Error
+	}
 
 	// Current attribution, from the live engine: the network and policy this
 	// address would receive now. Labelled current; the recorded rows carry
@@ -356,11 +387,15 @@ func (a *API) handleInvestigateClient(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if out.Decisions, err = a.decisionsFor(ctx, store.DecisionFilter{ClientIP: client}); err != nil {
+	if out.Decisions, err = a.decisionsFor(ctx, store.DecisionFilter{ClientIP: client, Since: since, Until: out.Window.To}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if out.Findings, err = a.findingsForClient(ctx, client, since); err != nil {
+	if out.Findings, err = a.findingsForClient(ctx, client, since, out.Window.To); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if out.Observations, err = a.observationsFor(ctx, "", client, since, out.Window.To); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -388,7 +423,7 @@ func (a *API) handleInvestigateEnrich(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.Providers == nil {
 		writeError(w, http.StatusServiceUnavailable,
-			"external providers are not enabled on this deployment; set integrations.enabled and restart")
+			"external provider service is unavailable on this deployment")
 		return
 	}
 	client, err := parseClientParam(r.URL.Query().Get("client"))
@@ -397,6 +432,16 @@ func (a *API) handleInvestigateEnrich(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var body struct {
+		Consent bool `json:"consent"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if !body.Consent {
+		writeError(w, http.StatusBadRequest, "consent must be true to send this domain to your configured external providers")
+		return
+	}
 	policyID := a.previewPolicyID(client)
 	mode := a.Providers.Mode()
 	resp := map[string]any{
@@ -409,7 +454,7 @@ func (a *API) handleInvestigateEnrich(w http.ResponseWriter, r *http.Request) {
 
 	switch mode {
 	case apiprovider.ModeOff:
-		resp["note"] = "reputation mode is off, so no provider was consulted; change the mode under External APIs to enable lookups"
+		resp["note"] = "reputation lookup was not performed because its mode is off; independently enabled enrichment is reported separately"
 	default:
 		verdict, ok := a.Providers.Consult(r.Context(), policyID, domain)
 		switch {
@@ -423,10 +468,13 @@ func (a *API) handleInvestigateEnrich(w http.ResponseWriter, r *http.Request) {
 			resp["lookup"] = "no_answer"
 			resp["note"] = "no provider answered within the configured budget; the lookup continues in the background"
 		}
-		// Enrichment, where the operator enabled it, runs in the
-		// background and lands on the evidence section later.
-		a.Providers.Enrich(domain)
 	}
+	// Enrichment has its own explicit enablement, independent of whether
+	// reputation can affect policy. Return the actual number queued; a full
+	// queue or no eligible providers must not be reported as successful work.
+	queued := a.Providers.EnrichForPolicy(domain, policyID)
+	resp["enrichmentQueued"] = queued
+	resp["enrichmentEnabled"] = a.Providers.EnrichmentEnabled()
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -444,20 +492,20 @@ func (a *API) domainActivity(ctx context.Context, domain, client string, since t
 		act.Summary = store.ActivitySummary{QTypes: map[string]int64{}}
 		return act, nil
 	}
-	summary, err := a.Store.ActivitySummarySince(ctx, domain, client, since)
+	summary, err := a.Store.ActivitySummaryWindow(ctx, domain, client, since, win.To)
 	if err != nil {
 		return act, err
 	}
 	act.Summary = summary
 	if win.ClientAttribution && client == "" {
-		clients, err := a.Store.ClientsOfDomainSince(ctx, domain, since, investigateListLimit)
+		clients, err := a.Store.ClientsOfDomainWindow(ctx, domain, since, win.To, investigateListLimit)
 		if err != nil {
 			return act, err
 		}
 		act.Clients = clients
 	}
 	events, next, err := a.Store.ListQueries(ctx, store.QueryFilter{
-		ExactDomain: domain, ClientIP: client, Since: since, Limit: investigateRecentLimit,
+		ExactDomain: domain, ClientIP: client, Since: since, Until: win.To, Limit: investigateRecentLimit,
 	})
 	if err != nil {
 		return act, err
@@ -489,7 +537,7 @@ func (a *API) clientActivity(ctx context.Context, client string, since time.Time
 		act.Unavailable = "client addresses are not recorded (log.log_client_ip), so no activity can be attributed to this address"
 		return act, nil
 	}
-	summary, err := a.Store.ActivitySummarySince(ctx, "", client, since)
+	summary, err := a.Store.ActivitySummaryWindow(ctx, "", client, since, win.To)
 	if err != nil {
 		return act, err
 	}
@@ -500,7 +548,7 @@ func (a *API) clientActivity(ctx context.Context, client string, since time.Time
 	}
 	act.Domains = domains
 	events, next, err := a.Store.ListQueries(ctx, store.QueryFilter{
-		ClientIP: client, Since: since, Limit: investigateRecentLimit,
+		ClientIP: client, Since: since, Until: win.To, Limit: investigateRecentLimit,
 	})
 	if err != nil {
 		return act, err
@@ -512,20 +560,17 @@ func (a *API) clientActivity(ctx context.Context, client string, since time.Time
 
 // decisionsFor lists stored decisions for a filter, as they were written.
 func (a *API) decisionsFor(ctx context.Context, f store.DecisionFilter) (investigationDecisions, error) {
-	f.Limit = investigateListLimit + 1
-	rows, err := a.Store.ListDecisions(ctx, f)
+	f.Limit = investigateListLimit
+	rows, next, err := a.Store.ListDecisionsPage(ctx, f)
 	if err != nil {
 		return investigationDecisions{}, err
 	}
 	d := investigationDecisions{
 		Recording: a.Decisions != nil,
 		Items:     rows,
-		Note: "stored when each decision was made, with the evidence cited then; " +
-			"never re-derived from today's policy or feeds",
-	}
-	if len(rows) > investigateListLimit {
-		d.Items = rows[:investigateListLimit]
-		d.Truncated = true
+		Truncated: next != "", NextCursor: next,
+		Note: "original recorded decisions within this window; follow nextCursor through /api/v1/decisions with the same domain, client, since and until. " +
+			"Evidence detail identifies captured snapshots or legacy current references; decisions are never re-derived from today's policy or feeds",
 	}
 	if d.Items == nil {
 		d.Items = []store.Decision{}
@@ -563,7 +608,8 @@ func (a *API) policyPreview(ctx context.Context, domain, client string) (investi
 	pv := investigationPreview{
 		ReadOnly: true,
 		Note: "what the current configuration would decide now; not what happened. " +
-			"Evaluated on the same code path as a live query, without contacting external providers",
+			"Evaluated by the compiled policy engine without DNS resolution or external provider calls. " +
+			"Native DNSSEC validation and answer-dependent rebinding checks are not evaluated here; an allowed policy preview does not guarantee that resolution will succeed",
 	}
 
 	var match policy.Match
@@ -685,7 +731,7 @@ func (a *API) evidenceFor(ctx context.Context, domain string, now time.Time) (in
 }
 
 // findingsForDomain lists findings about a name or any of its parents.
-func (a *API) findingsForDomain(ctx context.Context, domain, client string, since time.Time) (investigationFindings, error) {
+func (a *API) findingsForDomain(ctx context.Context, domain, client string, since, until time.Time) (investigationFindings, error) {
 	var names []string
 	domainutil.Suffixes(domain, func(s string) bool {
 		if strings.Contains(s, ".") {
@@ -698,37 +744,31 @@ func (a *API) findingsForDomain(ctx context.Context, domain, client string, sinc
 	if len(names) == 0 || names[0] != domain {
 		names = append([]string{domain}, names...)
 	}
-	rows, truncated, err := a.Store.FindingsForDomainsSince(ctx, names, since, investigateListLimit)
+	rows, truncated, err := a.Store.FindingsForDomains(ctx, names, client, since, until, investigateListLimit)
 	if err != nil {
 		return investigationFindings{}, err
 	}
 	out := a.findingsSection(rows, truncated)
-	if client != "" {
-		kept := out.Items[:0]
-		for _, f := range out.Items {
-			if f.ClientIP == client {
-				kept = append(kept, f)
-			}
-		}
-		out.Items = kept
-	}
-	return out, nil
+	out.Items, err = a.withReviews(ctx, out.Items)
+	return out, err
 }
 
 // findingsForClient lists findings attributed to an address.
-func (a *API) findingsForClient(ctx context.Context, client string, since time.Time) (investigationFindings, error) {
+func (a *API) findingsForClient(ctx context.Context, client string, since, until time.Time) (investigationFindings, error) {
 	rows, next, err := a.Store.ListFindings(ctx, store.FindingFilter{
-		ClientIP: client, Since: since, Limit: investigateListLimit,
+		ClientIP: client, Since: since, Until: until, Limit: investigateListLimit,
 	})
 	if err != nil {
 		return investigationFindings{}, err
 	}
-	return a.findingsSection(rows, next != ""), nil
+	out := a.findingsSection(rows, next != "")
+	out.Items, err = a.withReviews(ctx, out.Items)
+	return out, err
 }
 
 func (a *API) findingsSection(rows []store.Finding, truncated bool) investigationFindings {
 	out := investigationFindings{
-		Enabled:      a.Detector != nil,
+		Enabled:      a.Detector != nil || a.Learning != nil,
 		Enforcement:  "none",
 		Experimental: true,
 		Items:        make([]findingResponse, 0, len(rows)),
@@ -743,18 +783,21 @@ func (a *API) findingsSection(rows []store.Finding, truncated bool) investigatio
 }
 
 // observationsFor lists Daddybound's local verdicts for a name.
-func (a *API) observationsFor(ctx context.Context, domain string, since time.Time) (investigationObservations, error) {
+func (a *API) observationsFor(ctx context.Context, domain, client string, since, until time.Time) (investigationObservations, error) {
+	state := a.dnssecState()
 	out := investigationObservations{
-		Mode:         a.Config.DNS.LocalDNSSECMode(),
-		Available:    a.Config.DNS.ObserveDNSSEC(),
-		Enforcing:    false,
+		Mode:         state.Effective,
+		Available:    state.Observer != nil || state.NativeAvailable,
+		Active:       (state.Effective == config.LocalDNSSECObserve && state.ObserverActive) || (state.Effective == config.LocalDNSSECEnforce && state.NativeAvailable),
+		Enforcing:    state.Effective == config.LocalDNSSECEnforce && state.NativeAvailable,
 		Experimental: true,
 		Items:        []store.DNSSECObservation{},
-		Note: "what Daddybound concluded about this name after each answer was already sent; " +
-			"a bogus verdict here changed nothing a client received",
+		Note: "retained local DNSSEC verdicts; current mode does not describe historical rows. " +
+			"Learn observations changed nothing a client received; native_live rows come from the serving path. " +
+			"Use recorded query source and original decisions for the client outcome. Client-scoped rows require retained query-log correlation",
 	}
 	rows, err := a.Store.ListDNSSECObservations(ctx, store.DNSSECObservationFilter{
-		Domain: domain, Since: since, Limit: investigateListLimit + 1,
+		Domain: domain, ClientIP: client, Since: since, Until: until, Limit: investigateListLimit + 1,
 	})
 	if err != nil {
 		return out, err
@@ -764,5 +807,9 @@ func (a *API) observationsFor(ctx context.Context, domain string, since time.Tim
 		out.Truncated = true
 	}
 	out.Items = rows
+	// A retained result remains inspectable after the runtime is turned off.
+	// Available describes whether this section can report data; Active and
+	// Mode describe current execution, independently of historical rows.
+	out.Available = out.Available || len(rows) > 0
 	return out, nil
 }

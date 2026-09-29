@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
+	"github.com/jameshoulder/dnsdaddy/internal/evidence"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
@@ -88,6 +90,27 @@ func TestInvestigationRequiresAuthenticationAndValidInput(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("client path that is not an address = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestClientInvestigationDoesNotClaimMissingBaselineWhenLearningFailedToLoad(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	h.api.LearningError = "invalid checkpoint /private/operator-home/daddybound-learning.json"
+	resp, raw := h.do(http.MethodGet, "/api/v1/investigate/client/10.0.0.5", nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("investigation status %d: %s", resp.StatusCode, raw)
+	}
+	var out clientInvestigation
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Learning.Enabled || out.Learning.Available || out.Learning.Found != nil || out.Learning.Client != nil {
+		t.Fatalf("unavailable model presented as disabled or absent: %+v", out.Learning)
+	}
+	if out.Learning.Note == "" || strings.Contains(string(raw), "operator-home") {
+		t.Fatalf("missing actionable safe status or leaked internal path: %s", raw)
 	}
 }
 
@@ -440,7 +463,7 @@ func TestEnrichIsADeliberateActionBehindProviders(t *testing.T) {
 	// and saying so.
 	eng := apiprovider.NewEngine(apiprovider.Options{Mode: apiprovider.ModeOff})
 	h.api.Providers = eng
-	resp, raw = h.do(http.MethodPost, "/api/v1/investigate/domain/evil.com/enrich", nil)
+	resp, raw = h.do(http.MethodPost, "/api/v1/investigate/domain/evil.com/enrich", map[string]bool{"consent": true})
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("enrich in mode off = %d: %s", resp.StatusCode, raw)
@@ -475,5 +498,101 @@ func TestInvestigationFindingsCarryTheFullDocument(t *testing.T) {
 	var f detect.Finding
 	if err := json.Unmarshal(out.Findings.Items[0].Detail, &f); err != nil || f.ID != "fd" {
 		t.Errorf("detail did not decode as a finding: %v (%+v)", err, f)
+	}
+}
+
+func TestInvestigationDecisionsRespectWindowAndExposeContinuation(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	now := time.Now().UTC()
+	for i := 0; i < 52; i++ {
+		_, err := h.store.RecordDecision(context.Background(), store.Decision{ID: fmt.Sprintf("window-%02d", i), Time: now.Add(-time.Minute), Subject: evidence.Domain("window.example"), ClientIP: "192.0.2.1"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []store.Decision{
+		{ID: "outside-old", Time: now.Add(-48 * time.Hour), Subject: evidence.Domain("window.example"), ClientIP: "192.0.2.1"},
+		{ID: "outside-future", Time: now.Add(time.Hour), Subject: evidence.Domain("window.example"), ClientIP: "192.0.2.1"},
+	} {
+		if _, err := h.store.RecordDecision(context.Background(), d, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := h.investigate(t, "window.example", "hours=24", "client=192.0.2.1")
+	if len(out.Decisions.Items) != 50 || !out.Decisions.Truncated || out.Decisions.NextCursor == "" {
+		t.Fatalf("bounded investigation decisions = %+v", out.Decisions)
+	}
+	var page struct {
+		Decisions  []store.Decision `json:"decisions"`
+		NextCursor string           `json:"nextCursor"`
+	}
+	h.getJSON("/api/v1/decisions?domain=window.example&client=192.0.2.1&cursor="+url.QueryEscape(out.Decisions.NextCursor)+"&since="+url.QueryEscape(out.Window.From.Format(time.RFC3339Nano))+"&until="+url.QueryEscape(out.Window.To.Format(time.RFC3339Nano)), &page)
+	if len(page.Decisions) != 2 || page.NextCursor != "" {
+		t.Fatalf("investigation continuation = %+v", page)
+	}
+	client := h.investigateClient(t, "192.0.2.1", "hours=1")
+	for _, d := range client.Decisions.Items {
+		if strings.HasPrefix(d.ID, "outside-") {
+			t.Fatalf("out-of-window decision %s", d.ID)
+		}
+	}
+}
+
+func TestEnrichmentRequiresExplicitConsent(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	h.api.Providers = apiprovider.NewEngine(apiprovider.Options{Mode: apiprovider.ModeOff})
+	for _, body := range []any{nil, map[string]bool{"consent": false}, map[string]string{"consent": "true"}} {
+		resp, raw := h.do(http.MethodPost, "/api/v1/investigate/domain/x.example/enrich", body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("enrichment without consent = %d: %s", resp.StatusCode, raw)
+		}
+	}
+}
+
+type investigationModeFixture struct{ state DNSSECRuntimeState }
+
+func (f *investigationModeFixture) State() DNSSECRuntimeState             { return f.state }
+func (f *investigationModeFixture) SetMode(context.Context, string) error { return nil }
+
+func TestInvestigationObservationsRespectRecordedClientWindowAndLiveSource(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	rows := []store.DNSSECObservation{
+		{ID: "live-here", Time: now.Add(-time.Minute), Domain: "x.example", Resolution: "native_live", Status: "secure"},
+		{ID: "other-client", Time: now.Add(-time.Minute), Domain: "x.example", Resolution: "native", Status: "bogus"},
+		{ID: "no-correlation", Time: now.Add(-time.Minute), Domain: "x.example", Resolution: "native", Status: "secure"},
+		{ID: "future", Time: now.Add(time.Hour), Domain: "x.example", Status: "secure"},
+		{ID: "old", Time: now.Add(-48 * time.Hour), Domain: "x.example", Status: "secure"},
+	}
+	if err := h.store.InsertDNSSECObservations(context.Background(), rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ID == "no-correlation" {
+			continue
+		}
+		ip := "192.0.2.1"
+		if row.ID == "other-client" {
+			ip = "192.0.2.2"
+		}
+		h.insertQueries(t, true, store.QueryEvent{Time: row.Time, Domain: row.Domain, ClientIP: ip, DNSSECObservationID: row.ID, DNSSECSource: "native"})
+	}
+	fixture := &investigationModeFixture{DNSSECRuntimeState{Effective: "enforce", NativeAvailable: true}}
+	h.api.DNSSECControl = fixture
+	out := h.investigate(t, "x.example", "client=192.0.2.1", "hours=24")
+	if !out.Observations.Available || !out.Observations.Active || !out.Observations.Enforcing || len(out.Observations.Items) != 1 || out.Observations.Items[0].ID != "live-here" {
+		t.Fatalf("live client observation scope = %+v", out.Observations)
+	}
+	client := h.investigateClient(t, "192.0.2.1", "hours=24")
+	if len(client.Observations.Items) != 1 || client.Observations.Items[0].Resolution != "native_live" {
+		t.Fatalf("client observations = %+v", client.Observations)
+	}
+	fixture.state = DNSSECRuntimeState{Effective: "off"}
+	out = h.investigate(t, "x.example", "client=192.0.2.1", "hours=24")
+	if !out.Observations.Available || out.Observations.Active || out.Observations.Enforcing || len(out.Observations.Items) != 1 {
+		t.Fatalf("turning off changed historical rows: %+v", out.Observations)
 	}
 }

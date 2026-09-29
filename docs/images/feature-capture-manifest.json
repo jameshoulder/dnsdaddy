@@ -1,0 +1,244 @@
+{
+  "sourceBase": "59cc816d9c2aa12cd367f35c3a18c12a673dd3bb",
+  "sourceState": "working tree with the native, learning and management feature changes",
+  "capturedAt": "2026-09-29T21:11:53.053Z",
+  "finishedAt": "2026-09-29T21:11:56.855Z",
+  "browser": "151.0.7922.34",
+  "locale": "en-GB",
+  "timezone": "UTC",
+  "deviceScaleFactor": 1,
+  "colorScheme": "light",
+  "reducedMotion": "reduce",
+  "assets": {
+    "index.html": "2a27f8afa2f8628654b7279b57710cfb3edc6911dae70b624894f98be5aca6a8",
+    "app.js": "1a36e188da01a46a6980017aeeec592b50c1e15c16c2bc312daea48fc2413d40",
+    "app.css": "71d136813facfeb2c573b04721b902c092919f8ff79980fbe7a4293489cf6e3b",
+    "logo.svg": "1442e14df956542de12c6f6fd260492f3ab9b717307463bab984c185e5b6210e",
+    "favicon.svg": "4a7e84aa5b5a6716efd60774e381da069a27acfe394cf049a3a7c7234e804f39"
+  },
+  "images": [
+    {
+      "file": "sign-in.png",
+      "route": "/",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": false,
+      "state": "Signed out; password input empty.",
+      "width": 1440,
+      "height": 1000,
+      "sha256": "e94e2bcff7fb5a2ef40fa3f5cfe8b9d4cee709d65c1f48d95a21be017288018c",
+      "at": "2026-09-29T21:11:53.943Z"
+    },
+    {
+      "file": "dashboard.png",
+      "route": "#/dashboard",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": false,
+      "state": "Synthetic loopback traffic. Native mode explicitly Off in this lab; local learning is enabled.",
+      "width": 1440,
+      "height": 1000,
+      "sha256": "b5a9394460cf84dad2b2ec7fc43f982119e305ac1516736408cc161f81d63810",
+      "at": "2026-09-29T21:11:54.288Z"
+    },
+    {
+      "file": "queries.png",
+      "route": "#/queries?action=blocked",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": false,
+      "state": "Actual blocked synthetic query expanded.",
+      "width": 1440,
+      "height": 1000,
+      "sha256": "d592886e86088301c28fbff8ef3c2c54de62b29f5754941e43d2a4322b9f8de4",
+      "at": "2026-09-29T21:11:54.513Z"
+    },
+    {
+      "file": "detections.png",
+      "route": "#/detections",
+      "viewport": {
+        "width": 1440,
+        "height": 1200
+      },
+      "fullPage": false,
+      "state": "Actual synthetic detector finding expanded.",
+      "width": 1440,
+      "height": 1200,
+      "sha256": "4a463ea74c1620d00ad787744141010e438b50f23aeb0d1f706baa7e63174c1c",
+      "at": "2026-09-29T21:11:54.719Z"
+    },
+    {
+      "file": "assurance.png",
+      "route": "#/assurance",
+      "viewport": {
+        "width": 1440,
+        "height": 1200
+      },
+      "fullPage": true,
+      "state": "Assurance and route to Daddybound operations.",
+      "width": 1440,
+      "height": 2339,
+      "sha256": "4a5d8d41791c3b77fffb5b40a6b55dbe71037ed6e09b3b22911cbef080754377",
+      "at": "2026-09-29T21:11:54.958Z"
+    },
+    {
+      "file": "features-daddybound.png",
+      "route": "#/daddybound",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": true,
+      "state": "Native mode Off for the isolated lab; default-on local model reports its actual maturity.",
+      "width": 1440,
+      "height": 1217,
+      "sha256": "222ab21e3e39df0e660f101337eadeff50153e45982ade435a567c04723d3ca5",
+      "at": "2026-09-29T21:11:55.180Z"
+    },
+    {
+      "file": "features-external-apis.png",
+      "route": "#/integrations",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": true,
+      "state": "A synthetic provider and signed webhook are saved disabled. Credentials are empty and write-only.",
+      "width": 1440,
+      "height": 2278,
+      "sha256": "ece2ac40cb1df6b9abbf9cb2abdf9f46a393aeaf66fb23df857bcd03f4459586",
+      "at": "2026-09-29T21:11:55.495Z"
+    },
+    {
+      "file": "features-protection.png",
+      "route": "#/settings",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": true,
+      "state": "Rate limiting, rebinding exceptions and actual protection counters.",
+      "width": 1440,
+      "height": 2061,
+      "sha256": "25ab0684be3f9cd3cdd8daa1569d02351611738a818fdad6d7bf8c17c775c558",
+      "at": "2026-09-29T21:11:55.698Z"
+    },
+    {
+      "file": "features-recovery.png",
+      "route": "#/recovery",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": true,
+      "state": "Encrypted backup form, offline restore guidance and real configuration history.",
+      "width": 1440,
+      "height": 4556,
+      "sha256": "6acfbbc1f353524b5aec2e43f46b6d1ab4916718f373e67cee287b5dd35d8669",
+      "at": "2026-09-29T21:11:56.028Z"
+    },
+    {
+      "file": "features-exports.png",
+      "route": "#/reports",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": true,
+      "state": "Complete NDJSON export controls.",
+      "width": 1440,
+      "height": 1000,
+      "sha256": "85b44468c6bb05cd0aacb4cfc0c603910d354e5d6bc682d39171f49a2a646502",
+      "at": "2026-09-29T21:11:56.160Z"
+    },
+    {
+      "file": "features-investigate.png",
+      "route": "#/investigate?domain=malware.lab.example&client=127.0.0.21",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fullPage": true,
+      "state": "Recorded synthetic queries and decisions with a current read-only policy preview.",
+      "width": 1440,
+      "height": 6751,
+      "sha256": "cfd76df48e54d6ffdaf864c5354700322023dda7ba60939496eed75f6057dd9a",
+      "at": "2026-09-29T21:11:56.558Z"
+    },
+    {
+      "file": "mobile.png",
+      "route": "#/dashboard",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "fullPage": false,
+      "state": "390px overview; mobile navigation closed.",
+      "width": 390,
+      "height": 844,
+      "sha256": "a5bc248718ac7e165057a663677530a032c4d372b42e22659df598f00719f6ca",
+      "at": "2026-09-29T21:11:56.676Z"
+    },
+    {
+      "file": "features-daddybound-mobile.png",
+      "route": "#/daddybound",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "fullPage": true,
+      "state": "Native mode and actual local learning state at phone width.",
+      "width": 390,
+      "height": 2022,
+      "sha256": "e655397d10ae6f134f6d1e558502c63cad3355b43a661399b6819769c74eb66c",
+      "at": "2026-09-29T21:11:56.843Z"
+    }
+  ],
+  "verification": {
+    "uiTests": 246,
+    "interactiveBrowserChecks": 79,
+    "pageErrors": 0,
+    "consoleOrCSPErrors": 0,
+    "failedHTTPRequests": 0,
+    "externalBrowserRequests": 0
+  },
+  "fixture": {
+    "synthetic": true,
+    "queryRows24h": 6337,
+    "blockedQueries24h": 240,
+    "findings7d": 4,
+    "loadedFeedDomains": 3,
+    "nativeMode": "off",
+    "learningClients": {
+      "tracked": 7,
+      "ready": 0,
+      "warming": 7,
+      "max": 1024,
+      "evicted": 0
+    },
+    "learningObservations": {
+      "received": 1450,
+      "processed": 1450,
+      "dropped": 0,
+      "invalid": 0,
+      "blocked": 60,
+      "errors": 0,
+      "late": 0,
+      "windowOverflow": 0,
+      "uniqueSaturated": 0,
+      "privacySkipped": 0
+    },
+    "protectionCounters": {
+      "rateLimited": 0,
+      "rateOverflow": 0,
+      "trackedClients": 5,
+      "rebindingBlocked": 24
+    }
+  }
+}

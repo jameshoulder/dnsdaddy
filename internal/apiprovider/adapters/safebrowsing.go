@@ -130,7 +130,7 @@ func (s *safeBrowsing) Reputation(ctx context.Context, subject apiprovider.Subje
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(encoded))
 	if err != nil {
-		return apiprovider.Verdict{}, fmt.Errorf("build request: %w", err)
+		return apiprovider.Verdict{}, fmt.Errorf("provider request could not be constructed")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// GetBody, so the client's single retry can replay the body. Without it a

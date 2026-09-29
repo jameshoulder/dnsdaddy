@@ -126,10 +126,11 @@ type QueryEvent struct {
 	Proto      string    `json:"proto"`
 	ElapsedMS  int       `json:"elapsedMs"`
 	Cached     bool      `json:"cached"`
-	// DNSSEC is the validation status the upstream reported. DNS Daddy
-	// forwards rather than validating locally, so this is the upstream's
-	// conclusion, not ours. See the DNSSEC* constants.
+	// DNSSEC is the status recorded on the serving path. DNSSECSource names
+	// whose conclusion it was; old rows must not inherit today's runtime mode.
 	DNSSEC string `json:"dnssec,omitempty"`
+	// DNSSECSource is native or upstream; empty means legacy/unknown.
+	DNSSECSource string `json:"dnssecSource"`
 
 	// DNSSECObservationID correlates this query with the local Daddybound
 	// observation of it, or is empty when local validation was off, not
@@ -143,21 +144,19 @@ type QueryEvent struct {
 	DNSSECObservationID string `json:"-"`
 }
 
-// DNSSEC validation statuses recorded against a query.
-//
-// These describe what the *upstream* resolver concluded, because that is the
-// only thing a forwarder can observe. In particular DNSSECUnvalidated does not
-// mean "provably unsigned" — it means no AD bit came back, which covers an
-// unsigned zone and an upstream that does not validate equally. Claiming to
-// distinguish them would be claiming to do validation we do not do.
+// DNSSEC statuses recorded on the serving path. Read DNSSECSource alongside
+// them: native authentication is a local validation conclusion; forwarded
+// authentication records an upstream AD assertion. Neither establishes intent,
+// and an old row with no source cannot establish either provenance.
 const (
-	// DNSSECValidated: the upstream set the AD bit, having validated the
-	// answer against the chain of trust.
+	// DNSSECValidated: native validation was Secure, or the upstream asserted AD.
+	// Native replies expose AD only when the client's flags request it.
 	DNSSECValidated = "validated"
-	// DNSSECUnvalidated: an answer came back without the AD bit.
+	// DNSSECUnvalidated: no authentication was established by the selected path.
+	// This alone does not establish whether a zone was provably unsigned.
 	DNSSECUnvalidated = "unvalidated"
-	// DNSSECServfail: the upstream returned SERVFAIL. A failed DNSSEC
-	// validation is one cause among several; see internal/detect.
+	// DNSSECServfail: resolution failed. DNSSEC is one possible cause, and
+	// the recorded reason distinguishes it from transport or resource failures.
 	DNSSECServfail = "servfail"
 )
 

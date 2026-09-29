@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -204,5 +205,48 @@ func TestEvidenceContributionsCountOnlyDecidingCitations(t *testing.T) {
 	}
 	if _, ok := counts["ev_missing"]; ok {
 		t.Error("an unknown id gained a count")
+	}
+}
+
+func TestDomainInvestigationFiltersClientBeforeThePageLimit(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	rows := []Finding{{ID: "quiet-client", Time: now.Add(-time.Hour), ClientIP: "192.0.2.1", Domain: "example.com", Detail: "{}"}}
+	for i := 0; i < 60; i++ {
+		rows = append(rows, Finding{ID: fmt.Sprintf("busy-%02d", i), Time: now.Add(-time.Minute), ClientIP: "192.0.2.2", Domain: "example.com", Detail: "{}"})
+	}
+	if err := st.InsertFindings(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	got, truncated, err := st.FindingsForDomains(ctx, []string{"www.example.com", "example.com"}, "192.0.2.1", now.Add(-24*time.Hour), now, 50)
+	if err != nil || truncated || len(got) != 1 || got[0].ID != "quiet-client" {
+		t.Fatalf("client filter after page cap: %v truncated=%v err=%v", got, truncated, err)
+	}
+}
+
+func TestInvestigationSummariesShareWindowAndDoNotDuplicateRenamedClients(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	if err := st.InsertQueryBatch(ctx, []QueryEvent{
+		{Time: at.Add(-time.Minute), Domain: "scope.example", ClientIP: "192.0.2.1", ClientName: "Old label", NetworkID: "old", Action: ActionBlocked, Category: "z_old"},
+		{Time: at, Domain: "scope.example", ClientIP: "192.0.2.1", ClientName: "Current label", NetworkID: "current", Action: ActionBlocked, Category: "a_current"},
+		{Time: at.Add(time.Minute), Domain: "scope.example", ClientIP: "192.0.2.2", ClientName: "Future", Action: ActionBlocked},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	since := at.Add(-time.Hour)
+	summary, err := st.ActivitySummaryWindow(ctx, "scope.example", "", since, at)
+	if err != nil || summary.Queries != 2 {
+		t.Fatalf("summary includes out-of-window rows: %+v %v", summary, err)
+	}
+	clients, err := st.ClientsOfDomainWindow(ctx, "scope.example", since, at, 50)
+	if err != nil || len(clients) != 1 || clients[0].Queries != 2 || clients[0].ClientName != "Current label" || clients[0].NetworkID != "current" {
+		t.Fatalf("client identity split by rename: %+v %v", clients, err)
+	}
+	domains, err := st.DomainsOfClientWindow(ctx, "192.0.2.1", since, at, 50)
+	if err != nil || len(domains) != 1 || domains[0].Queries != 2 || domains[0].Category != "a_current" {
+		t.Fatalf("latest category chosen lexically instead of chronologically: %+v %v", domains, err)
 	}
 }

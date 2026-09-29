@@ -179,17 +179,16 @@ func TestAnExplanationDoesNotChangeWhenTheFeedDoes(t *testing.T) {
 	if after.PolicyPath != original.PolicyPath {
 		t.Error("the policy path changed after the fact")
 	}
-	// The original decision cites nothing now, because the row it cited was
-	// deleted. It must NOT have picked up the newer feed's claim: that claim
-	// did not exist when this decision was made and citing it would be
-	// rewriting history in the other direction.
+	// Captured evidence survives deletion from the mutable intelligence store.
+	// It must never pick up the newer feed's claim: that claim did not exist
+	// when this decision was made.
 	for _, c := range after.Cited {
 		if c.Evidence.Source == "f_other" {
 			t.Errorf("the decision cites evidence recorded after it was made: %+v", c.Evidence)
 		}
 	}
-	if len(after.Cited) != 0 {
-		t.Errorf("evidence deleted from the store still came back: %+v", after.Cited)
+	if len(after.Cited) != 1 || after.Cited[0].Evidence.Source != "f_urlhaus" || after.EvidenceSource != "recorded_snapshot" {
+		t.Errorf("the original evidence snapshot was not preserved: %+v", after)
 	}
 
 	// And the domain does now have current evidence, so the check above is
@@ -360,5 +359,124 @@ func TestThePolicyPathOmitsWhatWasNotInForce(t *testing.T) {
 	}
 	if !strings.Contains(got, "BLOCK") {
 		t.Errorf("path does not state the action: %q", got)
+	}
+}
+
+func TestNativeAndRebindingDecisionsRecordLocalFactsNotMaliciousness(t *testing.T) {
+	for _, tc := range []struct {
+		rule    policy.Rule
+		action  string
+		blocked bool
+		source  string
+		reason  string
+	}{
+		{policy.RuleNativeValidation, store.ActionError, false, "native", "DNSSEC validation failed: authenticated denial proof was invalid"},
+		{policy.RuleRebinding, store.ActionBlocked, true, "protection", "Public name resolved through an alias to a private IPv6 address"},
+	} {
+		t.Run(string(tc.rule), func(t *testing.T) {
+			r, st := newRecorder(t)
+			e := Event{Time: time.Now(), Domain: "check.example", Action: tc.action, Blocked: tc.blocked, Reason: tc.reason,
+				Basis: &policy.Basis{Rule: tc.rule, PolicyID: "p_std", PolicyName: "Standard", Category: "dns_security"}}
+			r.Record(e)
+			drain(t, r)
+			rows, err := st.ListDecisions(context.Background(), store.DecisionFilter{})
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("local decision = %v: %v", rows, err)
+			}
+			d, err := st.DecisionWithEvidence(context.Background(), rows[0].ID)
+			if err != nil || len(d.Cited) != 1 {
+				t.Fatalf("local evidence = %+v: %v", d, err)
+			}
+			if d.Cited[0].Evidence.Kind != evidence.KindLocal || d.Cited[0].Evidence.Source != tc.source || d.Cited[0].Evidence.Claim != tc.reason || !strings.Contains(d.Explanation, tc.reason) {
+				t.Fatalf("local reason lost: %+v", d)
+			}
+			assessment := evidence.Assess(evidence.Domain("check.example"), []evidence.Evidence{d.Cited[0].Evidence}, time.Now())
+			if assessment.Verdict == evidence.VerdictMalicious || assessment.Verdict == evidence.VerdictBenign {
+				t.Fatalf("protocol outcome became threat intelligence: %+v", assessment)
+			}
+			if tc.action == store.ActionError && (strings.Contains(d.PolicyPath, "ALLOW") || !strings.HasSuffix(d.PolicyPath, "ERROR") || !strings.HasPrefix(d.Explanation, "Resolution failed.")) {
+				t.Fatalf("failed resolution mislabeled as allow: %+v", d)
+			}
+		})
+	}
+}
+
+func TestRecorderCapturesBasisBeforeQueueing(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/queue.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	r := New(st, Options{})
+	e := feedBlock("queued.example")
+	r.Record(e)
+	e.Basis.FeedName = "Mutated after decision"
+	e.Basis.Category = "phishing"
+	queued := <-r.ch
+	r.write(context.Background(), queued)
+	rows, err := st.ListDecisions(context.Background(), store.DecisionFilter{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("queued decision = %v: %v", rows, err)
+	}
+	if rows[0].Category != "malware" || !strings.Contains(rows[0].Explanation, "URLhaus") || strings.Contains(rows[0].Explanation, "Mutated") {
+		t.Fatalf("queued evidence followed mutable caller state: %+v", rows[0])
+	}
+}
+
+func TestShutdownDrainsAlreadyAcceptedDecisionEvidence(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/drain.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	r := New(st, Options{QueueSize: 32, DrainTimeout: time.Second})
+	for i := 0; i < 20; i++ {
+		r.Record(feedBlock("shutdown.example"))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	go r.Run(ctx)
+	r.Wait()
+	stats := r.Stats()
+	if stats.Queued != 20 || stats.Written != 20 || stats.Failed != 0 || stats.Dropped != 0 || stats.Depth != 0 {
+		t.Fatalf("accepted evidence lost at shutdown: %+v", stats)
+	}
+	rows, err := st.ListDecisions(context.Background(), store.DecisionFilter{})
+	if err != nil || len(rows) != 20 {
+		t.Fatalf("drained decisions = %d: %v", len(rows), err)
+	}
+	for _, row := range rows {
+		full, err := st.DecisionWithEvidence(context.Background(), row.ID)
+		if err != nil || full.EvidenceSource != "recorded_snapshot" || len(full.Cited) != 1 {
+			t.Fatalf("drained snapshot missing: %+v %v", full, err)
+		}
+	}
+	r.Record(feedBlock("late.example"))
+	if r.Stats().Queued != 20 || r.Stats().ShutdownDropped != 1 {
+		t.Fatalf("shutdown accepted a late producer: %+v", r.Stats())
+	}
+}
+
+func TestShutdownDeadlineCountsUndrainedDecisions(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/deadline.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	r := New(st, Options{QueueSize: 32, DrainTimeout: time.Nanosecond})
+	for i := 0; i < 20; i++ {
+		r.Record(feedBlock("deadline.example"))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	go r.Run(ctx)
+	r.Wait()
+	if time.Since(started) > time.Second {
+		t.Fatal("bounded shutdown did not finish")
+	}
+	stats := r.Stats()
+	if stats.Queued != 20 || stats.Written != 0 || stats.ShutdownDropped != 20 || stats.Dropped != 20 || stats.Depth != 0 {
+		t.Fatalf("deadline losses hidden: %+v", stats)
 	}
 }

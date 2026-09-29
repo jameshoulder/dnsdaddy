@@ -156,7 +156,8 @@ func (o Options) withDefaults() Options {
 type Stats struct {
 	// Observed is how many validations completed, of any status.
 	Observed uint64
-	// Dropped is how many were discarded because the queue was full.
+	// Dropped counts requests not observed: full-queue rejections, requests
+	// rejected after shutdown, and accepted queued work discarded at shutdown.
 	//
 	// Exposed rather than swallowed: dropping biases the sample towards quiet
 	// periods, and a reader shown "10,000 observed" without "and 4,000
@@ -198,6 +199,12 @@ type Observer struct {
 	opts Options
 
 	queue chan Request
+	// admission serialises the constant-work send with shutdown. The queue
+	// stays open so captured Observe calls cannot panic after a mode change.
+	// runCtx is set before workers start; nil permits bounded pre-Run enqueue.
+	admission sync.RWMutex
+	runCtx    context.Context
+	stopping  bool
 
 	// started guards Run, which must be called exactly once.
 	started atomic.Bool
@@ -281,12 +288,18 @@ func NewID() string {
 
 // Observe enqueues a query for validation and returns whether it was accepted.
 //
-// Never blocks, never allocates on the fast path beyond the send, and never
-// returns an error a caller has to handle. That is the property the whole
-// milestone rests on: the answer path does a non-blocking channel send and a
-// counter increment, so no validation — however slow, however hostile the zone
-// — can add latency to a client's answer.
+// The admission gate protects only a context check, non-blocking channel send
+// and counter increment. It never waits for validation, queue space or a sink.
+// Shutdown closes admission before draining queued work; every rejected or
+// discarded request increments Dropped, including calls through a captured
+// observer after Run has returned.
 func (o *Observer) Observe(r Request) bool {
+	o.admission.RLock()
+	defer o.admission.RUnlock()
+	if o.stopping || (o.runCtx != nil && o.runCtx.Err() != nil) {
+		o.dropped.Add(1)
+		return false
+	}
 	select {
 	case o.queue <- r:
 		return true
@@ -307,6 +320,9 @@ func (o *Observer) Run(ctx context.Context) {
 		return
 	}
 	defer close(o.done)
+	o.admission.Lock()
+	o.runCtx = ctx
+	o.admission.Unlock()
 
 	var wg sync.WaitGroup
 	for i := 0; i < o.opts.Workers; i++ {
@@ -317,6 +333,21 @@ func (o *Observer) Run(ctx context.Context) {
 		}()
 	}
 	wg.Wait()
+	// Exclude all sends that passed admission before cancellation, then drain
+	// outside the gate. Workers have joined, and future senders are rejected,
+	// so every remaining item is discarded exactly once without holding a
+	// caller behind a queue-length operation.
+	o.admission.Lock()
+	o.stopping = true
+	o.admission.Unlock()
+	for {
+		select {
+		case <-o.queue:
+			o.dropped.Add(1)
+		default:
+			return
+		}
+	}
 }
 
 // Wait blocks until Run has returned.
@@ -324,10 +355,21 @@ func (o *Observer) Wait() { <-o.done }
 
 func (o *Observer) work(ctx context.Context) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case req := <-o.queue:
+			// Cancellation and a queued request can both win select. Do not
+			// start a new validation just to report a manufactured timeout.
+			// This item is no longer in the queue, so this worker accounts for
+			// it; Run accounts for the rest after all workers have joined.
+			if ctx.Err() != nil {
+				o.dropped.Add(1)
+				return
+			}
 			o.validate(ctx, req)
 		}
 	}

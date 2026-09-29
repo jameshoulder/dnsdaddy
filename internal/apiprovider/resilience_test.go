@@ -680,10 +680,8 @@ func TestNormaliseDomainMatchesWhatTheCacheIsKeyedOn(t *testing.T) {
 
 /* ---------- link-local dial control -------------------------------------- */
 
-// The one SSRF control in this package. It exists for a single escalation:
-// somebody who can add a provider is already an administrator of this
-// dashboard, but the cloud metadata service would make them an administrator
-// of the account the machine runs in, which is strictly more.
+// Destination controls apply to every new connection. Public unicast is the
+// default; explicitly approved private services are tested separately.
 func TestLinkLocalAddressesAreRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -699,30 +697,23 @@ func TestLinkLocalAddressesAreRefused(t *testing.T) {
 		{"AWS IPv6 metadata, which is unique-local rather than link-local",
 			"fd00:ec2::254", true},
 
-		// Everything an operator would legitimately point a provider at stays
-		// reachable. Blocking these would break the stated use case — an
-		// internal reputation service, or a self-hosted vendor appliance —
-		// and would not protect anybody from an administrator who already has
-		// the dashboard.
+		// Private, local and reserved ranges are refused by default.
 		{"a public address", "93.184.216.34", false},
-		{"an RFC 1918 internal service", "10.1.2.3", false},
-		{"a home network", "192.168.1.10", false},
-		{"a carrier-grade NAT range", "100.64.0.1", false},
-		{"loopback, which is where a test server lives", "127.0.0.1", false},
-		{"IPv6 loopback", "::1", false},
+		{"an RFC 1918 internal service", "10.1.2.3", true},
+		{"a home network", "192.168.1.10", true},
+		{"a carrier-grade NAT range", "100.64.0.1", true},
+		{"loopback, which is where a test server lives", "127.0.0.1", true},
+		{"IPv6 loopback", "::1", true},
 		{"a public IPv6 address", "2606:2800:220:1:248:1893:25c8:1946", false},
-		// The rest of unique-local space stays reachable: it is where an
-		// operator's own internal services live, and taking fc00::/7 away
-		// would break the use case this adapter exists for.
-		{"an ordinary unique-local address", "fd00:1234::5", false},
-		{"the neighbour of the AWS endpoint", "fd00:ec2::253", false},
+		{"an ordinary unique-local address", "fd00:1234::5", true},
+		{"the neighbour of the AWS endpoint", "fd00:ec2::253", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, err := netip.ParseAddr(tc.addr)
 			if err != nil {
 				t.Fatalf("parse %s: %v", tc.addr, err)
 			}
-			err = checkAddr(addr)
+			err = CheckDestinationAddress(addr, false)
 			if tc.refused && err == nil {
 				t.Errorf("%s was allowed", tc.addr)
 			}
@@ -750,13 +741,13 @@ func TestTheDialControlFailsClosed(t *testing.T) {
 		// only safe response to that is to refuse.
 		{"a hostname where an address was promised", "example.com:80"},
 	} {
-		if err := dialControl("tcp", tc.address, nil); err == nil {
+		if err := destinationControl(false)("tcp", tc.address, nil); err == nil {
 			t.Errorf("dialControl allowed %q (%s), which it could not parse", tc.address, tc.name)
 		}
 	}
 	// And a well-formed permitted address still gets through, so the test
 	// above is not passing because everything is refused.
-	if err := dialControl("tcp", "127.0.0.1:8080", nil); err != nil {
+	if err := destinationControl(false)("tcp", "93.184.216.34:443", nil); err != nil {
 		t.Errorf("dialControl refused an ordinary address: %v", err)
 	}
 }
@@ -779,20 +770,19 @@ func TestTheSharedTransportRefusesLinkLocal(t *testing.T) {
 		_ = conn.Close()
 		t.Fatal("the shared transport dialled the cloud metadata service")
 	}
-	if !strings.Contains(err.Error(), "link-local") {
+	if !errors.Is(err, ErrBlockedAddress) {
 		t.Errorf("the dial failed for some other reason, so the control may not be wired in: %v", err)
 	}
 
-	// And an ordinary address still dials, so the check above is not passing
-	// because the transport refuses everything.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
-	defer srv.Close()
-	host := strings.TrimPrefix(srv.URL, "http://")
-	conn, err = sharedTransport().DialContext(ctx, "tcp", host)
-	if err != nil {
-		t.Fatalf("the shared transport refused an ordinary address: %v", err)
+	// Loopback is also blocked at the actual dial boundary, while a public
+	// address passes the pure control predicate without any network request.
+	if _, err := sharedTransport().DialContext(ctx, "tcp", "127.0.0.1:80"); !errors.Is(err, ErrBlockedAddress) {
+		t.Fatalf("loopback dial was not guarded: %v", err)
 	}
-	_ = conn.Close()
+	if err := destinationControl(false)("tcp", "93.184.216.34:443", nil); err != nil {
+		t.Fatalf("public address refused: %v", err)
+	}
+
 }
 
 // The dialer's control is not enough on its own. With HTTP_PROXY set the
@@ -803,9 +793,9 @@ func TestABlockedLiteralIsRefusedBeforeAnythingIsDialled(t *testing.T) {
 	c := NewClient(ClientOptions{ProviderID: "p", Timeout: 2 * time.Second, RatePerMinute: 60})
 
 	for _, raw := range []string{
-		"http://169.254.169.254/latest/meta-data/",
+		"https://169.254.169.254/latest/meta-data/",
 		"https://[fd00:ec2::254]/latest/meta-data/",
-		"http://[::ffff:169.254.169.254]/",
+		"https://[::ffff:169.254.169.254]/",
 	} {
 		req, err := http.NewRequest(http.MethodGet, raw, nil)
 		if err != nil {
@@ -834,6 +824,7 @@ func TestABlockedLiteralIsRefusedBeforeAnythingIsDialled(t *testing.T) {
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
+	c = NewClient(ClientOptions{ProviderID: "fixture", Transport: srv.Client().Transport})
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	if err != nil {
 		t.Fatal(err)

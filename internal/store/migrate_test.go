@@ -74,6 +74,9 @@ func TestUpgradeFromPreDNSSECDatabase(t *testing.T) {
 	for _, r := range rows {
 		if r.Domain == "legacy.example" {
 			found = true
+			if r.DNSSECSource != "" {
+				t.Errorf("legacy row source was invented: %q", r.DNSSECSource)
+			}
 			if r.DNSSEC != "" {
 				t.Errorf("legacy row has dnssec=%q, want empty", r.DNSSEC)
 			}
@@ -86,7 +89,7 @@ func TestUpgradeFromPreDNSSECDatabase(t *testing.T) {
 	// And a new write using the new column must work.
 	if err := st.InsertQueryBatch(ctx, []QueryEvent{{
 		Time: time.Now(), Domain: "new.example", QType: "A",
-		Action: ActionAllowed, DNSSEC: DNSSECValidated,
+		Action: ActionAllowed, DNSSEC: DNSSECValidated, DNSSECSource: "native",
 	}}, true); err != nil {
 		t.Fatalf("insert after upgrade: %v", err)
 	}
@@ -95,7 +98,7 @@ func TestUpgradeFromPreDNSSECDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListQueries: %v", err)
 	}
-	if len(rows) != 1 || rows[0].DNSSEC != DNSSECValidated {
+	if len(rows) != 1 || rows[0].DNSSEC != DNSSECValidated || rows[0].DNSSECSource != "native" {
 		t.Errorf("new row did not round-trip its dnssec status: %+v", rows)
 	}
 

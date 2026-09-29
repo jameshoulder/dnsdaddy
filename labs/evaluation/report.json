@@ -1,0 +1,792 @@
+{
+  "algorithm": "robust-ewma-v1",
+  "datasetVersion": 1,
+  "trainingWindows": 96,
+  "trainingQueries": 5760,
+  "trainingEnd": "2026-09-01T02:00:00Z",
+  "heldOutStart": "2026-09-01T03:00:00Z",
+  "heldOutQueries": 3840,
+  "untrained": {
+    "windows": 64,
+    "benign": 38,
+    "malicious": 26,
+    "scored": 0,
+    "abstainedBenign": 38,
+    "abstainedMalicious": 26,
+    "truePositive": 0,
+    "falsePositive": 0,
+    "trueNegative": 0,
+    "falseNegative": 0,
+    "recallAmongScoredMalicious": null,
+    "detectionsDividedByAllMalicious": 0,
+    "falseAlertsDividedByScoredBenign": null,
+    "precision": null
+  },
+  "frozenLearnedModel": {
+    "windows": 64,
+    "benign": 38,
+    "malicious": 26,
+    "scored": 50,
+    "abstainedBenign": 4,
+    "abstainedMalicious": 10,
+    "truePositive": 8,
+    "falsePositive": 4,
+    "trueNegative": 30,
+    "falseNegative": 8,
+    "recallAmongScoredMalicious": 0.5,
+    "detectionsDividedByAllMalicious": 0.3076923076923077,
+    "falseAlertsDividedByScoredBenign": 0.11764705882352941,
+    "precision": 0.6666666666666666
+  },
+  "fixedLexicalRule": {
+    "windows": 64,
+    "benign": 38,
+    "malicious": 26,
+    "scored": 56,
+    "abstainedBenign": 0,
+    "abstainedMalicious": 8,
+    "truePositive": 14,
+    "falsePositive": 16,
+    "trueNegative": 22,
+    "falseNegative": 4,
+    "recallAmongScoredMalicious": 0.7777777777777778,
+    "detectionsDividedByAllMalicious": 0.5384615384615384,
+    "falseAlertsDividedByScoredBenign": 0.42105263157894735,
+    "precision": 0.4666666666666667
+  },
+  "outcomes": [
+    {
+      "window": "test-routine-web-00",
+      "scenario": "routine-web",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.01611596462370124,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-web-01",
+      "scenario": "routine-web",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.008913669571663323,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-web-02",
+      "scenario": "routine-web",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.005381538219175678,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-web-03",
+      "scenario": "routine-web",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.019393567385358544,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-web-04",
+      "scenario": "routine-web",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.03460980419545723,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-web-05",
+      "scenario": "routine-web",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.0028637724494255945,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-mail-00",
+      "scenario": "routine-mail",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.09520435435976596,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-mail-01",
+      "scenario": "routine-mail",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.1142575547264165,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-mail-02",
+      "scenario": "routine-mail",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.14447777023341798,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-mail-03",
+      "scenario": "routine-mail",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.08449967821565786,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-mail-04",
+      "scenario": "routine-mail",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.10271180034298866,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-mail-05",
+      "scenario": "routine-mail",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.06175562883379453,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-cdn-00",
+      "scenario": "routine-cdn",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.021424615771491094,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-cdn-01",
+      "scenario": "routine-cdn",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.024792764314344257,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-cdn-02",
+      "scenario": "routine-cdn",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.030354900304174613,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-cdn-03",
+      "scenario": "routine-cdn",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.01635774940386181,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-cdn-04",
+      "scenario": "routine-cdn",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.027714025496815932,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-cdn-05",
+      "scenario": "routine-cdn",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.03452878821347467,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-telemetry-00",
+      "scenario": "routine-telemetry",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.0353617868898722,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-telemetry-01",
+      "scenario": "routine-telemetry",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.010697719015966648,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-telemetry-02",
+      "scenario": "routine-telemetry",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.008740246387751357,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-telemetry-03",
+      "scenario": "routine-telemetry",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.0066537492481803335,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-telemetry-04",
+      "scenario": "routine-telemetry",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.007151827836371731,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-routine-telemetry-05",
+      "scenario": "routine-telemetry",
+      "label": "benign",
+      "state": "typical",
+      "distance": 0.004108089254235188,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": []
+    },
+    {
+      "window": "test-software-deployment-00",
+      "scenario": "software-deployment",
+      "label": "benign",
+      "state": "typical",
+      "distance": 1.17733853047142,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-software-deployment-01",
+      "scenario": "software-deployment",
+      "label": "benign",
+      "state": "typical",
+      "distance": 1.17733853047142,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-software-deployment-02",
+      "scenario": "software-deployment",
+      "label": "benign",
+      "state": "typical",
+      "distance": 1.17733853047142,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-software-deployment-03",
+      "scenario": "software-deployment",
+      "label": "benign",
+      "state": "typical",
+      "distance": 1.17733853047142,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-software-deployment-04",
+      "scenario": "software-deployment",
+      "label": "benign",
+      "state": "typical",
+      "distance": 1.17733853047142,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-software-deployment-05",
+      "scenario": "software-deployment",
+      "label": "benign",
+      "state": "typical",
+      "distance": 1.17733853047142,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-new-legitimate-nonce-service-00",
+      "scenario": "new-legitimate-nonce-service",
+      "label": "benign",
+      "state": "anomaly",
+      "distance": 5.068603097090391,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-new-legitimate-nonce-service-01",
+      "scenario": "new-legitimate-nonce-service",
+      "label": "benign",
+      "state": "anomaly",
+      "distance": 5.062479001636604,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-new-legitimate-nonce-service-02",
+      "scenario": "new-legitimate-nonce-service",
+      "label": "benign",
+      "state": "anomaly",
+      "distance": 5.082086025487935,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-new-legitimate-nonce-service-03",
+      "scenario": "new-legitimate-nonce-service",
+      "label": "benign",
+      "state": "anomaly",
+      "distance": 5.054447049935269,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-new-client-routine-00",
+      "scenario": "new-client-routine",
+      "label": "benign",
+      "state": "learning",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-new-client-routine-01",
+      "scenario": "new-client-routine",
+      "label": "benign",
+      "state": "learning",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-new-client-routine-02",
+      "scenario": "new-client-routine",
+      "label": "benign",
+      "state": "learning",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-new-client-routine-03",
+      "scenario": "new-client-routine",
+      "label": "benign",
+      "state": "learning",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-encoded-txt-exfiltration-00",
+      "scenario": "encoded-txt-exfiltration",
+      "label": "malicious",
+      "state": "anomaly",
+      "distance": 6.955910002557209,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-encoded-txt-exfiltration-01",
+      "scenario": "encoded-txt-exfiltration",
+      "label": "malicious",
+      "state": "anomaly",
+      "distance": 6.982722742621264,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-encoded-txt-exfiltration-02",
+      "scenario": "encoded-txt-exfiltration",
+      "label": "malicious",
+      "state": "anomaly",
+      "distance": 6.990792265596914,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-encoded-txt-exfiltration-03",
+      "scenario": "encoded-txt-exfiltration",
+      "label": "malicious",
+      "state": "anomaly",
+      "distance": 6.987311613512149,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-encoded-address-exfiltration-00",
+      "scenario": "encoded-address-exfiltration",
+      "label": "malicious",
+      "state": "excluded",
+      "distance": 2.327802173258207,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "extreme_feature_quarantine"
+      ]
+    },
+    {
+      "window": "test-encoded-address-exfiltration-01",
+      "scenario": "encoded-address-exfiltration",
+      "label": "malicious",
+      "state": "excluded",
+      "distance": 2.3356334700011057,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "extreme_feature_quarantine"
+      ]
+    },
+    {
+      "window": "test-encoded-address-exfiltration-02",
+      "scenario": "encoded-address-exfiltration",
+      "label": "malicious",
+      "state": "excluded",
+      "distance": 2.3288573192496282,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "extreme_feature_quarantine"
+      ]
+    },
+    {
+      "window": "test-encoded-address-exfiltration-03",
+      "scenario": "encoded-address-exfiltration",
+      "label": "malicious",
+      "state": "excluded",
+      "distance": 2.324390434834135,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "extreme_feature_quarantine"
+      ]
+    },
+    {
+      "window": "test-mail-host-txt-channel-00",
+      "scenario": "mail-host-txt-channel",
+      "label": "malicious",
+      "state": "anomaly",
+      "distance": 4.50193790167874,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-mail-host-txt-channel-01",
+      "scenario": "mail-host-txt-channel",
+      "label": "malicious",
+      "state": "anomaly",
+      "distance": 4.478878465163203,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-mail-host-txt-channel-02",
+      "scenario": "mail-host-txt-channel",
+      "label": "malicious",
+      "state": "anomaly",
+      "distance": 4.499227601877841,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-mail-host-txt-channel-03",
+      "scenario": "mail-host-txt-channel",
+      "label": "malicious",
+      "state": "anomaly",
+      "distance": 4.504535176401951,
+      "alert": true,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape",
+        "anomalous_window"
+      ]
+    },
+    {
+      "window": "test-dga-failed-resolution-00",
+      "scenario": "dga-failed-resolution",
+      "label": "malicious",
+      "state": "insufficient",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": [
+        "non_success_response_present",
+        "too_few_successful_queries"
+      ]
+    },
+    {
+      "window": "test-dga-failed-resolution-01",
+      "scenario": "dga-failed-resolution",
+      "label": "malicious",
+      "state": "insufficient",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": [
+        "non_success_response_present",
+        "too_few_successful_queries"
+      ]
+    },
+    {
+      "window": "test-dga-failed-resolution-02",
+      "scenario": "dga-failed-resolution",
+      "label": "malicious",
+      "state": "insufficient",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": [
+        "non_success_response_present",
+        "too_few_successful_queries"
+      ]
+    },
+    {
+      "window": "test-dga-failed-resolution-03",
+      "scenario": "dga-failed-resolution",
+      "label": "malicious",
+      "state": "insufficient",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": [
+        "non_success_response_present",
+        "too_few_successful_queries"
+      ]
+    },
+    {
+      "window": "test-low-and-slow-overlap-00",
+      "scenario": "low-and-slow-overlap",
+      "label": "malicious",
+      "state": "typical",
+      "distance": 0.027265589008148426,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-low-and-slow-overlap-01",
+      "scenario": "low-and-slow-overlap",
+      "label": "malicious",
+      "state": "typical",
+      "distance": 0.014498944081810183,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-low-and-slow-overlap-02",
+      "scenario": "low-and-slow-overlap",
+      "label": "malicious",
+      "state": "typical",
+      "distance": 0.028161889135420726,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-low-and-slow-overlap-03",
+      "scenario": "low-and-slow-overlap",
+      "label": "malicious",
+      "state": "typical",
+      "distance": 0.02477243544651612,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": []
+    },
+    {
+      "window": "test-already-policy-blocked-00",
+      "scenario": "already-policy-blocked",
+      "label": "malicious",
+      "state": "insufficient",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": [
+        "policy_block_present",
+        "too_few_successful_queries"
+      ]
+    },
+    {
+      "window": "test-already-policy-blocked-01",
+      "scenario": "already-policy-blocked",
+      "label": "malicious",
+      "state": "insufficient",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": [
+        "policy_block_present",
+        "too_few_successful_queries"
+      ]
+    },
+    {
+      "window": "test-already-policy-blocked-02",
+      "scenario": "already-policy-blocked",
+      "label": "malicious",
+      "state": "insufficient",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": [
+        "policy_block_present",
+        "too_few_successful_queries"
+      ]
+    },
+    {
+      "window": "test-already-policy-blocked-03",
+      "scenario": "already-policy-blocked",
+      "label": "malicious",
+      "state": "insufficient",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": false,
+      "exclusions": [
+        "policy_block_present",
+        "too_few_successful_queries"
+      ]
+    },
+    {
+      "window": "test-new-client-exfiltration-00",
+      "scenario": "new-client-exfiltration",
+      "label": "malicious",
+      "state": "excluded",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape"
+      ]
+    },
+    {
+      "window": "test-new-client-exfiltration-01",
+      "scenario": "new-client-exfiltration",
+      "label": "malicious",
+      "state": "excluded",
+      "distance": null,
+      "alert": false,
+      "fixedRuleAlert": true,
+      "exclusions": [
+        "bootstrap_suspicious_shape"
+      ]
+    }
+  ],
+  "gradualBenignShift": {
+    "acceptedWindows": 24,
+    "distanceAfter23Updates": 0.2746783622569431,
+    "distanceBeforeAdaptation": 1.17733853047142,
+    "experiment": "separate temporal benign-shift stream; not the frozen test set",
+    "meanLabelLengthAfter": 10.539764909819041,
+    "meanLabelLengthBefore": 7.13032688605555
+  },
+  "limitations": [
+    "Synthetic, author-constructed windows, not independently collected production or malware-capture data.",
+    "Labels express the generator's scenario intent; they are not investigated real-world outcomes.",
+    "Default parameters were fixed before this held-out run, but the same author understands both model and generator: no independence claim.",
+    "Only aggregate window shape is evaluated. Low-and-slow activity deliberately overlaps benign behaviour and may be missed.",
+    "Failed/blocked traffic and clients without a prior baseline can abstain. Denominators include those abstentions explicitly.",
+    "The fixed lexical comparator is a simple reference rule, not a benchmark of DNS Daddy's existing six detectors or another product.",
+    "No real-world false-positive rate, maliciousness probability, block-safety claim or adversarial robustness guarantee follows from these results."
+  ]
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -36,6 +37,9 @@ type ProviderConfig struct {
 	RatePerMinute   int
 	CacheTTLSeconds int
 	PolicyScope     []string
+	// Transport is supplied only by an embedding application / fixture test;
+	// no management JSON field can set it.
+	Transport http.RoundTripper
 }
 
 // BuildInstances turns configuration into callable providers.
@@ -92,6 +96,8 @@ func BuildInstances(configs []ProviderConfig, log *slog.Logger) []*Instance {
 			ProviderID:    cfg.ID,
 			Timeout:       time.Duration(cfg.TimeoutMS) * time.Millisecond,
 			RatePerMinute: cfg.RatePerMinute,
+			AllowPrivate:  cfg.Settings["allow_private"] == "true",
+			Transport:     cfg.Transport,
 		})
 		inst.Client = client
 

@@ -1,5 +1,5 @@
 /*
- * Tests for the Threat Observatory card's rendering decisions.
+ * Tests for dashboard state, provenance and explicit control boundaries.
  *
  * Run with `make test-ui`. There is no package.json, no dependency and no build
  * step — this uses node's built-in test runner against the very app.js the
@@ -22,10 +22,6 @@ const {
   esc,
   ApiError,
   claimRefresh,
-  observatoryState,
-  observatoryErrorSummary,
-  observatoryEnforcement,
-  observatoryCard,
   feedStatusBadge,
   threatIntelPanel,
   diagnosticsBanner,
@@ -83,6 +79,11 @@ const {
   DEFAULT_NETWORK_ID,
   decisionsCard,
   decisionEvidenceRow,
+  externalAPICard, nativeMode, nativeModeCard, nativeEnforcementCard, nativeOverview,
+  localLearningCard, learningWindows, findingConfidence, findingScore,
+  recoveryCard, changeHistoryRows, protectionCard, webhookCard,
+  investigationLearning, decisionEvidenceContent,
+  exportCard, readCompleteExport,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -112,158 +113,47 @@ const hoursAgo = (h) => new Date(Date.now() - h * 3600 * 1000).toISOString();
 
 /* ---------- state derivation -------------------------------------------- */
 
-test('a disabled feed offers activation', () => {
-  assert.equal(observatoryState(feed(), false), 'off');
-});
 
-test('a feed with a validated download is active', () => {
-  const f = feed({ enabled: true, loaded: true, lastRefreshedAt: now(), lastSuccessAt: now(), indexedDomains: 34821 });
-  assert.equal(observatoryState(f, false), 'active');
-});
 
-test('an enabled feed that has never downloaded is not active', () => {
-  // The 404 case, which is where the Observatory endpoint stands today.
-  const f = feed({
-    enabled: true,
-    lastRefreshedAt: now(),
-    lastSuccessAt: null,
-    lastError: 'HTTP 404 from https://threats.dnsdaddy.dev/api/v1/feed.json',
-  });
-  assert.equal(observatoryState(f, false), 'unavailable');
-});
 
-test('an enabled feed with no attempt yet is pending, not active', () => {
-  assert.equal(observatoryState(feed({ enabled: true }), false), 'pending');
-});
 
-test('a feed erroring after a good download is degraded, not broken', () => {
-  const f = feed({
-    enabled: true,
-    loaded: true,
-    lastRefreshedAt: now(),
-    lastSuccessAt: hoursAgo(2),
-    indexedDomains: 34821,
-    lastError: 'HTTP 500 from https://threats.dnsdaddy.dev/api/v1/feed.json',
-  });
-  assert.equal(observatoryState(f, false), 'stale');
-});
 
-test('a refresh in flight shows the connecting state', () => {
-  assert.equal(observatoryState(feed({ enabled: true }), true), 'connecting');
-});
 
-test('a missing feed row is its own state rather than a false negative', () => {
-  assert.equal(observatoryState(undefined, false), 'missing');
-});
+
+
+
+
+
+
+
 
 /* ---------- error wording ------------------------------------------------ */
 
-test('a 404 is explained as the endpoint not being live yet', () => {
-  const msg = observatoryErrorSummary('HTTP 404 from https://threats.dnsdaddy.dev/api/v1/feed.json');
-  assert.match(msg, /not available yet/);
-});
 
-test('a rejected download says the previous copy was kept', () => {
-  const msg = observatoryErrorSummary('rejected download, keeping the previous copy: observatory feed ends mid-document: it is truncated');
-  assert.match(msg, /previous copy/);
-});
 
-test('an unrecognised error still produces a sentence, not a blank', () => {
-  assert.notEqual(observatoryErrorSummary('something nobody anticipated'), '');
-  assert.equal(observatoryErrorSummary(''), '');
-});
+
+
+
 
 /* ---------- the card ----------------------------------------------------- */
 
-test('the disabled card offers one-click activation and states the privacy position', () => {
-  const out = observatoryCard(feed(), {});
-  assert.match(out, /Enable Threat Observatory/);
-  assert.match(out, /id="observatory-enable"/);
-  assert.match(out, /No account or API key required/);
-  assert.match(out, /threats\.dnsdaddy\.dev/);
-  assert.match(out, /DNS query logs are not uploaded/);
-  assert.doesNotMatch(out, /Active/);
-});
 
-test('the active card reports the real indexed count, not a constant', () => {
-  const out = observatoryCard(
-    feed({ enabled: true, loaded: true, lastRefreshedAt: now(), lastSuccessAt: now(), indexedDomains: 34821 }),
-    {}
-  );
-  assert.match(out, /badge ok">Active/);
-  assert.match(out, /34,821<\/strong> domains indexed/);
-  assert.match(out, /id="observatory-disable"/);
-  assert.match(out, /href="#\/feeds"/);
-});
 
-test('a feed that has never downloaded is never described as active', () => {
-  const out = observatoryCard(
-    feed({
-      enabled: true,
-      lastRefreshedAt: now(),
-      lastError: 'HTTP 404 from https://threats.dnsdaddy.dev/api/v1/feed.json',
-    }),
-    {}
-  );
-  assert.doesNotMatch(out, />Active</);
-  assert.match(out, /has not been downloaded yet/);
-  assert.match(out, /not available yet/);
-  assert.match(out, /Retry connection/);
-});
 
-test('a degraded card says what is still being enforced and how old it is', () => {
-  const out = observatoryCard(
-    feed({
-      enabled: true,
-      loaded: true,
-      lastRefreshedAt: now(),
-      lastSuccessAt: hoursAgo(2),
-      indexedDomains: 34821,
-      lastError: 'HTTP 500 from https://threats.dnsdaddy.dev/api/v1/feed.json',
-    }),
-    {}
-  );
-  assert.match(out, /Attention/);
-  assert.match(out, /Last successful intelligence/);
-  assert.match(out, /2h ago/);
-  assert.match(out, /last known good/);
-  assert.match(out, /34,821 domains/);
-  assert.match(out, /View error/);
-  assert.doesNotMatch(out, />Active</);
-});
 
-test('the connecting card does not claim protection yet', () => {
-  const out = observatoryCard(feed({ enabled: true }), { refreshing: true });
-  assert.match(out, /Connecting to the Observatory/);
-  assert.match(out, /Downloading threat intelligence/);
-  assert.match(out, /Nothing from this feed is enforced until/);
-  assert.doesNotMatch(out, />Active</);
-});
 
-test('a feed error from a remote server is escaped, not injected', () => {
-  // lastError is remote-controlled text: it is built from the response of
-  // whatever host the feed URL points at.
-  const out = observatoryCard(
-    feed({ enabled: true, lastRefreshedAt: now(), lastError: '<img src=x onerror="alert(1)">' }),
-    {}
-  );
-  assert.doesNotMatch(out, /<img/);
-  assert.match(out, /&lt;img/);
-});
+
+
+
+
+
+
 
 /* ---------- policies are the operator's, not the feed's ------------------ */
 
-test('the card names the categories no policy enforces rather than implying four', () => {
-  const out = observatoryEnforcement([{ categories: ['malware', 'phishing'] }]);
-  assert.match(out, /Malware, Phishing/);
-  assert.match(out, /C2, Cryptomining/);
-  assert.match(out, /does not change your policies/);
-});
 
-test('the card says nothing about gaps when every category is enforced', () => {
-  const out = observatoryEnforcement([{ categories: ['malware', 'phishing', 'c2', 'cryptomining'] }]);
-  assert.match(out, /every category/);
-});
+
+
 
 /* ---------- feed health and the dashboard panel -------------------------- */
 
@@ -278,7 +168,7 @@ test('feed health distinguishes stale intelligence from none at all', () => {
   assert.match(feedStatusBadge(feed({ enabled: true, lastError: 'HTTP 404' })), />Unavailable</);
 });
 
-test('the dashboard panel offers activation inline and lists the other sources', () => {
+test('the dashboard panel lists enabled sources and links to external APIs', () => {
   const data = {
     observatoryFeedId: OBSERVATORY_ID,
     totalIndexedDomains: 412345,
@@ -290,15 +180,16 @@ test('the dashboard panel offers activation inline and lists the other sources',
     ],
   };
   const out = threatIntelPanel(data);
-  assert.match(out, /id="observatory-enable"/);
+  assert.doesNotMatch(out, /id="observatory-enable"/);
+  assert.match(out, /href="#\/integrations"/);
   assert.match(out, /abuse\.ch URLhaus/);
   assert.match(out, /412,345 domains indexed/);
   // A switched-off third-party feed is summarised, not listed as a live source.
   assert.doesNotMatch(out, /StevenBlack/);
-  assert.match(out, /1 further feed available but switched off/);
+  assert.match(out, /2 further feeds available but switched off/);
   // The Observatory is listed first, but with the same badge markup as
   // everything else: prominent, not privileged.
-  assert.ok(out.indexOf('DNS Daddy Threat Observatory') < out.indexOf('abuse.ch URLhaus'));
+  assert.doesNotMatch(out, /DNS Daddy Threat Observatory/);
 });
 
 test('escaping applies to feed names, which an operator controls', () => {
@@ -314,67 +205,13 @@ test('escaping applies to feed names, which an operator controls', () => {
  * now is a different question, and only `loaded` answers it.
  */
 
-test('a feed whose cached copy is not in the index is never Active', () => {
-  // The restart case: the download succeeded, the cache file has since gone,
-  // and the rebuild skipped the feed. Nothing in the timestamps says so.
-  const f = feed({
-    enabled: true,
-    loaded: false,
-    loadError: 'its cached copy is missing',
-    lastRefreshedAt: hoursAgo(2),
-    lastSuccessAt: hoursAgo(2),
-    lastStatus: 'ok',
-    lastError: '',
-  });
-  assert.equal(observatoryState(f, false), 'unusable');
 
-  const out = observatoryCard(f, {});
-  assert.doesNotMatch(out, />Active</);
-  assert.match(out, /not currently blocking anything/);
-  assert.match(out, /its cached copy is missing/);
-  assert.match(out, /Download again/);
-});
 
-test('a loaded feed with a healthy refresh is Active', () => {
-  const f = feed({
-    enabled: true,
-    loaded: true,
-    lastRefreshedAt: now(),
-    lastSuccessAt: now(),
-    indexedDomains: 34821,
-  });
-  assert.equal(observatoryState(f, false), 'active');
-  assert.match(observatoryCard(f, {}), /badge ok">Active/);
-});
 
-test('a loaded feed whose latest refresh failed keeps blocking and reports degraded', () => {
-  const f = feed({
-    enabled: true,
-    loaded: true,
-    lastRefreshedAt: now(),
-    lastSuccessAt: hoursAgo(2),
-    indexedDomains: 34821,
-    lastError: 'HTTP 500 from https://threats.dnsdaddy.dev/api/v1/feed.json',
-  });
-  assert.equal(observatoryState(f, false), 'stale');
-  const out = observatoryCard(f, {});
-  assert.match(out, /still indexed and still blocked/);
-  assert.doesNotMatch(out, />Active</);
-});
 
-test('the four runtime states are all distinguishable', () => {
-  const base = { enabled: true };
-  const states = {
-    active: { ...base, loaded: true, lastSuccessAt: now() },
-    stale: { ...base, loaded: true, lastSuccessAt: hoursAgo(2), lastError: 'HTTP 500' },
-    unusable: { ...base, loaded: false, lastSuccessAt: hoursAgo(2) },
-    unavailable: { ...base, loaded: false, lastError: 'HTTP 404' },
-    pending: { ...base, loaded: false },
-  };
-  for (const [want, overrides] of Object.entries(states)) {
-    assert.equal(observatoryState(feed(overrides), false), want, `expected ${want}`);
-  }
-});
+
+
+
 
 test('the dashboard panel will not call an unloaded feed Active either', () => {
   const f = feed({ enabled: true, loaded: false, lastSuccessAt: hoursAgo(2) });
@@ -383,21 +220,7 @@ test('the dashboard panel will not call an unloaded feed Active either', () => {
   assert.match(badge, />Not blocking</);
 });
 
-test('a load error from the server is escaped like any other server text', () => {
-  const out = observatoryCard(
-    feed({
-      enabled: true,
-      loaded: false,
-      lastSuccessAt: hoursAgo(2),
-      loadError: '<img src=x onerror="alert(1)">',
-    }),
-    {}
-  );
-  assert.doesNotMatch(out, /<img/);
-  assert.match(out, /&lt;img/);
-  // And escaped exactly once — a double-escaped message is unreadable.
-  assert.doesNotMatch(out, /&amp;lt;/);
-});
+
 
 /* ---------- claiming the refresh slot ------------------------------------ */
 
@@ -1548,7 +1371,7 @@ test('every page title matches the navigation label that leads to it', () => {
   // the page look like it belonged to a different product than the link.
   const nav = {};
   for (const m of indexHtml.matchAll(/data-route="([a-z-]+)"[\s\S]*?<span>([^<]+)<\/span>/g)) {
-    nav[m[1]] = m[2];
+    nav[m[1]] = m[2].replace(/&amp;/g, '&');
   }
   const src = require('node:fs').readFileSync(
     require('node:path').join(__dirname, 'static', 'app.js'), 'utf8');
@@ -1631,7 +1454,8 @@ test('a feed that has never attempted a download is pending, not a fault', () =>
   assert.equal(h.broken.length, 0, 'a feed that never ran was counted as broken');
   assert.equal(h.pending.length, 2);
   assert.equal(h.tone, 'warn', 'never-run feeds should warn, not fault');
-  assert.match(h.label, /downloading/);
+  assert.match(h.label, /not loaded yet/);
+  assert.doesNotMatch(h.label, /downloading/, 'a pending feed does not prove a download is running');
 
   // And the two components agree, which is the actual requirement.
   for (const f of neverRan.feeds) {
@@ -2153,13 +1977,14 @@ test('a provider card never renders a credential', () => {
   assert.ok(!out.includes(PROVIDER_SECRET), 'the credential appears in the rendered card');
   assert.ok(!out.includes('example.test/api'), 'the settings map is rendered on the card');
   // The hint is what the operator is meant to see.
-  assert.ok(out.includes('…0d65'), 'the card does not show which credential is installed');
+  assert.ok(out.includes('Credential stored · write-only'));
+  assert.ok(!out.includes('0d65'), 'credential hints should not be rendered');
 });
 
 test('the credential line distinguishes stored from absent', () => {
-  assert.ok(credentialLine(provider()).includes('0d65'));
+  assert.ok(credentialLine(provider()).includes('Credential stored'));
   const none = credentialLine(provider({ secretSet: false, secretHint: '' }));
-  assert.ok(none.includes('no credential stored'), none);
+  assert.ok(none.includes('No credential stored'), none);
   assert.ok(!none.includes('0d65'), 'a removed credential still shows a hint');
 });
 
@@ -2168,13 +1993,13 @@ test('the credential line distinguishes stored from absent', () => {
 // operator is trusting our reading of somebody else's API.
 test('an unverified adapter is labelled on the card', () => {
   const out = providerCard(provider(), POLICIES, [template()]);
-  assert.ok(out.includes('Not verified live'), out);
+  assert.ok(out.includes('Adapter tested with fixtures'), out);
   assert.ok(out.includes('Not verified against the live service'), 'the evidence sentence is missing');
 });
 
 test('a live-verified adapter would be labelled differently', () => {
   const chip = verificationChip(template({ liveVerified: true, verification: 'Exercised against the live API.' }));
-  assert.ok(chip.includes('Verified live'), chip);
+  assert.ok(chip.includes('Adapter verified live'), chip);
   assert.ok(!chip.includes('Not verified'), chip);
 });
 
@@ -2184,10 +2009,10 @@ test('an adapter with no verification statement gets no chip at all', () => {
 });
 
 test('provider status reads as three distinct states', () => {
-  assert.ok(providerStatusBadge(provider({ status: 'ok' })).includes('working'));
-  assert.ok(providerStatusBadge(provider({ status: 'disabled' })).includes('switched off'));
+  assert.ok(providerStatusBadge(provider({ status: 'ok' })).includes('Enabled'));
+  assert.ok(providerStatusBadge(provider({ status: 'disabled' })).includes('Switched off'));
   const broken = providerStatusBadge(provider({ status: 'error' }));
-  assert.ok(broken.includes('not working'), broken);
+  assert.ok(broken.includes('Needs attention'), broken);
   // Amber, not red. A provider that cannot be reached is a degraded
   // integration, not a threat, and red is reserved for real danger.
   assert.ok(broken.includes('badge warn'), broken);
@@ -2212,15 +2037,15 @@ test('every card states what the provider discloses', () => {
 
 // The decision the operator was asked about: blocking mode is not offered in
 // the dashboard unless the configuration file already permits it.
-test('blocking is not offered when the configuration does not allow it', () => {
+test('API preferences offer only server-selectable modes', () => {
   const out = reputationCard({ mode: 'cache_only', ceiling: 'cache_only', selectable: ['off', 'cache_only'] }, null);
   assert.ok(out.includes('value="off"'), out);
   assert.ok(out.includes('value="cache_only"'), out);
   assert.ok(!out.includes('value="blocking"'), 'blocking was offered on a cache_only deployment');
   // And the page says where it lives, rather than leaving the operator to
   // conclude the feature does not exist.
-  assert.ok(out.includes('dnsdaddy.yaml'), out);
-  assert.ok(out.includes('integrations.reputation_mode'), out);
+  assert.ok(out.includes('Save API preferences'), out);
+  assert.ok(out.includes('Takes effect without a restart.'), out);
 });
 
 test('blocking is offered when the configuration allows it', () => {
@@ -2229,7 +2054,7 @@ test('blocking is offered when the configuration allows it', () => {
     null
   );
   assert.ok(out.includes('value="blocking"'), out);
-  assert.ok(out.includes('permitted by this deployment'), out);
+  assert.ok(out.includes('acceptDnsLatency'), out);
 });
 
 test('the selected mode is the one checked', () => {
@@ -2244,7 +2069,7 @@ test('every mode explains what it costs a query', () => {
     assert.ok(why && why.length > 40, `${mode} does not explain itself: ${why}`);
   }
   // The one that matters: blocking must say that it puts latency in the path.
-  assert.match(REPUTATION_MODES.blocking[1], /latency in front of a DNS answer/);
+  assert.match(REPUTATION_MODES.blocking[1], /delay DNS answers/);
 });
 
 /* ---------- the add form ------------------------------------------------- */
@@ -2261,7 +2086,7 @@ test('the add form asks for exactly the fields the adapter declares', () => {
 
 test('the add form says a credential cannot be read back', () => {
   const out = templateFields(template());
-  assert.match(out, /no endpoint that\s+returns it/);
+  assert.match(out, /never displayed after saving/);
 });
 
 test('the add form carries the adapter’s privacy note before anything is typed', () => {
@@ -2275,8 +2100,8 @@ test('with the feature off the page still says what the build could talk to', ()
   const out = availableAdaptersCard([template(), template({ kind: 'safebrowsing', displayName: 'Google Safe Browsing' })]);
   assert.ok(out.includes('VirusTotal'), out);
   assert.ok(out.includes('Google Safe Browsing'), out);
-  assert.ok(out.includes('Nothing here is configured or contacted'), out);
-  assert.ok(out.includes('Not verified live'), 'the catalogue drops the verification labelling');
+  assert.ok(out.includes('Nothing is contacted by opening this list'), out);
+  assert.ok(out.includes('Adapter tested with fixtures'), 'the catalogue drops the verification labelling');
 });
 
 test('the integrations route resolves', () => {
@@ -2387,7 +2212,7 @@ test('local and upstream DNSSEC are labelled as different measurements', () => {
     action: 'allowed',
     domain: 'example.com',
     qtype: 'A',
-    dnssec: 'validated',
+    dnssec: 'validated', dnssecSource: 'upstream',
     dnssecValidation: { status: 'bogus', disagreement: 'local_bogus_upstream_validated' },
   });
   assert.match(row, /DNSSEC \(upstream\)/);
@@ -2400,7 +2225,7 @@ test('local and upstream DNSSEC are labelled as different measurements', () => {
 });
 
 test('a query with no local observation shows no local row at all', () => {
-  const row = queryRow({ action: 'allowed', domain: 'example.com', qtype: 'A', dnssec: 'validated' });
+  const row = queryRow({ action: 'allowed', domain: 'example.com', qtype: 'A', dnssec: 'validated', dnssecSource: 'upstream' });
   assert.match(row, /DNSSEC \(upstream\)/);
   assert.doesNotMatch(row, /DNSSEC \(local/);
 });
@@ -2417,12 +2242,12 @@ test('the assurance card explains the feature even when it is off', () => {
   const card = localDnssecCard(null);
   assert.match(card, /Daddybound/);
   assert.match(card, /off/);
-  assert.match(card, /local_dnssec_validation/);
+  assert.match(card, /effective Daddybound mode/);
   // Off must not render counts that would read as "zero problems found".
   assert.doesNotMatch(card, /Observed/);
   // Live is shown as unavailable even here, so nobody reads "off" as "the
   // enforcing mode exists and I simply have not switched it on".
-  assert.match(card, /Live — unavailable/);
+  assert.match(card, /does not describe whether native Live enforcement is running/);
 });
 
 test('the assurance card leads with the fact that nothing is blocked', () => {
@@ -2608,17 +2433,17 @@ test('the Default row keeps its policy and 24-hour counts', () => {
 
 // --- Daddybound Learn / Live ----------------------------------------------
 
-test('Learn is shown as active and Live as unavailable', () => {
+test('Learn is explicitly an observation rather than enforcement', () => {
   const out = daddyboundModes(true);
-  assert.match(out, /Learn — active/);
-  assert.match(out, /Live — unavailable/);
-  assert.match(out, /Upstream resolver/);
+  assert.match(out, /Learn · observing/);
+  assert.doesNotMatch(out, /Live · enforcing/);
+  assert.match(out, /Upstream answers/);
 });
 
-test('Live is never presented as something already protecting traffic', () => {
+test('a boolean Learn status cannot claim current Live enforcement', () => {
   for (const out of [daddyboundModes(true), daddyboundModes(false)]) {
-    assert.match(out, /Live — unavailable/);
-    assert.match(out, /not implemented/);
+    assert.doesNotMatch(out, /Live · enforcing/);
+    assert.match(out, /Effective mode/);
     // The single most important negative: nothing about Live may read as a
     // capability the operator currently has.
     assert.doesNotMatch(out, /Live — active/);
@@ -3293,7 +3118,7 @@ test('recorded activity states why it is unavailable rather than showing zeroes'
   assert.match(some, /&lt;script&gt;/);
 });
 
-test('related findings and observations keep their experimental, non-enforcing labels', () => {
+test('related findings stay alert-only and observations use their recorded path', () => {
   const noFindings = relatedFindingsSection({ enabled: true, enforcement: 'none', experimental: true, items: [], note: 'they block nothing' });
   assert.match(noFindings, /Experimental · alert-only/);
   assert.match(noFindings, /not evidence that it is clean/);
@@ -3301,8 +3126,8 @@ test('related findings and observations keep their experimental, non-enforcing l
   assert.match(off, /switched off/);
 
   const obsOff = observationsSection({ available: false, items: [] });
-  assert.match(obsOff, /enforces nothing/);
-  assert.match(obsOff, /Learn mode is off/);
+  assert.match(obsOff, /recorded Daddybound outcomes/);
+  assert.match(obsOff, /No local DNSSEC records available/);
   const obs = observationsSection({ available: true, note: 'changed nothing', items: [
     { id: 'o1', time: now(), qtype: 'A', upstream: 'validated', status: 'bogus', reasonCode: 'x', reason: 'signature did not verify', disagreement: 'local_bogus_upstream_validated' },
   ] });
@@ -3461,10 +3286,10 @@ test('the runtime status card inserts its notes as markup rather than escaped te
   assert.match(off, /Learn is off, so Daddybound sends nothing/);
 });
 
-test('the runtime status card never scores readiness and keeps Live unavailable', () => {
+test('the runtime status card never scores readiness or promotes observations to enforcement', () => {
   const out = daddyboundStatusCard(runtimeStatus());
-  assert.match(out, /Live — unavailable/);
-  assert.match(out, /Learn — active/);
+  assert.doesNotMatch(out, /Live · enforcing/);
+  assert.match(out, /Learn · observing/);
   assert.match(out, />insufficient</);
   assert.match(out, /No number on this page is a readiness score/);
   assert.match(out, /not quantified/);
@@ -3486,6 +3311,21 @@ test('the runtime status card names the transport as separate from the encrypted
   assert.match(out, /2 lost before storage/);
   assert.match(out, /3 timeout · 0 limit · 1 unreachable/);
   assert.match(out, /operational outcomes, not DNSSEC states/);
+});
+
+test('stopped Learn counters remain explicitly inactive and retain their activation scope', () => {
+  const data = runtimeStatus();
+  data.mode.effective = 'off';
+  data.runtime.active = false;
+  data.runtime.scope = 'most_recent_learn_activation';
+  data.runtime.seamPanics = 2;
+  const out = daddyboundStatusCard(data);
+  assert.match(out, /inactive · retained from the most recent Learn activation/);
+  assert.match(out, /Last recorded health/);
+  assert.match(out, /queue saturation, stopped submissions or shutdown discards/);
+  assert.match(out, /2 lost before storage/);
+  assert.match(out, /Observation dispatch defects/);
+  assert.match(out, /since this process started; a resolver defect/);
 });
 
 test('cached and non-comparable populations are shown as such rather than as disagreements', () => {
@@ -3528,7 +3368,7 @@ test('a missing or off runtime status is unavailable, never a healthy zero', () 
     stored: { windowHours: 168, total: 0, retainedRows: 0, retentionDays: 7 },
     populations: [],
   }));
-  assert.match(off, /Learn — off/);
+  assert.match(off, />Off</);
   assert.match(off, /no trust-anchor manager is running/);
   assert.match(off, /no observer is running/);
   assert.match(off, /no stored observations/);
@@ -3539,4 +3379,228 @@ test('runtime status text from the server is escaped', () => {
   const out = daddyboundStatusCard(runtimeStatus({ anchors: { available: true, zone: '<b>.</b>', viable: true, trustedKeys: 1, keys: [], refresh: { lastError: '<img src=x>' }, persistence: { state: 'ok', file: 'x' } } }));
   assert.doesNotMatch(out, /<b>\.|<img/);
   assert.match(out, /&lt;b&gt;/);
+});
+
+/* ---------- Native, learning and explicit integration controls ---------- */
+
+test('a live mode label requires both the effective mode and actual enforcement', () => {
+  assert.equal(nativeMode(null).label, 'Unavailable');
+  assert.equal(nativeMode({ mode: { effective: 'enforce', enforcing: false } }).enforcing, false);
+  assert.equal(nativeMode({ mode: { effective: 'observe', enforcing: true } }).enforcing, false);
+  assert.equal(nativeMode({ mode: { effective: 'enforce', enforcing: true } }).enforcing, true);
+  const live = nativeModeCard({ mode: { effective: 'enforce', enforcing: true, live: { available: true } } });
+  assert.match(live, /Live · enforcing/);
+  assert.match(live, /no forwarding fallback/);
+  assert.match(live, /unencrypted UDP\/TCP port 53/);
+  assert.match(live, /name="acknowledgeNativeTransport"/);
+  assert.doesNotMatch(live, /name="acknowledgeNativeTransport"[^>]*checked/);
+});
+
+test('a deployment-pinned native mode is rendered as locked with its reason', () => {
+  const out = nativeModeCard({ mode: { effective: 'off', locked: true, reason: 'Mode pinned by this deployment.', live: { available: true } } });
+  assert.match(out, /fieldset class="mode-options" disabled/);
+  assert.match(out, /Mode pinned by this deployment/);
+  assert.doesNotMatch(out, /Apply resolution mode/);
+});
+
+test('native counters are not invented when the native runtime is absent', () => {
+  assert.equal(nativeEnforcementCard({}), '');
+  assert.doesNotMatch(nativeOverview(null, null), /0 baselines/);
+  const out = nativeEnforcementCard({ native: { available: true, secure: 92, insecure: 4, bogus: 2, indeterminate: 3, checkingDisabled: 7, resolutionFailures: 1, limitRejected: 9, inflight: 0, peak: 3 } });
+  assert.match(out, /92/);
+  assert.match(out, /Client checking disabled/);
+  assert.match(out, /CD=1/);
+  assert.match(out, /AD is cleared/);
+});
+
+test('query DNSSEC provenance comes from the recorded source, including unknown legacy rows', () => {
+  const base = { action: 'allowed', domain: 'example.test', qtype: 'A', dnssec: 'validated' };
+  const native = queryRow({ ...base, dnssecSource: 'native' });
+  assert.match(native, /DNSSEC \(native — Daddybound\)/);
+  assert.doesNotMatch(native, /DNSSEC \(upstream\)/);
+  const legacy = queryRow(base);
+  assert.match(legacy, /DNSSEC \(source unrecorded\)/);
+  assert.match(legacy, /AD reported/);
+  assert.doesNotMatch(legacy, /The upstream resolver validated/);
+});
+
+test('local learning readiness never turns into a threat probability or enforcing mode', () => {
+  const out = localLearningCard({ enabled: true, running: true, clients: { tracked: 2, ready: 1, warming: 1, max: 1024 }, observations: { received: 160, processed: 150, dropped: 10 }, windows: { anomalous: 3 }, queue: {}, persistence: {}, recent: [], warmupWindows: 12, warmupSeconds: 3600, windowSeconds: 300, minWindowQueries: 20 });
+  assert.match(out, /Learning only/);
+  assert.match(out, /Learning does not enforce blocks/);
+  assert.match(out, /sample maturity, not detection accuracy/);
+  assert.match(out, /150 processed \/ 160 received · 10 dropped/);
+  assert.doesNotMatch(out, /\d+%/);
+  assert.match(localLearningCard(null), /Learning status unavailable/);
+});
+
+test('a cold learning window has no score, and typical means within its baseline', () => {
+  const out = learningWindows([
+    { client: '192.0.2.1', state: 'learning', score: null, window: { eligibleQueries: 30 }, features: [] },
+    { client: '192.0.2.2', state: 'typical', score: 0.2, threshold: 2.5, window: { eligibleQueries: 80 }, features: [] },
+  ]);
+  assert.match(out, /No score until enough history exists/);
+  assert.match(out, /Within baseline/);
+  assert.match(out, /not a threat probability/);
+  assert.doesNotMatch(out, /safe|clean|benign/i);
+});
+
+test('uncalibrated model findings do not display confidence zero or a probability', () => {
+  const finding = { id: 'ml-1', eventType: 'local_behavior_anomaly', detector: 'robust-ewma-v1', confidence: 0, score: 0.5, detail: { evidence: { confidenceAvailable: false, anomalyDistance: 6 } } };
+  const out = findingRow(finding);
+  assert.match(out, /Uncalibrated anomaly/);
+  assert.doesNotMatch(out, /confidence 0/);
+  assert.match(out, /Anomaly distance: <span class="mono">6<\/span>/);
+  assert.match(out, /not a threat probability/);
+});
+
+test('a missing client baseline is not presented as a benign result', () => {
+  const out = investigationLearning({ enabled: true, found: false, note: 'No matching retained state.' });
+  assert.match(out, /No retained baseline/);
+  assert.match(out, /not a benign verdict/);
+  assert.doesNotMatch(out, /Baseline ready/);
+});
+
+test('legacy decision references retain their explicit evidence provenance', () => {
+  const out = decisionEvidenceContent({ evidenceSource: 'legacy_current_reference', evidenceNote: 'Current references; original evidence was not captured.', evidence: [{ sourceName: 'Example feed', claim: 'malware' }] });
+  assert.match(out, /Current references; original evidence was not captured/);
+  assert.match(out, /Example feed/);
+  const escaped = decisionEvidenceContent({ evidenceSource: 'legacy_current_reference', evidenceNote: '<img src=x onerror=alert(1)>', evidence: [] });
+  assert.doesNotMatch(escaped, /<img/);
+});
+
+test('external API preferences expose explicit sharing and latency acknowledgement without pre-consent', () => {
+  const out = reputationCard({ reputationMode: 'blocking', enrichmentEnabled: true, selectable: ['off', 'cache_only', 'blocking'] }, null);
+  assert.match(out, /name="consent"/);
+  assert.match(out, /name="acceptDnsLatency"/);
+  assert.doesNotMatch(out, /name="consent"[^>]*checked/);
+  assert.doesNotMatch(out, /name="acceptDnsLatency"[^>]*checked/);
+  assert.doesNotMatch(out, /dnsdaddy.yaml|restart required/);
+  assert.match(externalAPICard(), /Manage external APIs/);
+  assert.doesNotMatch(externalAPICard(), /Observatory/);
+});
+
+test('saved provider credentials are edited through masked write-only fields', () => {
+  const out = providerCard(provider({ secret: PROVIDER_SECRET }), POLICIES, [template()]);
+  assert.match(out, /data-secret-form="apr_1"/);
+  assert.match(out, /type="password" name="secret" autocomplete="new-password"/);
+  assert.doesNotMatch(out, /value="sk-|0d65/);
+  assert.doesNotMatch(out, /data-provider-consent="apr_1"[^>]*checked/);
+});
+
+test('a successful saved connection test is distinct from adapter verification', () => {
+  const out = providerCard(provider({ lastTest: { ok: true, testedAt: now(), detail: 'Account authenticated', latencyMs: 120 } }), POLICIES, [template()]);
+  assert.match(out, /Connection test passed/);
+  assert.match(out, /Account authenticated/);
+  assert.match(out, /Adapter tested with fixtures/);
+  assert.doesNotMatch(out, /Adapter verified live/);
+  assert.match(out, /3% errors/); // 0.025 is a ratio, not 0.025 percent.
+});
+
+test('backup passphrases are masked and restoration is explicitly offline', () => {
+  const out = recoveryCard({ available: true, included: ['Database', 'Credential encryption key'], excluded: ['Host firewall'], limitations: [] });
+  assert.match(out, /type="password" name="passphrase" autocomplete="new-password"/);
+  assert.match(out, /type="password" name="confirmation"/);
+  assert.match(out, /while DNS Daddy is stopped/);
+  assert.match(out, /destination restored-dnsdaddy/);
+  assert.match(out, /sessions are revoked/);
+  assert.doesNotMatch(out, /type="file"|Restore now/);
+  assert.doesNotMatch(recoveryCard(null), /backup-form/);
+});
+
+test('configuration history preserves incomplete status and redacts both values', () => {
+  const out = changeHistoryRows([{ id: 1, at: now(), actor: 'admin', action: 'Update credential', target: '<script>bad</script>', status: 'incomplete', changes: [{ resource: 'provider', field: 'secret', redacted: true, before: 'sensitive-old', after: 'sensitive-new' }] }]);
+  assert.match(out, /Incomplete/);
+  assert.match(out, /\[redacted\]/);
+  assert.doesNotMatch(out, /sensitive-old|sensitive-new|<script>/);
+});
+
+test('resolver protection carries its version and narrowly describes rebinding exceptions', () => {
+  const out = protectionCard({ version: 7, rateLimit: { enabled: true, qps: 50, burst: 100, maxClients: 4096, idleSeconds: 300 }, rebinding: { enabled: true, allowDomains: ['inside.example'], allowCIDRs: ['192.168.0.0/24'] }, counters: { rateLimited: 3, rateOverflow: 5, trackedClients: 8, rebindingBlocked: 2 } });
+  assert.match(out, /data-version="7"/);
+  assert.match(out, /Matches the original question and its subdomains/);
+  assert.match(out, /5 requests used the shared overflow allowance/);
+  assert.match(out, /Every name resolving into an allowed range/);
+});
+
+test('webhook credentials stay write-only and review-note sharing is disclosed', () => {
+  const out = webhookCard({ config: { enabled: false, secretSet: true, secret: PROVIDER_SECRET, secretHint: '0d65', eventTypes: ['finding.created'] }, stats: {} });
+  assert.doesNotMatch(out, /sk-live|0d65/);
+  assert.match(out, /type="password" name="secret" minlength="32"/);
+  assert.match(out, /Review events also include the review notes/);
+  assert.match(out, /Test saved receiver/);
+  assert.doesNotMatch(out, /name="consent"[^>]*checked/);
+});
+
+/* ---------- Complete export collection --------------------------------- */
+
+function exportResponse(lines, { next = '', skipped = 0, count = lines.length, snapshot = '41', until = '2026-09-29T20:00:00Z', truncated = next ? 'true' : 'false' } = {}) {
+  const headers = {
+    'Content-Type': 'application/x-ndjson', 'X-Export-Count': String(count), 'X-Export-Skipped': String(skipped),
+    'X-Truncated': truncated, 'X-Export-Snapshot': snapshot, 'X-Export-Until': until, 'X-Export-Since': '2026-09-28T20:00:00Z',
+  };
+  if (next) { headers.Link = `<${next}>; rel="next"`; headers['X-Next-Cursor'] = 'opaque-next'; }
+  return new Response(lines.map((line) => typeof line === 'string' ? line : JSON.stringify(line)).join('\n') + (lines.length ? '\n' : ''), { headers });
+}
+
+test('complete exports follow the server next link and preserve every returned record', async () => {
+  const calls = [];
+  const collected = await readCompleteExport({ dataset: 'queries', read: async (url) => {
+    calls.push(url);
+    return calls.length === 1 ? exportResponse([{ id: 1 }, { id: 2 }], { next: '/api/v1/queries/export?hours=24&cursor=opaque-next' }) : exportResponse([{ id: 3 }]);
+  } });
+  assert.equal(collected.rows, 3);
+  assert.equal(collected.pages, 2);
+  assert.equal(calls[1], '/api/v1/queries/export?hours=24&cursor=opaque-next');
+  assert.deepEqual(collected.chunks.join('').trim().split('\n').map(JSON.parse).map((row) => row.id), [1, 2, 3]);
+});
+
+test('a terminal page can be full and is complete only from the truncation metadata', async () => {
+  let calls = 0;
+  const collected = await readCompleteExport({ dataset: 'queries', read: async () => { calls++; return exportResponse(Array.from({ length: 500 }, (_, id) => ({ id }))); } });
+  assert.equal(collected.rows, 500);
+  assert.equal(calls, 1);
+});
+
+test('exports reject skipped records, truncated bodies and missing continuation metadata', async () => {
+  await assert.rejects(readCompleteExport({ dataset: 'findings', read: async () => exportResponse([{ id: 'one' }], { skipped: 1 }) }), /skipped/);
+  await assert.rejects(readCompleteExport({ dataset: 'queries', read: async () => exportResponse([{ id: 1 }], { count: 2 }) }), /before its reported record count/);
+  await assert.rejects(readCompleteExport({ dataset: 'queries', read: async () => exportResponse([], { truncated: 'true' }) }), /without a next-page link/);
+});
+
+test('export continuation cannot contact another origin or change its frozen boundary', async () => {
+  let calls = 0;
+  await assert.rejects(readCompleteExport({ dataset: 'queries', read: async () => { calls++; return exportResponse([], { next: 'https://untrusted.example/api/v1/queries/export?cursor=x' }); } }), /did not match this export/);
+  assert.equal(calls, 1);
+  calls = 0;
+  await assert.rejects(readCompleteExport({ dataset: 'queries', read: async () => ++calls === 1 ? exportResponse([], { next: '/api/v1/queries/export?cursor=next' }) : exportResponse([], { snapshot: '42' }) }), /boundary changed/);
+});
+
+test('a cancelled or oversized export never returns a supposedly complete collection', async () => {
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(readCompleteExport({ dataset: 'queries', signal: controller.signal, read: async () => { throw new Error('must not request'); } }), { name: 'AbortError' });
+  await assert.rejects(readCompleteExport({ dataset: 'queries', maxBytes: 3, read: async () => exportResponse([{ id: 'large enough' }]) }), /No partial file/);
+  assert.match(exportCard(), /20 MB browser limit/);
+});
+
+test('native Live records are never relabelled as Learn or compared with an absent upstream', () => {
+  const value = { resolution: 'native_live', status: 'bogus', qtype: 'A', reason: 'Signature rejected' };
+  const badge = localDnssecBadge(value);
+  assert.match(badge, /Native Live validation/);
+  assert.doesNotMatch(badge, /nothing blocked|Learn mode/);
+  const out = observationsSection({ available: true, items: [value] });
+  assert.match(out, /Not applicable/);
+  assert.match(out, /Signature rejected/);
+  assert.doesNotMatch(out, /enforces nothing|Learn mode, nothing blocked/);
+});
+
+test('a failed optional learner shows its failure without fabricated zero counters', () => {
+  const out = localLearningCard({ enabled: true, available: false, running: false, error: 'Saved model could not be loaded.', limitations: ['The resolver is still available.'] });
+  assert.match(out, /The learning model is unavailable/);
+  assert.match(out, /Saved model could not be loaded/);
+  assert.match(out, /The resolver is still available/);
+  assert.doesNotMatch(out, /Clients tracked|Baseline ready|Unusual windows|0 processed/);
+  const investigation = investigationLearning({ enabled: true, available: false, found: null, note: 'The saved model could not be loaded.' });
+  assert.match(investigation, /baseline result is unavailable/);
+  assert.doesNotMatch(investigation, /No retained baseline|benign verdict/);
 });

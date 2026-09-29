@@ -62,8 +62,13 @@ type DomainOfClient struct {
 // One GROUP BY over the subject's rows, which the qname and client indexes
 // bound to that subject rather than to the whole window.
 func (s *Store) ActivitySummarySince(ctx context.Context, domain, clientIP string, since time.Time) (ActivitySummary, error) {
+	return s.ActivitySummaryWindow(ctx, domain, clientIP, since, time.Time{})
+}
+
+// ActivitySummaryWindow uses the same fixed bounds as the investigation rows.
+func (s *Store) ActivitySummaryWindow(ctx context.Context, domain, clientIP string, since, until time.Time) (ActivitySummary, error) {
 	out := ActivitySummary{QTypes: map[string]int64{}}
-	where, args := subjectPredicate(domain, clientIP, since)
+	where, args := subjectPredicate(domain, clientIP, since, until)
 	if where == "" {
 		return out, nil
 	}
@@ -136,28 +141,42 @@ func (s *Store) ActivitySummarySince(ctx context.Context, domain, clientIP strin
 // address, and this deliberately does not fall back to any other column to
 // reconstruct one.
 func (s *Store) ClientsOfDomainSince(ctx context.Context, domain string, since time.Time, limit int) ([]ClientOfDomain, error) {
+	return s.ClientsOfDomainWindow(ctx, domain, since, time.Time{}, limit)
+}
+
+// ClientsOfDomainWindow returns one row per recorded client address. Names and
+// network labels come from its newest in-window query, even after a rename or
+// policy reassignment; those changes must not turn one address into two clients.
+func (s *Store) ClientsOfDomainWindow(ctx context.Context, domain string, since, until time.Time, limit int) ([]ClientOfDomain, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	where, args := subjectPredicate(domain, "", since, until)
+	if where == "" {
+		return []ClientOfDomain{}, nil
+	}
+	args = append(args, ActionBlocked, limit)
+	// #nosec G202 -- subjectPredicate emits only literal predicates; values are bound.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT client_ip, client_name, network_id, COUNT(*),
+		WITH activity AS (
+			SELECT client_ip, client_name, network_id, action, ts,
+			       ROW_NUMBER() OVER (PARTITION BY client_ip ORDER BY ts DESC, id DESC) AS newest
+			  FROM query_log WHERE `+where+` AND client_ip <> ''
+		)
+		SELECT client_ip,
+		       MAX(CASE WHEN newest = 1 THEN client_name END),
+		       MAX(CASE WHEN newest = 1 THEN network_id END), COUNT(*),
 		       SUM(CASE WHEN action = ? THEN 1 ELSE 0 END), MAX(ts)
-		  FROM query_log
-		 WHERE qname = ? AND ts >= ? AND client_ip <> ''
-		 GROUP BY client_ip, client_name, network_id
-		 ORDER BY COUNT(*) DESC, MAX(ts) DESC
-		 LIMIT ?`, ActionBlocked, domain, unixMilli(since), limit)
+		  FROM activity GROUP BY client_ip
+		 ORDER BY COUNT(*) DESC, MAX(ts) DESC, client_ip ASC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	out := []ClientOfDomain{}
 	for rows.Next() {
-		var (
-			c    ClientOfDomain
-			last int64
-		)
+		var c ClientOfDomain
+		var last int64
 		if err := rows.Scan(&c.ClientIP, &c.ClientName, &c.NetworkID, &c.Queries, &c.Blocked, &last); err != nil {
 			return nil, err
 		}
@@ -171,34 +190,37 @@ func (s *Store) ClientsOfDomainSince(ctx context.Context, domain string, since t
 // DomainsOfClientSince lists what a client asked for in the window, most
 // asked first, at most limit names.
 func (s *Store) DomainsOfClientSince(ctx context.Context, clientIP string, since time.Time, limit int) ([]DomainOfClient, error) {
+	return s.DomainsOfClientWindow(ctx, clientIP, since, time.Time{}, limit)
+}
+
+func (s *Store) DomainsOfClientWindow(ctx context.Context, clientIP string, since, until time.Time, limit int) ([]DomainOfClient, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	// The category of the most recent block, read as MAX over rows that
-	// were blocked — a name is almost always blocked under one category,
-	// and where feeds disagree the later spelling wins, which is a display
-	// choice rather than a claim.
+	where, args := subjectPredicate("", clientIP, since, until)
+	if where == "" {
+		return []DomainOfClient{}, nil
+	}
+	args = append(args, ActionBlocked, ActionBlocked, limit)
+	// #nosec G202 -- subjectPredicate emits only literal predicates; values are bound.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT qname, COUNT(*),
-		       SUM(CASE WHEN action = ? THEN 1 ELSE 0 END),
-		       COALESCE(MAX(CASE WHEN action = ? THEN category ELSE NULL END), ''),
-		       MAX(ts)
-		  FROM query_log
-		 WHERE client_ip = ? AND ts >= ?
-		 GROUP BY qname
-		 ORDER BY COUNT(*) DESC, MAX(ts) DESC
-		 LIMIT ?`, ActionBlocked, ActionBlocked, clientIP, unixMilli(since), limit)
+		WITH activity AS (
+			SELECT qname, action, category, ts,
+			       ROW_NUMBER() OVER (PARTITION BY qname, action ORDER BY ts DESC, id DESC) AS newest
+			  FROM query_log WHERE `+where+`
+		)
+		SELECT qname, COUNT(*), SUM(CASE WHEN action = ? THEN 1 ELSE 0 END),
+		       COALESCE(MAX(CASE WHEN action = ? AND newest = 1 THEN category END), ''), MAX(ts)
+		  FROM activity GROUP BY qname
+		 ORDER BY COUNT(*) DESC, MAX(ts) DESC, qname ASC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	out := []DomainOfClient{}
 	for rows.Next() {
-		var (
-			d    DomainOfClient
-			last int64
-		)
+		var d DomainOfClient
+		var last int64
 		if err := rows.Scan(&d.Domain, &d.Queries, &d.Blocked, &d.Category, &last); err != nil {
 			return nil, err
 		}
@@ -210,7 +232,7 @@ func (s *Store) DomainsOfClientSince(ctx context.Context, clientIP string, since
 }
 
 // subjectPredicate builds the WHERE clause for one subject in a window.
-func subjectPredicate(domain, clientIP string, since time.Time) (string, []any) {
+func subjectPredicate(domain, clientIP string, since, until time.Time) (string, []any) {
 	var (
 		parts []string
 		args  []any
@@ -228,6 +250,10 @@ func subjectPredicate(domain, clientIP string, since time.Time) (string, []any) 
 	}
 	parts = append(parts, "ts >= ?")
 	args = append(args, unixMilli(since))
+	if !until.IsZero() {
+		parts = append(parts, "ts <= ?")
+		args = append(args, unixMilli(until))
+	}
 	return strings.Join(parts, " AND "), args
 }
 
@@ -240,6 +266,12 @@ func subjectPredicate(domain, clientIP string, since time.Time) (string, []any) 
 // substring: "example.com" must not surface a finding about
 // "notexample.com".
 func (s *Store) FindingsForDomainsSince(ctx context.Context, domains []string, since time.Time, limit int) ([]Finding, bool, error) {
+	return s.FindingsForDomains(ctx, domains, "", since, time.Time{}, limit)
+}
+
+// FindingsForDomains applies the client and window before LIMIT. Filtering a
+// 50-row domain page afterward can hide every finding for a quieter client.
+func (s *Store) FindingsForDomains(ctx context.Context, domains []string, client string, since, until time.Time, limit int) ([]Finding, bool, error) {
 	if len(domains) == 0 {
 		return []Finding{}, false, nil
 	}
@@ -253,15 +285,25 @@ func (s *Store) FindingsForDomainsSince(ctx context.Context, domains []string, s
 	for _, d := range domains {
 		args = append(args, d)
 	}
-	args = append(args, unixMilli(since), limit+1)
+	args = append(args, unixMilli(since))
+	where := ""
+	if client != "" {
+		where += " AND client_ip = ?"
+		args = append(args, client)
+	}
+	if !until.IsZero() {
+		where += " AND ts <= ?"
+		args = append(args, unixMilli(until))
+	}
+	args = append(args, limit+1)
 
-	// #nosec G202 -- the only thing concatenated is a run of "?" built from
+	// #nosec G202 -- where is literal SQL; the other concatenation is a run of "?" built from
 	// an integer count by placeholders(); every name is bound in args.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, ts, event_type, severity, confidence, score, client_ip, client_name,
 		       network_id, domain, qtype, detector, title, summary, detail
 		  FROM findings
-		 WHERE domain IN (`+placeholders(len(domains))+`) AND ts >= ?
+		 WHERE domain IN (`+placeholders(len(domains))+`) AND ts >= ?`+where+`
 		 ORDER BY ts DESC, id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, false, err

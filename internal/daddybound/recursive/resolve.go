@@ -320,6 +320,7 @@ type resolution struct {
 	ctx     context.Context
 	trace   []Step
 	queries int
+	nsDepth int
 	dels    []Delegation
 	hops    []Hop
 	start   time.Time
@@ -365,6 +366,15 @@ func (rs *resolution) resolveWithAliases(qname string, rrtype uint16, hop int) (
 	if err != nil {
 		return nil, "", err
 	}
+	msg, target, err := prepareAlias(msg, qname, rrtype)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, previous := range rs.hops {
+		if previous.QName == qname && previous.QType == rrtype {
+			return nil, "", fmt.Errorf("%w: alias loop at %s", ErrLimit, qname)
+		}
+	}
 	// Recorded before the splice, because the splice is where provenance is
 	// lost: after it there is one message and no way to say which servers
 	// contributed which records.
@@ -372,10 +382,9 @@ func (rs *resolution) resolveWithAliases(qname string, rrtype uint16, hop int) (
 
 	// A CNAME that answers the question asked is the answer; only a CNAME
 	// for a different type needs following.
-	if rrtype == dns.TypeCNAME || msg.Rcode != dns.RcodeSuccess {
+	if rrtype == dns.TypeCNAME {
 		return msg, zone, nil
 	}
-	target := cnameTarget(msg, qname, rrtype)
 	if target == "" {
 		return msg, zone, nil
 	}
@@ -392,30 +401,8 @@ func (rs *resolution) resolveWithAliases(qname string, rrtype uint16, hop int) (
 	// leads to the answer, not just its final hop.
 	out := next.Copy()
 	out.Question = []dns.Question{{Name: qname, Qtype: rrtype, Qclass: dns.ClassINET}}
-	out.Answer = append(append([]dns.RR{}, aliasChain(msg, qname)...), next.Answer...)
+	out.Answer = append(firstAlias(msg, qname), next.Answer...)
 	return out, nextZone, nil
-}
-
-// cnameTarget returns the CNAME target for qname, or "".
-func cnameTarget(msg *dns.Msg, qname string, rrtype uint16) string {
-	for _, rr := range msg.Answer {
-		c, ok := rr.(*dns.CNAME)
-		if !ok {
-			continue
-		}
-		if dns.CanonicalName(c.Hdr.Name) != qname {
-			continue
-		}
-		// An answer that already carries the requested type alongside the
-		// alias needs no second resolution.
-		for _, other := range msg.Answer {
-			if other.Header().Rrtype == rrtype && dns.CanonicalName(other.Header().Name) == dns.CanonicalName(c.Target) {
-				return ""
-			}
-		}
-		return dns.CanonicalName(c.Target)
-	}
-	return ""
 }
 
 // resolveOnce walks delegations from the root to the servers for qname and
@@ -476,7 +463,7 @@ func (rs *resolution) resolveOnce(qname string, rrtype uint16) (*dns.Msg, string
 			return msg, zone, nil
 		}
 
-		next, err := rs.serversFor(child, ns, glue, 0)
+		next, err := rs.serversFor(child, ns, glue, rs.nsDepth)
 		if err != nil {
 			return nil, "", err
 		}
@@ -614,6 +601,9 @@ func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, r
 		// descending. Retry unminimised at this level so the caller sees a
 		// real answer or a real referral.
 		if askName != qname && isEmptyNoData(msg) {
+			if rs.queries >= rs.r.cfg.Limits.MaxQueries {
+				return nil, fmt.Errorf("%w: minimisation retry exceeds the query budget", ErrLimit)
+			}
 			rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
 				Kind: "nodata", Detail: "minimised probe: descending", Elapsed: elapsed})
 			rs.queries++
@@ -742,6 +732,8 @@ func (rs *resolution) serversFor(zone string, ns []string, glue map[string][]net
 		return nil, fmt.Errorf("%w: nameserver resolution deeper than %d for %s",
 			ErrLimit, rs.r.cfg.Limits.MaxNSResolutionDepth, zone)
 	}
+	rs.nsDepth++
+	defer func() { rs.nsDepth-- }()
 	for _, name := range ns {
 		if addrs, ok := rs.r.cache.GetAddrs(name); ok {
 			add(addrs)
@@ -753,6 +745,9 @@ func (rs *resolution) serversFor(zone string, ns []string, glue map[string][]net
 			}
 			msg, _, err := rs.resolveOnce(name, t)
 			if err != nil {
+				if errors.Is(err, ErrLimit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil, err
+				}
 				continue
 			}
 			var addrs []netip.Addr

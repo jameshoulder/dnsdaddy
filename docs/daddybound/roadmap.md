@@ -109,10 +109,11 @@ port 53, and the status page says so. Should authoritative encrypted transport
 become deployable, it sits behind the `Exchanger` interface and changes nothing
 above it.
 
-## Then: aggressive use of NSEC (RFC 8198), extended DNS errors (RFC 8914)
+## Next: aggressive use of NSEC (RFC 8198)
 
-Both depended on denial of existence, which now exists. RFC 8914 in particular would let Daddybound
-report its typed reasons over the wire rather than only in a trace.
+Aggressive negative caching remains unimplemented. Native Live now returns
+RFC 8914 Extended DNS Errors for validation and operational failures; clients
+without EDNS still receive the corresponding failure RCODE.
 
 ## Then: SVCB and HTTPS records (RFC 9460, RFC 9462)
 
@@ -125,34 +126,33 @@ test pins that. Adding support for the type must not change it.
 Out of scope for the foreseeable milestones and listed only so the boundary is
 explicit. Nothing in the engine anticipates them.
 
-## The question that gates enforcement
+## Implemented: experimental native Live
 
-None of the above is what stands between Daddybound and being DNS Daddy's
-validator. That gate is evidence, not features:
+[ADR 0003](../decisions/0003-daddybound-native-live.md) defines the actual
+client-answer path. Native Live authenticates exact projected data with
+cryptographic receipts, validates signed targets even after an unsigned alias,
+caps signature TTLs and returns explicit SERVFAIL for Bogus, Indeterminate and
+operational failures. It honors CD/DO/AD, keeps forwarding caches out of the
+native trust path and bounds concurrency, recursion and validation work.
 
-> What evidence do we have that Daddybound can be trusted, and what evidence
-> is still missing before it could enforce DNSSEC for a real deployment?
+Fresh installations select Live. Existing recorded Learn/off and explicit
+configuration choices are preserved. Learn observations remain independent of
+forwarded answers; Live observations identify the native result actually used.
 
-The current answer is in [validation-lab.md](validation-lab.md) under "What
-this evidence does not cover". In short: 78 laboratory scenarios and 612 live
-questions, both against two independent oracles, five signature algorithms end
-to end, zero false Secures, and two real defects found by the corpus that the
-laboratory could not have reached.
+## Remaining: operational readiness and private-zone routing
 
-That is a great deal more than the milestone before it, and it is still not
-enough to enforce anything. What is missing is not a number of scenarios. It
-is that Daddybound has never resolved a name for itself, has been compared
-against one resolver's view of the DNS, and has not been run anywhere for long
-enough for the failure modes that only appear over time — a key rollover
-mid-query, a zone that re-signs while a chain is being walked — to have shown
-up at all.
+Implementing Live does not close the evidence gate in
+[issue #67](https://github.com/jameshoulder/dnsdaddy/issues/67). The previously
+recorded laboratory/corpus counts and short Learn run are historical samples,
+not a longitudinal Live deployment or an independent security review.
 
-Observe mode now exists: the engine runs alongside the resolver on real
-traffic, deciding nothing. The first run of it, over 612 real names, produced
-the thing no test could — 609 verdicts about names nobody chose, four
-disagreements with the upstream, and none of them in the cell that matters
-(upstream validated, local bogus).
+Still needed: extended field time and volume, investigation of disagreements,
+clock and rollover events under realistic concurrency, explicit target-device
+CPU/memory/latency measurements and wider public-DNS coverage. Deterministic
+adversarial client tests now protect specific packet-binding and resource
+properties; they do not supply those missing denominators.
 
-What is still missing before enforcement is time and volume rather than
-features, plus a decided answer to what a client should receive when
-validation fails. See issue #63 and its successor.
+Native conditional forwarding and private trust-zone routing are also future
+work. Deployments relying on private split-DNS forwarders must currently use
+Learn or Off. Unsupported-policy cases deliberately fail closed and can have
+different availability behavior from other validators; see standards.md §5.3.

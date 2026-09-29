@@ -95,7 +95,7 @@ function compact(n) {
 }
 
 function relTime(iso) {
-  if (!iso) return 'never';
+  if (!iso || String(iso).startsWith('0001-01-01')) return 'never';
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return '—';
   const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
@@ -568,343 +568,7 @@ function copyBlock(text) {
   `;
 }
 
-/* ---------- DNS Daddy Threat Observatory --------------------------------- */
-
-/*
- * The Observatory is an ordinary built-in feed: the same row in the same
- * table, refreshed, cached, validated and indexed by the same machinery as
- * URLhaus. What it gets that the others do not is this card, because it is the
- * one source an operator has to opt into, and burying that behind the advanced
- * feeds page means most installs never get it.
- *
- * Everything below reads the state the feeds endpoint already reports. There
- * is no Observatory-specific state anywhere, on the server or here, and no
- * separate blocking mode — enabling it is a PATCH on a feed row followed by a
- * refresh of that row.
- */
-
-const OBSERVATORY_CATEGORIES = 'Malware · Phishing · C2 · Cryptomining';
-
-// The categories Observatory indicators are filed under, for the note about
-// which of them the operator's policies actually enforce.
-const OBSERVATORY_CATEGORY_IDS = ['malware', 'phishing', 'c2', 'cryptomining'];
-
-/**
- * Which state the card is in, derived from the feed row.
- *
- * "Active" is decided by `loaded` — whether this feed is in the index that is
- * answering queries right now — and never by the download history alone. That
- * distinction is the whole job of this function. A feed that downloaded
- * successfully last week and whose cached file has since gone missing has a
- * healthy lastSuccessAt, no lastError, and is blocking precisely nothing: the
- * rebuild at the last restart skipped it. Reporting that as Active is the most
- * misleading thing this card could do, so the two failure modes are kept
- * apart:
- *
- *   loaded                     → the index has it; the card may say Active
- *   !loaded && lastSuccessAt   → downloaded once, unusable now  ("unusable")
- *   !loaded && lastError       → never downloaded, and we know why ("unavailable")
- *   !loaded && neither         → enabled, nothing attempted yet  ("pending")
- *
- * A feed that is loaded but whose most recent refresh failed is "stale": the
- * last known good copy is in the index and still blocking, and only the
- * refresh is broken.
- */
-function observatoryState(feed, refreshing) {
-  if (!feed) return 'missing';
-  if (!feed.enabled) return 'off';
-  if (refreshing) return 'connecting';
-  if (!feed.loaded) {
-    if (feed.lastSuccessAt) return 'unusable';
-    return feed.lastError ? 'unavailable' : 'pending';
-  }
-  return feed.lastError ? 'stale' : 'active';
-}
-
-/**
- * A plain-English summary of a feed error, with the raw text still available
- * behind "View error".
- *
- * The 404 case is called out by name because it is the expected answer until
- * the Observatory's JSON API ships: an operator who enables this today should
- * be told the endpoint is not live yet, not left reading an HTTP status.
- */
-function observatoryErrorSummary(error) {
-  if (!error) return '';
-  if (/HTTP 404/.test(error)) return 'The Observatory feed endpoint is not available yet.';
-  if (/HTTP 401|HTTP 403/.test(error)) return 'The Observatory refused the request.';
-  if (/HTTP 5\d\d/.test(error)) return 'The Observatory is having server trouble.';
-  if (/rejected download/.test(error)) return 'The Observatory served a feed DNS Daddy could not trust, so the previous copy was kept.';
-  if (/timeout|deadline|no such host|connection refused/i.test(error)) return 'The Observatory could not be reached from this server.';
-  return 'The Observatory could not be refreshed.';
-}
-
-function observatoryErrorDetails(error) {
-  if (!error) return '';
-  return html`
-    <details class="finding obs-error">
-      <summary>View error</summary>
-      <div class="code obs-error-text">${error}</div>
-    </details>
-  `;
-}
-
-/** The privacy statement. Shown wherever the card offers to turn this on. */
-function observatoryPrivacyNote() {
-  return html`
-    <p class="muted small obs-privacy">
-      DNS Daddy periodically downloads the public threat feed from
-      <span class="mono">threats.dnsdaddy.dev</span>. DNS query logs are not uploaded.
-    </p>
-  `;
-}
-
-/**
- * Which Observatory categories the operator's policies actually enforce.
- *
- * Activation supplies intelligence; it does not tick a single category box.
- * If somebody has deliberately turned cryptomining off, enabling this feed
- * must not quietly turn it back on — so the card says plainly what is and is
- * not being enforced rather than implying four categories of protection it
- * does not control.
- */
-function observatoryEnforcement(policies) {
-  if (!policies || !policies.length) return '';
-  const enforced = new Set();
-  for (const p of policies) {
-    for (const c of p.categories || []) enforced.add(c);
-  }
-  const on = OBSERVATORY_CATEGORY_IDS.filter((c) => enforced.has(c));
-  const off = OBSERVATORY_CATEGORY_IDS.filter((c) => !enforced.has(c));
-  const label = (c) => (c === 'c2' ? 'C2' : c.charAt(0).toUpperCase() + c.slice(1));
-
-  if (!off.length) {
-    return html`<p class="muted small">Your policies enforce every category the Observatory files indicators under.</p>`;
-  }
-  return html`
-    <p class="muted small">
-      Your policies enforce ${on.length ? on.map(label).join(', ') : 'none of these categories'}.
-      Indicators tagged ${off.map(label).join(', ')} are indexed but not blocked, because no policy
-      enables ${off.length === 1 ? 'that category' : 'those categories'} —
-      turning this feed on does not change your policies.
-    </p>
-  `;
-}
-
-/**
- * The activation card. `feed` is the Observatory row from GET /feeds.
- */
-function observatoryCard(feed, { refreshing = false, policies = null } = {}) {
-  const state = observatoryState(feed, refreshing);
-
-  if (state === 'missing') {
-    return html`
-      <div class="card observatory" id="observatory-card">
-        <div class="card-head"><div><h2>DNS Daddy Threat Observatory</h2></div></div>
-        <p class="muted">
-          The built-in Observatory feed is not in this install's feed list. It is seeded on
-          first run; if it is missing, restart DNS Daddy or add it as a custom feed.
-        </p>
-      </div>
-    `;
-  }
-
-  const badge = {
-    active: html`<span class="badge ok">Active</span>`,
-    connecting: html`<span class="badge info">Connecting…</span>`,
-    stale: html`<span class="badge warn">Attention</span>`,
-    unusable: html`<span class="badge bad">Not blocking</span>`,
-    unavailable: html`<span class="badge warn">Attention</span>`,
-    pending: html`<span class="badge warn">Pending</span>`,
-    off: '',
-  }[state];
-
-  const bodies = {
-    off: () => html`
-      <p>Use live DNS threat intelligence published by the DNS Daddy Threat Observatory.</p>
-      <p class="obs-cats">${OBSERVATORY_CATEGORIES}</p>
-      <p class="muted small">No account or API key required.</p>
-      <div class="row obs-actions">
-        <button class="btn btn-primary" id="observatory-enable">Enable Threat Observatory</button>
-      </div>
-      ${raw(observatoryPrivacyNote())}
-    `,
-
-    connecting: () => html`
-      <p class="obs-progress-lead">Connecting to the Observatory…<br>Downloading threat intelligence…</p>
-      <div class="obs-progress" role="progressbar" aria-label="Downloading threat intelligence"><span></span></div>
-      <p class="muted small">
-        Nothing from this feed is enforced until the first download has been validated.
-      </p>
-    `,
-
-    active: () => html`
-      <p class="obs-count"><strong>${num(feed.indexedDomains)}</strong> domains indexed</p>
-      <p class="muted small">Updated ${relTime(feed.lastRefreshedAt)}</p>
-      <p class="obs-cats">${OBSERVATORY_CATEGORIES}</p>
-      <p class="muted small">Threat intelligence is refreshed automatically with your other feeds.</p>
-      ${raw(observatoryEnforcement(policies))}
-      <div class="row obs-actions">
-        <a class="btn btn-ghost" href="#/feeds">View details</a>
-        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
-      </div>
-    `,
-
-    stale: () => html`
-      <p>${observatoryErrorSummary(feed.lastError)}</p>
-      <p class="obs-count small">Last successful intelligence: <strong>${relTime(feed.lastSuccessAt)}</strong></p>
-      <p class="muted small">
-        DNS Daddy is continuing to use the last known good feed —
-        ${num(feed.indexedDomains)} domains from it are still indexed and still blocked.
-      </p>
-      ${raw(observatoryErrorDetails(feed.lastError))}
-      <div class="row obs-actions">
-        <button class="btn btn-primary" id="observatory-retry">Retry</button>
-        <a class="btn btn-ghost" href="#/feeds">View details</a>
-        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
-      </div>
-    `,
-
-    unavailable: () => html`
-      <p>Enabled, but threat intelligence has not been downloaded yet.</p>
-      <p class="muted small">${observatoryErrorSummary(feed.lastError)}</p>
-      ${raw(observatoryErrorDetails(feed.lastError))}
-      <div class="row obs-actions">
-        <button class="btn btn-primary" id="observatory-retry">Retry connection</button>
-        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
-      </div>
-    `,
-
-    // Downloaded successfully at some point, but the cached file is not in
-    // the index now — it went missing, or it would not parse on the way in.
-    // The feed row looks healthy and the resolver is blocking nothing from it,
-    // which is the one situation where trusting the timestamps would tell an
-    // operator the opposite of the truth.
-    unusable: () => html`
-      <p>The Observatory is enabled but is <strong>not currently blocking anything</strong>.</p>
-      <p class="muted small">
-        It downloaded successfully ${relTime(feed.lastSuccessAt)}, but that copy could not be
-        loaded into the running blocklist${feed.loadError ? ` — ${feed.loadError}` : ''}.
-        Downloading it again will fix it.
-      </p>
-      ${raw(observatoryErrorDetails(feed.lastError))}
-      <div class="row obs-actions">
-        <button class="btn btn-primary" id="observatory-retry">Download again</button>
-        <a class="btn btn-ghost" href="#/feeds">View details</a>
-        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
-      </div>
-    `,
-
-    pending: () => html`
-      <p>Enabled, but threat intelligence has not been downloaded yet.</p>
-      <div class="row obs-actions">
-        <button class="btn btn-primary" id="observatory-retry">Retry connection</button>
-        <button class="btn btn-ghost" id="observatory-disable">Disable</button>
-      </div>
-    `,
-  };
-
-  return html`
-    <div class="card observatory" id="observatory-card" data-state="${state}">
-      <div class="card-head">
-        <div>
-          <h2>DNS Daddy Threat Observatory</h2>
-          <p>Live DNS threat intelligence from DNS Daddy.</p>
-        </div>
-        <div class="row-end">${raw(badge)}</div>
-      </div>
-      ${raw(bodies[state]())}
-    </div>
-  `;
-}
-
-/**
- * Wire the card's buttons. Safe to call on a page that has no card.
- *
- * Every button is a call to an endpoint that already existed for feeds, or —
- * in the case of the single-feed refresh — the narrow version of one. None of
- * it touches policies, categories, or any other feed.
- */
-function mountObservatoryCard(feedId) {
-  const enable = $('#observatory-enable');
-  if (enable) {
-    enable.addEventListener('click', async () => {
-      enable.disabled = true;
-      enable.textContent = 'Connecting…';
-      try {
-        await apiSend('PATCH', `/feeds/${feedId}`, { enabled: true });
-      } catch (err) {
-        reportError(err);
-        enable.disabled = false;
-        enable.textContent = 'Enable Threat Observatory';
-        return;
-      }
-      await runObservatoryRefresh(feedId);
-    });
-  }
-
-  const retry = $('#observatory-retry');
-  if (retry) {
-    retry.addEventListener('click', async () => {
-      retry.disabled = true;
-      retry.textContent = 'Connecting…';
-      await runObservatoryRefresh(feedId);
-    });
-  }
-
-  const disable = $('#observatory-disable');
-  if (disable) {
-    disable.addEventListener('click', async () => {
-      disable.disabled = true;
-      try {
-        // Only this feed. Every other feed, and every policy, is untouched;
-        // the server rebuilds the index so its domains stop being blocked
-        // without waiting for the next scheduled refresh.
-        await apiSend('PATCH', `/feeds/${feedId}`, { enabled: false });
-        toast('Threat Observatory disabled — your other feeds are unchanged');
-      } catch (err) {
-        reportError(err);
-      }
-      await router.reload();
-    });
-  }
-}
-
-/**
- * Refresh the Observatory feed now and follow it to a result.
- *
- * This is the second half of one-click activation: enabling a feed that then
- * sits untouched until the next scheduled refresh — up to twelve hours later —
- * is not an activated feed, it is a promise. So the row is refreshed
- * immediately through the ordinary feed machinery, the card shows the download
- * happening, and the operator is told what actually came back.
- */
-async function runObservatoryRefresh(feedId) {
-  const route = router.current;
-  // Paint the connecting state as soon as a refresh is actually in flight —
-  // ours, or the one we are queued behind — and not before.
-  let painted = false;
-  const data = await claimRefresh(feedId, {
-    onRunning: async () => {
-      if (painted) return;
-      painted = true;
-      await router.reload();
-    },
-  });
-  await router.reload(); // the outcome
-
-  const feed = data && (data.feeds || []).find((f) => f.id === feedId);
-  if (feed) {
-    if (feed.lastError) {
-      toast(observatoryErrorSummary(feed.lastError), 'error');
-    } else if (feed.loaded) {
-      toast(`Threat Observatory active — ${num(feed.indexedDomains)} domains indexed`);
-    }
-  }
-
-  // Only repaint if the operator is still on the page they clicked from.
-  if (router.current === route) await router.reload();
-}
+/* ---------- Feed refresh and health ------------------------------------- */
 
 /**
  * Refresh one feed, waiting for the refresh slot if something else holds it.
@@ -983,7 +647,7 @@ function waitForFeedRefresh({ intervalMs = 2000, timeoutMs = 180000 } = {}) {
  */
 function feedStatusBadge(feed) {
   if (!feed.enabled) return html`<span class="badge">Off</span>`;
-  // Same rule as the Observatory card: "Active" means this feed is in the
+  // "Active" means this feed is in the
   // index answering queries, not that a download once succeeded.
   if (!feed.loaded) {
     if (feed.lastSuccessAt) return html`<span class="badge bad">Not blocking</span>`;
@@ -996,66 +660,22 @@ function feedStatusBadge(feed) {
     : html`<span class="badge ok">Active</span>`;
 }
 
-/**
- * Compact threat-intelligence health panel for the dashboard.
- *
- * The Observatory sits at the top because it is the one feed that needs a
- * decision from the operator, and it carries an inline Enable button so the
- * decision can be made from the page everybody lands on. It is not presented
- * as better intelligence than the independent sources under it — it is one row
- * in the same list, with the same badge, from the same endpoint.
- */
+// Feed health and an explicit route to operator-owned external APIs.
 function threatIntelPanel(data) {
-  if (!data) {
-    return html`<div class="card"><div class="card-head"><h2>Threat intelligence</h2></div>
-      ${raw(unavailableState('Threat intelligence unavailable', 'Feed health could not be retrieved. Retry to check the current state.'))}</div>`;
-  }
+  if (!data) return html`<div class="card"><div class="card-head"><h2>Threat intelligence</h2></div>
+    ${raw(unavailableState('Threat intelligence unavailable', 'Feed health could not be retrieved. Retry to check the current state.'))}</div>`;
   const feeds = data.feeds || [];
-  const observatory = feeds.find((f) => f.id === data.observatoryFeedId);
-  const others = feeds.filter((f) => f.id !== data.observatoryFeedId && f.enabled);
-  const offCount = feeds.filter((f) => f.id !== data.observatoryFeedId && !f.enabled).length;
-
-  const row = (feed, extra) => html`
-    <div class="feed-row">
-      <span class="feed-name">${feed.name}</span>
-      ${raw(
-        feed.enabled && feed.loaded && feed.indexedDomains
-          ? html`<span class="feed-meta">${compact(feed.indexedDomains)}</span>`
-          : ''
-      )}
-      <span class="intel-status">${raw(extra || feedStatusBadge(feed))}</span>
-    </div>
-  `;
-
-  const observatoryRow = !observatory
-    ? ''
-    : observatory.enabled
-      ? row(observatory)
-      : row(
-          observatory,
-          html`<button class="btn btn-primary btn-sm" id="observatory-enable">Enable</button>`
-        );
-
-  return html`
-    <div class="card">
-      <div class="card-head">
-        <div>
-          <h2>Threat intelligence</h2>
-          <p>${num(data.totalIndexedDomains)} domains indexed across enabled feeds.</p>
-        </div>
-        <div class="row-end"><a class="btn btn-observe btn-sm" href="#/feeds">Manage</a></div>
-      </div>
-      <div class="intel-list">
-        ${raw(observatoryRow)}
-        ${raw(others.map((f) => row(f)).join(''))}
-      </div>
-      ${raw(
-        offCount
-          ? html`<p class="muted small mt-3">${offCount} further feed${offCount === 1 ? '' : 's'} available but switched off.</p>`
-          : ''
-      )}
-    </div>
-  `;
+  const enabled = feeds.filter((feed) => feed.enabled);
+  const offCount = feeds.length - enabled.length;
+  return html`<div class="card"><div class="card-head"><div><h2>Threat intelligence</h2>
+      <p>${num(data.totalIndexedDomains)} domains indexed across enabled feeds.</p></div>
+      <a class="btn btn-observe btn-sm" href="#/feeds">Manage feeds</a></div>
+    <div class="intel-list">${raw(enabled.map((feed) => html`<div class="feed-row"><span class="feed-name">${feed.name}</span>
+      ${raw(feed.loaded && feed.indexedDomains ? html`<span class="feed-meta">${compact(feed.indexedDomains)}</span>` : '')}
+      <span class="intel-status">${raw(feedStatusBadge(feed))}</span></div>`).join(''))}</div>
+    ${raw(offCount ? html`<p class="muted small mt-3">${offCount} further feed${offCount === 1 ? '' : 's'} available but switched off.</p>` : '')}
+    <p class="small note-tight"><a href="#/integrations">Connect your own external APIs →</a></p>
+  </div>`;
 }
 
 /* ---------- overview ---------------------------------------------------- */
@@ -1158,8 +778,8 @@ function feedHealth(data) {
     return {
       tone: 'warn',
       label: pending.length === enabled.length
-        ? 'Threat intelligence still downloading'
-        : `${pending.length} of ${enabled.length} feeds still downloading`,
+        ? 'Threat intelligence not loaded yet'
+        : `${pending.length} of ${enabled.length} feeds not loaded yet`,
       enabled, broken, pending, stale,
     };
   }
@@ -1549,7 +1169,7 @@ pages.dashboard = {
       if (err.status === 401 || err.name === 'AbortError') throw err;
       return null;
     });
-    const [overview, activity, categories, recent, feeds, diagnostics, detections] = await Promise.all([
+    const [overview, activity, categories, recent, feeds, diagnostics, detections, native, learning] = await Promise.all([
       read('/overview'),
       optional('/activity/queries?hours=24'),
       optional('/threats/categories?hours=24'),
@@ -1557,6 +1177,8 @@ pages.dashboard = {
       optional('/feeds'),
       optional('/diagnostics'),
       optional('/findings/summary?days=1'),
+      optional('/dnssec/status?hours=24'),
+      optional('/learning/status'),
     ]);
     if (!context.isCurrent || context.isCurrent()) this.feeds = feeds;
 
@@ -1575,6 +1197,7 @@ pages.dashboard = {
     return html`
       <div class="overview-workspace">
         ${raw(statusHero(overview, feeds, detections))}
+        ${raw(nativeOverview(native, learning))}
         <div class="overview-primary">
           <section class="card overview-activity">
             <div class="card-head">
@@ -1632,7 +1255,6 @@ pages.dashboard = {
     `;
   },
   async mounted() {
-    mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
   },
 };
 
@@ -1738,7 +1360,7 @@ function decisionsCard(data) {
       <div class="card-head">
         <div>
           <h2>Why was this blocked?</h2>
-          <p>What decided each block, and the evidence behind it as it stood at the time.</p>
+          <p>Recorded decisions and their evidence. Older decisions without an original snapshot are labelled when expanded.</p>
         </div>
       </div>
       ${raw(
@@ -1747,6 +1369,13 @@ function decisionsCard(data) {
           : emptyState('Nothing decided yet', 'Blocks will appear here as they happen.', { icon: '○' })
       )}
     </div>`;
+}
+
+function decisionEvidenceContent(full) {
+  const cited = full.evidence || [];
+  const provenance = full.evidenceNote || (full.evidenceSource === 'legacy_current_reference' ? 'Legacy decision: these are current references, not an original evidence snapshot.' : '');
+  return html`${raw(provenance ? html`<p class="notice-inline ${full.evidenceSource === 'legacy_current_reference' ? 'is-warn' : ''}">${provenance}</p>` : '')}
+    ${raw(cited.length ? cited.map(decisionEvidenceRow).join('') : html`<p class="small muted">The evidence behind this decision is no longer on file. The explanation above is what was recorded at the time.</p>`)}`;
 }
 
 // mountDecisionCards fetches a decision's evidence the first time it is opened.
@@ -1758,13 +1387,7 @@ function mountDecisionCards() {
       const host = $(`[data-evidence-for="${el.dataset.decision}"]`, el);
       try {
         const full = await apiGet(`/decisions/${el.dataset.decision}`);
-        const cited = full.evidence || [];
-        host.innerHTML = sanitize(
-          cited.length
-            ? cited.map(decisionEvidenceRow).join('')
-            : html`<p class="small muted">The evidence behind this decision is no longer on file.
-                 The explanation above is what was recorded at the time.</p>`
-        );
+        host.innerHTML = sanitize(decisionEvidenceContent(full));
         paintDynamic(host);
       } catch (err) {
         host.innerHTML = sanitize(html`<p class="rec-note is-warn">${err.message}</p>`);
@@ -1778,27 +1401,17 @@ pages.threats = {
   title: 'Blocked domains',
   subtitle: 'Recorded DNS blocks and the evidence behind them.',
   async render() {
-    const [categories, top, recent, feeds, policies, decisions] = await Promise.all([
+    const [categories, top, recent, decisions] = await Promise.all([
       apiGet('/threats/categories?hours=168'),
       apiGet('/threats/top-domains?days=7&limit=25'),
       apiGet('/queries?action=blocked&limit=50'),
-      apiGet('/feeds'),
-      apiGet('/policies'),
       apiGet('/decisions?limit=25'),
     ]);
-    this.feeds = feeds;
-
     const catRows = categories.categories.map((c) => ({ label: c.label, count: c.count, category: c.category }));
     const total = catRows.reduce((sum, r) => sum + r.count, 0);
-    const observatory = (feeds.feeds || []).find((f) => f.id === feeds.observatoryFeedId);
 
     return html`
-      <div class="section">
-        ${raw(observatoryCard(observatory, {
-          refreshing: feeds.refreshing,
-          policies: policies.policies,
-        }))}
-      </div>
+      ${raw(externalAPICard())}
 
       <div class="section grid grid-side">
         <div class="card">
@@ -1821,7 +1434,6 @@ pages.threats = {
   },
   async mounted() {
     mountDecisionCards();
-    mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
 
 
   },
@@ -1835,16 +1447,16 @@ pages.threats = {
  * both an unsigned zone and an upstream that does not validate — a forwarder
  * cannot tell those apart. See docs/dnssec.md.
  */
-function dnssecBadge(status) {
+function dnssecBadge(status, source = 'unknown') {
+  const origin = source === 'native' ? 'Daddybound' : source === 'upstream' ? 'The upstream resolver' : 'The recorded answer';
   const map = {
-    validated: ['ok', 'validated', 'The upstream resolver validated this answer against the DNSSEC chain of trust.'],
-    unvalidated: ['', 'unvalidated', 'No AD bit came back: either the zone is unsigned or the upstream does not validate.'],
-    servfail: ['bad', 'servfail', 'The upstream could not answer. A failed DNSSEC validation is one possible cause among several.'],
+    validated: [source === 'unknown' ? 'info' : 'ok', source === 'unknown' ? 'AD reported' : 'validated', source === 'unknown' ? 'The answer carried an authenticated-data flag, but its validation source was not recorded.' : `${origin} reported a DNSSEC-validated answer.`],
+    unvalidated: ['', 'unvalidated', source === 'native' ? 'No authenticated-data flag: the answer may be unsigned, or the client may have requested checking disabled.' : source === 'upstream' ? 'No AD bit came back: either the zone is unsigned or the upstream did not validate.' : 'No authenticated-data flag was recorded. The validation source is unknown.'],
+    servfail: ['bad', 'servfail', `${origin} could not answer. Check the recorded reason: failed or inconclusive validation is one possible cause.`],
   };
   const entry = map[status];
   if (!entry) return html`<span class="muted">—</span>`;
-  const [cls, text, title] = entry;
-  return html`<span class="badge ${cls}" title="${title}">${text}</span>`;
+  return html`<span class="badge ${entry[0]}" title="${entry[2]}">${entry[1]}</span>`;
 }
 
 /*
@@ -1861,10 +1473,11 @@ function dnssecBadge(status) {
  * been misled by the interface.
  */
 function localDnssecBadge(v) {
+  const live = v.resolution === 'native_live';
   const map = {
     secure: ['ok', 'secure', 'Daddybound authenticated this answer against the DNSSEC chain of trust.'],
     insecure: ['', 'insecure', 'Daddybound proved this name lies in an unsigned part of the DNS.'],
-    bogus: ['bad', 'bogus', 'Daddybound could not authenticate this answer. Nothing was blocked: Learn mode records verdicts only.'],
+    bogus: ['bad', 'bogus', live ? 'Native DNSSEC validation rejected this answer.' : 'Daddybound could not authenticate this answer. Nothing was blocked: Learn mode records verdicts only.'],
     indeterminate: ['', 'indeterminate', 'Daddybound could not decide.'],
     timeout: ['', 'timeout', 'Validation ran out of time. This says nothing about the answer.'],
     resource_limit: ['', 'limit reached', 'Validation hit an internal bound. This says nothing about the answer.'],
@@ -1887,7 +1500,7 @@ function localDnssecBadge(v) {
   // reader who takes it as evidence the answer was refused has been misled
   // about what their resolver did.
   return html`<span class="badge ${cls}" title="${title}">${text}</span>`
-    + html`<span class="muted"> · Learn mode, nothing blocked</span>`
+    + html`<span class="muted"> · ${live ? 'Native Live validation' : 'Learn mode, nothing blocked'}</span>`
     + note + stale;
 }
 
@@ -1947,8 +1560,8 @@ function queryRow(q, filters = {}) {
     ['Reason', q.reason ? html`${q.reason}` : ''],
     ['Category', q.category ? categoryBadge(q.category) : ''],
     ['Source', q.source ? html`${q.source}` : ''],
-    ['DNSSEC (upstream)', q.dnssec ? dnssecBadge(q.dnssec) : ''],
-    ['DNSSEC (local — Daddybound)', q.dnssecValidation ? localDnssecBadge(q.dnssecValidation) : ''],
+    [q.dnssecSource === 'native' ? 'DNSSEC (native — Daddybound)' : q.dnssecSource === 'upstream' ? 'DNSSEC (upstream)' : 'DNSSEC (source unrecorded)', q.dnssec ? dnssecBadge(q.dnssec, q.dnssecSource || 'unknown') : ''],
+    [q.dnssecValidation && q.dnssecValidation.resolution === 'native_live' ? 'Native validation outcome' : 'DNSSEC (local — Daddybound)', q.dnssecValidation ? localDnssecBadge(q.dnssecValidation) : ''],
     ['Cache hit', typeof q.cached === 'boolean' ? (q.cached ? 'Yes' : 'No') : ''],
     ['Took', typeof q.elapsedMs === 'number' ? html`${q.elapsedMs} ms` : ''],
     ['Time', q.time ? html`${new Date(q.time).toLocaleString('en-GB')}` : ''],
@@ -2211,7 +1824,7 @@ function evidenceList(evidence) {
       ${raw(
         Object.entries(evidence)
           .map(([k, v]) => {
-            const rendered = Array.isArray(v) ? v.join(', ') : v === null ? '—' : typeof v === 'object' ? JSON.stringify(v) : v;
+            const rendered = Array.isArray(v) ? v.map((item) => typeof item === 'object' && item !== null ? JSON.stringify(item) : item).join(', ') : v === null ? '—' : typeof v === 'object' ? JSON.stringify(v) : v;
             return html`<div><dt class="mono">${k}</dt><dd class="mono">${rendered}</dd></div>`;
           })
           .join('')
@@ -2352,6 +1965,22 @@ function reviewForm(finding) {
     </form>`;
 }
 
+function findingConfidence(f) {
+  if (f.eventType === 'local_behavior_anomaly' || f.detector === 'robust-ewma-v1' || (f.detail && f.detail.evidence && f.detail.evidence.confidenceAvailable === false)) {
+    return html`<span class="badge tier">Uncalibrated anomaly</span>`;
+  }
+  return html`<span class="muted small nowrap">confidence ${f.confidence}</span>`;
+}
+
+function findingScore(f) {
+  if (f.eventType === 'local_behavior_anomaly') {
+    const distance = f.detail && f.detail.evidence && f.detail.evidence.anomalyDistance;
+    return typeof distance === 'number' ? html`Anomaly distance: <span class="mono">${Number(distance.toFixed(3))}</span> <span class="muted">(not a threat probability)</span>`
+      : html`Normalised anomaly score: <span class="mono">${f.score}</span> <span class="muted">(not a threat probability)</span>`;
+  }
+  return html`Score: <span class="mono">${f.score}</span>`;
+}
+
 function findingRow(f) {
   return html`
     <details class="finding" data-finding="${f.id}">
@@ -2360,7 +1989,7 @@ function findingRow(f) {
         ${raw(reviewBadge(f.review))}
         <span class="mono">${f.eventType}</span>
         <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
-        <span class="muted small nowrap">confidence ${f.confidence}</span>
+        ${raw(findingConfidence(f))}
         <span class="muted small nowrap">${relTime(f.time)}</span>
       </summary>
       <div class="finding-body">
@@ -2368,7 +1997,7 @@ function findingRow(f) {
         <p class="muted small">
           Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> ·
           Detector: <span class="mono">${f.detector}</span> ·
-          Score: <span class="mono">${f.score}</span>
+          ${raw(findingScore(f))}
         </p>
         ${raw(findingLinks(f))}
         ${raw(reviewForm(f))}
@@ -2459,11 +2088,10 @@ pages.detections = {
     return html`
       <div class="card notice">
         <p><strong>These findings do not block anything.</strong> They are behavioural
-          heuristics: they score traffic, explain the score, and alert. Blocking is done by the
-          policy and threat-feed engine, from curated intelligence rather than inference. Every
-          detector below is <strong>experimental</strong> — the thresholds are calibrated against
-          synthetic traffic, not a production network. Reviewing a finding records your assessment
-          and changes none of that.</p>
+          signals for investigation, with the measurements retained for review. The local traffic
+          model also compares each client against its own baseline. These detectors are <strong>experimental</strong>;
+          sample maturity is not proof of accuracy. Reviewing a finding records your assessment
+          without changing policy or automatically retraining the model.</p>
       </div>
 
       <div class="section grid grid-4">
@@ -2890,7 +2518,7 @@ function previewSection(pv) {
           ${raw(ext.mode ? html` <span class="muted small">mode ${ext.mode}</span>` : '')}
           ${raw(ext.provider ? html` <span class="muted small">${ext.provider}</span>` : '')}
           ${raw(ext.note ? html`<div class="muted small">${ext.note}</div>` : '')}
-          ${raw(ext.configured && ext.reached && !ext.evaluated ? html`<div class="row note-tight"><button type="button" class="btn btn-ghost btn-sm" id="inv-enrich">Ask the configured providers now</button> <span class="muted small">A deliberate lookup within the configured mode and budget.</span></div>` : '')}
+          ${raw(ext.configured && ext.reached && !ext.evaluated ? html`<div class="note-tight"><label class="checkline"><input type="checkbox" id="inv-enrich-consent"><span>I agree to share this domain with the configured providers.</span></label><div class="row note-tight"><button type="button" class="btn btn-ghost btn-sm" id="inv-enrich">Ask the configured providers now</button> <span class="muted small">A deliberate lookup within the configured mode and budget.</span></div><p id="inv-enrich-error" class="form-error" role="alert" hidden></p></div>` : '')}
         </dd></div>
       </dl>
       <details class="chart-data"><summary>Under every policy</summary>
@@ -2952,7 +2580,7 @@ function relatedFindingsSection(fd) {
         <p>${fd.note}</p>
       </div></div>
       ${raw(!fd.enabled
-        ? emptyState('Behavioural detection is switched off', 'No findings can exist while detection.enabled is false.', { icon: '○' })
+        ? emptyState('Behavioural detection is switched off', 'No active finding source was reported. Retained findings depend on this installation’s history and retention.', { icon: '○' })
         : items.length
           ? items.map((f) => html`
               <details class="finding">
@@ -2960,12 +2588,12 @@ function relatedFindingsSection(fd) {
                   ${raw(severityBadge(f.severity))}
                   <span class="mono">${f.eventType}</span>
                   <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
-                  <span class="muted small nowrap">confidence ${f.confidence}</span>
+                  ${raw(findingConfidence(f))}
                   <span class="muted small nowrap">${relTime(f.time)}</span>
                 </summary>
                 <div class="finding-body">
                   <p>${f.summary}</p>
-                  <p class="muted small">Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> · Detector: <span class="mono">${f.detector}</span> · Score: <span class="mono">${f.score}</span></p>
+                  <p class="muted small">Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> · Detector: <span class="mono">${f.detector}</span> · ${raw(findingScore(f))}</p>
                   ${raw(findingDetail(f.detail))}
                 </div>
               </details>`).join('') + (fd.truncated ? html`<p class="muted small">Only the newest findings are shown.</p>` : '')
@@ -2979,24 +2607,25 @@ function observationsSection(ob) {
   return html`
     <div class="card section" id="inv-observations">
       <div class="card-head"><div>
-        <div class="card-eyebrow">Experimental · Daddybound · enforces nothing</div>
+        <div class="card-eyebrow">Experimental · recorded Daddybound outcomes</div>
         <h2>Local DNSSEC observations</h2>
         <p>${ob.note}</p>
       </div></div>
       ${raw(!ob.available
-        ? emptyState('Learn mode is off', 'Daddybound is not observing traffic on this instance, so no local verdict exists for any name.', { icon: '○' })
+        ? emptyState('No local DNSSEC records available', 'This response contains no retained local validation data. Check Daddybound for the current operating mode.', { icon: '○' })
         : items.length
           ? html`<div class="table-wrap"><table>
-              <thead><tr><th>When</th><th>Type</th><th>Upstream said</th><th>Daddybound concluded</th><th>Differs</th><th>Reason</th></tr></thead>
+              <thead><tr><th>When</th><th>Type</th><th>Recorded path</th><th>Upstream said</th><th>Daddybound concluded</th><th>Differs</th><th>Reason</th></tr></thead>
               <tbody>${raw(items.map((o) => html`<tr>
                 <td class="muted">${relTime(o.time)}${o.cached ? ' (cached answer)' : ''}</td>
                 <td class="mono">${o.qtype}</td>
-                <td>${raw(o.upstream ? dnssecBadge(o.upstream) : '—')}</td>
+                <td>${o.resolution === 'native_live' ? 'Native Live' : 'Learn observation'}</td>
+                <td>${raw(o.resolution === 'native_live' ? 'Not applicable' : o.upstream ? dnssecBadge(o.upstream, 'upstream') : '—')}</td>
                 <td>${raw(localDnssecBadge(o))}</td>
                 <td>${o.disagreement || '—'}</td>
                 <td class="muted small">${o.reason || ''}</td></tr>`).join(''))}
               </tbody></table></div>${raw(ob.truncated ? html`<p class="muted small">Only the newest observations are shown.</p>` : '')}`
-          : emptyState('No observation for this name', 'Daddybound observes only resolved queries, and only those the queue accepted.', { icon: '○' }))}
+          : emptyState('No observation for this name', 'No retained local validation record matches this name and window. Missing records do not establish a validation result.', { icon: '○' }))}
     </div>`;
 }
 
@@ -3019,6 +2648,20 @@ function investigationHeader(subject, w) {
         ${raw(subject.sub ? html`<p>${subject.sub}</p>` : '')}
       </div><div class="row-end hero-intel">${raw(windowLine(w))}</div></div>
     </div>`;
+}
+
+function investigationLearning(data) {
+  if (!data) return '';
+  const client = data.client;
+  return html`<div class="card section" id="inv-learning"><div class="card-head"><div><h2>Local learning baseline</h2><p>${data.note || 'Current local model state for this client.'}</p></div><span class="badge ${data.enabled && data.available === false ? 'warn' : 'tier'}">${data.enabled && data.available === false ? 'Unavailable' : 'Learning only'}</span></div>
+    ${raw(!data.enabled ? html`<p class="muted">Local traffic learning is off.</p>` : data.available === false ? html`<p class="rec-note is-warn">The learning model could not be read. A baseline result is unavailable.</p>` : !data.found || !client ? html`<p class="muted">No retained baseline for this client. This is not a benign verdict.</p>` : html`
+      <dl class="claim-key"><div class="qfact"><dt>Maturity</dt><dd><span class="badge ${client.ready ? 'info' : ''}">${client.ready ? 'Baseline ready' : 'Building baseline'}</span> <span class="muted small">sample maturity, not detection accuracy</span></dd></div>
+        <div class="qfact"><dt>History</dt><dd>${num(client.baselineWindows)} trained windows · ${num(client.baselineQueries)} baseline queries</dd></div>
+        <div class="qfact"><dt>Last seen</dt><dd>${relTime(client.lastSeenAt)}</dd></div></dl>
+      <details class="chart-data"><summary>Baseline features</summary><div class="table-wrap"><table><thead><tr><th>Feature</th><th>Mean</th><th>Standard deviation</th></tr></thead><tbody>
+        ${raw((client.features || []).map((feature) => html`<tr><td class="mono small">${feature.name}</td><td>${feature.baselineMean === null ? '—' : num(feature.baselineMean)}</td><td>${feature.baselineStd === null ? '—' : num(feature.baselineStd)}</td></tr>`).join(''))}</tbody></table></div></details>`)}
+    <p class="small note-tight"><a href="#/daddybound">View learning health and recent windows →</a></p>
+  </div>`;
 }
 
 pages.investigate = {
@@ -3054,6 +2697,7 @@ pages.investigate = {
         ${raw(activitySection(data.activity, { client: true }))}
         ${raw(decisionSection(data.decisions))}
         ${raw(relatedFindingsSection(data.findings))}
+        ${raw(investigationLearning(data.learning))}
         ${raw(rawJsonSection(data))}`;
     }
 
@@ -3096,10 +2740,13 @@ pages.investigate = {
     const enrich = $('#inv-enrich');
     if (enrich && this.enrich) {
       enrich.addEventListener('click', async () => {
+        const consent = $('#inv-enrich-consent'); const error = $('#inv-enrich-error');
+        if (!consent || !consent.checked) { if (error) { error.textContent = 'Agree to share this domain before requesting external evidence.'; error.hidden = false; } if (consent) consent.focus(); return; }
+        if (error) error.hidden = true;
         enrich.disabled = true;
         try {
           const q = this.enrich.client ? `?client=${encodeURIComponent(this.enrich.client)}` : '';
-          const res = await apiSend('POST', `/investigate/domain/${encodeURIComponent(this.enrich.domain)}/enrich${q}`);
+          const res = await apiSend('POST', `/investigate/domain/${encodeURIComponent(this.enrich.domain)}/enrich${q}`, { consent: true });
           toast(res && res.note ? res.note : `Lookup ${res && res.lookup ? res.lookup : 'requested'}`);
           router.reload();
         } catch (err) {
@@ -3886,11 +3533,6 @@ pages.feeds = {
                           ? html`<span>last good ${relTime(f.lastSuccessAt)}</span>`
                           : ''
                       )}
-                      ${raw(
-                        f.format === 'observatory'
-                          ? html`<span>plus each indicator's own category</span>`
-                          : ''
-                      )}
                     </div>
                     ${raw(f.lastError ? html`<p class="rec-note is-warn">${f.lastError}</p>` : '')}
                     ${raw(
@@ -3998,579 +3640,403 @@ pages.feeds = {
   },
 };
 
-/* ---------- Integrations: external APIs ---------------------------------- */
+/* ---------- External APIs: operator-owned connections -------------------- */
 
-/*
- * The one page in this product where an operator hands a third party a
- * credential and lets it influence resolution. Everything on it is written to
- * make that trade explicit rather than convenient: what leaves the network,
- * what evidence exists that the adapter works, and what a mode actually costs.
- *
- * Two things are deliberately absent. There is no "recommended providers"
- * list, because a recommendation is a claim about somebody else's service that
- * this project cannot support. And blocking mode is not offered here unless
- * dnsdaddy.yaml already permits it — see reputationCard.
- */
-
-// What each mode means, in the terms that matter: what it costs a query.
 const REPUTATION_MODES = {
-  off: [
-    'Off',
-    'Providers are never consulted from the resolution path. Configure them, test them, ' +
-      'and nothing reaches DNS until you change this.',
-  ],
-  cache_only: [
-    'Cache only',
-    'A query reads what is already cached and never waits. A miss answers immediately ' +
-      'and queues a lookup, so the verdict is there next time. Cannot slow a query down.',
-  ],
-  blocking: [
-    'Blocking',
-    'A cache miss waits, up to the configured budget, for a provider to answer. ' +
-      'The only mode that puts somebody else’s latency in front of a DNS answer.',
-  ],
+  off: ['Off', 'No automatic domain checks. You can still save and explicitly test a connection.'],
+  cache_only: ['Background checks', 'Use cached verdicts immediately. Missing verdicts are requested in the background for future queries.'],
+  blocking: ['Wait for a verdict', 'On a cache miss, wait up to the configured time budget for a provider. This can delay DNS answers.'],
 };
 
-function providerStatusBadge(p) {
-  if (p.status === 'ok') return html`<span class="badge ok"><span class="dot"></span>working</span>`;
-  if (p.status === 'disabled') return html`<span class="badge info">switched off</span>`;
-  return html`<span class="badge warn"><span class="dot"></span>not working</span>`;
+function externalAPICard() {
+  return html`<div class="card section integration-cta">
+    <div><div class="card-eyebrow">Your intelligence sources</div><h2>Add context with external APIs</h2>
+      <p class="muted">Connect your own provider accounts, test them explicitly and choose how their evidence affects DNS decisions.</p></div>
+    <a class="btn btn-observe" href="#/integrations">Manage external APIs</a>
+  </div>`;
 }
 
-// The verification chip, in the Assurance page's vocabulary. Every adapter
-// shipped so far is "not verified live", and saying so on the card is the
-// whole point: an operator trusting a provider needs to know the adapter
-// itself has only been exercised against captured responses.
+function providerStatusBadge(p) {
+  if (p.status === 'disabled' || !p.enabled) return html`<span class="badge">Switched off</span>`;
+  if (p.status !== 'ok') return html`<span class="badge warn">Needs attention</span>`;
+  return html`<span class="badge info">Enabled</span>`;
+}
+
 function verificationChip(tpl) {
   if (!tpl || !tpl.verification) return '';
-  if (tpl.liveVerified) {
-    return html`<span class="badge ok claim">Verified live</span>`;
-  }
-  return html`<span class="badge tier claim">Not verified live</span>`;
+  return tpl.liveVerified
+    ? html`<span class="badge ok claim">Adapter verified live</span>`
+    : html`<span class="badge tier claim">Adapter tested with fixtures</span>`;
 }
 
 function providerStats(s) {
-  if (!s || !s.calls) {
-    return html`<div class="rec-meta"><span>no calls yet</span></div>`;
-  }
-  const breaker = s.breaker === 'closed' ? '' : html`<span class="badge warn">circuit ${s.breaker}</span>`;
-  return html`
-    <div class="rec-meta">
-      <span>${num(s.calls)} calls</span>
-      <span>${num(s.meanLatencyMs)} ms mean</span>
-      <span>${rate(s.errorRate)} errors</span>
-      ${raw(s.rateWaits ? html`<span>${num(s.rateWaits)} rate-limited waits</span>` : '')}
-      ${raw(breaker)}
-    </div>
-    ${raw(s.lastError ? html`<p class="rec-note is-warn">Last error: ${s.lastError}</p>` : '')}
-  `;
+  if (!s || !s.calls) return html`<div class="rec-meta"><span>No automatic calls yet</span></div>`;
+  return html`<div class="rec-meta">
+    <span>${num(s.calls)} calls</span><span>${num(s.meanLatencyMs)} ms mean</span>
+    <span>${rate(Number(s.errorRate || 0) * 100)}% errors</span>
+    ${raw(s.rateWaits ? html`<span>${num(s.rateWaits)} rate-limit waits</span>` : '')}
+    ${raw(s.breaker && s.breaker !== 'closed' ? html`<span class="badge warn">Requests paused: ${s.breaker}</span>` : '')}
+  </div>${raw(s.lastError ? html`<p class="rec-note is-warn">Last error: ${s.lastError}</p>` : '')}`;
 }
 
-// The credential line. It shows that a key exists and which one, and offers no
-// way to read it — there is no endpoint that would answer.
 function credentialLine(p) {
-  if (!p.secretSet) {
-    return html`
-      <div class="rec-meta">
-        <span>no credential stored</span>
-        ${raw(p.rotatedAt ? html`<span>removed ${relTime(p.rotatedAt)}</span>` : '')}
-      </div>`;
-  }
-  return html`
-    <div class="rec-meta">
-      <span>credential ending <span class="mono">…${p.secretHint}</span></span>
-      ${raw(p.rotatedAt ? html`<span>set ${relTime(p.rotatedAt)}</span>` : '')}
-    </div>`;
+  return html`<div class="rec-meta"><span>${p.secretSet ? 'Credential stored · write-only' : 'No credential stored'}</span>
+    ${raw(p.rotatedAt ? html`<span>${p.secretSet ? 'updated' : 'removed'} ${relTime(p.rotatedAt)}</span>` : '')}</div>`;
 }
 
 function policyScopeControls(p, policies) {
-  const all = !p.policyScope || p.policyScope.length === 0;
-  const rows = policies
-    .map(
-      (pol) => html`
-        <label class="checkline">
-          <input type="checkbox" data-scope="${p.id}" data-policy-id="${pol.id}"
-                 ${raw(all || p.policyScope.includes(pol.id) ? 'checked' : '')}>
-          <span>${pol.name}</span>
-        </label>`
-    )
-    .join('');
-  return html`
-    <details class="provider-scope">
-      <summary>Applies to ${all ? 'every policy' : `${p.policyScope.length} of ${policies.length} policies`}</summary>
-      <p class="small muted">Untick a policy to stop sending its clients’ queries to this provider.
-         Unticking every policy is the same as ticking them all, so at least one stays on.</p>
-      ${raw(rows)}
-    </details>`;
+  if (!policies.length) return '';
+  const all = !p.policyScope || !p.policyScope.length;
+  return html`<details class="provider-scope">
+    <summary>Policy scope: ${all ? 'all policies' : `${p.policyScope.length} selected`}</summary>
+    <p class="small muted">Select the policies whose domains this provider may receive. Switch the provider off to stop all sharing.</p>
+    ${raw(policies.map((pol) => html`<label class="checkline">
+      <input type="checkbox" data-scope="${p.id}" data-policy-id="${pol.id}" ${raw(all || p.policyScope.includes(pol.id) ? 'checked' : '')}>
+      <span>${pol.name}</span></label>`).join(''))}
+  </details>`;
 }
 
 function providerCard(p, policies, templates) {
   const tpl = templates.find((t) => t.kind === p.kind);
-  return html`
-    <div class="rec" data-provider="${p.id}">
-      <div class="rec-main">
-        <div class="rec-title">
-          <strong>${p.name || p.displayName || p.kind}</strong>
-          ${raw(providerStatusBadge(p))}
-          ${raw(verificationChip(tpl))}
-        </div>
-        <div class="rec-meta">
-          <span>${p.displayName || p.kind}</span>
-          <span>${(p.capabilities || []).join(' · ') || 'no capabilities enabled'}</span>
-          <span>${num(p.ratePerMinute)}/min · ${num(p.timeoutMs)} ms timeout</span>
-        </div>
-        ${raw(p.detail ? html`<p class="rec-note is-warn">${p.detail}</p>` : '')}
-        ${raw(p.privacyNote ? html`<p class="rec-note">${p.privacyNote}</p>` : '')}
-        ${raw(tpl && tpl.verification ? html`<p class="small muted">${tpl.verification}</p>` : '')}
-        ${raw(credentialLine(p))}
-        ${raw(providerStats(p.stats))}
+  const lastTest = p.lastTest;
+  return html`<article class="rec provider-entry" data-provider="${p.id}">
+    <div class="rec-main">
+      <div class="rec-title"><strong>${p.name || p.displayName || p.kind}</strong>${raw(providerStatusBadge(p))}</div>
+      <div class="rec-meta"><span>${p.displayName || p.kind}</span><span>${(p.capabilities || []).join(' · ')}</span>
+        <span>${num(p.ratePerMinute)} requests/min · ${num(p.timeoutMs)} ms timeout</span></div>
+      ${raw(p.detail ? html`<p class="rec-note ${p.status === 'error' ? 'is-warn' : ''}">${p.detail}</p>` : '')}
+      <p class="rec-note">${p.privacyNote || (tpl && tpl.privacyNote) || 'The selected domain is shared with this provider when it is consulted.'}</p>
+      ${raw(credentialLine(p))}
+      ${raw(lastTest ? html`<p class="rec-note ${lastTest.ok ? 'is-ok' : 'is-warn'}"><strong>${lastTest.ok ? 'Connection test passed' : 'Connection test failed'}</strong>
+        · ${relTime(lastTest.testedAt)}${lastTest.latencyMs !== undefined ? ` · ${num(lastTest.latencyMs)} ms` : ''}
+        ${lastTest.detail ? ` — ${lastTest.detail}` : ''}</p>` : html`<p class="rec-note muted">This saved connection has not been tested.</p>`)}
+      ${raw(providerStats(p.stats))}
+      <label class="checkline consent-line"><input type="checkbox" data-provider-consent="${p.id}">
+        <span>I agree to share the test request or selected domains with this provider when I test or enable it.</span></label>
+      <div class="row provider-actions">
+        <button type="button" class="btn btn-ghost btn-sm" data-test="${p.id}">Test connection</button>
+        <button type="button" class="btn ${p.enabled ? 'btn-ghost' : 'btn-observe'} btn-sm" data-provider-toggle="${p.id}" data-current-enabled="${p.enabled ? 'true' : 'false'}">${p.enabled ? 'Switch off' : 'Enable provider'}</button>
+      </div>
+      <p class="rec-note" data-result="${p.id}" role="status" hidden></p>
+      <details class="provider-scope provider-options"><summary>Connection settings</summary>
         ${raw(policyScopeControls(p, policies))}
+        <form data-secret-form="${p.id}" class="credential-form" autocomplete="off">
+          <label class="field"><span>${p.secretSet ? 'Replace' : 'Add'} credential</span>
+            <input type="password" name="secret" autocomplete="new-password" spellcheck="false" required>
+            <span class="small muted">Stored encrypted. The saved value is never sent back to this page.</span></label>
+          <button class="btn btn-ghost btn-sm" type="submit">Save credential</button>
+        </form>
         <div class="row provider-actions">
-          <button class="btn btn-ghost btn-sm" data-test="${p.id}">Test connection</button>
-          <button class="btn btn-ghost btn-sm" data-rotate="${p.id}">
-            ${p.secretSet ? 'Rotate credential' : 'Set credential'}
-          </button>
           ${raw(p.secretSet ? html`<button class="btn btn-ghost btn-sm" data-clear-secret="${p.id}">Remove credential</button>` : '')}
-          <button class="btn btn-danger btn-sm" data-delete="${p.id}">Delete</button>
+          <button class="btn btn-danger btn-sm" data-delete-provider="${p.id}">Delete provider</button>
         </div>
-        <p class="rec-note" data-result="${p.id}" hidden></p>
-      </div>
-      <div class="rec-actions">
-        <label class="checkline">
-          <input type="checkbox" data-enable="${p.id}" ${raw(p.enabled ? 'checked' : '')}
-                 aria-label="Enable ${p.name}">
-          <span>Enabled</span>
-        </label>
-      </div>
-    </div>`;
+        ${raw(verificationChip(tpl))}
+        ${raw(tpl && tpl.verification ? html`<p class="small muted">${tpl.verification}</p>` : '')}
+      </details>
+    </div>
+  </article>`;
 }
 
 function reputationCard(rep, engine) {
-  const selectable = rep.selectable || ['off'];
-  const options = selectable
-    .map((m) => {
-      const [label, why] = REPUTATION_MODES[m] || [m, ''];
-      return html`
-        <label class="checkline">
-          <input type="radio" name="reputation-mode" value="${m}" ${raw(rep.mode === m ? 'checked' : '')}>
-          <span>
-            ${label}
-            <span class="cat-desc">${why}</span>
-          </span>
-        </label>`;
-    })
-    .join('');
-
-  // Blocking is missing from the list unless the configuration file already
-  // allows it. Saying so, rather than showing a disabled radio, keeps the
-  // decision where it belongs: in a file somebody edited deliberately.
-  const blockingNote = selectable.includes('blocking')
-    ? html`<p class="small muted">Blocking mode is permitted by this deployment’s configuration.
-             Read <span class="mono">docs/external-apis.md</span> before relying on it.</p>`
-    : html`<p class="small muted">Blocking mode is not offered here. It is the only mode that puts a
-             third party’s latency in front of a DNS answer, so it is set in
-             <span class="mono">dnsdaddy.yaml</span> — see
-             <span class="mono">integrations.reputation_mode</span> and
-             <span class="mono">docs/external-apis.md</span> — and this page can only lower it.</p>`;
-
-  const counters = engine
-    ? html`
-        <div class="rec-meta">
-          <span>${num(engine.cacheSize)} cached verdicts</span>
-          <span>${num(engine.cacheHits)} hits · ${num(engine.cacheMisses)} misses</span>
-          <span>${num(engine.completed)} lookups completed</span>
-          ${raw(engine.dropped ? html`<span>${num(engine.dropped)} dropped</span>` : '')}
-          <span>${num(engine.queueDepth)}/${num(engine.queueSize)} queued</span>
-        </div>`
-    : '';
-
-  return html`
-    <div class="card section">
-      <div class="card-head">
-        <div>
-          <h2>How much say providers have</h2>
-          <p>Adding a provider does not change what gets blocked. This does.</p>
-        </div>
-      </div>
-      <div class="stack">${raw(options)}</div>
-      ${raw(blockingNote)}
-      ${raw(counters)}
-    </div>`;
+  const selectable = rep.selectable || ['off', 'cache_only', 'blocking'];
+  const mode = rep.reputationMode || rep.mode || 'off';
+  return html`<div class="card section">
+    <div class="card-head"><div><h2>How providers are used</h2><p>Save the connection first, then choose the sharing and decision behaviour.</p></div>
+      <span class="badge ${mode === 'off' ? '' : 'info'}">${(REPUTATION_MODES[mode] || [mode])[0]}</span></div>
+    <form id="integration-settings-form">
+      <fieldset class="mode-options"><legend>Automatic domain checks</legend>
+        ${raw(selectable.map((m) => html`<label class="mode-option"><input type="radio" name="reputationMode" value="${m}" ${raw(mode === m ? 'checked' : '')}>
+          <span><strong>${(REPUTATION_MODES[m] || [m])[0]}</strong><span class="cat-desc">${(REPUTATION_MODES[m] || [m, ''])[1]}</span></span></label>`).join(''))}
+      </fieldset>
+      <label class="checkline note-tight"><input type="checkbox" name="enrichmentEnabled" ${raw(rep.enrichmentEnabled ? 'checked' : '')}>
+        <span>Allow on-demand investigation enrichment<span class="cat-desc">An explicit lookup can fetch extra context from enabled providers. Opening an investigation or preview stays local.</span></span></label>
+      <label class="checkline consent-line"><input type="checkbox" name="consent">
+        <span>I agree to send selected domains to my enabled providers under these settings.</span></label>
+      <label class="checkline" id="provider-latency-consent" ${raw(mode === 'blocking' ? '' : 'hidden')}><input type="checkbox" name="acceptDnsLatency">
+        <span>I accept that waiting for a provider can delay DNS answers.</span></label>
+      <div class="row note-tight"><button type="submit" class="btn btn-primary">Save API preferences</button><span class="muted small">Takes effect without a restart.</span></div>
+      <p class="form-error" id="integration-settings-error" role="alert" hidden></p>
+    </form>
+    ${raw(engine ? html`<div class="rec-meta note-loose"><span>${num(engine.cacheSize)} cached verdicts</span><span>${num(engine.cacheHits)} hits · ${num(engine.cacheMisses)} misses</span>
+      <span>${num(engine.completed)} completed lookups</span><span>${num(engine.queueDepth)}/${num(engine.queueSize)} queued</span>
+      ${raw(engine.dropped ? html`<span>${num(engine.dropped)} dropped</span>` : '')}</div>` : '')}
+  </div>`;
 }
 
-// The add-provider form. The field list comes from the chosen template, so a
-// provider's settings are whatever the compiled-in adapter says they are and
-// there is no second copy of that knowledge here to drift.
 function templateFields(tpl) {
   if (!tpl) return '';
-  const fields = (tpl.fields || [])
-    .map(
-      (f) => html`
-        <label class="field">
-          <span>${f.label}${f.required ? ' *' : ''}</span>
-          <input name="cfg:${f.key}" value="${f.default || ''}" placeholder="${f.placeholder || ''}"
-                 ${raw(f.required ? 'required' : '')}>
-          ${raw(f.help ? html`<span class="small muted">${f.help}</span>` : '')}
-        </label>`
-    )
-    .join('');
+  return html`<div class="provider-disclosure"><p class="rec-note">${tpl.privacyNote}</p>
+    ${raw(tpl.docsUrl ? html`<a href="${tpl.docsUrl}" target="_blank" rel="noopener noreferrer" class="small">Provider documentation ↗</a>` : '')}</div>
+    <div class="grid grid-2">
+      ${raw((tpl.fields || []).filter((f) => f.key !== 'allow_private').map((f) => html`<label class="field"><span>${f.label}${f.required ? ' *' : ''}</span>
+        <input name="cfg:${f.key}" value="${f.default || ''}" placeholder="${f.placeholder || ''}" ${raw(f.required ? 'required' : '')} autocomplete="off" spellcheck="false">
+        ${raw(f.help ? html`<span class="small muted">${f.help}</span>` : '')}</label>`).join(''))}
+      <label class="field"><span>${tpl.secretLabel || 'Credential'}${tpl.secretRequired ? ' *' : ''}</span>
+        <input name="secret" type="password" autocomplete="new-password" spellcheck="false" ${raw(tpl.secretRequired ? 'required' : '')}>
+        <span class="small muted">Bring your own account and API key. Stored encrypted; never displayed after saving.</span></label>
+    </div>
+    ${raw((tpl.fields || []).some((f) => f.key === 'allow_private') ? html`<label class="checkline note-tight"><input type="checkbox" name="cfg:allow_private" value="true"><span>Allow my private HTTPS service<span class="cat-desc">For a receiver I control on a private IPv4 or IPv6 address. Valid TLS is required; loopback and cloud metadata remain blocked.</span></span></label>` : '')}
+    <details class="provider-scope"><summary>Request limits and adapter details</summary>
+      <div class="grid grid-3 note-tight">
+        <label class="field"><span>Requests per minute</span><input name="ratePerMinute" type="number" min="1" value="${tpl.defaultRatePerMinute || 60}"></label>
+        <label class="field"><span>Timeout (ms)</span><input name="timeoutMs" type="number" min="100" value="${tpl.defaultTimeoutMs || 2000}"></label>
+        <label class="field"><span>Cache lifetime (seconds)</span><input name="cacheTtlSeconds" type="number" min="60" value="${tpl.defaultCacheTtlSeconds || 21600}"></label>
+      </div>${raw(verificationChip(tpl))}<p class="small muted">${tpl.verification || ''}</p>
+    </details>`;
+}
 
-  const secret = html`
-    <label class="field">
-      <span>${tpl.secretLabel || 'Credential'}${tpl.secretRequired ? ' *' : ''}</span>
-      <input name="secret" type="password" autocomplete="off" spellcheck="false"
-             ${raw(tpl.secretRequired ? 'required' : '')}>
-      <span class="small muted">Encrypted before it reaches disk. There is no endpoint that
-        returns it afterwards — if you lose it, set a new one.</span>
-    </label>`;
-
-  return html`
-    <p class="rec-note">${tpl.privacyNote}</p>
-    <p class="small muted">${tpl.verification}</p>
-    <div class="grid grid-2">${raw(fields)}${raw(secret)}</div>
-    <div class="grid grid-3">
-      <label class="field"><span>Requests per minute</span>
-        <input name="ratePerMinute" type="number" min="1" value="${tpl.defaultRatePerMinute || 60}"></label>
-      <label class="field"><span>Timeout (ms)</span>
-        <input name="timeoutMs" type="number" min="100" value="${tpl.defaultTimeoutMs || 2000}"></label>
-      <label class="field"><span>Cache verdicts for (seconds)</span>
-        <input name="cacheTtlSeconds" type="number" min="60" value="${tpl.defaultCacheTtlSeconds || 21600}"></label>
-    </div>`;
+function availableAdaptersCard(templates) {
+  if (!templates.length) return '';
+  return html`<div class="card"><div class="card-head"><div><h2>Available adapters</h2><p>Nothing is contacted by opening this list.</p></div></div>
+    ${raw(templates.map((t) => html`<div class="rec"><div><div class="rec-title"><strong>${t.displayName}</strong>${raw(verificationChip(t))}</div>
+      <p class="rec-note">${t.privacyNote}</p><p class="small muted">${t.verification}</p></div></div>`).join(''))}</div>`;
 }
 
 pages.integrations = {
   title: 'External APIs',
-  subtitle: 'Threat intelligence you have chosen to consult.',
-
-  async render() {
-    // The template catalogue answers even when the feature is switched off,
-    // because it describes the build rather than the configuration, and it is
-    // how an operator decides whether to switch it on.
-    const templates = await apiGet('/integrations/templates');
-
-    let data;
-    try {
-      data = await apiGet('/integrations/providers');
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 503) {
-        return html`
-          <div class="card section">
-            ${raw(
-              emptyState(
-                'External APIs are switched off',
-                err.message,
-                { icon: '○' }
-              )
-            )}
-            <p class="small muted">Nothing on this page can send a query anywhere until
-               <span class="mono">integrations.enabled</span> is set in
-               <span class="mono">dnsdaddy.yaml</span> and the resolver restarted. That is the
-               default, and a deployment that never touches this feature pays one atomic load
-               per query for it.</p>
-          </div>
-          ${raw(availableAdaptersCard(templates.templates || []))}`;
-      }
-      throw err;
-    }
-
-    const policies = await apiGet('/policies');
-    const tpls = templates.templates || [];
+  subtitle: 'Your accounts. Your keys. Explicit control over what gets shared.',
+  async render(context = {}) {
+    const read = (path) => apiGet(path, { signal: context.signal });
+    const [catalogue, settings, data, policies] = await Promise.all([
+      read('/integrations/templates'), read('/integrations/settings'), read('/integrations/providers'), read('/policies'),
+    ]);
+    const templates = catalogue.templates || [];
     const providers = data.providers || [];
-
-    const cards = providers.length
-      ? providers.map((p) => providerCard(p, policies.policies || [], tpls)).join('')
-      : emptyState(
-          'No providers configured',
-          'Nothing is being sent anywhere. Add one below to start consulting an external service.',
-          { icon: '○' }
-        );
-
-    return html`
-      ${raw(reputationCard(data.reputation || {}, data.engine))}
-
-      <div class="card section">
-        <div class="card-head">
-          <div>
-            <h2>Providers</h2>
-            <p>Each one sends the domain being resolved to somebody else. The note on every
-               card says what that means for this network.</p>
-          </div>
-        </div>
-        ${raw(cards)}
-      </div>
-
-      <div class="card">
-        <div class="card-head">
-          <div>
-            <h2>Add a provider</h2>
-            <p>Choose an adapter, fill in what it needs, and test it before you save.</p>
-          </div>
-        </div>
-        <form id="provider-form">
-          <div class="grid grid-2">
-            <label class="field"><span>Service</span>
-              <select name="kind" id="provider-kind">
-                ${raw(tpls.map((t) => html`<option value="${t.kind}">${t.displayName}</option>`).join(''))}
-              </select>
-            </label>
-            <label class="field"><span>Name on this dashboard</span>
-              <input name="name" placeholder="VirusTotal"></label>
-          </div>
-          <div id="provider-fields"></div>
-          <div class="row">
-            <button class="btn btn-ghost" type="button" id="provider-test">Test connection</button>
-            <button class="btn btn-primary" type="submit">Add provider</button>
-          </div>
-          <p class="rec-note" id="provider-test-result" hidden></p>
-        </form>
-      </div>`;
+    if (!context.isCurrent || context.isCurrent()) this.templates = templates;
+    return html`<div class="card section integration-intro">
+      <div><div class="card-eyebrow">Bring your own intelligence</div><h2>Extend your DNS workspace</h2>
+        <p class="muted">Choose a provider, save your credentials and test the connection. Each connection starts switched off.</p></div>
+      <ol class="connection-steps" aria-label="Connection setup"><li><span>1</span>Save securely</li><li><span>2</span>Test deliberately</li><li><span>3</span>Choose how it is used</li></ol>
+      ${raw(settings.encryptionAvailable === false ? html`<p class="notice-inline">Credential encryption is unavailable. Connections cannot be saved until the server’s key storage is fixed.</p>` : '')}
+    </div>
+    <div class="card section"><div class="card-head"><div><h2>Your connections</h2><p>${providers.length ? `${providers.length} configured. Tests and live activity are reported separately.` : 'Connect only the services you want this instance to use.'}</p></div></div>
+      ${raw(providers.length ? providers.map((p) => providerCard(p, policies.policies || [], templates)).join('')
+        : emptyState('No providers connected', 'Add your first provider below. No API key is bundled with DNS Daddy.', { icon: '○' }))}
+    </div>
+    <div class="card section"><details class="add-provider" ${raw(providers.length ? '' : 'open')}><summary><h2>Add a provider</h2></summary>
+      <form id="provider-form" class="note-loose" autocomplete="off">
+        <div class="grid grid-2"><label class="field"><span>Service</span><select name="kind" id="provider-kind">${raw(templates.map((t) => html`<option value="${t.kind}">${t.displayName}</option>`).join(''))}</select></label>
+          <label class="field"><span>Connection name</span><input name="name" placeholder="e.g. My VirusTotal account" maxlength="128"></label></div>
+        <div id="provider-fields"></div>
+        <label class="checkline consent-line"><input type="checkbox" name="testConsent"><span>I agree to send one test request to this provider if I select Test connection.</span></label>
+        <div class="row note-tight"><button class="btn btn-ghost" type="button" id="provider-test">Test connection</button><button class="btn btn-primary" type="submit" ${raw(settings.encryptionAvailable === false ? 'disabled' : '')}>Save connection · switched off</button></div>
+        <p class="rec-note" id="provider-test-result" role="status" hidden></p>
+      </form></details></div>
+    ${raw(reputationCard(settings, data.engine))}
+    <div id="webhook-section"></div>`;
   },
-
   async mounted() {
-    const templates = ((await apiGet('/integrations/templates')).templates) || [];
+    const templates = this.templates || [];
     const byKind = Object.fromEntries(templates.map((t) => [t.kind, t]));
-
     const fieldsHost = $('#provider-fields');
     const kindSelect = $('#provider-kind');
-    if (fieldsHost && kindSelect) {
-      const paintFields = () => {
-        fieldsHost.innerHTML = sanitize(templateFields(byKind[kindSelect.value]));
-        paintDynamic(fieldsHost);
-      };
-      kindSelect.addEventListener('change', paintFields);
-      paintFields();
-    }
-
     const showResult = (el, ok, message) => {
       if (!el) return;
       el.hidden = false;
       el.className = `rec-note ${ok ? 'is-ok' : 'is-warn'}`;
       el.textContent = message;
     };
-
-    // The wizard's candidate body: whatever the chosen template asked for.
+    if (fieldsHost && kindSelect) {
+      const paintFields = () => {
+        fieldsHost.innerHTML = sanitize(templateFields(byKind[kindSelect.value]));
+        const form = $('#provider-form');
+        if (form && form.elements.testConsent) form.elements.testConsent.checked = false;
+        const result = $('#provider-test-result');
+        if (result) result.hidden = true;
+      };
+      kindSelect.addEventListener('change', paintFields);
+      paintFields();
+    }
     const candidateFromForm = () => {
       const form = new FormData($('#provider-form'));
       const config = {};
-      for (const [key, value] of form.entries()) {
-        if (key.startsWith('cfg:') && String(value).trim() !== '') {
-          config[key.slice(4)] = String(value);
-        }
-      }
+      for (const [key, value] of form.entries()) if (key.startsWith('cfg:') && String(value).trim() !== '') config[key.slice(4)] = String(value);
       return {
-        kind: form.get('kind'),
-        name: String(form.get('name') || '').trim() || (byKind[form.get('kind')] || {}).displayName || form.get('kind'),
-        config,
-        secret: String(form.get('secret') || ''),
-        timeoutMs: Number(form.get('timeoutMs')) || undefined,
-        ratePerMinute: Number(form.get('ratePerMinute')) || undefined,
-        cacheTtlSeconds: Number(form.get('cacheTtlSeconds')) || undefined,
+        kind: form.get('kind'), name: String(form.get('name') || '').trim() || (byKind[form.get('kind')] || {}).displayName || form.get('kind'),
+        config, secret: String(form.get('secret') || ''), timeoutMs: Number(form.get('timeoutMs')) || undefined,
+        ratePerMinute: Number(form.get('ratePerMinute')) || undefined, cacheTtlSeconds: Number(form.get('cacheTtlSeconds')) || undefined,
       };
     };
-
     const testButton = $('#provider-test');
-    if (testButton) {
-      testButton.addEventListener('click', async () => {
-        const c = candidateFromForm();
-        testButton.disabled = true;
-        testButton.textContent = 'Testing…';
-        try {
-          const res = await apiSend('POST', '/integrations/providers/test', {
-            kind: c.kind,
-            config: c.config,
-            secret: c.secret,
-            timeoutMs: c.timeoutMs,
-            ratePerMinute: c.ratePerMinute,
-          });
-          showResult(
-            $('#provider-test-result'),
-            res.ok,
-            res.ok ? `${res.detail} (${res.latencyMs} ms)` : res.error
-          );
-        } catch (err) {
-          reportError(err);
-        } finally {
-          testButton.disabled = false;
-          testButton.textContent = 'Test connection';
-        }
-      });
-    }
-
+    if (testButton) testButton.addEventListener('click', async () => {
+      const form = $('#provider-form');
+      if (!form.reportValidity()) return;
+      if (!form.elements.testConsent.checked) {
+        showResult($('#provider-test-result'), false, 'Please agree to the test request before contacting this provider.');
+        form.elements.testConsent.focus(); return;
+      }
+      const candidate = candidateFromForm();
+      testButton.disabled = true; testButton.textContent = 'Testing…';
+      try {
+        const res = await apiSend('POST', '/integrations/providers/test', { kind: candidate.kind, config: candidate.config, secret: candidate.secret, timeoutMs: candidate.timeoutMs, ratePerMinute: candidate.ratePerMinute, consent: true });
+        showResult($('#provider-test-result'), res.ok, res.ok ? `${res.detail} (${num(res.latencyMs)} ms). Save the connection when you are ready.` : res.error || res.detail || 'The test did not succeed.');
+      } catch (err) { showResult($('#provider-test-result'), false, err.message); }
+      finally { testButton.disabled = false; testButton.textContent = 'Test connection'; }
+    });
     const form = $('#provider-form');
-    if (form) {
-      form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const c = candidateFromForm();
-        const tpl = byKind[c.kind] || {};
-        try {
-          await apiSend('POST', '/integrations/providers', {
-            name: c.name,
-            kind: c.kind,
-            enabled: true,
-            capabilities: tpl.capabilities || ['reputation'],
-            config: c.config,
-            secret: c.secret || undefined,
-            timeoutMs: c.timeoutMs,
-            ratePerMinute: c.ratePerMinute,
-            cacheTtlSeconds: c.cacheTtlSeconds,
-          });
-          toast('Provider added — it will not affect resolution until the mode above allows it');
-          router.reload();
-        } catch (err) {
-          reportError(err);
-        }
+    if (form) form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = $('button[type="submit"]', form); button.disabled = true;
+      const candidate = candidateFromForm();
+      try {
+        await apiSend('POST', '/integrations/providers', { ...candidate, enabled: false, capabilities: (byKind[candidate.kind] || {}).capabilities || ['reputation'] });
+        form.reset(); toast('Connection saved securely and switched off. Enable it when you are ready.');
+        await router.reload();
+      } catch (err) { showResult($('#provider-test-result'), false, err.message); button.disabled = false; }
+    });
+    const settingsForm = $('#integration-settings-form');
+    if (settingsForm) {
+      $$('input[name="reputationMode"]', settingsForm).forEach((radio) => radio.addEventListener('change', () => {
+        $('#provider-latency-consent').hidden = settingsForm.elements.reputationMode.value !== 'blocking';
+        settingsForm.elements.acceptDnsLatency.checked = false;
+      }));
+      settingsForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const error = $('#integration-settings-error'); error.hidden = true;
+        const mode = settingsForm.elements.reputationMode.value;
+        const enrichmentEnabled = settingsForm.elements.enrichmentEnabled.checked;
+        const consent = settingsForm.elements.consent.checked;
+        const acceptDnsLatency = settingsForm.elements.acceptDnsLatency.checked;
+        if ((mode !== 'off' || enrichmentEnabled) && !consent) { error.textContent = 'Agree to domain sharing before enabling provider use.'; error.hidden = false; settingsForm.elements.consent.focus(); return; }
+        if (mode === 'blocking' && !acceptDnsLatency) { error.textContent = 'Confirm the DNS latency trade-off before enabling this mode.'; error.hidden = false; settingsForm.elements.acceptDnsLatency.focus(); return; }
+        const button = $('button[type="submit"]', settingsForm); button.disabled = true;
+        try { await apiSend('PUT', '/integrations/settings', { reputationMode: mode, enrichmentEnabled, consent, acceptDnsLatency }); toast('API preferences saved'); await router.reload(); }
+        catch (err) { error.textContent = err.message; error.hidden = false; button.disabled = false; }
       });
     }
-
-    $$('input[name="reputation-mode"]').forEach((radio) =>
-      radio.addEventListener('change', async () => {
-        if (!radio.checked) return;
-        try {
-          await apiSend('PUT', '/integrations/reputation', { mode: radio.value });
-          toast(
-            radio.value === 'off'
-              ? 'Providers will no longer be consulted during resolution'
-              : `Reputation set to ${(REPUTATION_MODES[radio.value] || [radio.value])[0].toLowerCase()}`
-          );
-        } catch (err) {
-          reportError(err);
-          router.reload();
-        }
-      })
-    );
-
-    $$('[data-enable]').forEach((cb) =>
-      cb.addEventListener('change', async () => {
-        try {
-          await apiSend('PATCH', `/integrations/providers/${cb.dataset.enable}`, { enabled: cb.checked });
-          toast(cb.checked ? 'Provider enabled' : 'Provider switched off — nothing more is sent to it');
-          router.reload();
-        } catch (err) {
-          reportError(err);
-          cb.checked = !cb.checked;
-        }
-      })
-    );
-
-    $$('[data-test]').forEach((btn) =>
-      btn.addEventListener('click', async () => {
-        const id = btn.dataset.test;
-        btn.disabled = true;
-        btn.textContent = 'Testing…';
-        try {
-          const res = await apiSend('POST', `/integrations/providers/${id}/test`);
-          showResult($(`[data-result="${id}"]`), res.ok, res.ok ? `${res.detail} (${res.latencyMs} ms)` : res.error);
-        } catch (err) {
-          reportError(err);
-        } finally {
-          btn.disabled = false;
-          btn.textContent = 'Test connection';
-        }
-      })
-    );
-
-    $$('[data-rotate]').forEach((btn) =>
-      btn.addEventListener('click', async () => {
-        // A prompt rather than an inline field, so a credential is never
-        // sitting in a form somebody walked away from.
-        const secret = window.prompt('New credential for this provider. It is encrypted immediately and cannot be read back.');
-        if (secret === null || secret.trim() === '') return;
-        try {
-          await apiSend('POST', `/integrations/providers/${btn.dataset.rotate}/secret`, { secret });
-          toast('Credential stored');
-          router.reload();
-        } catch (err) {
-          reportError(err);
-        }
-      })
-    );
-
-    $$('[data-clear-secret]').forEach((btn) =>
-      btn.addEventListener('click', async () => {
-        if (!window.confirm('Remove this provider’s credential? It will stay configured but stop authenticating.')) return;
-        try {
-          await apiSend('DELETE', `/integrations/providers/${btn.dataset.clearSecret}/secret`);
-          toast('Credential removed');
-          router.reload();
-        } catch (err) {
-          reportError(err);
-        }
-      })
-    );
-
-    $$('[data-delete]').forEach((btn) =>
-      btn.addEventListener('click', async () => {
-        if (!window.confirm('Delete this provider, its credential and its cached verdicts?')) return;
-        try {
-          await apiSend('DELETE', `/integrations/providers/${btn.dataset.delete}`);
-          toast('Provider deleted');
-          router.reload();
-        } catch (err) {
-          reportError(err);
-        }
-      })
-    );
-
-    // Policy scope. Sent as a whole list rather than per-checkbox, because the
-    // server stores a list and a per-checkbox PATCH would race itself.
-    $$('[data-scope]').forEach((cb) =>
-      cb.addEventListener('change', async () => {
-        const id = cb.dataset.scope;
-        const boxes = $$(`[data-scope="${id}"]`);
-        const chosen = boxes.filter((b) => b.checked).map((b) => b.dataset.policyId);
-        // Every policy ticked means "all", which the server stores as an empty
-        // list. Zero ticked would mean the same thing to the server, which is
-        // the opposite of what the operator just asked for, so it is refused.
-        if (chosen.length === 0) {
-          cb.checked = true;
-          toast('A provider must apply to at least one policy — switch it off instead', 'error');
-          return;
-        }
-        try {
-          await apiSend('PATCH', `/integrations/providers/${id}`, {
-            policyScope: chosen.length === boxes.length ? [] : chosen,
-          });
-          toast('Policy scope saved');
-        } catch (err) {
-          reportError(err);
-          cb.checked = !cb.checked;
-        }
-      })
-    );
+    const consentFor = (id) => {
+      const checkbox = $(`[data-provider-consent="${id}"]`);
+      if (checkbox && checkbox.checked) return true;
+      showResult($(`[data-result="${id}"]`), false, 'Agree to sharing above before testing or enabling this connection.');
+      if (checkbox) checkbox.focus();
+      return false;
+    };
+    $$('[data-provider-toggle]').forEach((button) => button.addEventListener('click', async () => {
+      const id = button.dataset.providerToggle; const enabled = button.dataset.currentEnabled !== 'true';
+      if (enabled && !consentFor(id)) return;
+      button.disabled = true;
+      try { await apiSend('PATCH', `/integrations/providers/${encodeURIComponent(id)}`, { enabled, consent: enabled }); toast(enabled ? 'Provider enabled under your API preferences' : 'Provider switched off'); await router.reload(); }
+      catch (err) { showResult($(`[data-result="${id}"]`), false, err.message); button.disabled = false; }
+    }));
+    $$('[data-test]').forEach((button) => button.addEventListener('click', async () => {
+      const id = button.dataset.test; if (!consentFor(id)) return;
+      button.disabled = true; button.textContent = 'Testing…';
+      try { const res = await apiSend('POST', `/integrations/providers/${encodeURIComponent(id)}/test`, { consent: true }); showResult($(`[data-result="${id}"]`), res.ok, res.ok ? `${res.detail} (${num(res.latencyMs)} ms)` : res.error || res.detail || 'The test did not succeed.'); }
+      catch (err) { showResult($(`[data-result="${id}"]`), false, err.message); }
+      finally { button.disabled = false; button.textContent = 'Test connection'; }
+    }));
+    $$('[data-secret-form]').forEach((secretForm) => secretForm.addEventListener('submit', async (event) => {
+      event.preventDefault(); const field = $('input[name="secret"]', secretForm); const button = $('button', secretForm); button.disabled = true;
+      try { await apiSend('POST', `/integrations/providers/${encodeURIComponent(secretForm.dataset.secretForm)}/secret`, { secret: field.value }); field.value = ''; toast('Credential stored securely'); await router.reload(); }
+      catch (err) { reportError(err); }
+      finally { field.value = ''; button.disabled = false; }
+    }));
+    $$('[data-clear-secret]').forEach((button) => button.addEventListener('click', async () => {
+      if (!window.confirm('Remove this provider’s credential? Requests that require it will fail until you add another.')) return;
+      button.disabled = true;
+      try { await apiSend('DELETE', `/integrations/providers/${encodeURIComponent(button.dataset.clearSecret)}/secret`); toast('Credential removed'); await router.reload(); }
+      catch (err) { reportError(err); button.disabled = false; }
+    }));
+    $$('[data-delete-provider]').forEach((button) => button.addEventListener('click', async () => {
+      if (!window.confirm('Delete this provider, its credential and its cached verdicts?')) return;
+      button.disabled = true;
+      try { await apiSend('DELETE', `/integrations/providers/${encodeURIComponent(button.dataset.deleteProvider)}`); toast('Provider deleted'); await router.reload(); }
+      catch (err) { reportError(err); button.disabled = false; }
+    }));
+    $$('[data-scope]').forEach((checkbox) => checkbox.addEventListener('change', async () => {
+      const id = checkbox.dataset.scope; const boxes = $$(`[data-scope="${id}"]`); const chosen = boxes.filter((b) => b.checked).map((b) => b.dataset.policyId);
+      if (!chosen.length) { checkbox.checked = true; toast('Keep at least one policy selected, or switch the provider off.', 'error'); return; }
+      // Expanding scope changes who may be shared. A narrowing needs no consent.
+      if (checkbox.checked && !consentFor(id)) { checkbox.checked = false; return; }
+      boxes.forEach((b) => { b.disabled = true; });
+      try { await apiSend('PATCH', `/integrations/providers/${encodeURIComponent(id)}`, { policyScope: chosen.length === boxes.length ? [] : chosen, consent: checkbox.checked }); toast('Policy scope saved'); }
+      catch (err) { reportError(err); checkbox.checked = !checkbox.checked; }
+      finally { boxes.forEach((b) => { b.disabled = false; }); }
+    }));
+    if (typeof mountWebhooks === 'function') await mountWebhooks();
   },
 };
 
-// availableAdaptersCard is what the page shows when the feature is off: what
-// this build could talk to, and what each would disclose.
-function availableAdaptersCard(templates) {
-  if (!templates.length) return '';
-  const rows = templates
-    .map(
-      (t) => html`
-        <div class="rec">
-          <div class="rec-main">
-            <div class="rec-title">
-              <strong>${t.displayName}</strong>
-              ${raw(verificationChip(t))}
-            </div>
-            <div class="rec-meta"><span>${(t.capabilities || []).join(' · ')}</span></div>
-            <p class="rec-note">${t.privacyNote}</p>
-            <p class="small muted">${t.verification}</p>
-          </div>
-        </div>`
-    )
-    .join('');
-  return html`
-    <div class="card">
-      <div class="card-head">
-        <div>
-          <h2>What this build can talk to</h2>
-          <p>Compiled-in adapters. Nothing here is configured or contacted.</p>
-        </div>
-      </div>
-      ${raw(rows)}
-    </div>`;
+
+/* ---------- Optional event delivery ------------------------------------ */
+
+function webhookCard(data) {
+  const config = data.config || {};
+  const stats = data.stats || {};
+  const events = config.eventTypes || [];
+  return html`<div class="card section"><details class="webhook-panel" ${raw(config.enabled ? 'open' : '')}>
+    <summary><span><h2>Send findings to your own system</h2><span class="small muted">Optional webhook delivery</span></span><span class="badge ${config.enabled ? 'info' : ''}">${config.enabled ? 'Enabled' : 'Off'}</span></summary>
+    <p class="muted note-loose">Deliver selected events as signed JSON to an HTTPS endpoint you control. DNS answers never wait for delivery.</p>
+    <form id="webhook-form" data-secret-set="${config.secretSet ? 'true' : 'false'}" autocomplete="off">
+      <label class="field"><span>Receiver URL</span><input type="url" name="url" value="${config.url || ''}" placeholder="https://security.example/webhooks/dnsdaddy" spellcheck="false" required>
+        <span class="small muted">Use HTTPS. Put authentication in the signing key below, never in the URL.</span></label>
+      <div class="grid grid-2"><label class="field"><span>${config.secretSet ? 'Replace signing key (optional)' : 'Signing key'}</span>
+        <input type="password" name="secret" minlength="32" maxlength="4096" autocomplete="new-password" spellcheck="false">
+        <span class="small muted">At least 32 characters. ${config.secretSet ? 'A key is stored; leave blank to keep it.' : 'Provide the same key to your receiver to verify signatures.'} Stored encrypted and write-only.</span></label>
+        <fieldset class="webhook-events"><legend>Events to deliver</legend><label class="checkline"><input type="checkbox" name="findingCreated" ${raw(events.includes('finding.created') ? 'checked' : '')}><span>New findings</span></label>
+          <label class="checkline"><input type="checkbox" name="findingReviewed" ${raw(events.includes('finding.reviewed') ? 'checked' : '')}><span>Finding reviews</span></label></fieldset></div>
+      <p class="notice-inline">Finding events can contain domains and client details. Review events also include the review notes and history metadata. Choose a receiver authorised to hold that information.</p>
+      <details class="provider-scope"><summary>Delivery limits and private receivers</summary>
+        <div class="grid grid-3 note-tight"><label class="field"><span>Timeout (ms)</span><input name="timeoutMs" type="number" min="100" max="15000" required value="${config.timeoutMs || 5000}"></label>
+          <label class="field"><span>Maximum attempts</span><input name="maxAttempts" type="number" min="1" max="8" required value="${config.maxAttempts || 5}"></label>
+          <label class="field"><span>Queued event limit</span><input name="maxQueue" type="number" min="1" max="1000" required value="${config.maxQueue || 500}"></label></div>
+        <label class="checkline"><input type="checkbox" name="allowPrivate" ${raw(config.allowPrivate ? 'checked' : '')}><span>Allow my private HTTPS receiver<span class="cat-desc">For an intentional private IPv4 or IPv6 destination. Loopback and cloud metadata destinations remain disallowed.</span></span></label>
+      </details>
+      <label class="checkline note-tight"><input type="checkbox" name="enabled" ${raw(config.enabled ? 'checked' : '')}><span>Enable event delivery</span></label>
+      <label class="checkline consent-line"><input type="checkbox" name="consent"><span>I agree to send the selected events or a test event to this receiver.</span></label>
+      <div class="row note-tight"><button type="submit" class="btn btn-primary">Save webhook</button><button type="button" class="btn btn-ghost" id="webhook-test" ${raw(config.url ? '' : 'disabled')}>Test saved receiver</button>
+        ${raw(config.secretSet ? html`<button type="button" class="btn btn-ghost" id="webhook-clear-secret">Remove key and disable</button>` : '')}</div>
+      <p class="muted small">Only new events are delivered after enabling. Saving webhook changes discards queued events and counts them as dropped.</p>
+      <p id="webhook-result" class="rec-note" role="status" hidden></p>
+    </form>
+    <div class="delivery-status note-loose"><h3 class="small">Delivery history</h3><div class="rec-meta"><span>${num(stats.queueDepth)} queued now</span><span>${num(stats.delivered)} delivered</span>
+      <span>${num(stats.failed)} failed</span><span>${num(stats.dropped)} dropped</span><span>${num(stats.retried)} retries</span></div>
+      <p class="small muted">Totals survive restarts. Last successful delivery: ${relTime(stats.lastSuccessAt)}${stats.lastHttpStatus ? ` · last HTTP status ${stats.lastHttpStatus}` : ''}.</p>
+      ${raw(stats.lastError ? html`<p class="rec-note is-warn">${stats.lastError}</p>` : '')}</div>
+  </details></div>`;
 }
+
+async function mountWebhooks() {
+  const host = $('#webhook-section'); if (!host) return;
+  let data;
+  try { data = await apiGet('/integrations/webhook'); }
+  catch (err) {
+    if (host.isConnected && err.status !== 401) host.innerHTML = sanitize(html`<div class="card section"><h2>Optional webhook delivery</h2><p class="rec-note is-warn">${err.message}</p></div>`);
+    return;
+  }
+  if (!host.isConnected) return;
+  host.innerHTML = sanitize(webhookCard(data));
+  const form = $('#webhook-form', host); const result = $('#webhook-result', host);
+  const show = (ok, message) => { result.hidden = false; result.className = `rec-note ${ok ? 'is-ok' : 'is-warn'}`; result.textContent = message; };
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault(); const fields = form.elements; const enabled = fields.enabled.checked; const consent = fields.consent.checked;
+    if (enabled && !consent) { show(false, 'Agree to event sharing before enabling delivery.'); fields.consent.focus(); return; }
+    if (enabled && form.dataset.secretSet !== 'true' && fields.secret.value.length < 32) { show(false, 'Add a signing key of at least 32 characters before enabling delivery.'); fields.secret.focus(); return; }
+    const eventTypes = [fields.findingCreated.checked && 'finding.created', fields.findingReviewed.checked && 'finding.reviewed'].filter(Boolean);
+    if (!eventTypes.length) { show(false, 'Choose at least one event type.'); return; }
+    const body = { enabled, url: fields.url.value.trim(), eventTypes, allowPrivate: fields.allowPrivate.checked,
+      timeoutMs: Number(fields.timeoutMs.value), maxAttempts: Number(fields.maxAttempts.value), maxQueue: Number(fields.maxQueue.value), consent };
+    if (fields.secret.value) body.secret = fields.secret.value;
+    fields.secret.value = ''; const button = $('button[type="submit"]', form); button.disabled = true;
+    try { await apiSend('PUT', '/integrations/webhook', body); toast('Webhook saved'); await mountWebhooks(); }
+    catch (err) { show(false, err.message); button.disabled = false; }
+  });
+  $('#webhook-test', host).addEventListener('click', async (event) => {
+    if (!form.elements.consent.checked) { show(false, 'Agree to send a test event before contacting the saved receiver.'); form.elements.consent.focus(); return; }
+    const button = event.currentTarget; button.disabled = true; button.textContent = 'Testing…';
+    try { const test = await apiSend('POST', '/integrations/webhook/test', { consent: true }); show(test.ok, test.ok ? `${test.detail} (${num(test.latencyMs)} ms)` : test.error || test.detail || 'The receiver test failed.'); }
+    catch (err) { show(false, err.message); }
+    finally { button.disabled = false; button.textContent = 'Test saved receiver'; }
+  });
+  const clear = $('#webhook-clear-secret', host);
+  if (clear) clear.addEventListener('click', async () => {
+    if (!window.confirm('Remove the signing key and disable webhook delivery?')) return;
+    clear.disabled = true;
+    try { await apiSend('DELETE', '/integrations/webhook/secret'); toast('Webhook key removed and delivery disabled'); await mountWebhooks(); }
+    catch (err) { show(false, err.message); clear.disabled = false; }
+  });
+}
+
 
 pages.setup = {
   title: 'Setup',
@@ -4656,12 +4122,111 @@ pages.setup = {
   },
 };
 
+/* ---------- Complete browser exports ----------------------------------- */
+
+function exportCard() {
+  return html`<div class="card section"><div class="card-head"><div><h2>Export retained records</h2>
+    <p>Collect every page of the selected dataset as newline-delimited JSON.</p></div></div>
+    <form id="export-form" class="query-filters"><label class="query-filter"><span>Dataset</span><select name="dataset"><option value="queries">Query log</option><option value="decisions">Decision records and evidence</option><option value="findings">Original findings</option></select></label>
+      <label class="query-filter"><span>Window</span><select name="hours"><option value="24">Last 24 hours</option><option value="168">Last 7 days</option><option value="720">Last 30 days</option><option value="0">All retained records</option></select></label>
+      <div class="query-filter-actions"><button class="btn btn-primary" type="submit">Download complete export</button><button type="button" class="btn btn-ghost" id="export-cancel" hidden>Cancel</button></div></form>
+    <p id="export-progress" class="small muted note-tight" role="status"></p><p id="export-error" class="form-error" role="alert" hidden></p>
+    <p class="muted small">The time window is fixed at the first page. No file is offered if a page fails, records are skipped or the 20 MB browser limit is reached. Retention can remove data during a long export; an export is not a backup.</p>
+    <p class="small"><a href="${REPO}/docs/exports.md" target="_blank" rel="noopener noreferrer">API export guide for larger collections ↗</a></p>
+  </div>`;
+}
+
+async function readCompleteExport({ dataset, hours = '24', signal, onProgress = () => {}, read = (url, options) => fetch(url, options), maxBytes = 20 * 1024 * 1024, maxPages = 1000 }) {
+  if (!['queries', 'decisions', 'findings'].includes(dataset)) throw new Error('Unknown export dataset.');
+  if (!['0', '24', '168', '720'].includes(String(hours))) throw new Error('Unknown export window.');
+  const prefix = `/api/v1/${dataset}/export`;
+  let next = `${prefix}?hours=${hours}&limit=${dataset === 'findings' ? 1000 : 500}`;
+  const chunks = []; const seen = new Set();
+  let rows = 0; let pages = 0; let bytes = 0; let boundary;
+  while (next) {
+    if (signal && signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+    if (seen.has(next) || pages >= maxPages) throw new Error('Export did not reach a final page. No complete file was created.');
+    if (!next.startsWith(`${prefix}?`) || next.includes('#')) throw new Error('The next-page link did not match this export. No file was created.');
+    seen.add(next);
+    const response = await read(next, { credentials: 'same-origin', signal });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null);
+      throw new ApiError(response.status, detail && detail.error || `Export page failed (${response.status}).`);
+    }
+    const countHeader = response.headers.get('X-Export-Count');
+    const skippedHeader = response.headers.get('X-Export-Skipped');
+    const truncated = response.headers.get('X-Truncated');
+    const count = Number(countHeader); const skipped = Number(skippedHeader);
+    if (countHeader === null || skippedHeader === null || !Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(skipped) || skipped < 0 || !['true', 'false'].includes(truncated)) {
+      throw new Error('The server did not provide complete export metadata. No file was created.');
+    }
+    if (skipped) throw new Error(`${num(skipped)} stored record(s) were skipped. Investigate the export data; no file was labelled complete.`);
+    const currentBoundary = ['X-Export-Since', 'X-Export-Until', 'X-Export-Snapshot'].map((key) => response.headers.get(key));
+    if (!currentBoundary[1] || currentBoundary[2] === null) throw new Error('The export boundary is missing. No file was created.');
+    if (boundary && currentBoundary.some((value, index) => value !== boundary[index])) throw new Error('The export boundary changed between pages. Start a new export.');
+    boundary = currentBoundary;
+    let pageText = '';
+    const reader = response.body.getReader(); const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const chunk = await reader.read(); if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > maxBytes) { await reader.cancel(); throw new Error('This export exceeds the 20 MB browser limit. Choose a smaller window or use the API export guide. No partial file was offered.'); }
+        pageText += decoder.decode(chunk.value, { stream: true });
+      }
+      pageText += decoder.decode();
+    } finally { reader.releaseLock(); }
+    const lines = pageText.split('\n').filter((line) => line.trim() !== '');
+    if (lines.length !== count) throw new Error('An export page ended before its reported record count. No file was created.');
+    for (const line of lines) {
+      try { JSON.parse(line); } catch { throw new Error('An export page contained invalid JSON. No file was created.'); }
+    }
+    chunks.push(pageText.endsWith('\n') || !pageText ? pageText : pageText + '\n'); rows += count; pages++;
+    onProgress({ rows, pages, bytes });
+    if (truncated === 'false') { next = ''; continue; }
+    const link = (response.headers.get('Link') || '').match(/<([^>]+)>;\s*rel="?next"?/);
+    if (!link || !response.headers.get('X-Next-Cursor')) throw new Error('The server reported more records without a next-page link. No file was created.');
+    next = link[1];
+  }
+  return { chunks, rows, pages, bytes, since: boundary[0], until: boundary[1] };
+}
+
+function mountExports(context = {}) {
+  const form = $('#export-form'); if (!form) return;
+  const progress = $('#export-progress'); const error = $('#export-error'); const cancel = $('#export-cancel');
+  let controller = null;
+  if (context.signal) context.signal.addEventListener('abort', () => { if (controller) controller.abort(); }, { once: true });
+  cancel.addEventListener('click', () => { if (controller) controller.abort(); });
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault(); if (controller) return;
+    controller = new AbortController(); error.hidden = true; cancel.hidden = false;
+    const button = $('button[type="submit"]', form); button.disabled = true; const dataset = form.elements.dataset.value;
+    progress.textContent = 'Reading the first page…';
+    try {
+      const collected = await readCompleteExport({ dataset, hours: form.elements.hours.value, signal: controller.signal,
+        onProgress: ({ rows, pages }) => { progress.textContent = `${num(rows)} records collected across ${num(pages)} pages…`; },
+      });
+      if (!form.isConnected) return;
+      const blob = new Blob(collected.chunks, { type: 'application/x-ndjson' }); const url = URL.createObjectURL(blob);
+      const link = document.createElement('a'); link.href = url; link.download = `dnsdaddy-${dataset}-${new Date().toISOString().slice(0, 10)}.ndjson`;
+      document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+      progress.textContent = `Complete: ${num(collected.rows)} records across ${num(collected.pages)} pages. Download started.`;
+    } catch (err) {
+      if (err.status === 401) showLogin();
+      if (err.name === 'AbortError') progress.textContent = 'Export cancelled. No partial file was downloaded.';
+      else { error.textContent = err.message; error.hidden = false; progress.textContent = ''; }
+    } finally { controller = null; button.disabled = false; cancel.hidden = true; }
+  });
+}
+
+
 pages.reports = {
   title: 'Reports',
   subtitle: 'Evidence you can forward.',
   async render() {
     const summary = await apiGet('/reports/summary?days=7');
     return html`
+      ${raw(exportCard())}
       <div class="card section">
         <div class="card-head">
           <div>
@@ -4713,7 +4278,8 @@ pages.reports = {
       </div>
     `;
   },
-  async mounted() {
+  async mounted(context = {}) {
+    mountExports(context);
     $('#download-report').addEventListener('click', () => {
       const days = $('#report-days').value;
       // A plain navigation keeps the session cookie and lets the browser
@@ -4762,7 +4328,7 @@ function evidenceRow(what, where, detail) {
 const CLAIM_TIERS = {
   verified: ['ok', 'Verified', 'Re-checked automatically on every change, in CI. The workflow is in the repository.'],
   tested: ['info', 'Tested', 'Exercised once, by a tool or a person, at a stated point in time. Not re-run on every change.'],
-  experimental: ['tier', 'Experimental', 'Shipped and working, but calibrated against synthetic traffic rather than a production network.'],
+  experimental: ['tier', 'Experimental', 'Available for evaluation. Sample limits and performance claims require measurement; this is not an independent security review.'],
   unverified: ['warn', 'Not verified', 'Nobody has checked this. Where the word appears, treat the claim as open.'],
   limitation: ['warn', 'Limitation', 'A boundary of what this product, or the evidence behind it, can show.'],
 };
@@ -4788,66 +4354,14 @@ function claimChip(tier) {
  * The dropped count sits beside the totals for the same reason. A sample that
  * silently shrank under load would invite conclusions it cannot support.
  */
-// daddyboundModes renders the two modes and which one is running.
-//
-// Live is rendered, disabled, rather than left out. Leaving it out would let a
-// reader assume Learn is all there is and that Daddybound is therefore already
-// protecting them; showing it greyed out with the reason attached is the
-// honest version. It stays disabled until the answer path can actually enforce
-// — there is no configuration that turns it on, because `enforce` is refused
-// at startup rather than quietly run as Learn.
-function daddyboundModes(learn) {
-  return html`
-    <dl class="claim-key">
-      <div class="qfact">
-        <dt>Mode</dt>
-        <dd>
-          ${raw(learn
-            ? html`<span class="badge ok">Learn — active</span>`
-            : html`<span class="badge">Learn — off</span>`)}
-          ${raw(html`<span class="badge" title="Live requires DNSSEC enforcement in the answer path. That is not implemented, so this mode cannot be selected and dns.local_dnssec_validation: enforce is refused at startup rather than run as Learn.">Live — unavailable</span>`)}
-        </dd>
-      </div>
-      <div class="qfact">
-        <dt>Current DNSSEC decision source</dt>
-        <dd><span class="badge">Upstream resolver</span></dd>
-      </div>
-    </dl>
-    <p class="muted small note-tight">
-      <strong>Learn</strong> — Daddybound independently validates the same names your clients
-      ask for and records what it concludes. It does not alter the answer returned to the
-      client.
-    </p>
-    <p class="muted small note-tight">
-      <strong>Live</strong> — will allow Daddybound to participate in DNSSEC enforcement once
-      enforcement has been implemented and validated. It is not implemented today, so no
-      answer is refused, rewritten or delayed on Daddybound's verdict.
-    </p>`;
-}
-
+// The legacy observations summary can contain more than one resolution path.
+// It must not be used as a Learn-only population on the operations page.
 function localDnssecCard(data) {
   const off = !data || data.mode !== 'observe';
 
-  if (off) {
-    return html`
-      <div class="card section">
-        <div class="card-head">
-          <div>
-            <div class="card-eyebrow">Experimental</div>
-            <h2>Daddybound ${raw(claimChip('experimental'))}</h2>
-            <p>DNS Daddy can run its own DNSSEC validator, Daddybound, alongside
-               resolution and record what it concludes. It is <strong>off</strong>.</p>
-          </div>
-        </div>
-        ${raw(daddyboundModes(false))}
-        <p class="muted small note-tight">
-          Set <span class="mono">dns.local_dnssec_validation: observe</span> and restart to run
-          Learn mode. New installations start in Learn; an upgrade leaves this as it was, because
-          Learn sends its own DNSSEC queries upstream and that is not a change to inherit
-          silently.
-        </p>
-      </div>`;
-  }
+  if (off) return html`<div class="card section"><div class="card-head"><div><h2>Sampled DNSSEC observations</h2>
+    <p>Separate Learn observations are off. This does not describe whether native Live enforcement is running.</p></div></div>
+    <a href="#/daddybound" class="btn btn-ghost btn-sm">Check the effective Daddybound mode</a></div>`;
 
   const s = data.summary || {};
   const by = s.byStatus || {};
@@ -4891,9 +4405,9 @@ function localDnssecCard(data) {
         ${raw(stat('Indeterminate', by.indeterminate))}
         ${raw(stat('Could not validate', (by.timeout || 0) + (by.resource_limit || 0) + (by.unsupported || 0) + (by.internal_error || 0), 'timeout, limit or unsupported — not a DNSSEC state'))}
         ${raw(stat('Differs from upstream', disTotal, 'the point of the exercise'))}
-        ${raw(stat('Not observed', runtime.dropped, 'queue was full — the sample is smaller than your traffic'))}
+        ${raw(stat('Not observed', runtime.dropped, 'queue saturation, stopped submissions or shutdown discards — the sample is smaller than your traffic'))}
         ${raw(stat('Observed but not stored', runtime.unrecorded, 'validated, then lost before the database — evidence that went missing'))}
-        ${raw(stat('Median latency', (s.avgDurationMs || 0).toFixed(1) + ' ms', 'off the answer path'))}
+        ${raw(stat('Mean latency', (s.avgDurationMs || 0).toFixed(1) + ' ms', 'off the answer path'))}
         ${raw(stat('p95 latency', (s.p95DurationMs || 0).toFixed(1) + ' ms'))}
       </dl>
 
@@ -4948,6 +4462,9 @@ function daddyboundStatusCard(status) {
   const res = status.resolution || {};
   const an = status.anchors || {};
   const rt = status.runtime || {};
+  const learnActive = rt.active === undefined ? mode.effective === 'observe' : rt.active;
+  const learnScope = rt.scope === 'most_recent_learn_activation' ? 'inactive · retained from the most recent Learn activation'
+    : rt.scope === 'since_current_learn_activation' ? 'since the current Learn activation' : 'since this process started';
   const st = status.stored || {};
   const ev = status.evidence || {};
   const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${raw(note ? html` <span class="muted small">${note}</span>` : '')}</dd></div>`;
@@ -4958,14 +4475,14 @@ function daddyboundStatusCard(status) {
   return html`
     <div class="card section" id="daddybound-status">
       <div class="card-head"><div>
-        <div class="card-eyebrow">Experimental · enforces nothing</div>
+        <div class="card-eyebrow">Experimental · ${mode.enforcing ? 'native enforcement' : mode.effective === 'observe' ? 'observation only' : 'native validation off'}</div>
         <h2>Daddybound runtime ${raw(claimChip('experimental'))}</h2>
         <p>What the process holds about local validation, with each figure's scope named. Reading this page resolves nothing and changes no trust state.</p>
       </div></div>
 
       <dl class="claim-key">
-        ${raw(stat('Mode', html`<span class="badge ${mode.effective === 'observe' ? 'ok' : ''}">${mode.effective === 'observe' ? 'Learn — active' : 'Learn — off'}</span> <span class="badge">Live — unavailable</span>`, `configured: ${mode.configured || '—'} · chosen by ${mode.chosenBy === 'installation_default' ? 'the installation default' : 'configuration'}`))}
-        ${raw(stat('Live', html`<span class="muted small">${mode.live && mode.live.reason ? mode.live.reason : 'not implemented'}</span>`))}
+        ${raw(stat('Mode', html`<span class="badge ${nativeMode(status).tone}">${nativeMode(status).label}</span>`, `configured: ${mode.configured || '—'} · chosen by ${mode.chosenBy === 'installation_default' ? 'the installation default' : ['runtime', 'dashboard'].includes(mode.chosenBy) ? 'a saved runtime setting' : 'configuration'}`))}
+        ${raw(mode.live && mode.live.reason ? stat('Live availability', html`<span class="muted small">${mode.live.reason}</span>`) : '')}
         ${raw(stat('Resolution source', html`<span class="badge">${res.source || '—'}</span>`, res.transport || ''))}
         ${raw(stat('Client answers', html`<span class="muted small">${res.clientPath || ''}</span>`))}
       </dl>
@@ -4981,15 +4498,16 @@ function daddyboundStatusCard(status) {
           </dl>
           ${raw(anchorKeyRows(an.keys))}`)}
 
-      <h4>Runtime <span class="muted small">since this process started</span></h4>
+      <h4>Learn observer <span class="muted small">${rt.available ? learnScope : 'not running'}</span></h4>
       ${raw(!rt.available
         ? html`<p class="muted small">${rt.healthNote || 'No observer is running.'}</p>`
         : html`<dl class="claim-key">
-            ${raw(stat('Health', html`<span class="badge ${rt.health === 'ok' ? 'ok' : rt.health === 'degraded' ? 'warn' : ''}">${rt.health}</span>`, rt.healthNote || ''))}
-            ${raw(stat('Observed', html`<span class="mono">${n(rt.observed)}</span>`, `${n(rt.dropped)} not observed (queue full) · ${n(rt.unrecorded)} lost before storage · ${n(rt.writeErrors)} write errors`))}
+            ${raw(stat(learnActive ? 'Health' : 'Last recorded health', html`<span class="badge ${rt.health === 'ok' ? 'ok' : rt.health === 'degraded' ? 'warn' : ''}">${rt.health}</span>`, rt.healthNote || ''))}
+            ${raw(stat('Observed', html`<span class="mono">${n(rt.observed)}</span>`, `${n(rt.dropped)} not observed (queue saturation, stopped submissions or shutdown discards) · ${n(rt.unrecorded)} lost before storage · ${n(rt.writeErrors)} write errors`))}
             ${raw(stat('Could not conclude', html`<span class="mono">${n(rt.timeouts)} timeout · ${n(rt.resourceLimit)} limit · ${n(rt.unreachable)} unreachable</span>`, 'operational outcomes, not DNSSEC states'))}
             ${raw(stat('Native work', html`<span class="mono">${n(rt.queries)}</span> queries to authoritative servers`, `${n(rt.delegations)} zone cuts crossed`))}
-            ${raw(rt.panics || rt.seamPanics ? stat('Defects', html`<span class="badge bad">${n((rt.panics || 0) + (rt.seamPanics || 0))} contained panics</span>`, 'a defect in the validator, not a property of your traffic — please report it') : '')}
+            ${raw(rt.panics ? stat('Observer defects', html`<span class="badge bad">${n(rt.panics)} contained panics</span>`, 'within this Learn activation; a validator defect to report') : '')}
+            ${raw(rt.seamPanics ? stat('Observation dispatch defects', html`<span class="badge bad">${n(rt.seamPanics)} contained panics</span>`, 'since this process started; a resolver defect to report') : '')}
           </dl>`)}
 
       <h4>Stored <span class="muted small">rows within the last ${st.windowHours || '—'}h</span></h4>
@@ -5024,6 +4542,172 @@ function daddyboundStatusCard(status) {
     </div>`;
 }
 
+/* ---------- Native resolution and local traffic learning ---------------- */
+
+function nativeMode(status) {
+  const mode = (status && status.mode) || {};
+  if (!status) return { label: 'Unavailable', tone: 'warn', active: false, enforcing: false };
+  if (mode.effective === 'enforce') return mode.enforcing
+    ? { label: 'Live · enforcing', tone: 'ok', active: true, enforcing: true }
+    : { label: 'Live · needs attention', tone: 'warn', active: false, enforcing: false };
+  if (mode.effective === 'observe') return { label: 'Learn · observing', tone: 'info', active: true, enforcing: false };
+  return { label: 'Off', tone: '', active: false, enforcing: false };
+}
+
+function daddyboundModes(status) {
+  // Boolean input remains useful to older observation callers; a full runtime
+  // response is required before this helper can claim live enforcement.
+  const data = typeof status === 'boolean' ? { mode: { effective: status ? 'observe' : 'off', enforcing: false } } : status;
+  const mode = nativeMode(data);
+  return html`<dl class="claim-key"><div class="qfact"><dt>Effective mode</dt><dd><span class="badge ${mode.tone}">${mode.label}</span></dd></div>
+    <div class="qfact"><dt>DNSSEC decisions</dt><dd>${mode.enforcing ? 'Daddybound validates the native answer path.' : mode.active ? 'Upstream answers; Daddybound records a separate observation.' : 'The configured forwarding resolver answers.'}</dd></div></dl>
+    <p class="muted small note-tight">Live resolves natively and applies DNSSEC checks before returning an answer. Learn records separate sampled validations. Local traffic learning is shown separately below.</p>`;
+}
+
+function nativeModeCard(status) {
+  if (!status) return html`<div class="card section">${raw(unavailableState('Daddybound status unavailable', 'The server did not return its effective resolution mode. No mode is assumed.'))}</div>`;
+  const mode = status.mode || {};
+  const state = nativeMode(status);
+  const labels = { enforce: ['Live', 'Resolve natively and enforce DNSSEC validation in the answer path.'], observe: ['Learn', 'Keep forwarding answers and record sampled native validations separately.'], off: ['Off', 'Use the forwarding resolver without separate native validation.'] };
+  return html`<div class="card section engine-mode-card"><div class="card-head"><div><div class="card-eyebrow">Native DNS engine</div><h2>Daddybound</h2>
+      <p>Native resolution, explicit trust checks and a local view of changing traffic.</p></div><span class="badge ${state.tone}">${state.label}</span></div>
+    <p class="engine-mode-copy">${state.enforcing ? 'Daddybound is answering through its native resolver and enforcing DNSSEC. Bogus or inconclusive validation fails the lookup; there is no forwarding fallback.' : mode.effective === 'enforce' ? 'Live is selected, but the native answer path is not enforcing. Review the operational status below before relying on native validation.' : state.active ? 'Daddybound is observing separate native validations. These observations do not change the answer returned by your forwarding resolver.' : 'Native validation is off. DNS answers use your configured forwarding resolver.'}</p>
+    <form id="daddybound-mode-form">
+      <fieldset class="mode-options" ${raw(mode.locked ? 'disabled' : '')}><legend>Resolution mode</legend>
+        ${raw(['enforce', 'observe', 'off'].map((value) => html`<label class="mode-option"><input type="radio" name="mode" value="${value}" ${raw(mode.effective === value ? 'checked' : '')} ${raw(value === 'enforce' && mode.live && mode.live.available === false ? 'disabled' : '')}>
+          <span><strong>${labels[value][0]}</strong><span class="cat-desc">${labels[value][1]}</span></span></label>`).join(''))}
+      </fieldset>
+      ${raw(mode.locked ? html`<p class="notice-inline">${mode.reason || 'This deployment pins the resolution mode in its startup configuration.'}</p>` : html`
+        <label class="checkline consent-line" id="native-transport-consent"><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native resolution contacts authoritative DNS servers over unencrypted UDP/TCP port 53.</span></label>
+        <div class="row note-tight"><button type="submit" class="btn btn-primary">Apply resolution mode</button><span class="muted small">New queries use the changed mode.</span></div>`)}
+      <p id="native-mode-error" class="form-error" role="alert" hidden></p>
+    </form>
+    ${raw(mode.live && mode.live.available === false && mode.live.reason ? html`<p class="rec-note is-warn">${mode.live.reason}</p>` : '')}
+    <p class="muted small note-tight">Experimental. Native enforcement and machine-learning findings have different responsibilities: an unusual traffic pattern alone never blocks a domain.</p>
+  </div>`;
+}
+
+function nativeEnforcementCard(status) {
+  const data = status && status.native;
+  if (!data || !data.available) return '';
+  const metric = (label, value, sub) => metricCard({ label, value: num(value), sub });
+  return html`<div class="card section"><div class="card-head"><div><h2>Native answer path</h2><p>Answer counters since native activation. Signed, unsigned and failed validation are reported separately.</p></div></div>
+    <div class="grid grid-4 native-metrics">${raw(metric('Secure', data.secure, 'Validated signed answers'))}${raw(metric('Insecure', data.insecure, 'Proven unsigned answers'))}
+      ${raw(metric('Bogus', data.bogus, 'Failed DNSSEC checks'))}${raw(metric('Indeterminate', data.indeterminate, 'Could not establish trust'))}</div>
+    <dl class="claim-key note-loose"><div class="qfact"><dt>Other outcomes</dt><dd>${num(data.resolutionFailures)} resolution failures · ${num(data.limitRejected)} rejected at the concurrency limit</dd></div>
+      <div class="qfact"><dt>Active work</dt><dd>${num(data.inflight)} in flight · peak ${num(data.peak)}</dd></div>
+      <div class="qfact"><dt>Client checking disabled</dt><dd>${num(data.checkingDisabled)} requests <span class="muted small">Clients requested CD=1. Returned data is unchecked and AD is cleared; policy still applies.</span></dd></div>
+      <div class="qfact"><dt>Recorded outcomes</dt><dd>${num(data.stored)} stored · ${num(data.unrecorded)} lost · ${num(data.writeErrors)} write errors <span class="muted small">since this process started</span></dd></div>
+      ${raw(data.panics ? html`<div class="qfact"><dt>Contained faults</dt><dd class="rec-note is-warn">${num(data.panics)} panics. Report this as a resolver defect.</dd></div>` : '')}</dl>
+  </div>`;
+}
+
+function learningWindows(results) {
+  if (!results || !results.length) return html`<p class="muted small">No completed traffic windows yet. Live queries must meet the minimum sample before a baseline comparison is possible.</p>`;
+  const states = { learning: ['info', 'Building baseline'], typical: ['', 'Within baseline'], anomaly: ['warn', 'Unusual'], excluded: ['', 'Excluded'], insufficient: ['', 'Too little traffic'] };
+  const number = (value) => typeof value === 'number' ? String(Math.round(value * 1000) / 1000) : '—';
+  return html`<div class="learning-window-list">${raw(results.map((result) => {
+    const [tone, label] = states[result.state] || ['warn', result.state || 'Unknown'];
+    const window = result.window || {};
+    return html`<details class="learning-window"><summary><span class="mono small">${result.client || 'Unattributed client'}</span><span class="badge ${tone}">${label}</span>
+      <span class="small muted">${num(window.eligibleQueries)} eligible queries</span><span class="small muted">${relTime(window.end)}</span></summary>
+      <p class="muted small">${num(result.baselineWindows)} baseline windows · ${num(result.baselineQueries)} baseline queries · age ${duration(result.baselineAgeSeconds)}.
+        ${result.score === null || result.score === undefined ? 'No score until enough history exists.' : `Anomaly distance ${number(result.score)}; threshold ${number(result.threshold)}. This is not a threat probability.`}</p>
+      ${raw((result.excludedReasons || []).length ? html`<p class="rec-note">${result.excludedReasons.join(' · ')}</p>` : '')}
+      ${raw((result.features || []).length ? html`<div class="table-wrap"><table><thead><tr><th>Feature</th><th>Measured</th><th>Baseline mean</th><th>Deviation</th></tr></thead><tbody>${raw(result.features.map((feature) => html`<tr>
+        <td class="mono small">${feature.name}</td><td>${number(feature.value)}</td><td>${number(feature.baselineMean)}</td><td>${number(feature.z)}</td></tr>`).join(''))}</tbody></table></div>` : '')}
+      ${raw(result.client ? html`<div class="row note-tight"><a class="btn btn-ghost btn-sm" href="${investigateHash({ client: result.client })}">Investigate client</a></div>` : '')}
+    </details>`;
+  }).join(''))}</div>`;
+}
+
+function localLearningCard(status) {
+  if (!status) return html`<div class="card section"><div class="card-head"><h2>Local traffic learning</h2></div>
+    ${raw(unavailableState('Learning status unavailable', 'The local model status could not be retrieved. No sample counts are inferred.'))}</div>`;
+  if (status.available === false) return html`<div class="card section" id="local-learning"><div class="card-head"><div><h2>Local traffic learning</h2><p>Local behavioural baselines and unusual-activity findings.</p></div><span class="badge ${status.enabled ? 'warn' : ''}">${status.enabled ? 'Unavailable' : 'Off'}</span></div>
+    ${raw(status.enabled ? unavailableState('The learning model is unavailable', status.error || 'Learning is configured, but its worker could not start. No sample counts are inferred.') : html`<p class="muted">Local traffic learning is disabled for this deployment.</p>`)}
+    ${raw((status.limitations || []).length ? html`<ul class="compact-list small muted">${raw(status.limitations.map((item) => html`<li>${item}</li>`).join(''))}</ul>` : '')}</div>`;
+  const clients = status.clients || {};
+  const observations = status.observations || {};
+  const windows = status.windows || {};
+  const queue = status.queue || {};
+  const persistence = status.persistence || {};
+  const running = status.enabled && status.running;
+  const label = running ? 'Learning only' : status.enabled ? 'Not running' : 'Off';
+  return html`<div class="card section" id="local-learning"><div class="card-head"><div><div class="card-eyebrow">On-device behavioural model</div><h2>Local traffic learning</h2>
+      <p>Builds a separate baseline for each client and records unusual changes as findings.</p></div><div class="row"><span class="badge ${running ? 'info' : status.enabled ? 'warn' : ''}">${label}</span><span class="badge tier">Experimental</span></div></div>
+    <p class="muted">${running ? 'Learning stays on this resolver. The model compares new traffic windows with a client’s previous pattern; it does not call an external AI service.' : status.enabled ? 'Learning is enabled, but the worker is not running. Its counters do not imply that new traffic is being processed.' : 'Local traffic learning is disabled for this deployment.'}</p>
+    <div class="grid grid-4 native-metrics note-loose">
+      ${raw(metricCard({ label: 'Clients tracked', value: num(clients.tracked), sub: `${num(clients.max)} client limit` }))}
+      ${raw(metricCard({ label: 'Baseline ready', value: num(clients.ready), sub: 'Enough local history to compare' }))}
+      ${raw(metricCard({ label: 'Still learning', value: num(clients.warming), sub: 'Waiting for sufficient history' }))}
+      ${raw(metricCard({ label: 'Unusual windows', value: num(windows.anomalous), sub: 'Signals to review, not threats proven' }))}
+    </div>
+    <div class="notice-inline note-loose"><strong>Learning does not enforce blocks.</strong> Review unusual activity alongside the original query evidence. Baseline readiness describes sample maturity, not detection accuracy.</div>
+    <div class="row note-loose"><a class="btn btn-observe" href="#/detections">Review findings</a><a class="btn btn-ghost" href="#/investigate">Investigate a client</a></div>
+    <details class="chart-data"><summary>Recent client windows</summary>${raw(learningWindows(status.recent))}</details>
+    <details class="chart-data"><summary>Learning health and sample limits</summary>
+      <dl class="claim-key note-tight">
+        <div class="qfact"><dt>Minimum history</dt><dd>${num(status.warmupWindows)} suitable windows across at least ${duration(status.warmupSeconds)}; ${num(status.minWindowQueries)} queries per ${duration(status.windowSeconds)} window.</dd></div>
+        <div class="qfact"><dt>Observations</dt><dd>${num(observations.processed)} processed / ${num(observations.received)} received · ${num(observations.dropped)} dropped</dd></div>
+        <div class="qfact"><dt>Windows</dt><dd>${num(windows.trained)} trained · ${num(windows.quarantined)} quarantined · ${num(windows.insufficient)} below the sample minimum</dd></div>
+        <div class="qfact"><dt>Unfinished windows</dt><dd>${num(windows.evictedPending)} evicted · ${num(windows.restartDiscarded)} discarded after restart</dd></div>
+        <div class="qfact"><dt>Excluded observations</dt><dd>${num(observations.blocked)} blocked · ${num(observations.errors)} failed · ${num(observations.invalid)} invalid · ${num(observations.late)} late · ${num(observations.privacySkipped)} omitted for privacy</dd></div>
+        <div class="qfact"><dt>State limits</dt><dd>${num(clients.evicted)} client baselines evicted · ${num(observations.windowOverflow)} window overflows · ${num(observations.uniqueSaturated)} unique-name limits reached</dd></div>
+        <div class="qfact"><dt>Pending work</dt><dd>${num(queue.depth)} / ${num(queue.capacity)} observations queued</dd></div>
+        <div class="qfact"><dt>Model findings</dt><dd>${num(status.findingsEmitted)} emitted · ${num(status.findingSuppressed)} suppressed · ${num(status.findingErrors)} write errors</dd></div>
+        <div class="qfact"><dt>Last observation</dt><dd>${status.lastProcessedAt && !status.lastProcessedAt.startsWith('0001-') ? relTime(status.lastProcessedAt) : 'No observation processed yet'}</dd></div>
+        <div class="qfact"><dt>Model persistence</dt><dd>${persistence.enabled ? persistence.lastSavedAt && !persistence.lastSavedAt.startsWith('0001-') ? `Saved ${relTime(persistence.lastSavedAt)}` : 'No saved checkpoint yet' : 'Not persisted'}${persistence.loaded ? ' · previous baseline loaded' : ''} · ${num(persistence.saveErrors)} save errors</dd></div>
+        ${raw(persistence.lastError ? html`<div class="qfact"><dt>Persistence error</dt><dd class="rec-note is-warn">${persistence.lastError}</dd></div>` : '')}
+      </dl>
+      <p class="muted small">The model uses bounded rolling statistics. It holds unusual windows out of baseline updates to reduce contamination. Low activity, missing observations and client turnover limit what it can conclude.</p>
+      <p class="muted small">Algorithm: <span class="mono">${status.algorithm || '—'}</span> · model ${status.modelVersion ?? '—'}. Scores are distances from a baseline, never a probability that a domain is malicious.</p>
+    </details>
+  </div>`;
+}
+
+function nativeOverview(status, learning) {
+  const mode = nativeMode(status);
+  const ready = learning && learning.clients;
+  return html`<div class="card section native-overview"><div class="native-overview-item"><span class="label muted small">Daddybound</span><strong>${mode.label}</strong>
+      <span class="muted small">${mode.enforcing ? 'Native DNSSEC in the answer path' : mode.active ? 'Sampled DNSSEC observations' : status ? 'Forwarding resolver selected' : 'Runtime status could not be read'}</span></div>
+    <div class="native-overview-item"><span class="label muted small">Local learning</span><strong>${learning ? learning.enabled && learning.running ? `${num(ready && ready.ready)} baselines ready` : learning.enabled ? 'Needs attention' : 'Off' : 'Unavailable'}</strong>
+      <span class="muted small">${ready ? `${num(ready.warming)} clients warming up · findings only` : 'Local observations and model health'}</span></div>
+    <a href="#/daddybound" class="btn btn-observe btn-sm">Open Daddybound</a></div>`;
+}
+
+pages.daddybound = {
+  title: 'Daddybound',
+  subtitle: 'Native resolution, local learning and the evidence behind each.',
+  async render(context = {}) {
+    const read = (path) => apiGet(path, { signal: context.signal }).catch((error) => {
+      if (error.status === 401 || error.name === 'AbortError') throw error;
+      return null;
+    });
+    const [runtime, learning] = await Promise.all([read('/dnssec/status?hours=168'), read('/learning/status')]);
+    return html`${raw(nativeModeCard(runtime))}${raw(nativeEnforcementCard(runtime))}${raw(localLearningCard(learning))}
+      <details class="card section engine-details"><summary><h2>Trust anchors, observation health and evidence limits</h2></summary>
+        <div class="note-loose">${raw(daddyboundStatusCard(runtime))}</div>
+      </details>`;
+  },
+  async mounted() {
+    const form = $('#daddybound-mode-form');
+    if (!form || !$('button[type="submit"]', form)) return;
+    const consent = $('#native-transport-consent');
+    const update = () => { if (consent) consent.hidden = form.elements.mode.value === 'off'; };
+    $$('input[name="mode"]', form).forEach((radio) => radio.addEventListener('change', update)); update();
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); const mode = form.elements.mode.value; const error = $('#native-mode-error'); error.hidden = true;
+      const acknowledgeNativeTransport = form.elements.acknowledgeNativeTransport.checked;
+      if (mode !== 'off' && !acknowledgeNativeTransport) { error.textContent = 'Confirm the native DNS transport before applying this mode.'; error.hidden = false; form.elements.acknowledgeNativeTransport.focus(); return; }
+      const button = $('button[type="submit"]', form); button.disabled = true;
+      try { await apiSend('PUT', '/dnssec/mode', { mode, acknowledgeNativeTransport }); toast('Resolution mode updated'); await router.reload(); }
+      catch (err) { error.textContent = err.message; error.hidden = false; button.disabled = false; }
+    });
+  },
+};
+
+
 pages.assurance = {
   title: 'Assurance',
   subtitle: 'What is checked, by what, and what that does not prove.',
@@ -5031,8 +4715,6 @@ pages.assurance = {
     const settings = await apiGet('/settings').catch(() => ({ version: 'unknown' }));
     // Best-effort: the Assurance page must render even when local DNSSEC
     // observation is off, unreachable, or has never recorded anything.
-    const dnssec = await apiGet('/dnssec/observations?hours=168').catch(() => null);
-    const runtime = await apiGet('/dnssec/status?hours=168').catch(() => null);
 
     return html`
       <div class="card lead section">
@@ -5055,8 +4737,7 @@ pages.assurance = {
         </div>
       </div>
 
-      ${raw(localDnssecCard(dnssec))}
-      ${raw(daddyboundStatusCard(runtime))}
+      <div class="card section integration-cta"><div><h2>Daddybound operations</h2><p class="muted">Effective resolution mode, trust-anchor health, local learning and observation limits.</p></div><a class="btn btn-observe" href="#/daddybound">Open Daddybound</a></div>
 
       <div class="card section">
         <div class="card-head">
@@ -5174,11 +4855,190 @@ pages.assurance = {
   },
 };
 
+/* ---------- Recovery and recorded changes ------------------------------- */
+
+function recoveryCard(status) {
+  if (!status || !status.available) return html`<div class="card section"><div class="card-head"><h2>Encrypted backup</h2></div>
+    ${raw(unavailableState('Backup unavailable', (status && status.error) || 'The server could not report its backup capabilities. Retry before relying on recovery.'))}</div>`;
+  return html`<div class="card section"><div class="card-head"><div><div class="card-eyebrow">Recovery</div><h2>Download an encrypted backup</h2>
+    <p>Protect the archive with a separate passphrase. Keep both somewhere you can access if this server is lost.</p></div><span class="badge info">Encrypted</span></div>
+    <div class="grid grid-2"><div><h3 class="small">Included</h3><ul class="compact-list">${raw((status.included || []).map((item) => html`<li>${item}</li>`).join(''))}</ul></div>
+      <div><h3 class="small">Not included</h3><ul class="compact-list">${raw((status.excluded || []).map((item) => html`<li>${item}</li>`).join(''))}</ul></div></div>
+    <form id="backup-form" autocomplete="off" class="note-loose">
+      <div class="grid grid-2"><label class="field"><span>Backup passphrase</span><input type="password" name="passphrase" autocomplete="new-password" minlength="12" maxlength="1024" required aria-describedby="backup-passphrase-note"></label>
+        <label class="field"><span>Confirm passphrase</span><input type="password" name="confirmation" autocomplete="new-password" minlength="12" maxlength="1024" required></label></div>
+      <p id="backup-passphrase-note" class="muted small">At least 12 characters. DNS Daddy cannot recover a forgotten backup passphrase.</p>
+      <div class="row note-tight"><button class="btn btn-primary" type="submit">Create encrypted backup</button><span id="backup-progress" class="muted small" role="status"></span></div>
+      <p id="backup-error" class="form-error" role="alert" hidden></p>
+    </form>
+    ${raw((status.limitations || []).length ? html`<details class="chart-data"><summary>Backup limitations</summary><ul class="compact-list">${raw(status.limitations.map((item) => html`<li>${item}</li>`).join(''))}</ul></details>` : '')}
+  </div>
+  <div class="card section"><div class="card-head"><div><h2>Restore into a new directory</h2><p>Restoration runs on the server while DNS Daddy is stopped. A live database is never replaced from this page.</p></div></div>
+    <ol class="restore-steps"><li>Copy the encrypted backup and a private file containing its passphrase to the recovery host.</li>
+      <li>Run the restore command below, choosing a new destination directory.</li><li>Check the restored configuration, paths and listener addresses, then start DNS Daddy against it and verify DNS resolution.</li></ol>
+    ${raw(copyBlock('dnsdaddy restore -input backup.ddbackup -destination restored-dnsdaddy -passphrase-file /private/backup-passphrase.txt'))}
+    <p class="muted small note-tight">Existing browser sessions are revoked during restore. Treat the restored directory as sensitive: it contains the keys required to use saved provider credentials.</p>
+  </div>`;
+}
+
+function changeValue(value) {
+  if (value === undefined || value === null) return '—';
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+function changeHistoryRows(events) {
+  if (!events || !events.length) return html`<p class="muted small">No configuration changes have been recorded yet.</p>`;
+  const states = { complete: ['ok', 'Completed'], failed: ['bad', 'Failed'], pending: ['info', 'In progress'], incomplete: ['warn', 'Incomplete'] };
+  return events.map((event) => {
+    const [tone, label] = states[event.status] || ['warn', event.status || 'Unknown'];
+    return html`<details class="change-event"><summary><span class="change-summary"><strong>${event.action || 'Configuration change'}</strong>
+      <span class="muted small">${event.target || ''}</span></span><time class="small muted" datetime="${event.at}">${new Date(event.at).toLocaleString('en-GB')}</time><span class="badge ${tone}">${label}</span></summary>
+      <div class="change-body"><p class="small muted">Actor: ${event.actor || 'unknown'}${event.httpStatus ? ` · response ${event.httpStatus}` : ''}${event.completedAt ? ` · finished ${new Date(event.completedAt).toLocaleString('en-GB')}` : ''}</p>
+        ${raw(event.error ? html`<p class="rec-note is-warn">${event.error}</p>` : '')}
+        ${raw((event.changes || []).length ? html`<div class="table-wrap"><table><thead><tr><th>Setting</th><th>Before</th><th>After</th></tr></thead><tbody>
+          ${raw(event.changes.map((change) => html`<tr><td><strong>${change.field || change.resource}</strong>${raw(change.resource && change.field ? html`<div class="small muted">${change.resource}</div>` : '')}</td>
+            <td><pre class="change-value">${change.redacted ? '[redacted]' : changeValue(change.before)}</pre></td><td><pre class="change-value">${change.redacted ? '[redacted]' : changeValue(change.after)}</pre></td></tr>`).join(''))}
+        </tbody></table></div>` : html`<p class="muted small">No field differences were recorded for this event.</p>`)}
+      </div></details>`;
+  }).join('');
+}
+
+async function downloadEncryptedBackup(passphrase) {
+  const response = await fetch('/api/v1/recovery/backup', {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase }),
+  });
+  if (response.status === 401) { showLogin(); throw new ApiError(401, 'Your session ended. Sign in and create the backup again.'); }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new ApiError(response.status, (body && body.error) || `Backup could not be created (${response.status}).`);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="?([a-zA-Z0-9._-]+\.ddbackup)"?/);
+  const filename = match ? match[1] : `dnsdaddy-${new Date().toISOString().slice(0, 10)}.ddbackup`;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a'); link.href = url; link.download = filename;
+  document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  return { filename, size: blob.size };
+}
+
+pages.recovery = {
+  title: 'Recovery & changes',
+  subtitle: 'Protect your configuration and understand how it changed.',
+  async render(context = {}) {
+    const read = (path) => apiGet(path, { signal: context.signal }).catch((error) => {
+      if (error.status === 401 || error.name === 'AbortError') throw error;
+      return { available: false, error: error.message };
+    });
+    const [status, history] = await Promise.all([read('/recovery/status'), read('/config/history?limit=50')]);
+    if (!context.isCurrent || context.isCurrent()) this.history = history;
+    return html`${raw(recoveryCard(status))}<div class="card section" id="change-history">
+      <div class="card-head"><div><h2>Configuration history</h2><p>Newest first. Original event details are retained; credentials and secret values are redacted.</p></div></div>
+      <div id="change-events">${raw(history.error ? unavailableState('Change history unavailable', history.error) : changeHistoryRows(history.events))}</div>
+      <div class="row note-loose"><button type="button" class="btn btn-ghost" id="history-more" ${raw(history.hasMore ? '' : 'hidden')}>Load earlier changes</button><span id="history-result" class="small muted" role="status"></span></div>
+      ${raw(history.scope ? html`<p class="muted small">${history.scope}</p>` : '')}
+      ${raw(history.consistency ? html`<p class="muted small">${history.consistency}</p>` : '')}
+      <p class="muted small note-tight">This is an application history, not a tamper-evident audit log. An incomplete event does not prove a change was applied.</p>
+    </div>`;
+  },
+  async mounted() {
+    bindCopyButtons();
+    const form = $('#backup-form');
+    if (form) form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const error = $('#backup-error'); const progress = $('#backup-progress'); const button = $('button[type="submit"]', form);
+      error.hidden = true;
+      const passphrase = form.elements.passphrase.value;
+      const size = new TextEncoder().encode(passphrase).byteLength;
+      if (passphrase !== form.elements.confirmation.value) { error.textContent = 'The passphrases do not match.'; error.hidden = false; form.elements.confirmation.focus(); return; }
+      if (size < 12 || size > 1024) { error.textContent = 'Use a passphrase between 12 and 1024 UTF-8 bytes.'; error.hidden = false; return; }
+      button.disabled = true; progress.textContent = 'Preparing the encrypted archive…'; form.reset();
+      try {
+        const backup = await downloadEncryptedBackup(passphrase);
+        progress.textContent = `Download started: ${backup.filename} (${num(Math.ceil(backup.size / 1024))} KB). Keep your passphrase separately.`;
+      } catch (err) { error.textContent = err.message; error.hidden = false; progress.textContent = ''; }
+      finally { button.disabled = false; }
+    });
+    const button = $('#history-more');
+    let cursor = this.history && this.history.nextBeforeId;
+    if (button) button.addEventListener('click', async () => {
+      if (!cursor) return;
+      button.disabled = true; const host = $('#change-events'); const note = $('#history-result'); note.textContent = 'Loading earlier changes…';
+      try {
+        const data = await apiGet(`/config/history?limit=50&beforeId=${encodeURIComponent(cursor)}`);
+        if (!host.isConnected) return;
+        host.insertAdjacentHTML('beforeend', sanitize(changeHistoryRows(data.events)));
+        cursor = data.nextBeforeId; button.hidden = !data.hasMore; note.textContent = `${num((data.events || []).length)} earlier changes loaded.`;
+      } catch (err) { if (note.isConnected) note.textContent = err.message; }
+      finally { button.disabled = false; }
+    });
+  },
+};
+
+
+/* ---------- Availability and DNS rebinding controls ---------------------- */
+
+function protectionCard(data) {
+  if (!data || data.error) return html`<div class="card section"><div class="card-head"><h2>Resolver protection</h2></div>
+    ${raw(unavailableState('Protection settings unavailable', (data && data.error) || 'Current rate limits and rebinding settings could not be read.'))}</div>`;
+  const limit = data.rateLimit || {};
+  const rebinding = data.rebinding || {};
+  const counters = data.counters || {};
+  return html`<div class="card section" id="resolver-protection"><div class="card-head"><div><h2>Resolver protection</h2>
+    <p>Bound client demand and reject public names that resolve to private addresses unless you explicitly allow them.</p></div></div>
+    <form id="protection-form" data-version="${data.version}">
+      <div class="grid grid-2"><div>
+        <label class="checkline"><input type="checkbox" name="rateEnabled" ${raw(limit.enabled ? 'checked' : '')}><span><strong>Per-client rate limiting</strong><span class="cat-desc">Each attributed client has a bounded allowance. Excess requests are refused.</span></span></label>
+        <div class="grid grid-2 note-tight"><label class="field"><span>Queries per second</span><input name="qps" type="number" min="1" max="100000" step="any" required value="${limit.qps}"></label>
+          <label class="field"><span>Allowed burst</span><input name="burst" type="number" min="1" max="1000000" step="1" required value="${limit.burst}"></label></div>
+        <details class="provider-scope"><summary>Client state limits</summary><div class="grid grid-2 note-tight">
+          <label class="field"><span>Tracked client limit</span><input name="maxClients" type="number" min="1" max="65536" required value="${limit.maxClients}"></label>
+          <label class="field"><span>Release idle state after (seconds)</span><input name="idleSeconds" type="number" min="5" max="3600" required value="${limit.idleSeconds}"></label></div>
+          <p class="muted small">When tracking is full, new clients share an overflow allowance. Reverse-proxy trust and network tokens determine attribution.</p></details>
+      </div><div>
+        <label class="checkline"><input type="checkbox" name="rebindingEnabled" ${raw(rebinding.enabled ? 'checked' : '')}><span><strong>DNS rebinding protection</strong><span class="cat-desc">Checks IPv4, IPv6 and alias answers for private or reserved destinations.</span></span></label>
+        <label class="field note-tight"><span>Allowed internal domains</span><textarea name="allowDomains" rows="3" placeholder="internal.example">${(rebinding.allowDomains || []).join('\n')}</textarea>
+          <span class="small muted">One domain per line. Matches the original question and its subdomains, including legitimate split-DNS names.</span></label>
+        <details class="provider-scope"><summary>Address-range exceptions</summary><label class="field note-tight"><span>Allowed destination ranges</span><textarea name="allowCIDRs" rows="3" placeholder="192.168.10.0/24">${(rebinding.allowCIDRs || []).join('\n')}</textarea>
+          <span class="small muted">One CIDR per line. Every name resolving into an allowed range can pass this check; keep exceptions narrow.</span></label></details>
+      </div></div>
+      <div class="row note-loose"><button type="submit" class="btn btn-primary">Save resolver protection</button><span class="muted small">Applies to new queries.</span></div>
+      <p class="form-error" id="protection-error" role="alert" hidden></p>
+    </form>
+    <div class="rec-meta note-loose"><span>${num(counters.rateLimited)} rate-limited requests</span><span>${num(counters.rateOverflow)} requests used the shared overflow allowance</span>
+      <span>${num(counters.trackedClients)} clients tracked</span><span>${num(counters.rebindingBlocked)} rebinding blocks</span></div>
+  </div>`;
+}
+
+function mountProtection() {
+  const form = $('#protection-form'); if (!form) return;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault(); const error = $('#protection-error'); error.hidden = true;
+    const lines = (value) => value.split('\n').map((line) => line.trim()).filter(Boolean);
+    const fields = form.elements;
+    const body = { version: Number(form.dataset.version),
+      rateLimit: { enabled: fields.rateEnabled.checked, qps: Number(fields.qps.value), burst: Number(fields.burst.value), maxClients: Number(fields.maxClients.value), idleSeconds: Number(fields.idleSeconds.value) },
+      rebinding: { enabled: fields.rebindingEnabled.checked, allowDomains: lines(fields.allowDomains.value), allowCIDRs: lines(fields.allowCIDRs.value) },
+    };
+    const button = $('button[type="submit"]', form); button.disabled = true;
+    try {
+      const result = await apiSend('PUT', '/protection', body);
+      if (result && result.version !== undefined) form.dataset.version = String(result.version);
+      toast('Resolver protection saved'); await router.reload();
+    } catch (err) {
+      error.textContent = err.status === 409 ? 'These settings changed elsewhere. Refresh this page, review the current values and save again. Your changes were not applied.' : err.message;
+      error.hidden = false; button.disabled = false;
+    }
+  });
+}
+
+
 pages.settings = {
   title: 'Settings',
   subtitle: 'Runtime configuration and access.',
   async render() {
-    const [settings, tokens] = await Promise.all([apiGet('/settings'), apiGet('/tokens')]);
+    const [settings, tokens, protection] = await Promise.all([apiGet('/settings'), apiGet('/tokens'), apiGet('/protection').catch((error) => ({ error: error.message }))]);
 
     return html`
       <div class="section grid grid-4">
@@ -5202,11 +5062,12 @@ pages.settings = {
         )}
       </div>
 
+      ${raw(protectionCard(protection))}
+      <div class="card section integration-cta"><div><h2>Recovery &amp; changes</h2><p class="muted">Create an encrypted backup and review recorded configuration changes.</p></div><a class="btn btn-observe" href="#/recovery">Open recovery</a></div>
       <div class="card section">
         <div class="card-head">
           <div><h2>Effective configuration</h2>
-          <p>Read-only. Configuration lives in your YAML file and environment, so a
-             deployment is reproducible from its config rather than from database state.</p></div>
+          <p>Startup settings from this running process. Runtime changes made in the dashboard are recorded in configuration history.</p></div>
         </div>
         <div class="table-wrap">
           <table>
@@ -5293,6 +5154,7 @@ pages.settings = {
     `;
   },
   async mounted() {
+    mountProtection();
     $('#password-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const form = new FormData(e.target);
@@ -5763,19 +5625,14 @@ if (typeof document !== 'undefined') {
  * this is not a module system, it is four lines that let `node --test` require
  * the file. `module` is undefined in a browser, so the block is inert there.
  *
- * Only pure functions are exported — the ones that decide what the Threat
- * Observatory card claims. That decision is the one place in the UI where
- * being wrong means telling somebody they are protected when they are not.
+ * Pure rendering functions and the bounded export collector are exported so
+ * tests can pin evidence provenance, consent boundaries and completeness.
  */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     esc,
     ApiError,
     claimRefresh,
-    observatoryState,
-    observatoryErrorSummary,
-    observatoryEnforcement,
-    observatoryCard,
     feedStatusBadge,
     threatIntelPanel,
     diagnosticsBanner,
@@ -5834,6 +5691,24 @@ if (typeof module !== 'undefined' && module.exports) {
     decisionRow,
     decisionsCard,
     decisionEvidenceRow,
+    decisionEvidenceContent,
+    investigationLearning,
+    findingScore,
+    dnssecBadge,
+    exportCard,
+    readCompleteExport,
+    externalAPICard,
+    nativeMode,
+    nativeModeCard,
+    nativeEnforcementCard,
+    nativeOverview,
+    localLearningCard,
+    learningWindows,
+    findingConfidence,
+    recoveryCard,
+    changeHistoryRows,
+    protectionCard,
+    webhookCard,
     providerCard,
     providerStatusBadge,
     verificationChip,

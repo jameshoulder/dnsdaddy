@@ -205,6 +205,8 @@ type APIProviderUpdate struct {
 // would send a VirusTotal key to Safe Browsing on the next lookup. Switching
 // service means creating a provider and deleting the old one, which also makes
 // the operator re-enter the credential — the correct amount of friction.
+// The configuration write and expiry of its old persistent cache are atomic.
+// Runtime callers must also revoke old engine tasks before making the write.
 func (s *Store) UpdateAPIProvider(ctx context.Context, id string, up APIProviderUpdate) (APIProvider, error) {
 	cur, err := s.GetAPIProvider(ctx, id)
 	if err != nil {
@@ -241,6 +243,11 @@ func (s *Store) UpdateAPIProvider(ctx context.Context, id string, up APIProvider
 	}
 	applyProviderDefaults(&cur)
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return APIProvider{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful commit
 	now := unixMilli(time.Now())
 	const q = `
 		UPDATE api_providers
@@ -248,10 +255,24 @@ func (s *Store) UpdateAPIProvider(ctx context.Context, id string, up APIProvider
 		       timeout_ms = ?, rate_per_minute = ?, cache_ttl_seconds = ?,
 		       policy_scope = ?, updated_at = ?
 		 WHERE id = ?`
-	if _, err := s.db.ExecContext(ctx, q,
+	res, err := tx.ExecContext(ctx, q,
 		cur.Name, boolToInt(cur.Enabled), encodeJSON(cur.Capabilities),
 		encodeStringMap(cur.Config), cur.TimeoutMS, cur.RatePerMinute,
-		cur.CacheTTLSeconds, encodeJSON(cur.PolicyScope), now, id); err != nil {
+		cur.CacheTTLSeconds, encodeJSON(cur.PolicyScope), now, id)
+	if err != nil {
+		return APIProvider{}, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return APIProvider{}, err
+	}
+	if n == 0 {
+		return APIProvider{}, ErrNotFound
+	}
+	if err := expireProviderCacheTx(ctx, tx, id, now); err != nil {
+		return APIProvider{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return APIProvider{}, err
 	}
 	cur.UpdatedAt = fromUnixMilli(now)
@@ -338,10 +359,17 @@ func applyProviderDefaults(p *APIProvider) {
 // caller that knows the plaintext, and keeping it out of the store means there
 // is no code path in this package that has ever held a decrypted credential.
 // hint must already be derived — secrets.Hint does it — for the same reason.
+// Installing or rotating the credential atomically expires results obtained
+// with the previous credentials. Runtime callers must first revoke old tasks.
 func (s *Store) SetProviderSecret(ctx context.Context, providerID string, ciphertext []byte, keyID, hint string) error {
 	if len(ciphertext) == 0 {
 		return fmt.Errorf("refusing to store an empty credential for %s", providerID)
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful commit
 	now := unixMilli(time.Now())
 
 	// The rotation timestamp survives an upsert, so "when was this last
@@ -354,8 +382,13 @@ func (s *Store) SetProviderSecret(ctx context.Context, providerID string, cipher
 		  key_id     = excluded.key_id,
 		  hint       = excluded.hint,
 		  rotated_at = ?`
-	_, err := s.db.ExecContext(ctx, q, providerID, ciphertext, keyID, hint, now, now)
-	return err
+	if _, err := tx.ExecContext(ctx, q, providerID, ciphertext, keyID, hint, now, now); err != nil {
+		return err
+	}
+	if err := expireProviderCacheTx(ctx, tx, providerID, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ProviderSecretCiphertext returns the sealed credential, or ErrNotFound.
@@ -373,10 +406,41 @@ func (s *Store) ProviderSecretCiphertext(ctx context.Context, providerID string)
 	return ct, err
 }
 
-// DeleteProviderSecret removes a stored credential, leaving the provider.
+// DeleteProviderSecret removes a stored credential and expires its cached
+// results in one transaction, leaving the provider. Runtime callers must first
+// revoke old tasks so an earlier request cannot restore a fresh cache entry.
 func (s *Store) DeleteProviderSecret(ctx context.Context, providerID string) error {
-	_, err := s.db.ExecContext(ctx,
-		"DELETE FROM api_provider_secrets WHERE provider_id = ?", providerID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful commit
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM api_provider_secrets WHERE provider_id = ?", providerID); err != nil {
+		return err
+	}
+	if err := expireProviderCacheTx(ctx, tx, providerID, unixMilli(time.Now())); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// expireProviderCacheTx retires cached reputation and enrichment when their
+// configuration or credential changes. Expiry makes old answers ineligible for
+// restart warming while retaining raw responses, scores, categories, fetched
+// times and enrichment data until normal expired-cache pruning. These mutable
+// cache rows are separate from immutable findings and recorded DNS decisions.
+// Already expired rows keep their earlier expiry; unrelated providers are not
+// affected. The owning engine must prevent an old task from committing later.
+func expireProviderCacheTx(ctx context.Context, tx *sql.Tx, providerID string, now int64) error {
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE intel_verdicts SET expires_at = ? WHERE provider_id = ? AND expires_at > ?",
+		now, providerID, now); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx,
+		"UPDATE intel_enrichment SET expires_at = ? WHERE provider_id = ? AND expires_at > ?",
+		now, providerID, now)
 	return err
 }
 

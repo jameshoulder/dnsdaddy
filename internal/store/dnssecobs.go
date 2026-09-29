@@ -173,6 +173,10 @@ type DNSSECObservationFilter struct {
 	// window the summary is computed over, so a list and its summary
 	// describe one population.
 	Since time.Time
+	Until time.Time
+	// ClientIP narrows via the retained query log's exact observation ID.
+	// Observations without recorded client correlation cannot be attributed.
+	ClientIP string
 	// Domain, when set, keeps only observations of exactly that name.
 	Domain string
 	Limit  int
@@ -204,11 +208,19 @@ func (s *Store) ListDNSSECObservations(ctx context.Context, f DNSSECObservationF
 		q += " AND ts >= ?"
 		args = append(args, unixMilli(f.Since))
 	}
+	if !f.Until.IsZero() {
+		q += " AND ts <= ?"
+		args = append(args, unixMilli(f.Until))
+	}
+	if f.ClientIP != "" {
+		q += " AND EXISTS (SELECT 1 FROM query_log l WHERE l.dnssec_obs = dnssec_observations.id AND l.dnssec_obs <> '' AND l.client_ip = ?)"
+		args = append(args, f.ClientIP)
+	}
 	if f.Domain != "" {
 		q += " AND qname = ?"
 		args = append(args, f.Domain)
 	}
-	q += " ORDER BY ts DESC LIMIT ?"
+	q += " ORDER BY ts DESC, id DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
