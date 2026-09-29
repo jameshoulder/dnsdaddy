@@ -250,12 +250,17 @@ type QueryFilter struct {
 	NetworkID string
 	Action    string
 	Category  string
-	Domain    string
-	ClientIP  string
-	Since     time.Time
-	Until     time.Time
-	Cursor    int64 // return rows with id < cursor; 0 means start at the newest
-	Limit     int
+	// Domain is a substring match, for the query log's search box.
+	Domain string
+	// ExactDomain matches one normalised name exactly, for an investigation
+	// that has to land on the rows for that name and no other. Uses the
+	// qname index where Domain's LIKE cannot.
+	ExactDomain string
+	ClientIP    string
+	Since       time.Time
+	Until       time.Time
+	Cursor      int64 // return rows with id < cursor; 0 means start at the newest
+	Limit       int
 }
 
 // ListQueries returns query-log rows newest-first, plus the cursor to pass in
@@ -288,6 +293,10 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 	if d := strings.TrimSpace(f.Domain); d != "" {
 		where = append(where, "qname LIKE ?")
 		args = append(args, "%"+strings.ToLower(d)+"%")
+	}
+	if f.ExactDomain != "" {
+		where = append(where, "qname = ?")
+		args = append(args, f.ExactDomain)
 	}
 	if !f.Since.IsZero() {
 		where = append(where, "ts >= ?")

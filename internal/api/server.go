@@ -210,6 +210,16 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/decisions/{id}", a.handleGetDecision)
 	api.HandleFunc("GET /api/v1/evidence/domain/{domain}", a.handleDomainEvidence)
 
+	// Investigation: one name or one address, everything already recorded
+	// about it, in sections that stay apart — what happened, what was
+	// decided then, what would be decided now, what is on file, what the
+	// detectors inferred. Read-only; the policy preview runs on the live
+	// engine's snapshot and contacts no provider. The one POST asks the
+	// configured providers deliberately, within their existing budgets.
+	api.HandleFunc("GET /api/v1/investigate/domain/{domain}", a.handleInvestigateDomain)
+	api.HandleFunc("POST /api/v1/investigate/domain/{domain}/enrich", a.handleInvestigateEnrich)
+	api.HandleFunc("GET /api/v1/investigate/client/{ip}", a.handleInvestigateClient)
+
 	api.HandleFunc("GET /api/v1/clients", a.handleListClients)
 	api.HandleFunc("PUT /api/v1/clients", a.handleSetClient)
 

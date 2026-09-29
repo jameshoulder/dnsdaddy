@@ -62,7 +62,8 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | DNSSEC status per query | The **upstream's** verdict. See below and [dns-security/dnssec.md](dns-security/dnssec.md). |
 | Prometheus metrics | Hand-rolled, no client library. |
 | Markdown reports | A period summary written for someone who does not run the network. |
-| Structured security findings | Stored, queryable, and exportable as NDJSON. See [detection/README.md](detection/README.md). |
+| Structured security findings | Stored, queryable, and exportable as NDJSON, paged by a keyset cursor so an export says whether it is complete. See [detection/README.md](detection/README.md) and [siem.md](siem.md). |
+| Domain and client investigation | `GET /api/v1/investigate/domain/{domain}` and `/client/{ip}`, and the dashboard's Investigate page: what the query log recorded for one exact name or address, the decisions stored at the time, a read-only preview of what the current configuration would decide now, what is on file and whether any of it ever decided a query, and related experimental findings and Daddybound observations — each in its own section. Nothing is written and no external provider is contacted; a name an external provider would be asked about is reported as *not evaluated*, never guessed allowed. Enrichment is a separate POST that uses the configured providers within their existing mode and budget. Exact name match only: it is not a substring search, a passive-DNS history, an IP-reputation source or a device discovery tool. |
 
 ### Management
 

@@ -1977,7 +1977,9 @@ function queryRow(q, filters = {}) {
       </summary>
       <dl class="qfacts">${raw(facts)}</dl>
       <div class="qactions">
-        <a class="btn btn-observe btn-sm" href="${queryHash({ ...context, domain: q.domain })}" data-filter-domain="${q.domain}">Filter this domain</a>
+        <a class="btn btn-observe btn-sm" href="${investigateHash({ domain: q.domain, client: q.clientIp, hours: context.hours })}" data-investigate-domain="${q.domain}">Investigate this domain</a>
+        <a class="btn btn-ghost btn-sm" href="${queryHash({ ...context, domain: q.domain })}" data-filter-domain="${q.domain}">Filter this domain</a>
+        ${raw(q.clientIp ? html`<a class="btn btn-ghost btn-sm" href="${investigateHash({ client: q.clientIp, hours: context.hours })}" data-investigate-client="${q.clientIp}">Investigate this client</a>` : '')}
         ${raw(q.clientIp ? html`<a class="btn btn-ghost btn-sm" href="${queryHash({ ...context, clientIp: q.clientIp })}">Filter this client</a>` : '')}
       </div>
     </details>`;
@@ -2338,6 +2340,7 @@ pages.detections = {
                           Detector: <span class="mono">${f.detector}</span> ·
                           Score: <span class="mono">${f.score}</span>
                         </p>
+                        ${raw(findingLinks(f))}
                         ${raw(findingDetail(f.detail))}
                       </div>
                     </details>
@@ -2381,6 +2384,415 @@ pages.detections = {
         </div>
       </div>
     `;
+  },
+};
+
+/* ---------- investigation ------------------------------------------------ */
+
+/*
+ * One name or one address, everything already recorded about it, in sections
+ * that never blur into each other. The order is the operator's question in
+ * order: what happened, why it was decided then, what would be decided now,
+ * what is on file, what the detectors think. The first screen answers the
+ * first two; everything raw lives in labelled disclosures at the end.
+ *
+ * Nothing on this page is written by this page. The preview is the server's
+ * evaluation of current configuration and is labelled as such, next to the
+ * stored decisions it must never be confused with.
+ */
+
+// Links from a finding to the subjects it concerns.
+function findingLinks(f) {
+  const links = [];
+  if (f.domain) links.push(html`<a class="btn btn-ghost btn-sm" href="${investigateHash({ domain: f.domain })}" data-investigate-domain="${f.domain}">Investigate domain</a>`);
+  if (f.clientIp) links.push(html`<a class="btn btn-ghost btn-sm" href="${investigateHash({ client: f.clientIp })}" data-investigate-client="${f.clientIp}">Investigate client</a>`);
+  return links.length ? html`<div class="row finding-links">${raw(links.join(''))}</div>` : '';
+}
+
+function normaliseInvestigateFilters(input = {}) {
+  return {
+    domain: String(input.domain || '').trim(),
+    client: String(input.client || '').trim(),
+    hours: ['1', '24', '168', '720'].includes(String(input.hours)) ? String(input.hours) : '',
+  };
+}
+
+function investigateFilters(hash) {
+  const params = new URLSearchParams(String(hash || '').split('?')[1] || '');
+  return normaliseInvestigateFilters(Object.fromEntries(params));
+}
+
+function investigateHash(filters) {
+  const f = normaliseInvestigateFilters(filters);
+  const query = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
+  return `#/investigate${query ? `?${query}` : ''}`;
+}
+
+function investigateForm(filters) {
+  const option = (value, label, selected) => html`<option value="${value}"${raw(value === selected ? ' selected' : '')}>${label}</option>`;
+  return html`
+    <div class="card section">
+      <form class="query-filters" id="inv-form">
+        <div class="query-filter"><label for="inv-domain">Domain</label>
+          <input id="inv-domain" name="domain" type="search" placeholder="exact name, e.g. evil.example" autocomplete="off" spellcheck="false" value="${filters.domain}"></div>
+        <div class="query-filter"><label for="inv-client">Client IP</label>
+          <input id="inv-client" name="client" type="search" placeholder="optional, exact address" autocomplete="off" spellcheck="false" value="${filters.client}"></div>
+        <div class="query-filter"><label for="inv-hours">Retained data window</label>
+          <select id="inv-hours" name="hours">
+            ${raw([['', 'Retention window'], ['1', 'Last hour'], ['24', 'Last 24 hours'], ['168', 'Last 7 days'], ['720', 'Last 30 days']].map(([v, l]) => option(v, l, filters.hours)).join(''))}
+          </select></div>
+        <div class="query-filter-actions">
+          <button type="submit" class="btn btn-observe" id="inv-apply">Investigate</button>
+          <button type="button" class="btn btn-ghost" id="inv-clear">Clear</button>
+        </div>
+      </form>
+      <p class="muted small query-filter-note">Exact names only, as this resolver recorded them. A domain alone investigates the name;
+        a client alone investigates the address; both together narrow the name to that client. This is not a passive-DNS history,
+        an IP-reputation source or a device discovery tool — it reads what this resolver kept.</p>
+    </div>`;
+}
+
+function windowLine(w) {
+  if (!w) return '';
+  return html`<span class="badge">Last ${w.hours}h</span>
+    <span class="muted small">Per-query rows are retained for ${w.retentionDays} day${w.retentionDays === 1 ? '' : 's'}${w.queryLog ? '' : ' · query log off'}${w.clientAttribution ? '' : ' · client addresses not recorded'}</span>`;
+}
+
+const OUTCOME_BADGE = {
+  blocked: ['bad', 'Blocked'],
+  allowed: ['qact-allowed', 'Allowed'],
+  not_evaluated: ['warn', 'Not evaluated'],
+};
+
+function outcomeBadge(outcome) {
+  const [cls, label] = OUTCOME_BADGE[outcome] || ['warn', String(outcome || 'unknown')];
+  return html`<span class="badge ${cls}">${label}</span>`;
+}
+
+// 1. What happened.
+function activitySection(act, { client = false } = {}) {
+  if (!act || !act.available) {
+    return html`
+      <div class="card section" id="inv-activity">
+        <div class="card-head"><div><h2>Recorded activity</h2><p>What the query log holds for this subject.</p></div></div>
+        ${raw(emptyState('Not recorded', (act && act.unavailable) || 'No per-query rows exist for this subject by configuration.', { icon: '○' }))}
+      </div>`;
+  }
+  const s = act.summary || {};
+  const qtypes = Object.entries(s.qtypes || {}).sort((a, b) => b[1] - a[1]);
+  const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${note ? html` <span class="muted small">${note}</span>` : ''}</dd></div>`;
+  const clients = (act.clients || []).length
+    ? html`<h4>Clients that asked</h4>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Client</th><th>Network</th><th class="num">Queries</th><th class="num">Blocked</th><th>Last seen</th><th></th></tr></thead>
+          <tbody>${raw(act.clients.map((c) => html`<tr>
+            <td class="mono">${c.clientName || c.clientIp}${raw(c.clientName ? html` <span class="muted small">${c.clientIp}</span>` : '')}</td>
+            <td class="mono small">${c.networkId || '—'}</td>
+            <td class="num">${num(c.queries)}</td><td class="num">${num(c.blocked)}</td>
+            <td class="muted">${relTime(c.lastSeen)}</td>
+            <td><a class="btn btn-ghost btn-sm" href="${investigateHash({ client: c.clientIp })}">Investigate client</a></td></tr>`).join(''))}
+          </tbody></table></div>`
+    : '';
+  const domains = (act.domains || []).length
+    ? html`<h4>Names this client asked for</h4>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Domain</th><th class="num">Queries</th><th class="num">Blocked</th><th>Category</th><th>Last seen</th><th></th></tr></thead>
+          <tbody>${raw(act.domains.map((d) => html`<tr>
+            <td class="mono">${d.domain}</td>
+            <td class="num">${num(d.queries)}</td><td class="num">${num(d.blocked)}</td>
+            <td>${raw(d.category ? categoryBadge(d.category) : '—')}</td>
+            <td class="muted">${relTime(d.lastSeen)}</td>
+            <td><a class="btn btn-ghost btn-sm" href="${investigateHash({ domain: d.domain })}">Investigate domain</a></td></tr>`).join(''))}
+          </tbody></table></div>`
+    : '';
+  return html`
+    <div class="card section" id="inv-activity">
+      <div class="card-head"><div><h2>Recorded activity</h2><p>${act.note}</p></div></div>
+      ${raw(s.queries
+        ? html`<dl class="claim-key">
+            ${raw(stat('Queries', html`<span class="mono">${num(s.queries)}</span>`, `${num(s.allowed)} allowed · ${num(s.blocked)} blocked · ${num(s.errors)} failed`))}
+            ${raw(stat('Seen', html`${relTime(s.firstSeen)} → ${relTime(s.lastSeen)}`))}
+            ${raw(stat('Record types', html`<span class="mono">${qtypes.map(([t, n]) => `${t} ${num(n)}`).join(' · ')}</span>`))}
+            ${raw(stat('Answer cache', html`<span class="mono">${num(s.cached)}</span>`, 'allowed answers served from cache'))}
+            ${raw(stat('Latency', html`<span class="mono">${(s.avgElapsedMs || 0).toFixed(1)} ms</span>`, `average · max ${num(s.maxElapsedMs)} ms`))}
+          </dl>`
+        : emptyState('Nothing recorded in this window', 'No query-log row matches this exact subject in the selected window. Widen the window, or check the name is spelt as clients ask for it.', { icon: '○' }))}
+      ${raw(client ? domains : clients)}
+      ${raw((act.recent || []).length
+        ? html`<h4>Newest rows${act.recentCursor ? ` (first ${act.recentLimit})` : ''}</h4>
+            <div class="qlog">${raw(act.recent.map((q) => queryRow(q)).join(''))}</div>
+            ${raw(act.recentCursor ? html`<p class="muted small">More rows exist. <a href="${queryHash(client ? { clientIp: act.recent[0].clientIp } : { domain: act.recent[0].domain })}">Open the query log</a> to page through them.</p>` : '')}`
+        : '')}
+    </div>`;
+}
+
+// 2. What was decided at the time.
+function decisionSection(dec) {
+  const rows = (dec && dec.items) || [];
+  return html`
+    <div class="card section" id="inv-decisions">
+      <div class="card-head"><div><h2>Historical decisions</h2><p>${(dec && dec.note) || 'Stored when each decision was made.'}</p></div></div>
+      ${raw(!dec || !dec.recording
+        ? emptyState('Not recording decisions', 'Decision records are switched off (log.decision_records), so no stored explanation exists. The current policy preview below is not a substitute: it says what would be decided now, not why anything was decided then.', { icon: '○' })
+        : rows.length
+          ? rows.map(decisionRow).join('') + (dec.truncated ? html`<p class="muted small">Only the newest decisions are shown.</p>` : '')
+          : emptyState('No decision recorded', 'No stored decision matches this subject. An allowed query records no decision; a block before decision records were enabled has none either.', { icon: '○' }))}
+    </div>`;
+}
+
+function previewDecisionLine(d) {
+  return html`${raw(outcomeBadge(d.outcome))}
+    ${raw(d.rule ? html`<span class="badge">${d.rule}</span>` : '')}
+    ${raw(d.category ? categoryBadge(d.category) : '')}
+    ${raw(d.reason ? html`<span class="muted small">${d.reason}</span>` : '')}
+    ${raw(d.source ? html`<span class="muted small">source: ${d.source}</span>` : '')}`;
+}
+
+// 3. What would be decided now. Labelled as a preview everywhere it appears.
+function previewSection(pv) {
+  if (!pv) return '';
+  const c = pv.context || {};
+  const ext = pv.external || {};
+  return html`
+    <div class="card section" id="inv-preview">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">Preview · current configuration · read-only</div>
+        <h2>Current policy preview</h2>
+        <p>${pv.note}</p>
+      </div></div>
+      <dl class="claim-key">
+        <div class="qfact"><dt>Context</dt><dd>
+          ${raw(c.client ? html`client <span class="mono">${c.client}</span> · ` : html`no client supplied · `)}
+          ${raw(c.attribution === 'catch_all' ? 'catch-all network' : c.attribution === 'network_prefix' ? 'matched by network prefix' : 'no network')}
+          ${raw(c.networkName ? html` · <span class="mono">${c.networkName}</span>` : '')}
+          ${raw(c.policyName ? html` · policy <span class="mono">${c.policyName}</span>` : '')}
+        </dd></div>
+        <div class="qfact"><dt>Would be</dt><dd>${raw(previewDecisionLine(pv.decision || {}))}</dd></div>
+        <div class="qfact"><dt>External providers</dt><dd>
+          ${raw(!ext.configured
+            ? html`<span class="badge">none configured</span>`
+            : html`<span class="badge ${ext.evaluated ? 'ok' : ext.reached ? 'warn' : ''}">${ext.evaluated ? 'cached verdict used' : ext.reached ? 'lookup not performed' : 'not reached'}</span>`)}
+          ${raw(ext.mode ? html` <span class="muted small">mode ${ext.mode}</span>` : '')}
+          ${raw(ext.provider ? html` <span class="muted small">${ext.provider}</span>` : '')}
+          ${raw(ext.note ? html`<div class="muted small">${ext.note}</div>` : '')}
+          ${raw(ext.configured && ext.reached && !ext.evaluated ? html`<div class="row note-tight"><button type="button" class="btn btn-ghost btn-sm" id="inv-enrich">Ask the configured providers now</button> <span class="muted small">A deliberate lookup within the configured mode and budget.</span></div>` : '')}
+        </dd></div>
+      </dl>
+      <details class="chart-data"><summary>Under every policy</summary>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Policy</th><th class="num">Enabled networks</th><th>Would be</th></tr></thead>
+          <tbody>${raw((pv.byPolicy || []).map((p) => html`<tr>
+            <td>${p.policyName} <span class="muted small mono">${p.policyId}</span></td>
+            <td class="num">${num(p.assignedNetworks)}</td>
+            <td>${raw(previewDecisionLine(p.decision || {}))}</td></tr>`).join(''))}
+          </tbody></table></div>
+        <p class="muted small">A comparison, not a change: nothing is assigned or edited from this page.</p>
+      </details>
+    </div>`;
+}
+
+// 4. What is on file now.
+function evidenceSection(ev) {
+  if (!ev) return '';
+  const a = ev.assessment || {};
+  const items = ev.items || [];
+  const row = (e) => html`
+    <div class="ev-row${e.expired ? ' is-expired' : ''}">
+      <div class="ev-main">
+        <div class="ev-title">
+          <strong>${e.sourceName || e.source}</strong>
+          <span class="badge">${e.kind || 'unknown'}</span>
+          ${raw(e.confidence ? html`<span class="badge">${CONFIDENCE_LABEL[e.confidence] || e.confidence} confidence</span>` : '')}
+          ${raw(e.expired ? html`<span class="badge warn">expired</span>` : '')}
+          ${raw(e.contributedTo ? html`<span class="badge ok">decided ${num(e.contributedTo)} quer${e.contributedTo === 1 ? 'y' : 'ies'}</span>` : html`<span class="badge">on file only</span>`)}
+        </div>
+        <div class="ev-claim">${e.claim}</div>
+        <div class="rec-meta">
+          ${raw(e.category ? html`<span>${e.category}</span>` : '')}
+          <span>observed ${relTime(e.observedAt)}</span>
+          ${raw(e.expiresAt ? html`<span>${e.expired ? 'expired' : 'expires'} ${relTime(e.expiresAt)}</span>` : html`<span>does not expire</span>`)}
+        </div>
+      </div>
+    </div>`;
+  return html`
+    <div class="card section" id="inv-evidence">
+      <div class="card-head"><div><h2>Current evidence</h2><p>${ev.note}</p></div></div>
+      <p><strong>${a.summary || 'Nothing on file for this subject.'}</strong>
+        ${raw(a.verdict ? html` <span class="badge ${a.verdict === 'malicious' ? 'bad' : a.verdict === 'suspicious' ? 'warn' : a.verdict === 'benign' ? 'ok' : ''}">${a.verdict}</span>` : '')}
+        ${raw(a.inferenceOnly ? html` <span class="badge warn">inference only</span>` : '')}
+        ${raw(a.corroborated ? html` <span class="badge">corroborated</span>` : '')}</p>
+      ${raw(items.length ? items.map(row).join('') : '')}
+    </div>`;
+}
+
+// 5. What the detectors inferred, and what Daddybound concluded.
+function relatedFindingsSection(fd) {
+  if (!fd) return '';
+  const items = fd.items || [];
+  return html`
+    <div class="card section" id="inv-findings">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">Experimental · alert-only</div>
+        <h2>Related findings</h2>
+        <p>${fd.note}</p>
+      </div></div>
+      ${raw(!fd.enabled
+        ? emptyState('Behavioural detection is switched off', 'No findings can exist while detection.enabled is false.', { icon: '○' })
+        : items.length
+          ? items.map((f) => html`
+              <details class="finding">
+                <summary>
+                  ${raw(severityBadge(f.severity))}
+                  <span class="mono">${f.eventType}</span>
+                  <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
+                  <span class="muted small nowrap">confidence ${f.confidence}</span>
+                  <span class="muted small nowrap">${relTime(f.time)}</span>
+                </summary>
+                <div class="finding-body">
+                  <p>${f.summary}</p>
+                  <p class="muted small">Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> · Detector: <span class="mono">${f.detector}</span> · Score: <span class="mono">${f.score}</span></p>
+                  ${raw(findingDetail(f.detail))}
+                </div>
+              </details>`).join('') + (fd.truncated ? html`<p class="muted small">Only the newest findings are shown.</p>` : '')
+          : emptyState('No related finding', 'No detector raised anything about this subject in the window. That is not evidence that it is clean.', { icon: '○' }))}
+    </div>`;
+}
+
+function observationsSection(ob) {
+  if (!ob) return '';
+  const items = ob.items || [];
+  return html`
+    <div class="card section" id="inv-observations">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">Experimental · Daddybound · enforces nothing</div>
+        <h2>Local DNSSEC observations</h2>
+        <p>${ob.note}</p>
+      </div></div>
+      ${raw(!ob.available
+        ? emptyState('Learn mode is off', 'Daddybound is not observing traffic on this instance, so no local verdict exists for any name.', { icon: '○' })
+        : items.length
+          ? html`<div class="table-wrap"><table>
+              <thead><tr><th>When</th><th>Type</th><th>Upstream said</th><th>Daddybound concluded</th><th>Differs</th><th>Reason</th></tr></thead>
+              <tbody>${raw(items.map((o) => html`<tr>
+                <td class="muted">${relTime(o.time)}${o.cached ? ' (cached answer)' : ''}</td>
+                <td class="mono">${o.qtype}</td>
+                <td>${raw(o.upstream ? dnssecBadge(o.upstream) : '—')}</td>
+                <td>${raw(localDnssecBadge(o))}</td>
+                <td>${o.disagreement || '—'}</td>
+                <td class="muted small">${o.reason || ''}</td></tr>`).join(''))}
+              </tbody></table></div>${ob.truncated ? html`<p class="muted small">Only the newest observations are shown.</p>` : ''}`
+          : emptyState('No observation for this name', 'Daddybound observes only resolved queries, and only those the queue accepted.', { icon: '○' }))}
+    </div>`;
+}
+
+function rawJsonSection(data) {
+  let text;
+  try {
+    text = JSON.stringify(data, null, 2);
+  } catch {
+    text = 'unavailable';
+  }
+  return html`<details class="chart-data section"><summary>Raw response</summary><pre class="mono small inv-raw">${text}</pre></details>`;
+}
+
+function investigationHeader(subject, w) {
+  return html`
+    <div class="card section">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">${subject.kind}</div>
+        <h2 class="mono">${subject.title}</h2>
+        ${raw(subject.sub ? html`<p>${subject.sub}</p>` : '')}
+      </div><div class="row-end hero-intel">${raw(windowLine(w))}</div></div>
+    </div>`;
+}
+
+pages.investigate = {
+  title: 'Investigate',
+  subtitle: 'One name or one address: what happened, why, and what would happen now.',
+  async render(context = {}) {
+    const hash = context.hash === undefined ? window.location.hash : context.hash;
+    const filters = investigateFilters(hash);
+    const read = (path) => apiGet(path, { signal: context.signal });
+    const form = investigateForm(filters);
+
+    if (!filters.domain && !filters.client) {
+      return html`${raw(form)}
+        ${raw(emptyState('Enter a domain or a client address', 'Query-log rows and findings link here. The page reads what this resolver kept: recorded activity, stored decisions, a read-only preview of current policy, evidence on file, and related findings.', { icon: '⌕' }))}`;
+    }
+
+    const hours = filters.hours ? `hours=${encodeURIComponent(filters.hours)}` : '';
+    if (!filters.domain) {
+      let data;
+      try {
+        data = await read(`/investigate/client/${encodeURIComponent(filters.client)}${hours ? `?${hours}` : ''}`);
+      } catch (err) {
+        if (err.status === 401 || err.name === 'AbortError') throw err;
+        return html`${raw(form)}${raw(unavailableState('Could not investigate this client', err.message || 'The request failed.'))}`;
+      }
+      const sub = data.subject || {};
+      const att = sub.attribution || {};
+      return html`${raw(form)}
+        ${raw(investigationHeader({
+          kind: 'Client', title: sub.name ? `${sub.name} · ${sub.client}` : sub.client,
+          sub: `Current attribution: ${att.attribution === 'catch_all' ? 'catch-all network' : att.attribution === 'network_prefix' ? 'matched by network prefix' : 'none'}${att.networkName ? ` · ${att.networkName}` : ''}${att.policyName ? ` · policy ${att.policyName}` : ''} — as configured now, not as recorded then.`,
+        }, data.window))}
+        ${raw(activitySection(data.activity, { client: true }))}
+        ${raw(decisionSection(data.decisions))}
+        ${raw(relatedFindingsSection(data.findings))}
+        ${raw(rawJsonSection(data))}`;
+    }
+
+    const params = [filters.client ? `client=${encodeURIComponent(filters.client)}` : '', hours].filter(Boolean).join('&');
+    let data;
+    try {
+      data = await read(`/investigate/domain/${encodeURIComponent(filters.domain)}${params ? `?${params}` : ''}`);
+    } catch (err) {
+      if (err.status === 401 || err.name === 'AbortError') throw err;
+      return html`${raw(form)}${raw(unavailableState('Could not investigate this domain', err.message || 'The request failed.'))}`;
+    }
+    const sub = data.subject || {};
+    this.enrich = { domain: sub.domain, client: sub.client };
+    return html`${raw(form)}
+      ${raw(investigationHeader({
+        kind: sub.client ? 'Domain · one client' : 'Domain',
+        title: sub.domain,
+        sub: `${sub.input && sub.input !== sub.domain ? `Entered as ${sub.input}. ` : ''}${sub.client ? `Narrowed to client ${sub.client}.` : ''}`,
+      }, data.window))}
+      ${raw(activitySection(data.activity))}
+      ${raw(decisionSection(data.decisions))}
+      ${raw(previewSection(data.preview))}
+      ${raw(evidenceSection(data.evidence))}
+      ${raw(relatedFindingsSection(data.findings))}
+      ${raw(observationsSection(data.observations))}
+      ${raw(rawJsonSection(data))}`;
+  },
+  async mounted() {
+    const form = $('#inv-form');
+    if (form) {
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const next = investigateHash(Object.fromEntries(new FormData(form)));
+        if (window.location.hash === next) router.reload();
+        else window.location.hash = next;
+      });
+      $('#inv-clear').addEventListener('click', () => { window.location.hash = '#/investigate'; });
+    }
+    mountDecisionCards();
+    const enrich = $('#inv-enrich');
+    if (enrich && this.enrich) {
+      enrich.addEventListener('click', async () => {
+        enrich.disabled = true;
+        try {
+          const q = this.enrich.client ? `?client=${encodeURIComponent(this.enrich.client)}` : '';
+          const res = await apiSend('POST', `/investigate/domain/${encodeURIComponent(this.enrich.domain)}/enrich${q}`);
+          toast(res && res.note ? res.note : `Lookup ${res && res.lookup ? res.lookup : 'requested'}`);
+          router.reload();
+        } catch (err) {
+          reportError(err);
+          enrich.disabled = false;
+        }
+      });
+    }
   },
 };
 
@@ -4963,6 +5375,16 @@ if (typeof module !== 'undefined' && module.exports) {
     statusHero,
     blockedSplit,
     measuredFacts,
+    investigateFilters,
+    investigateHash,
+    investigateForm,
+    findingLinks,
+    activitySection,
+    decisionSection,
+    previewSection,
+    evidenceSection,
+    relatedFindingsSection,
+    observationsSection,
     attentionItems,
     attentionPanel,
     recentlyBlocked,

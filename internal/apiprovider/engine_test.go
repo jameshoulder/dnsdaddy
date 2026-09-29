@@ -538,3 +538,47 @@ func waitFor(t *testing.T, limit time.Duration, cond func() bool) {
 	}
 	t.Fatalf("condition not met within %s", limit)
 }
+
+// CachedVerdict is the read the policy preview makes. It must answer from
+// memory alone: no provider call, no lookup queued, no budget waited on —
+// and it must not pretend to know an answer the cache does not hold.
+func TestCachedVerdictReadsMemoryAndQueuesNothing(t *testing.T) {
+	p := &fakeProvider{verdict: Verdict{Disposition: DispositionMalicious, Score: 1}}
+	e := engineWith(t, Options{Mode: ModeBlocking, Budget: 200 * time.Millisecond}, fakeInstance("apr_1", p))
+
+	v, outcome := e.CachedVerdict("pol_1", "cold.example")
+	if outcome != CacheOutcomeMiss {
+		t.Fatalf("cold cache: outcome = %v, want a miss", outcome)
+	}
+	if v.Disposition != DispositionUnknown {
+		t.Errorf("cold cache returned disposition %s; a miss must be unknown", v.Disposition)
+	}
+	if n := p.calls.Load(); n != 0 {
+		t.Errorf("a cache read called the provider %d time(s)", n)
+	}
+	if s := e.Stats(); s.Enqueued != 0 {
+		t.Errorf("a cache read enqueued %d lookup(s)", s.Enqueued)
+	}
+
+	// Once the live path has warmed the cache, the read finds the answer.
+	if _, ok := e.Consult(context.Background(), "pol_1", "cold.example"); !ok {
+		t.Fatal("precondition: the blocking consult did not answer")
+	}
+	v, outcome = e.CachedVerdict("pol_1", "cold.example")
+	if outcome != CacheOutcomeHit || v.Disposition != DispositionMalicious {
+		t.Errorf("warm cache: outcome %v, disposition %s; want a malicious hit", outcome, v.Disposition)
+	}
+
+	// Mode off and an out-of-scope policy both mean no provider applies.
+	e.SetMode(ModeOff)
+	if _, outcome := e.CachedVerdict("pol_1", "cold.example"); outcome != CacheOutcomeNoProvider {
+		t.Errorf("mode off: outcome = %v, want no provider", outcome)
+	}
+	e.SetMode(ModeBlocking)
+	scoped := fakeInstance("apr_2", p)
+	scoped.PolicyScope = []string{"pol_other"}
+	e.SetInstances([]*Instance{scoped})
+	if _, outcome := e.CachedVerdict("pol_1", "cold.example"); outcome != CacheOutcomeNoProvider {
+		t.Errorf("out-of-scope provider: outcome = %v, want no provider", outcome)
+	}
+}

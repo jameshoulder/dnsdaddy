@@ -199,6 +199,29 @@ func (c *Consultant) Consult(ctx context.Context, policyID, domain string) (poli
 	}, true
 }
 
+// ConsultCached implements policy.CachedReputation: what the providers have
+// on file, without asking them.
+func (c *Consultant) ConsultCached(policyID, domain string) (policy.ReputationVerdict, policy.CacheState) {
+	if c == nil || c.Engine == nil {
+		return policy.ReputationVerdict{}, policy.CacheNoProvider
+	}
+	res, outcome := apiprovider.PolicyConsultant{Engine: c.Engine, Threshold: c.Threshold}.
+		ConsultCached(policyID, domain)
+	switch outcome {
+	case apiprovider.CacheOutcomeHit:
+		return policy.ReputationVerdict{
+			Malicious:    res.Malicious,
+			Score:        res.Score,
+			Category:     res.Category,
+			ProviderName: res.ProviderName,
+		}, policy.CacheHit
+	case apiprovider.CacheOutcomeMiss:
+		return policy.ReputationVerdict{}, policy.CacheMiss
+	default:
+		return policy.ReputationVerdict{}, policy.CacheNoProvider
+	}
+}
+
 // Compile-time proof that the adapters satisfy what they claim to. Without
 // these, a signature drifting is a runtime nil interface three layers away
 // from the change that caused it.
@@ -206,4 +229,5 @@ var (
 	_ apiprovider.ProviderSource = (*Source)(nil)
 	_ apiprovider.VerdictStore   = (*VerdictStore)(nil)
 	_ policy.Reputation          = (*Consultant)(nil)
+	_ policy.CachedReputation    = (*Consultant)(nil)
 )

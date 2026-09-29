@@ -140,6 +140,12 @@ CREATE INDEX IF NOT EXISTS query_log_ts_idx        ON query_log (ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_action_ts_idx ON query_log (action, ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_network_idx   ON query_log (network_id, ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_qname_idx     ON query_log (qname);
+-- The client investigation reads one address's rows in a window. Without this
+-- the only route to them is a scan of every row in the window, which on the
+-- reference deployment is a million rows for one page. Created on upgrade by
+-- the same idempotent statement as the rest, which on a large existing log
+-- takes a few seconds once at startup.
+CREATE INDEX IF NOT EXISTS query_log_client_ts_idx ON query_log (client_ip, ts DESC);
 
 -- Local DNSSEC validation observations, one row per query Daddybound looked
 -- at. Separate from query_log because the two are written independently: the

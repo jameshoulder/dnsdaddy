@@ -39,6 +39,16 @@ const {
   statusHero,
   blockedSplit,
   measuredFacts,
+  investigateFilters,
+  investigateHash,
+  investigateForm,
+  findingLinks,
+  activitySection,
+  decisionSection,
+  previewSection,
+  evidenceSection,
+  relatedFindingsSection,
+  observationsSection,
   attentionItems,
   attentionPanel,
   recentlyBlocked,
@@ -3137,4 +3147,153 @@ test('measured facts escape server-supplied text', () => {
   }) }));
   assert.doesNotMatch(out, /<img/);
   assert.match(out, /&lt;img/);
+});
+
+/* ---------- investigation --------------------------------------------- */
+
+test('the investigate route is served and its state survives a bookmark', () => {
+  assert.equal(routeName('#/investigate?domain=evil.example'), 'investigate');
+  const hash = investigateHash({ domain: 'Evil.Example', client: '2001:db8::1', hours: '24' });
+  const back = investigateFilters(hash);
+  assert.equal(back.domain, 'Evil.Example');
+  assert.equal(back.client, '2001:db8::1');
+  assert.equal(back.hours, '24');
+  // Unsupported windows are dropped rather than sent; hostile text survives
+  // the round trip as text.
+  assert.equal(investigateFilters(investigateHash({ domain: 'a', hours: '999' })).hours, '');
+  const hostile = '<img src=x onerror=alert(1)>';
+  assert.equal(investigateFilters(investigateHash({ domain: hostile })).domain, hostile);
+  const form = investigateForm({ domain: hostile, client: '', hours: '' });
+  assert.doesNotMatch(form, /<img/);
+  assert.match(form, /&lt;img/);
+  assert.match(form, /not a passive-DNS history/);
+});
+
+test('query rows and findings link into the investigation with the subject they concern', () => {
+  const row = queryRow({ domain: 'evil.example', action: 'blocked', clientIp: '10.0.0.5', time: now() }, { hours: '24' });
+  assert.match(row, /data-investigate-domain="evil.example"/);
+  assert.match(row, /href="#\/investigate\?domain=evil.example&amp;client=10.0.0.5&amp;hours=24"/);
+  assert.match(row, /data-investigate-client="10.0.0.5"/);
+  // An unattributed row offers no client investigation: there is no address
+  // to investigate and nothing is inferred to stand in for one.
+  const anon = queryRow({ domain: 'evil.example', action: 'allowed', time: now() });
+  assert.doesNotMatch(anon, /data-investigate-client/);
+
+  const links = findingLinks({ domain: 'evil.example', clientIp: '10.0.0.5' });
+  assert.match(links, /Investigate domain/);
+  assert.match(links, /Investigate client/);
+  assert.equal(findingLinks({}), '');
+  assert.doesNotMatch(findingLinks({ domain: '<b>x</b>' }), /<b>/);
+});
+
+test('the preview is labelled as a preview and never renders not-evaluated as allowed', () => {
+  const base = {
+    readOnly: true, note: 'what the current configuration would decide now; not what happened',
+    context: { client: '10.0.0.5', attribution: 'network_prefix', networkName: 'Office', policyName: 'Standard' },
+    byPolicy: [{ policyId: 'p_strict', policyName: 'Strict', assignedNetworks: 0, decision: { outcome: 'blocked', rule: 'category', category: 'adult' } }],
+  };
+  const pending = previewSection({ ...base,
+    decision: { outcome: 'not_evaluated', reason: 'not evaluated: an external provider would be consulted and no cached verdict exists; provider lookup not performed' },
+    external: { configured: true, mode: 'blocking', reached: true, evaluated: false, note: 'provider lookup not performed' },
+  });
+  assert.match(pending, /Preview · current configuration · read-only/);
+  assert.match(pending, /not what happened/);
+  assert.match(pending, />Not evaluated</);
+  assert.doesNotMatch(pending, /badge qact-allowed">Allowed/);
+  assert.match(pending, /lookup not performed/);
+  assert.match(pending, /id="inv-enrich"/);
+  assert.match(pending, /A comparison, not a change/);
+
+  const cached = previewSection({ ...base,
+    decision: { outcome: 'blocked', rule: 'reputation', reason: 'Blocked by external threat intelligence (TestIntel)', source: 'TestIntel' },
+    external: { configured: true, mode: 'blocking', reached: true, evaluated: true, fromCache: true, provider: 'TestIntel', note: 'cached verdict used' },
+  });
+  assert.match(cached, />Blocked</);
+  assert.match(cached, /cached verdict used/);
+  assert.doesNotMatch(cached, /id="inv-enrich"/);
+
+  const local = previewSection({ ...base,
+    decision: { outcome: 'allowed', rule: 'allow_list', reason: 'Allowed by policy allow-list' },
+    external: { configured: true, mode: 'blocking', reached: false, evaluated: false, note: 'decided by a local rule before any provider would be asked' },
+  });
+  assert.match(local, />Allowed</);
+  assert.match(local, /not reached/);
+});
+
+test('historical decisions render the stored explanation and say when none is recorded', () => {
+  const off = decisionSection({ recording: false, items: [] });
+  assert.match(off, /Not recording decisions/);
+  assert.match(off, /not a substitute/);
+  const none = decisionSection({ recording: true, items: [], note: 'stored when made' });
+  assert.match(none, /No decision recorded/);
+  const some = decisionSection({ recording: true, note: 'stored when made', items: [
+    { id: 'dec_1', time: now(), action: 'blocked', subject: { value: 'evil.example' }, explanation: 'Blocked because URLhaus listed as malware.', policyPath: 'network:Office → policy:Standard → category:malware → BLOCK' },
+  ] });
+  assert.match(some, /Blocked because URLhaus listed as malware\./);
+  assert.match(some, /stored when made/);
+  // No composed reason: the page renders what was stored and nothing else.
+  assert.doesNotMatch(some, /would be/i);
+});
+
+test('evidence shows freshness and whether a claim ever decided anything', () => {
+  const out = evidenceSection({
+    note: 'expired claims are shown and excluded from the assessment',
+    assessment: { verdict: 'malicious', summary: 'Listed as malware by URLhaus.', corroborated: false, inferenceOnly: false },
+    items: [
+      { id: 'a', source: 'f_urlhaus', sourceName: 'URLhaus', kind: 'feed', confidence: 'high', claim: 'listed as malware', category: 'malware', observedAt: now(), expiresAt: now(), expired: false, contributedTo: 3 },
+      { id: 'b', source: 'f_old', sourceName: 'Old feed', kind: 'feed', confidence: 'low', claim: 'listed as <b>phishing</b>', observedAt: hoursAgo(72), expiresAt: hoursAgo(24), expired: true, contributedTo: 0 },
+    ],
+  });
+  assert.match(out, /decided 3 queries/);
+  assert.match(out, /on file only/);
+  assert.match(out, />expired</);
+  assert.match(out, /is-expired/);
+  assert.match(out, /Listed as malware by URLhaus\./);
+  assert.doesNotMatch(out, /<b>phishing/);
+  assert.match(out, /&lt;b&gt;phishing/);
+});
+
+test('recorded activity states why it is unavailable rather than showing zeroes', () => {
+  const off = activitySection({ available: false, unavailable: 'client addresses are not recorded (log.log_client_ip)' });
+  assert.match(off, /Not recorded/);
+  assert.match(off, /log\.log_client_ip/);
+  assert.doesNotMatch(off, /Queries<\/dt>/);
+
+  const empty = activitySection({ available: true, note: 'exact name only', summary: { queries: 0, qtypes: {} }, recent: [] });
+  assert.match(empty, /Nothing recorded in this window/);
+
+  const some = activitySection({
+    available: true, note: 'exact name only',
+    summary: { queries: 12, allowed: 9, blocked: 3, errors: 0, firstSeen: hoursAgo(5), lastSeen: now(), qtypes: { A: 8, AAAA: 4 }, cached: 2, avgElapsedMs: 3.25, maxElapsedMs: 40 },
+    clients: [{ clientIp: '10.0.0.5', clientName: 'laptop', networkId: 'n_default', queries: 7, blocked: 2, lastSeen: now() }],
+    recent: [{ domain: '<script>x</script>.example', action: 'blocked', category: 'malware', clientIp: '10.0.0.5', time: now() }],
+    recentCursor: 99, recentLimit: 100,
+  });
+  assert.match(some, /9 allowed · 3 blocked · 0 failed/);
+  assert.match(some, /A 8 · AAAA 4/);
+  assert.match(some, /Clients that asked/);
+  assert.match(some, /laptop/);
+  assert.match(some, /More rows exist/);
+  assert.doesNotMatch(some, /<script>/);
+  assert.match(some, /&lt;script&gt;/);
+});
+
+test('related findings and observations keep their experimental, non-enforcing labels', () => {
+  const noFindings = relatedFindingsSection({ enabled: true, enforcement: 'none', experimental: true, items: [], note: 'they block nothing' });
+  assert.match(noFindings, /Experimental · alert-only/);
+  assert.match(noFindings, /not evidence that it is clean/);
+  const off = relatedFindingsSection({ enabled: false, items: [] });
+  assert.match(off, /switched off/);
+
+  const obsOff = observationsSection({ available: false, items: [] });
+  assert.match(obsOff, /enforces nothing/);
+  assert.match(obsOff, /Learn mode is off/);
+  const obs = observationsSection({ available: true, note: 'changed nothing', items: [
+    { id: 'o1', time: now(), qtype: 'A', upstream: 'validated', status: 'bogus', reasonCode: 'x', reason: 'signature did not verify', disagreement: 'local_bogus_upstream_validated' },
+  ] });
+  assert.match(obs, /Daddybound concluded/);
+  assert.match(obs, /local_bogus_upstream_validated/);
+  // The existing badge wording carries the guarantee: a bogus verdict says
+  // nothing was blocked.
+  assert.match(obs, /not blocked|changed nothing|nothing was blocked/i);
 });

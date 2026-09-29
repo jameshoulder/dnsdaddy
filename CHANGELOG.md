@@ -66,6 +66,49 @@ process's lifetime error counter by the last day's queries, which on a
 long-running resolver with a quiet day read as degraded for a fault weeks
 past.
 
+### Investigate one name or one address
+
+A new **Investigate** page and two read-only routes,
+`GET /api/v1/investigate/domain/{domain}` and `GET /api/v1/investigate/client/{ip}`,
+put everything already recorded about one subject on one screen — in
+sections that stay apart, because they answer different questions:
+
+1. **Recorded activity**: outcomes, the clients that asked, record types,
+   cache hits and latency where retained, first and last seen, and the
+   newest rows with their local DNSSEC observation. Exact name only; the
+   query log's substring search is a different tool and the page says so.
+2. **Historical decisions**: the stored records, with the explanation that
+   was written when each was made. Never re-derived from today's policy.
+3. **Current policy preview**: what the current configuration would decide
+   now, for the supplied client or the catch-all, and under every policy
+   for comparison. It runs on the live engine's compiled snapshot through
+   the same code as a real query, and writes nothing: no query-log row, no
+   decision, no cache entry. It does not contact external providers. Where
+   the live outcome would depend on a provider lookup and no cached verdict
+   exists, it says **not evaluated — provider lookup not performed** rather
+   than guessing "allowed".
+4. **Current evidence**: every claim on file with its source, when it was
+   observed, when it expires, and how many recorded decisions it actually
+   decided. Expired claims are shown and excluded from the assessment.
+5. **Related findings and Daddybound observations**, with their
+   experimental and non-enforcing labels intact.
+
+Names are normalised the way a browser sends them (IDNA lookup rules, lower
+case, no trailing dot), so `Bücher.Example.` lands on the rows for
+`xn--bcher-kva.example`. Clients are IP addresses; a name is refused. The
+client view respects `log.log_client_ip`: with addresses not recorded it
+reports the activity as unavailable and reconstructs nothing from other
+columns. Query-log rows and findings link to the page from the dashboard,
+and its state lives in the URL.
+
+`POST /api/v1/investigate/domain/{domain}/enrich` is the one deliberate
+action: it asks the configured providers within their existing mode and
+budget, and answers `503` where none are enabled.
+
+Two small store additions support the page: an exact-name filter on the
+query log and an index on `(client_ip, ts)`, created once at startup on
+upgrade.
+
 ### Findings page by cursor, and an export says when it is a prefix
 
 `GET /api/v1/findings` now pages. Each response carries `nextCursor`; passing

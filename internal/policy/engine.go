@@ -188,6 +188,68 @@ type ReputationVerdict struct {
 	ProviderName string
 }
 
+// CachedReputation is the read-only face of a Reputation: what it already
+// knows, without asking anyone.
+//
+// Optional. A consultant that implements it lets the policy preview say what
+// an external provider has on file for a name without causing a lookup. One
+// that does not is treated as having nothing on file, which makes the preview
+// say "not evaluated" rather than guess.
+type CachedReputation interface {
+	ConsultCached(policyID, domain string) (ReputationVerdict, CacheState)
+}
+
+// CacheState says what a cache-only consultation found.
+type CacheState int
+
+const (
+	// CacheNoProvider: no external provider applies to this policy, or
+	// reputation is off. The live path would not consult anyone either.
+	CacheNoProvider CacheState = iota
+	// CacheMiss: a provider applies and has no usable cached verdict. The
+	// live path would ask it, and the answer is unknown until it does.
+	CacheMiss
+	// CacheHit: every applicable provider had a fresh cached verdict, or one
+	// of them had a malicious one, which is decisive on its own.
+	CacheHit
+)
+
+// Preview is what the current configuration would decide for a question,
+// reached without any side effect.
+//
+// The decision is produced by the same code the DNS handler runs, on the
+// same compiled snapshot, so it cannot drift from what a real query would
+// get. What it does not do is the one step of the live path that has a side
+// effect: asking an external provider. External reports what the provider
+// cache already held instead, and says plainly when the live outcome would
+// depend on a lookup this preview did not perform.
+type Preview struct {
+	Decision Decision
+	// PolicyID and PolicyName are the policy the question was evaluated
+	// under, after falling back to the default for an unknown ID.
+	PolicyID   string
+	PolicyName string
+	External   ExternalPreview
+}
+
+// ExternalPreview describes the external-provider step of a preview.
+type ExternalPreview struct {
+	// Configured reports that a reputation consultant is installed at all.
+	Configured bool
+	// Reached reports that evaluation got as far as the external step: no
+	// local rule decided the question first. An allow-listed name never
+	// reaches a provider, and the preview says so by leaving this false.
+	Reached bool
+	// State is what the cache held, when the step was reached.
+	State CacheState
+	// Evaluated reports that the external step produced an answer — a
+	// cached verdict — rather than being skipped for want of one.
+	Evaluated bool
+	// ProviderName names the provider whose cached verdict decided, if one
+	// did.
+	ProviderName string
+}
+
 // Engine evaluates questions against the current configuration.
 type Engine struct {
 	snap  atomic.Pointer[snapshot]
@@ -426,14 +488,112 @@ func (e *Engine) Evaluate(policyID, domain string) Decision {
 // rather than leaving it to run out its budget.
 func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) Decision {
 	snap := e.snap.Load()
-	p := snap.policies[policyID]
-	if p == nil {
-		p = snap.defaultPolicy
-	}
+	p := snap.policyFor(policyID)
 	if p == nil {
 		return Decision{LogQuery: true, BlockMode: store.BlockNXDOMAIN}
 	}
 
+	d := evaluateLocal(e.lists, p, domain)
+	if d.Basis.Decided() {
+		return d
+	}
+
+	// External intelligence, last and only if configured.
+	//
+	// Last on purpose. Everything above is local: a map lookup against an
+	// index already in memory, which is microseconds and cannot fail. Asking a
+	// third party is the most expensive and least reliable thing this function
+	// can do, so it happens only for names nothing local had an opinion about
+	// — and a domain the operator explicitly allowed never reaches it at all,
+	// which also means it is never disclosed.
+	//
+	// The nil check is the whole cost when no provider is configured, which is
+	// the default and the overwhelmingly common case.
+	if rep := e.reputation.Load(); rep != nil {
+		if v, ok := (*rep).Consult(ctx, policyID, domain); ok && v.Malicious {
+			applyReputation(&d, p, v)
+		}
+	}
+
+	return d
+}
+
+// Preview evaluates a question exactly as EvaluateContext would, minus the
+// one step with a side effect. See the Preview type.
+//
+// Nothing here writes: no query-log row, no decision record, no cache entry,
+// no provider request. It reads the compiled snapshot and, when the external
+// step is reached, the provider cache.
+func (e *Engine) Preview(policyID, domain string) Preview {
+	snap := e.snap.Load()
+	p := snap.policyFor(policyID)
+	if p == nil {
+		return Preview{Decision: Decision{LogQuery: true, BlockMode: store.BlockNXDOMAIN}}
+	}
+
+	out := Preview{PolicyID: p.id, PolicyName: p.name}
+	out.Decision = evaluateLocal(e.lists, p, domain)
+	rep := e.reputation.Load()
+	out.External.Configured = rep != nil
+	if out.Decision.Basis.Decided() || rep == nil {
+		return out
+	}
+
+	out.External.Reached = true
+	cached, ok := (*rep).(CachedReputation)
+	if !ok {
+		// A consultant that cannot be asked without a lookup. Treated as a
+		// miss: the live path would ask, and this preview did not.
+		out.External.State = CacheMiss
+		return out
+	}
+	v, state := cached.ConsultCached(policyID, domain)
+	out.External.State = state
+	if state != CacheHit {
+		return out
+	}
+	out.External.Evaluated = true
+	out.External.ProviderName = v.ProviderName
+	if v.Malicious {
+		applyReputation(&out.Decision, p, v)
+	}
+	return out
+}
+
+// policyFor returns the named policy, or the default for an unknown ID.
+func (s *snapshot) policyFor(id string) *compiledPolicy {
+	if p := s.policies[id]; p != nil {
+		return p
+	}
+	return s.defaultPolicy
+}
+
+// applyReputation turns a provider's malicious verdict into the decision.
+func applyReputation(d *Decision, p *compiledPolicy, v ReputationVerdict) {
+	d.Blocked = true
+	d.Category = v.Category
+	if d.Category == "" {
+		d.Category = "malware"
+	}
+	d.Source = v.ProviderName
+	d.Basis = &Basis{
+		Rule: RuleReputation, Category: d.Category,
+		ProviderName: v.ProviderName,
+		PolicyID:     p.id, PolicyName: p.name,
+	}
+	// Named rather than generic. An operator looking at a blocked query has
+	// to be able to tell a curated-feed block from a third-party API's
+	// opinion, because only one of those is something they can inspect
+	// offline.
+	d.Reason = "Blocked by external threat intelligence (" + v.ProviderName + ")"
+}
+
+// evaluateLocal runs the three local rules and returns the decision they
+// reached, with Basis set when one of them fired.
+//
+// Shared by the live path and the preview so the two cannot disagree. It
+// allocates nothing on the miss path: see the note on Decision.Basis.
+func evaluateLocal(lists *blocklist.Holder, p *compiledPolicy, domain string) Decision {
 	d := Decision{BlockMode: p.blockMode, LogQuery: p.logQueries}
 
 	if len(p.allow) > 0 && matchSuffix(p.allow, domain) {
@@ -460,7 +620,7 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 		// categories, and this policy blocks it if it enables any one of them.
 		// Asking for the domain's primary category and comparing it here would
 		// miss a C2 domain that a malware feed also lists.
-		if entry, ok := e.lists.Load().LookupEnabled(domain, p.categories); ok {
+		if entry, ok := lists.Load().LookupEnabled(domain, p.categories); ok {
 			d.Blocked = true
 			d.Category = entry.Category
 			d.Source = entry.FeedName
@@ -471,38 +631,6 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 				PolicyID: p.id, PolicyName: p.name,
 			}
 			return d
-		}
-	}
-
-	// External intelligence, last and only if configured.
-	//
-	// Last on purpose. Everything above is local: a map lookup against an
-	// index already in memory, which is microseconds and cannot fail. Asking a
-	// third party is the most expensive and least reliable thing this function
-	// can do, so it happens only for names nothing local had an opinion about
-	// — and a domain the operator explicitly allowed never reaches it at all,
-	// which also means it is never disclosed.
-	//
-	// The nil check is the whole cost when no provider is configured, which is
-	// the default and the overwhelmingly common case.
-	if rep := e.reputation.Load(); rep != nil {
-		if v, ok := (*rep).Consult(ctx, policyID, domain); ok && v.Malicious {
-			d.Blocked = true
-			d.Category = v.Category
-			if d.Category == "" {
-				d.Category = "malware"
-			}
-			d.Source = v.ProviderName
-			d.Basis = &Basis{
-				Rule: RuleReputation, Category: d.Category,
-				ProviderName: v.ProviderName,
-				PolicyID:     p.id, PolicyName: p.name,
-			}
-			// Named rather than generic. An operator looking at a blocked
-			// query has to be able to tell a curated-feed block from a
-			// third-party API's opinion, because only one of those is
-			// something they can inspect offline.
-			d.Reason = "Blocked by external threat intelligence (" + v.ProviderName + ")"
 		}
 	}
 

@@ -1099,6 +1099,9 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .hero-stat.is-blocked .n { color: var(--danger); }
 .hero-stat.is-detect .n  { color: var(--violet); }
 .hero-split { display: block; margin-top: 4px; font-size: 12px; color: var(--muted-foreground); }
+.inv-raw { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; margin: 0; }
+.ev-row.is-expired .ev-claim { color: var(--muted-foreground); text-decoration: line-through; }
+.finding-links { margin: 0 0 var(--s3); gap: var(--s2); flex-wrap: wrap; }
 .hero-period { flex: none; margin-left: auto; align-self: flex-start; }
 
 .attn-item {

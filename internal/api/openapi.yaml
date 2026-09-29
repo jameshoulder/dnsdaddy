@@ -1059,6 +1059,100 @@ paths:
                     items: { $ref: "#/components/schemas/Decision" }
         "400": { description: A domain is required }
 
+  /api/v1/investigate/domain/{domain}:
+    get:
+      tags: [Investigation]
+      summary: Everything recorded about one name, in sections that stay apart
+      description: |
+        A read-only investigation of one domain name: what the query log
+        recorded, what was decided at the time, what the current
+        configuration would decide now, what is on file about it, what the
+        experimental detectors inferred, and what Daddybound concluded
+        locally. The sections answer different questions and are never
+        merged.
+
+        Nothing here writes. No query-log row, decision record, cache entry
+        or configuration changes as a result of this request, and no
+        external provider is contacted: the policy preview runs on the same
+        compiled snapshot and code path as a live query, minus the provider
+        step, and reads only what the provider cache already holds.
+
+        The name is normalised the way a browser would send it — IDNA
+        lookup rules to A-labels, lower case, no trailing dot — and matched
+        **exactly** against recorded names. `www.evil.example` and
+        `evil.example` are different names; this is not a substring
+        search and not a global domain index.
+      parameters:
+        - { name: domain, in: path, required: true, schema: { type: string }, description: The name to investigate, Unicode or A-label form. }
+        - { name: client, in: query, schema: { type: string }, description: Optional client IP address. Narrows activity, decisions and findings to it and makes the preview use its attributed policy. }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 8760 }, description: Retained-data window. Defaults to the query-log retention. }
+      responses:
+        "200":
+          description: The investigation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainInvestigation" }
+        "400":
+          description: Not a valid domain name, or `client` is not an IP address
+  /api/v1/investigate/domain/{domain}/enrich:
+    post:
+      tags: [Investigation]
+      summary: Ask the configured external providers about a name, now
+      description: |
+        The one deliberate action in the investigation surface. It consults
+        the configured providers exactly as the resolution path would in the
+        configured reputation mode — `off` consults nobody, `cache_only`
+        queues a lookup for next time, `blocking` waits at most the
+        configured budget — and queues enrichment where that is enabled.
+        Nothing about this request widens what the operator configured.
+
+        A POST, so it sits behind the same-origin check and a link cannot
+        trigger a provider call. Answers `503` when external providers are
+        not enabled on this deployment.
+      parameters:
+        - { name: domain, in: path, required: true, schema: { type: string } }
+        - { name: client, in: query, schema: { type: string }, description: Optional client IP, to consult under its attributed policy. }
+      responses:
+        "200":
+          description: What was requested and what came back
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domain: { type: string }
+                  policyId: { type: string }
+                  mode: { type: string, enum: [off, cache_only, blocking] }
+                  lookup: { type: string, enum: [not_performed, answered, queued, no_answer] }
+                  verdict: { type: [object, "null"] }
+                  note: { type: string }
+        "503":
+          description: External providers are not enabled
+  /api/v1/investigate/client/{ip}:
+    get:
+      tags: [Investigation]
+      summary: Everything recorded about one client address
+      description: |
+        The client-focused view: the names an address asked for, its
+        recorded outcomes, the decisions and findings attributed to it, and
+        the network and policy the current configuration maps it to now.
+
+        Read-only. When client addresses are not recorded
+        (`log.log_client_ip` off) the activity section is reported as
+        unavailable with the reason, and nothing is reconstructed from other
+        columns to stand in for it.
+      parameters:
+        - { name: ip, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 8760 } }
+      responses:
+        "200":
+          description: The investigation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClientInvestigation" }
+        "400":
+          description: The path does not name an IP address
+
   /api/v1/clients:
     get:
       tags: [Administration]
@@ -2683,6 +2777,195 @@ components:
         failed: { type: integer }
         queueDepth: { type: integer }
 
+    InvestigationWindow:
+      type: object
+      properties:
+        hours: { type: integer }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        retentionDays: { type: integer, description: Per-query rows older than this cannot exist, whatever the window. }
+        queryLog: { type: boolean }
+        clientAttribution: { type: boolean }
+    InvestigationActivity:
+      type: object
+      description: What the query log recorded. Outcomes, not verdicts.
+      properties:
+        source: { type: string, enum: [query_log] }
+        available: { type: boolean, description: False when no per-query rows exist for this subject by configuration. }
+        unavailable: { type: string, description: Why, when not available. }
+        summary:
+          type: object
+          properties:
+            queries: { type: integer, format: int64 }
+            allowed: { type: integer, format: int64 }
+            blocked: { type: integer, format: int64 }
+            errors: { type: integer, format: int64 }
+            firstSeen: { type: [string, "null"], format: date-time }
+            lastSeen: { type: [string, "null"], format: date-time }
+            qtypes: { type: object, additionalProperties: { type: integer, format: int64 } }
+            cached: { type: integer, format: int64 }
+            avgElapsedMs: { type: number }
+            maxElapsedMs: { type: integer, format: int64 }
+        clients:
+          type: array
+          description: On a domain investigation, the attributed clients that asked for it, busiest first. Absent when addresses are not recorded.
+          items:
+            type: object
+            properties:
+              clientIp: { type: string }
+              clientName: { type: string }
+              networkId: { type: string }
+              queries: { type: integer, format: int64 }
+              blocked: { type: integer, format: int64 }
+              lastSeen: { type: [string, "null"], format: date-time }
+        domains:
+          type: array
+          description: On a client investigation, the names it asked for, most asked first.
+          items:
+            type: object
+            properties:
+              domain: { type: string }
+              queries: { type: integer, format: int64 }
+              blocked: { type: integer, format: int64 }
+              category: { type: string, description: The most recent recorded block category, if any. }
+              lastSeen: { type: [string, "null"], format: date-time }
+        recent:
+          type: array
+          items: { $ref: "#/components/schemas/QueryEvent" }
+        recentCursor: { type: integer, format: int64, description: Continue through /api/v1/queries with the same filters; 0 when complete. }
+        recentLimit: { type: integer }
+        note: { type: string }
+    InvestigationDecisions:
+      type: object
+      description: Stored decisions, as written when they were made. Never re-derived.
+      properties:
+        recording: { type: boolean, description: Whether decision records are on at all. }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Decision" }
+        truncated: { type: boolean }
+        note: { type: string }
+    InvestigationPreview:
+      type: object
+      description: |
+        What the current configuration would decide now. Labelled a
+        preview because it is one: it is not what happened, and it must not
+        be read as the reason for any recorded decision.
+      properties:
+        readOnly: { type: boolean, enum: [true] }
+        context:
+          type: object
+          properties:
+            client: { type: string }
+            attribution: { type: string, enum: [none, catch_all, network_prefix] }
+            networkId: { type: string }
+            networkName: { type: string }
+            policyId: { type: string }
+            policyName: { type: string }
+        decision:
+          type: object
+          properties:
+            outcome:
+              type: string
+              enum: [blocked, allowed, not_evaluated]
+              description: |
+                `not_evaluated` means the live outcome would depend on an
+                external provider lookup this preview did not perform. It
+                is never rendered as `allowed`.
+            rule: { type: string }
+            reason: { type: string }
+            category: { type: string }
+            source: { type: string }
+            blockMode: { type: string }
+        external:
+          type: object
+          properties:
+            configured: { type: boolean }
+            mode: { type: string }
+            reached: { type: boolean, description: No local rule decided first, so a provider would be asked. }
+            evaluated: { type: boolean, description: A cached verdict answered. }
+            fromCache: { type: boolean }
+            provider: { type: string }
+            note: { type: string }
+        byPolicy:
+          type: array
+          description: The same name under every configured policy, so a different assignment can be compared without changing anything.
+          items:
+            type: object
+            properties:
+              policyId: { type: string }
+              policyName: { type: string }
+              assignedNetworks: { type: integer }
+              decision: { type: object }
+        note: { type: string }
+    InvestigationEvidence:
+      type: object
+      properties:
+        assessment: { $ref: "#/components/schemas/Assessment" }
+        items:
+          type: array
+          items:
+            allOf:
+              - { $ref: "#/components/schemas/Evidence" }
+              - type: object
+                properties:
+                  expired: { type: boolean, description: Past its own expiry and excluded from the assessment; shown because "listed until Tuesday" is useful. }
+                  contributedTo: { type: integer, format: int64, description: Recorded decisions this claim was cited as having decided. Zero means on file, never load-bearing. }
+        note: { type: string }
+    InvestigationFindings:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        enforcement: { type: string, enum: [none] }
+        experimental: { type: boolean, enum: [true] }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/FindingSummaryRow" }
+        truncated: { type: boolean }
+        note: { type: string }
+    InvestigationObservations:
+      type: object
+      properties:
+        mode: { type: string, enum: [off, observe] }
+        available: { type: boolean }
+        enforcing: { type: boolean, enum: [false] }
+        experimental: { type: boolean, enum: [true] }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/DNSSECObservation" }
+        truncated: { type: boolean }
+        note: { type: string }
+    DomainInvestigation:
+      type: object
+      properties:
+        subject:
+          type: object
+          properties:
+            domain: { type: string, description: The normalised name that was searched. }
+            input: { type: string, description: The name as supplied. }
+            client: { type: string }
+        window: { $ref: "#/components/schemas/InvestigationWindow" }
+        activity: { $ref: "#/components/schemas/InvestigationActivity" }
+        decisions: { $ref: "#/components/schemas/InvestigationDecisions" }
+        preview: { $ref: "#/components/schemas/InvestigationPreview" }
+        evidence: { $ref: "#/components/schemas/InvestigationEvidence" }
+        findings: { $ref: "#/components/schemas/InvestigationFindings" }
+        observations: { $ref: "#/components/schemas/InvestigationObservations" }
+    ClientInvestigation:
+      type: object
+      properties:
+        subject:
+          type: object
+          properties:
+            client: { type: string }
+            name: { type: string, description: The operator-assigned name, if any. }
+            attribution:
+              type: object
+              description: The network and policy the current configuration maps this address to. Current, not historical.
+        window: { $ref: "#/components/schemas/InvestigationWindow" }
+        activity: { $ref: "#/components/schemas/InvestigationActivity" }
+        decisions: { $ref: "#/components/schemas/InvestigationDecisions" }
+        findings: { $ref: "#/components/schemas/InvestigationFindings" }
     DNSSECObservation:
       type: object
       description: |
