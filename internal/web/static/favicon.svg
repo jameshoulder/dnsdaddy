@@ -1,25 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
-  <!--
-    Favicon. Deliberately not the full mark.
-    At 16px the node constellation and the meridian collapse into grey mush, so
-    this keeps only the two things that identify the product at that size: the
-    cyan globe ring and the green shield. Heavier strokes than the full mark
-    for the same reason — a 1.5px stroke on a 40-unit grid is a fifth of a
-    pixel once the browser has scaled it down.
-
-    Drawn on a dark rounded tile because most browsers put this against a light
-    tab strip, and the cyan needs a dark ground to hold its hue.
-  -->
   <rect width="40" height="40" rx="9" fill="#070D16"/>
   <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <circle cx="18" cy="18.5" r="11.5" stroke="#22D3EE" stroke-width="3"/>
-    <path d="M6.6 18.5 h22.8" stroke="#22D3EE" stroke-width="2" opacity="0.8"/>
-    <ellipse cx="18" cy="18.5" rx="5" ry="11.5" stroke="#22D3EE" stroke-width="2" opacity="0.8"/>
+    <circle cx="18" cy="18.5" r="11.5" stroke="#205AC9" stroke-width="3"/>
+    <path d="M6.6 18.5 h22.8" stroke="#205AC9" stroke-width="2" opacity="0.8"/>
+    <ellipse cx="18" cy="18.5" rx="5" ry="11.5" stroke="#205AC9" stroke-width="2" opacity="0.8"/>
   </g>
   <path d="M28.4 21 l8 2.8 v5.4 c0 4.9-3.6 8.2-8 9.4 -4.4-1.2-8-4.5-8-9.4 v-5.4 Z"
         fill="#070D16" stroke="#070D16" stroke-width="3" stroke-linejoin="round"/>
   <path d="M28.4 21 l8 2.8 v5.4 c0 4.9-3.6 8.2-8 9.4 -4.4-1.2-8-4.5-8-9.4 v-5.4 Z"
-        fill="#BFED6D"/>
+        fill="#1D694F"/>
   <path d="M24.8 29.4 l2.8 2.8 4.8-5.6" fill="none" stroke="#070D16"
         stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

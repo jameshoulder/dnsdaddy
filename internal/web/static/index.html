@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
+<a class="skip-link" href="#view">Skip to content</a>
 
 <!--
   Icon sprite. Inline <symbol>s rather than an icon library: twelve glyphs do
@@ -107,7 +108,7 @@
       <span class="wordmark wordmark-lg">DNS <b>Daddy</b></span>
     </div>
     <h1>Sign in</h1>
-    <p class="muted">This is the control plane for your resolver.</p>
+    <p class="muted">Welcome back to your DNS workspace.</p>
     <label for="password">Admin password</label>
     <input type="password" id="password" name="password" autocomplete="current-password" required>
     <p class="form-error" id="login-error" role="alert" hidden></p>
@@ -120,39 +121,35 @@
 </div>
 
 <div id="app" class="app" hidden>
+  <button class="nav-backdrop" id="nav-backdrop" aria-label="Close navigation" tabindex="-1" hidden></button>
   <aside class="sidebar" id="sidebar">
+    <button class="icon-btn nav-close" id="nav-close" aria-label="Close navigation">×</button>
     <div class="brand">
       <svg class="logo-mark" viewBox="0 0 40 40" aria-hidden="true">
         <use href="/logo.svg#mark"></use>
       </svg>
-      <span class="wordmark">DNS <b>Daddy</b></span>
+      <div><span class="wordmark">DNS <b>Daddy</b></span><span class="brand-note">Protective DNS</span></div>
     </div>
 
     <nav class="nav" aria-label="Main">
-      <h2 class="nav-group" id="nav-overview">Overview</h2>
-      <ul class="nav-list" aria-labelledby="nav-overview">
-        <li><a href="#/dashboard" data-route="dashboard"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-dashboard"/></svg><span>Dashboard</span></a></li>
-      </ul>
-      <h2 class="nav-group" id="nav-investigate">Investigate</h2>
-      <ul class="nav-list" aria-labelledby="nav-investigate">
-        <li><a href="#/threats" data-route="threats"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-threats"/></svg><span>Threats</span></a></li>
+      <h2 class="nav-group" id="nav-workspace">Workspace</h2>
+      <ul class="nav-list" aria-labelledby="nav-workspace">
+        <li><a href="#/dashboard" data-route="dashboard"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-dashboard"/></svg><span>Overview</span></a></li>
         <li><a href="#/queries" data-route="queries"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-queries"/></svg><span>Query log</span></a></li>
-        <li><a href="#/detections" data-route="detections"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-detections"/></svg><span>Detections</span></a></li>
+        <li><a href="#/detections" data-route="detections"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-detections"/></svg><span>Findings</span></a></li>
+        <li><a href="#/threats" data-route="threats"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-threats"/></svg><span>Blocked domains</span></a></li>
       </ul>
-      <h2 class="nav-group" id="nav-protect">Protect</h2>
-      <ul class="nav-list" aria-labelledby="nav-protect">
+      <h2 class="nav-group" id="nav-controls">Controls</h2>
+      <ul class="nav-list" aria-labelledby="nav-controls">
         <li><a href="#/networks" data-route="networks"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-networks"/></svg><span>Networks</span></a></li>
         <li><a href="#/policies" data-route="policies"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-policies"/></svg><span>Policies</span></a></li>
         <li><a href="#/feeds" data-route="feeds"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-feeds"/></svg><span>Threat intelligence</span></a></li>
         <li><a href="#/integrations" data-route="integrations"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-integrations"/></svg><span>External APIs</span></a></li>
       </ul>
-      <h2 class="nav-group" id="nav-evidence">Evidence</h2>
-      <ul class="nav-list" aria-labelledby="nav-evidence">
-        <li><a href="#/reports" data-route="reports"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reports"/></svg><span>Reports</span></a></li>
-        <li><a href="#/assurance" data-route="assurance"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-assurance"/></svg><span>Assurance</span></a></li>
-      </ul>
       <h2 class="nav-group" id="nav-system">System</h2>
       <ul class="nav-list" aria-labelledby="nav-system">
+        <li><a href="#/reports" data-route="reports"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-reports"/></svg><span>Reports</span></a></li>
+        <li><a href="#/assurance" data-route="assurance"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-assurance"/></svg><span>Assurance</span></a></li>
         <li><a href="#/setup" data-route="setup"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-setup"/></svg><span>Setup</span></a></li>
         <li><a href="#/settings" data-route="settings"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></a></li>
       </ul>
@@ -164,16 +161,17 @@
         <span id="sidebar-status-text">Checking…</span>
       </div>
       <div class="muted small" id="sidebar-version">—</div>
+      <button class="btn btn-ghost btn-sm" id="logout-btn">Sign out</button>
     </div>
   </aside>
 
   <div class="main">
     <header class="topbar">
-      <button class="icon-btn menu-btn" id="menu-btn" aria-label="Toggle navigation">
+      <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-menu"/></svg>
       </button>
       <div class="topbar-title">
-        <h1 id="page-title">Dashboard</h1>
+        <h1 id="page-title">Overview</h1>
         <p class="muted small" id="page-subtitle"></p>
       </div>
       <!--
@@ -185,13 +183,15 @@
       -->
       <form class="topbar-search" id="search-form" role="search">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
-        <input id="global-search" type="search" placeholder="Search the query log by domain…"
-               aria-label="Search the query log by domain" autocomplete="off">
+        <input id="global-search" type="search" placeholder="Search domains…"
+               aria-label="Search the query log by domain" autocomplete="off" aria-keyshortcuts="Control+k Meta+k">
+        <kbd class="search-key" aria-hidden="true">Ctrl K</kbd>
+        <button class="search-submit" id="search-submit" type="submit">Search</button>
       </form>
       <div class="topbar-actions">
         <span class="muted small" id="refresh-note"></span>
+        <button class="btn btn-ghost btn-sm" id="auto-refresh-btn" aria-pressed="false" title="Pause automatic updates on Overview and Blocked domains">Pause updates</button>
         <button class="btn btn-ghost btn-sm" id="refresh-btn">Refresh</button>
-        <button class="btn btn-ghost btn-sm" id="logout-btn">Sign out</button>
       </div>
     </header>
 

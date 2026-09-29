@@ -49,18 +49,18 @@ const raw = (value) => ({ __raw: true, value });
 // are choices rather than threats. They stay far enough apart in hue to be
 // told apart in the breakdown meter, where they appear side by side.
 const CATEGORY_COLOURS = {
-  malware: '#FF6B7A',            // danger — outright malicious
-  phishing: '#FF9E64',           // credential theft
-  c2: '#F472B6',                 // command-and-control
-  cryptomining: '#FBBF24',       // resource abuse
-  'newly-registered': '#B48EF0', // suspicion, not proof
-  ads: '#5EEAD4',                // policy, not a threat
-  adult: '#FDA4AF',              // policy
-  gambling: '#FCD34D',           // policy
-  custom: '#94A9C4',             // operator's own list
+  malware: '#AD2843',            // danger — outright malicious
+  phishing: '#99430B',           // credential theft
+  c2: '#A02772',                 // command-and-control
+  cryptomining: '#805400',       // resource abuse
+  'newly-registered': '#7046AC', // suspicion, not proof
+  ads: '#006E76',                // policy, not a threat
+  adult: '#9F375C',              // policy
+  gambling: '#726000',           // policy
+  custom: '#526578',             // operator's own list
 };
 
-const colourFor = (cat) => CATEGORY_COLOURS[cat] || '#94A9C4';
+const colourFor = (cat) => CATEGORY_COLOURS[cat] || '#526578';
 
 function sanitize(htmlString) {
   const doc = new DOMParser().parseFromString(htmlString, 'text/html');
@@ -203,7 +203,7 @@ async function api(path, options = {}) {
   return body;
 }
 
-const apiGet = (path) => api(path);
+const apiGet = (path, options) => api(path, options);
 const apiSend = (method, path, body) =>
   api(path, { method, body: body === undefined ? undefined : JSON.stringify(body) });
 
@@ -272,7 +272,7 @@ function areaChart(buckets) {
   const gridlines = [0.25, 0.5, 0.75]
     .map((f) => {
       const y = padTop + plotH * f;
-      return `<line x1="${padX}" y1="${y}" x2="${W - padX}" y2="${y}" stroke="#1E2C42" stroke-width="1" stroke-dasharray="3 4"/>`;
+      return `<line x1="${padX}" y1="${y}" x2="${W - padX}" y2="${y}" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 4"/>`;
     })
     .join('');
 
@@ -281,25 +281,21 @@ function areaChart(buckets) {
          aria-label="DNS queries and blocks over time">
       <defs>
         <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#22D3EE" stop-opacity="0.26"/>
-          <stop offset="100%" stop-color="#22D3EE" stop-opacity="0"/>
+          <stop offset="0%" stop-color="var(--brand-cyan)" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="var(--brand-cyan)" stop-opacity="0"/>
         </linearGradient>
       </defs>
       ${raw(gridlines)}
       <path d="${raw(area(totalPts))}" fill="url(#areaFill)"/>
-      <!-- Traffic is cyan because it is observation, and blocks are red
-           because they are the threat. Reversing that — as V2 did, drawing
-           total volume in the protection colour — made the busiest hour look
-           like the safest one. -->
-      <path d="${raw(line(totalPts))}" fill="none" stroke="#22D3EE" stroke-width="2"
+      <path d="${raw(line(totalPts))}" fill="none" stroke="var(--brand-cyan)" stroke-width="2"
             stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-      <path d="${raw(line(blockedPts))}" fill="none" stroke="#FF6B7A" stroke-width="1.75"
+      <path d="${raw(line(blockedPts))}" fill="none" stroke="var(--danger)" stroke-width="1.75"
             stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
     </svg>
     <div class="chart-axis">${raw(axis)}</div>
     <div class="chart-legend">
-      <span><i class="swatch" data-bg="#22D3EE"></i>Total queries · peak ${compact(max)}/h</span>
-      <span><i class="swatch" data-bg="#FF6B7A"></i>Blocked</span>
+      <span><i class="swatch" data-bg="var(--brand-cyan)"></i>Total queries · peak ${num(max)}/h</span>
+      <span><i class="swatch" data-bg="var(--danger)"></i>Blocked queries</span>
     </div>
   `;
 }
@@ -340,7 +336,7 @@ function metricCard({ label, value, sub, tone }) {
 
 function statusBadge(status) {
   const map = {
-    protected: ['ok', 'Protected'],
+    protected: ['ok', 'Filtering configured'],
     operational: ['ok', 'Operational'],
     healthy: ['ok', 'Healthy'],
     ok: ['ok', 'OK'],
@@ -457,6 +453,7 @@ function firstClientCard(overview) {
           address they came from is not permitted to use this resolver. Nothing
           is broken — DNS Daddy is declining on purpose.
         </p>
+        <details class="first-client-guide"><summary>Connection steps</summary>
         <ol class="small first-client-steps">
           <li>Open <a href="#/networks">Networks</a> and add the client or network.</li>
           <li>Tick <strong>Allow this network to use DNS Daddy</strong>.</li>
@@ -468,6 +465,7 @@ function firstClientCard(overview) {
           page.
         </p>
         ${raw(footer)}
+        </details>
       </div>`;
   }
 
@@ -488,6 +486,7 @@ function firstClientCard(overview) {
           <code>REFUSED</code>. Testing before you change that will fail, and
           the failure will not tell you why.
         </p>
+        <details class="first-client-guide"><summary>Connection steps</summary>
         <p class="muted small">
           DNS-over-HTTPS and DNS-over-TLS clients holding a network's token are
           identified by that token rather than by where they connect from, so
@@ -504,6 +503,7 @@ function firstClientCard(overview) {
           to edit.
         </p>
         ${raw(footer)}
+        </details>
       </div>`;
   }
 
@@ -514,6 +514,7 @@ function firstClientCard(overview) {
         DNS Daddy is running and nothing has sent it a query, which is expected
         until you point something at it.
       </p>
+      <details class="first-client-guide"><summary>Connection steps</summary>
       <p class="small">Try this from a machine you expect it to serve:</p>
       <pre class="first-client-cmd">nslookup example.com ${target}</pre>
       <p class="muted small">
@@ -527,6 +528,7 @@ function firstClientCard(overview) {
         <strong>Allow this network to use DNS Daddy</strong>.
       </p>
       ${raw(footer)}
+      </details>
     </div>`;
 }
 
@@ -548,6 +550,13 @@ function emptyState(title, body, opts = {}) {
     <p>${body}</p>
     ${raw(action)}
   </div>`;
+}
+
+function unavailableState(title, body) {
+  return emptyState(title, body, {
+    icon: '!',
+    action: '<button type="button" class="btn btn-ghost btn-sm" data-page-retry>Retry</button>',
+  });
 }
 
 function copyBlock(text) {
@@ -997,6 +1006,10 @@ function feedStatusBadge(feed) {
  * in the same list, with the same badge, from the same endpoint.
  */
 function threatIntelPanel(data) {
+  if (!data) {
+    return html`<div class="card"><div class="card-head"><h2>Threat intelligence</h2></div>
+      ${raw(unavailableState('Threat intelligence unavailable', 'Feed health could not be retrieved. Retry to check the current state.'))}</div>`;
+  }
   const feeds = data.feeds || [];
   const observatory = feeds.find((f) => f.id === data.observatoryFeedId);
   const others = feeds.filter((f) => f.id !== data.observatoryFeedId && f.enabled);
@@ -1045,24 +1058,11 @@ function threatIntelPanel(data) {
   `;
 }
 
-/* ---------- dashboard v2 ------------------------------------------------- */
+/* ---------- overview ---------------------------------------------------- */
 
-/*
- * The dashboard answers six questions, in this order:
- *
- *   1. Is DNS Daddy operating correctly?      status hero
- *   2. Is my network protected right now?     status hero
- *   3. What has it stopped recently?          recently blocked
- *   4. Is anything requiring my attention?    needs attention
- *   5. What is happening on my network?       threat activity chart
- *   6. Are my threat feeds healthy?           threat intelligence
- *
- * Everything below is assembled from endpoints that already exist. No figure
- * on this page is derived from anything the server did not measure, and where
- * a number cannot be had honestly the component says so rather than showing a
- * zero — a zero and an unknown look identical, and only one of them is safe to
- * act on.
- */
+// Configuration, observed activity and faults are separate claims. The
+// overview uses existing endpoints and never substitutes a zero for a failed
+// read: an empty result and an unavailable result require different actions.
 
 /**
  * The hero's wording, taken from the server's protection status and nothing
@@ -1078,18 +1078,18 @@ function threatIntelPanel(data) {
 const PROTECTION_STATES = {
   protected: {
     tone: 'ok',
-    word: 'Protected',
-    line: 'DNS protection is active. Queries are checked against the loaded threat intelligence before they are answered.',
+    word: 'Filtering configured',
+    line: 'Threat intelligence is loaded and blocking rules are configured. Each query follows its matched policy.',
   },
   degraded: {
     tone: 'warn',
     word: 'Not enforcing',
-    line: 'Threat intelligence is loaded, but no policy blocks anything with it, so nothing is being stopped yet.',
+    line: 'Threat intelligence is loaded, but no configured policy has category or domain blocking rules.',
   },
   offline: {
     tone: 'bad',
-    word: 'Not blocking',
-    line: 'No threat intelligence is loaded. DNS Daddy is answering queries without checking any of them.',
+    word: 'No intelligence loaded',
+    line: 'No threat intelligence is loaded. Configured domain rules may still apply.',
   },
 };
 
@@ -1113,6 +1113,10 @@ function protectionState(status) {
  * warning on a deliberately minimal install.
  */
 function feedHealth(data) {
+  if (!data || !Array.isArray(data.feeds)) {
+    return { tone: 'warn', label: 'Threat intelligence unavailable', unavailable: true,
+      enabled: [], broken: [], pending: [], stale: [] };
+  }
   const all = (data && data.feeds) || [];
   const enabled = all.filter((f) => f.enabled);
 
@@ -1169,10 +1173,9 @@ function toneBadgeClass(tone) {
 /**
  * The status block the page opens with.
  *
- * The dot and the word are driven by the protection status alone; feed health
- * gets its own labelled badge underneath rather than being folded into the
- * headline. Mixing them would produce an amber dot over the word "Protected",
- * which is the kind of composite status nobody can act on.
+ * The headline describes the server's configuration heuristic; feed health
+ * has its own labelled badge. A configured rule and a fresh feed are separate
+ * facts, and neither alone establishes coverage of every network.
  *
  * Nothing here relies on colour: every state that has a colour also has a word
  * beside it, and the dot's shape changes with severity.
@@ -1180,7 +1183,7 @@ function toneBadgeClass(tone) {
 function statusHero(overview, feedsData, detections) {
   const state = protectionState(overview.protectionStatus);
   const intel = feedHealth(feedsData);
-  const indexed = (feedsData && feedsData.totalIndexedDomains) || 0;
+  const indexed = feedsData ? feedsData.totalIndexedDomains : null;
 
   // Behavioural detection has three answers and they are not interchangeable.
   // A zero says "nothing suspicious happened"; nobody measured that when the
@@ -1188,22 +1191,15 @@ function statusHero(overview, feedsData, detections) {
   // either. Only a count that came back gets rendered as a count.
   let detectionStat;
   if (!detections) {
-    detectionStat = html`<div class="hero-stat"><span class="n muted">—</span><span class="k">Detections</span></div>`;
+    detectionStat = html`<div class="hero-stat"><span class="n muted is-unavailable">Unavailable</span><span class="k">Findings</span></div>`;
   } else if (detections.enabled === false) {
-    detectionStat = html`<div class="hero-stat"><span class="n muted">Off</span><span class="k">Detections</span></div>`;
+    detectionStat = html`<div class="hero-stat"><span class="n muted">Off</span><span class="k">Findings</span></div>`;
   } else {
-    detectionStat = html`<div class="hero-stat is-detect"><span class="n">${num(detections.total)}</span><span class="k">Detections</span></div>`;
+    detectionStat = html`<div class="hero-stat is-detect"><span class="n">${num(detections.total)}</span><span class="k">Findings</span></div>`;
   }
 
   return html`
-    <section class="hero is-${state.tone}" aria-label="Protection status">
-      <!--
-        Decorative only. Concentric rings and a grid, identical on every
-        install, encoding nothing. aria-hidden because there is nothing here
-        for a screen reader to convey, and deliberately unlabelled so it can
-        never be read as a measurement of anything.
-      -->
-      <div class="hero-topo" aria-hidden="true"></div>
+    <section class="hero is-${state.tone}" aria-label="Filtering configuration and activity">
       <div class="hero-top">
         <div class="hero-state">
           <span class="hero-dot" aria-hidden="true"></span>
@@ -1212,7 +1208,7 @@ function statusHero(overview, feedsData, detections) {
             <p class="hero-sub">${state.line}</p>
             <p class="hero-sub hero-intel">
               <span class="badge ${toneBadgeClass(intel.tone)}">${intel.label}</span>
-              <span>${num(indexed)} domains indexed${intel.enabled.length ? ` across ${intel.enabled.length} enabled feed${intel.enabled.length === 1 ? '' : 's'}` : ''}</span>
+              ${raw(intel.unavailable ? '' : html`<span>${num(indexed)} domains indexed${intel.enabled.length ? ` across ${intel.enabled.length} enabled feed${intel.enabled.length === 1 ? '' : 's'}` : ''}</span>`)}
             </p>
           </div>
         </div>
@@ -1220,7 +1216,7 @@ function statusHero(overview, feedsData, detections) {
       </div>
       <div class="hero-stats">
         <div class="hero-stat"><span class="n">${num(overview.queries24h)}</span><span class="k">DNS queries</span></div>
-        <div class="hero-stat is-blocked"><span class="n">${num(overview.threatsBlocked24h)}</span><span class="k">Threats blocked</span></div>
+        <div class="hero-stat is-blocked"><span class="n">${num(overview.threatsBlocked24h)}</span><span class="k">Blocked queries</span></div>
         <!-- No queries in the period means no rate to state. Zero per cent is
              a measurement; this is the absence of one. -->
         <div class="hero-stat">
@@ -1246,10 +1242,10 @@ function statusHero(overview, feedsData, detections) {
  * checks it never received, which is the single most misleading thing this
  * panel could do.
  */
-function attentionItems(diagnostics, feedsData) {
+function attentionItems(diagnostics, feedsData, unavailable = []) {
   const items = [];
 
-  if (!diagnostics) {
+  if (!diagnostics || !Array.isArray(diagnostics.checks)) {
     items.push({
       tone: 'warn',
       title: 'Configuration checks unavailable',
@@ -1262,12 +1258,19 @@ function attentionItems(diagnostics, feedsData) {
         tone: c.status === 'fail' ? 'bad' : 'warn',
         title: c.name || c.section || 'Configuration',
         body: [c.summary, c.action].filter(Boolean).join(' '),
+        evidence: c.evidence || [],
       });
     }
   }
 
   const health = feedHealth(feedsData);
-  if (!health.enabled.length) {
+  if (health.unavailable) {
+    items.push({
+      tone: 'warn',
+      title: 'Threat intelligence unavailable',
+      body: 'Feed health could not be retrieved. Retry to check which sources are loaded.',
+    });
+  } else if (!health.enabled.length) {
     items.push({
       tone: 'bad',
       title: 'No threat intelligence is enabled',
@@ -1303,7 +1306,9 @@ function attentionItems(diagnostics, feedsData) {
     });
   }
 
-  return items;
+  return items.concat(unavailable.map((title) => ({
+    tone: 'warn', title, body: 'This endpoint could not be retrieved. Retry to check its current state.',
+  })));
 }
 
 function attentionPanel(items) {
@@ -1317,7 +1322,12 @@ function attentionPanel(items) {
               <span class="badge ${toneBadgeClass(i.tone)} attn-badge">${i.tone === 'bad' ? 'Fault' : 'Warning'}</span>
               <div class="attn-body">
                 <strong>${i.title}</strong>
-                <p>${i.body}</p>
+                ${raw((i.body || '').length > 140 || (i.evidence || []).length
+                  ? html`<details class="attn-details"><summary>Details and next step</summary>
+                      <p>${i.body}</p>
+                      ${raw((i.evidence || []).length ? html`<ul>${raw(i.evidence.map((e) => html`<li>${e}</li>`).join(''))}</ul>` : '')}
+                    </details>`
+                  : html`<p>${i.body}</p>`)}
               </div>
             </div>`
         )
@@ -1327,12 +1337,12 @@ function attentionPanel(items) {
           <span class="hero-dot" aria-hidden="true"></span>
           <div class="attn-body">
             <strong>Nothing needs your attention</strong>
-            <p>Every configuration check passed, and every enabled feed is loaded and refreshing.</p>
+            <p>No warnings or faults were returned by configuration checks or feed health.</p>
           </div>
         </div>`;
 
   const lede = items.length
-    ? `${items.length} item${items.length === 1 ? '' : 's'}${bad ? ` · ${bad} blocking` : ''}`
+    ? `${items.length} item${items.length === 1 ? '' : 's'}${bad ? ` · ${bad} fault${bad === 1 ? '' : 's'}` : ''}`
     : 'Configuration checks and feed health.';
 
   return html`
@@ -1356,18 +1366,21 @@ function attentionPanel(items) {
  * away in the query log rather than guessed at here.
  */
 function recentlyBlocked(rows) {
-  if (!rows || !rows.length) {
+  if (!rows) {
+    return unavailableState('Recent blocks unavailable', 'The query log could not be retrieved. Retry to see the latest recorded blocks.');
+  }
+  if (!rows.length) {
     return emptyState(
       'Nothing blocked in the log yet',
       'Either the query log is switched off, or nothing resolving through DNS Daddy has asked for a blocked domain yet.',
-      { icon: '⃠', action: '<a class="btn btn-observe btn-sm" href="#/threats">Open Threats</a>' }
+      { icon: '⃠', action: '<a class="btn btn-observe btn-sm" href="#/queries?action=blocked">Open query log</a>' }
     );
   }
   return rows
     .map(
       (q) => html`
         <div class="dom-row">
-          <span class="dom-name">${q.domain}</span>
+          <a class="dom-name" href="${queryHash({ domain: q.domain, action: 'blocked' })}">${q.domain}</a>
           <span class="dom-meta">
             ${raw(q.category ? categoryBadge(q.category) : '')}
             ${raw(q.clientName || q.clientIp ? html`<span class="mono">${q.clientName || q.clientIp}</span>` : '')}
@@ -1417,7 +1430,7 @@ function repeatOffenders(domains) {
                     data-bg="${colourFor(d.category)}"></span>
             </span>
           </div>
-          <a class="btn btn-ghost btn-sm offender-go" href="#/queries"
+          <a class="btn btn-ghost btn-sm offender-go" href="${queryHash({ domain: d.domain })}"
              data-investigate="${d.domain}">Investigate</a>
         </div>`;
     })
@@ -1460,97 +1473,97 @@ function protectionBreakdown(rows) {
 const pages = {};
 
 pages.dashboard = {
-  title: 'Dashboard',
-  subtitle: 'Protection status, recent activity, and anything that needs you.',
-  async render() {
+  title: 'Overview',
+  subtitle: 'Resolver activity, filtering configuration and the next thing to check.',
+  async render(context = {}) {
+    const read = (path) => apiGet(path, { signal: context.signal });
+    const optional = (path) => read(path).catch((err) => {
+      if (err.status === 401 || err.name === 'AbortError') throw err;
+      return null;
+    });
     const [overview, activity, categories, recent, feeds, diagnostics, detections] = await Promise.all([
-      apiGet('/overview'),
-      apiGet('/activity/queries?hours=24'),
-      apiGet('/threats/categories?hours=24'),
-      // The actual blocked queries rather than a 7-day leaderboard: "what has
-      // it stopped recently" is a question about the log, and the log is what
-      // answers it.
-      apiGet('/queries?action=blocked&limit=8').catch(() => null),
-      apiGet('/feeds'),
-      // Both of these are tolerated failures. A dashboard that will not load
-      // because one panel's endpoint is unavailable is a worse outcome than a
-      // dashboard that says which panel it could not fill — and both say so
-      // rather than rendering an unearned zero.
-      apiGet('/diagnostics').catch(() => null),
-      apiGet('/findings/summary?days=1').catch(() => null),
+      read('/overview'),
+      optional('/activity/queries?hours=24'),
+      optional('/threats/categories?hours=24'),
+      optional('/queries?action=blocked&limit=8'),
+      optional('/feeds'),
+      optional('/diagnostics'),
+      optional('/findings/summary?days=1'),
     ]);
-    this.feeds = feeds;
+    if (!context.isCurrent || context.isCurrent()) this.feeds = feeds;
 
-    const catRows = (categories.categories || []).map((c) => ({
-      label: c.label,
-      count: c.count,
-      category: c.category,
-    }));
-
-    const buckets = activity.buckets || [];
+    const catRows = categories ? (categories.categories || []).map((c) => ({
+      label: c.label, count: c.count, category: c.category,
+    })) : null;
+    const buckets = activity ? activity.buckets || [] : [];
     const hadTraffic = buckets.some((b) => b.total > 0);
+    const unavailable = [
+      !activity && 'Query activity unavailable',
+      !categories && 'Block categories unavailable',
+      !recent && 'Recent blocks unavailable',
+      !detections && 'Findings unavailable',
+    ].filter(Boolean);
 
     return html`
-      ${raw(statusHero(overview, feeds, detections))}
-      ${raw(attentionPanel(attentionItems(diagnostics, feeds)))}
-      ${raw(firstClientCard(overview))}
-
-      <div class="section card">
-        <div class="card-head">
-          <div>
-            <h2>Threat activity</h2>
-            <p>Queries and blocks over the last 24 hours, in hourly buckets.</p>
-          </div>
-          <div class="row-end"><a class="btn btn-observe btn-sm" href="#/queries">Query log</a></div>
+      <div class="overview-workspace">
+        ${raw(statusHero(overview, feeds, detections))}
+        <div class="overview-primary">
+          <section class="card overview-activity">
+            <div class="card-head">
+              <div><h2>DNS activity</h2><p>Queries and blocks over the last 24 hours.</p></div>
+              <div class="row-end"><a class="btn btn-observe btn-sm" href="#/queries?hours=24">Query log</a></div>
+            </div>
+            ${raw(!activity
+              ? unavailableState('Query activity unavailable', 'Hourly query counts could not be retrieved. Retry to see the current activity.')
+              : hadTraffic
+                ? html`<div class="chart-wrap">${raw(areaChart(buckets))}</div>
+                    <details class="chart-data"><summary>View hourly values</summary>
+                      <div class="table-wrap"><table><thead><tr><th>Hour</th><th>Queries</th><th>Blocked</th></tr></thead>
+                      <tbody>${raw(buckets.map((b) => html`<tr><td>${b.label}</td><td>${num(b.total)}</td><td>${num(b.blocked)}</td></tr>`).join(''))}</tbody></table></div>
+                    </details>`
+                : emptyState('No DNS activity recorded',
+                    'No query activity is recorded for the last 24 hours. Check client configuration and query logging if you expected traffic.',
+                    { icon: '∿', action: '<a class="btn btn-ghost btn-sm" href="#/setup">Setup guide</a>' }))}
+          </section>
+          <div class="overview-attention">${raw(attentionPanel(attentionItems(diagnostics, feeds, unavailable)))}</div>
         </div>
-        ${raw(
-          hadTraffic
-            ? html`<div class="chart-wrap">${raw(areaChart(buckets))}</div>`
-            : emptyState(
-                'No DNS activity observed yet',
-                'DNS Daddy is running and has not been asked to resolve anything in the last 24 hours. Point a device at it and the traffic will appear here.',
-                { icon: '∿', action: '<a class="btn btn-ghost btn-sm" href="#/setup">Setup guide</a>' }
-              )
-        )}
-      </div>
 
-      <div class="section grid grid-2">
-        <div class="card">
-          <div class="card-head">
-            <div><h2>Recently blocked</h2><p>Newest first, as recorded in the query log.</p></div>
-            <div class="row-end"><a class="btn btn-observe btn-sm" href="#/threats">All threats</a></div>
-          </div>
-          ${raw(recentlyBlocked(recent ? recent.queries : null))}
-        </div>
-        <div class="card">
-          <div class="card-head">
-            <div><h2>Protection breakdown</h2><p>What was blocked in the last 24 hours, by category.</p></div>
-          </div>
-          ${raw(protectionBreakdown(catRows))}
-        </div>
-      </div>
+        ${raw(firstClientCard(overview))}
 
-      <div class="section grid grid-2">
-        ${raw(threatIntelPanel(feeds))}
-        <div class="card">
-          <div class="card-head">
-            <div><h2>Resolver</h2><p>What this instance is doing, and for whom.</p></div>
+        <div class="section grid grid-2">
+          <div class="card">
+            <div class="card-head">
+              <div><h2>Recently blocked</h2><p>Newest first, as recorded in the query log.</p></div>
+              <div class="row-end"><a class="btn btn-observe btn-sm" href="#/queries?action=blocked">View log</a></div>
+            </div>
+            ${raw(recentlyBlocked(recent ? recent.queries : null))}
           </div>
-          <div class="grid grid-3">
-            <div><div class="label muted small">STATUS</div><div>${raw(statusBadge(overview.resolverStatus))}</div></div>
-            <div><div class="label muted small">UPTIME</div><div>${duration(overview.uptimeSeconds)}</div></div>
-            <div><div class="label muted small">FEEDS REFRESHED</div><div>${relTime(overview.lastFeedRefresh)}</div></div>
-            <div><div class="label muted small">NETWORKS</div><div>${num(overview.protectedNetworks)}</div></div>
-            <div><div class="label muted small">POLICIES</div><div>${num(overview.activePolicies)}</div></div>
-            <div><div class="label muted small">VERSION</div><div class="mono small">${overview.version}</div></div>
+          <div class="card">
+            <div class="card-head"><div><h2>Blocked by category</h2><p>Recorded blocks in the last 24 hours.</p></div></div>
+            ${raw(catRows
+              ? protectionBreakdown(catRows)
+              : unavailableState('Block categories unavailable', 'The category breakdown could not be retrieved. Retry to check the recorded blocks.'))}
+          </div>
+        </div>
+
+        <div class="section grid grid-2">
+          ${raw(threatIntelPanel(feeds))}
+          <div class="card">
+            <div class="card-head"><div><h2>Resolver</h2><p>This instance and its configured scope.</p></div></div>
+            <div class="grid grid-3">
+              <div><div class="label muted small">Status</div><div>${raw(statusBadge(overview.resolverStatus))}</div></div>
+              <div><div class="label muted small">Uptime</div><div>${duration(overview.uptimeSeconds)}</div></div>
+              <div><div class="label muted small">Feeds refreshed</div><div>${relTime(overview.lastFeedRefresh)}</div></div>
+              <div><div class="label muted small">Configured networks</div><div>${num(overview.protectedNetworks)}</div></div>
+              <div><div class="label muted small">Policies</div><div>${num(overview.activePolicies)}</div></div>
+              <div><div class="label muted small">Version</div><div class="mono small">${overview.version}</div></div>
+            </div>
           </div>
         </div>
       </div>
     `;
   },
   async mounted() {
-    // The panel's inline Enable button runs exactly the same activation as the
-    // full card on the Threats page.
     mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
   },
 };
@@ -1694,8 +1707,8 @@ function mountDecisionCards() {
 
 
 pages.threats = {
-  title: 'Threats',
-  subtitle: 'Everything blocked, and why.',
+  title: 'Blocked domains',
+  subtitle: 'Recorded DNS blocks and the evidence behind them.',
   async render() {
     const [categories, top, recent, feeds, policies, decisions] = await Promise.all([
       apiGet('/threats/categories?hours=168'),
@@ -1742,16 +1755,7 @@ pages.threats = {
     mountDecisionCards();
     mountObservatoryCard(this.feeds ? this.feeds.observatoryFeedId : '');
 
-    // Investigate goes to the query log filtered by that domain. That is what
-    // the existing endpoint supports, and it is the whole of what the button
-    // claims: every query for this name, who asked, and when.
-    $('#view').addEventListener('click', (e) => {
-      const el = e.target.closest('[data-investigate]');
-      if (!el) return;
-      e.preventDefault();
-      pages.queries.pendingDomain = el.dataset.investigate;
-      window.location.hash = '#/queries';
-    });
+
   },
 };
 
@@ -1832,8 +1836,13 @@ function localDnssecBadge(v) {
  * reader semantics and browser find-in-page all work without any of it being
  * reimplemented, and a row stays open across a re-render of its neighbours.
  */
-function queryTable(queries) {
+function queryTable(queries, { filtered = false, filters = {} } = {}) {
   if (!queries || !queries.length) {
+    if (filtered) {
+      return emptyState('No matching queries',
+        'Try a broader filter or time range. Only queries retained in the log can appear here.',
+        { icon: '≡', action: '<a class="btn btn-ghost btn-sm" href="#/queries">Clear filters</a>' });
+    }
     return emptyState(
       'No queries recorded',
       'Either the query log is switched off, or nothing has resolved through DNS Daddy yet.',
@@ -1841,14 +1850,17 @@ function queryTable(queries) {
     );
   }
 
-  return html`<div class="qlog">${raw(queries.map(queryRow).join(''))}</div>`;
+  return html`<div class="qlog">
+    <div class="query-log-head query-grid" aria-hidden="true"><span></span><span>Domain</span><span>Outcome</span><span>Category</span><span>Client</span><span>Time</span></div>
+    ${raw(queries.map((q) => queryRow(q, filters)).join(''))}</div>`;
 }
 
 // One entry. The action decides the row's accent, and the accent is never the
 // only signal: the word is there too, in a badge.
-function queryRow(q) {
-  const action = q.action === 'blocked' ? 'blocked' : q.action === 'error' ? 'error' : 'allowed';
+function queryRow(q, filters = {}) {
+  const action = ['blocked', 'error', 'allowed'].includes(q.action) ? q.action : 'unknown';
   const who = q.clientName || q.clientIp || '';
+  const context = normaliseQueryFilters(filters);
 
   // Detail rows, each omitted when the server did not record it. An empty row
   // reading "—" is noise; an absent one is an accurate statement that nothing
@@ -1862,12 +1874,14 @@ function queryRow(q) {
     ['Type', q.qtype ? html`<span class="mono">${q.qtype}</span>` : ''],
     ['Client', who ? html`<span class="mono">${who}</span>` : ''],
     ['Client address', q.clientName && q.clientIp ? html`<span class="mono">${q.clientIp}</span>` : ''],
+    ['Network ID', q.networkId ? html`<span class="mono">${q.networkId}</span>` : ''],
+    ['Protocol', q.proto ? html`${q.proto}` : ''],
     ['Reason', q.reason ? html`${q.reason}` : ''],
     ['Category', q.category ? categoryBadge(q.category) : ''],
     ['Source', q.source ? html`${q.source}` : ''],
     ['DNSSEC (upstream)', q.dnssec ? dnssecBadge(q.dnssec) : ''],
     ['DNSSEC (local — Daddybound)', q.dnssecValidation ? localDnssecBadge(q.dnssecValidation) : ''],
-    ['Answered from', q.cached ? 'the local cache' : 'an upstream resolver'],
+    ['Cache hit', typeof q.cached === 'boolean' ? (q.cached ? 'Yes' : 'No') : ''],
     ['Took', typeof q.elapsedMs === 'number' ? html`${q.elapsedMs} ms` : ''],
     ['Time', q.time ? html`${new Date(q.time).toLocaleString('en-GB')}` : ''],
   ]
@@ -1876,8 +1890,8 @@ function queryRow(q) {
     .join('');
 
   return html`
-    <details class="qrow is-${raw(action)}">
-      <summary>
+    <details class="qrow query-row is-${raw(action)}">
+      <summary class="query-grid">
         <span class="qmark" aria-hidden="true"></span>
         <span class="qdomain mono">${q.domain}</span>
         ${raw(
@@ -1885,111 +1899,194 @@ function queryRow(q) {
             ? html`<span class="badge bad qact">Blocked</span>`
             : action === 'error'
               ? html`<span class="badge warn qact">Error</span>`
-              : html`<span class="badge qact qact-allowed">Allowed</span>`
+              : action === 'allowed'
+                ? html`<span class="badge qact qact-allowed">Allowed</span>`
+                : html`<span class="badge warn qact">Unknown</span>`
         )}
-        ${raw(q.category ? html`<span class="qcat">${q.category}</span>` : '')}
-        <span class="qclient mono">${who || '—'}</span>
-        <span class="qtime">${clockTime(q.time)}</span>
+        <span class="qcat">${q.category || '—'}</span>
+        <span class="qclient mono"><span class="sr-only">Client: </span>${who || '—'}</span>
+        <span class="qtime"><span class="sr-only">Time: </span>${clockTime(q.time)}</span>
       </summary>
       <dl class="qfacts">${raw(facts)}</dl>
       <div class="qactions">
-        <a class="btn btn-observe btn-sm" href="#/queries" data-filter-domain="${q.domain}">Every query for this domain</a>
+        <a class="btn btn-observe btn-sm" href="${queryHash({ ...context, domain: q.domain })}" data-filter-domain="${q.domain}">Filter this domain</a>
+        ${raw(q.clientIp ? html`<a class="btn btn-ghost btn-sm" href="${queryHash({ ...context, clientIp: q.clientIp })}">Filter this client</a>` : '')}
       </div>
     </details>`;
 }
 
+// The HTTP endpoint accepts relative hours; storage's since/until fields are
+// not exposed by this API. Keep bookmarks limited to filters we can apply.
+function normaliseQueryFilters(input = {}) {
+  return {
+    domain: String(input.domain || '').trim(),
+    clientIp: String(input.clientIp || '').trim(),
+    action: ['blocked', 'allowed', 'error'].includes(input.action) ? input.action : '',
+    networkId: String(input.networkId || '').trim(),
+    hours: ['1', '24', '168'].includes(String(input.hours)) ? String(input.hours) : '',
+  };
+}
+
+function queryFilters(hash) {
+  const params = new URLSearchParams(String(hash || '').split('?')[1] || '');
+  return normaliseQueryFilters(Object.fromEntries(params));
+}
+
+function queryParameters(filters) {
+  return new URLSearchParams(Object.entries(normaliseQueryFilters(filters)).filter(([, value]) => value));
+}
+
+function queryHash(filters) {
+  const query = queryParameters(filters).toString();
+  return `#/queries${query ? `?${query}` : ''}`;
+}
+
+function setQueryFilters(filters) {
+  const next = queryHash(filters);
+  if (window.location.hash === next) return router.reload();
+  window.location.hash = next;
+}
+
+function queryFilterForm(networks, filters) {
+  const choices = networks || [];
+  const missing = filters.networkId && !choices.some((n) => n.id === filters.networkId);
+  const option = (value, label, selected) => html`<option value="${value}"${raw(value === selected ? ' selected' : '')}>${label}</option>`;
+  return html`
+    <div class="card section query-filter-card">
+      <form class="query-filters" id="q-filters">
+        <div class="query-filter"><label for="q-domain">Domain contains</label>
+          <input id="q-domain" name="domain" type="search" placeholder="example.com" autocomplete="off" spellcheck="false" value="${filters.domain}"></div>
+        <div class="query-filter"><label for="q-client">Client IP</label>
+          <input id="q-client" name="clientIp" type="search" placeholder="Exact IP address" autocomplete="off" spellcheck="false" value="${filters.clientIp}"></div>
+        <div class="query-filter"><label for="q-action">Outcome</label>
+          <select id="q-action" name="action">
+            ${raw([['', 'All outcomes'], ['blocked', 'Blocked'], ['allowed', 'Allowed'], ['error', 'Errors']].map(([v, l]) => option(v, l, filters.action)).join(''))}
+          </select></div>
+        <div class="query-filter"><label for="q-network">Network</label>
+          <select id="q-network" name="networkId">
+            ${raw(option('', 'All networks', filters.networkId))}
+            ${raw(choices.map((n) => option(n.id, n.name, filters.networkId)).join(''))}
+            ${raw(missing ? option(filters.networkId, `${filters.networkId} (not in current list)`, filters.networkId) : '')}
+          </select></div>
+        <div class="query-filter"><label for="q-hours">Time range</label>
+          <select id="q-hours" name="hours">
+            ${raw([['', 'All retained'], ['1', 'Last hour'], ['24', 'Last 24 hours'], ['168', 'Last 7 days']].map(([v, l]) => option(v, l, filters.hours)).join(''))}
+          </select></div>
+        <div class="query-filter-actions">
+          <button type="submit" class="btn btn-observe" id="q-apply">Apply filters</button>
+          <button type="button" class="btn btn-ghost" id="q-clear">Clear filters</button>
+        </div>
+      </form>
+      <div class="query-filter-note query-filter-summary row">
+        <p class="muted small">Domain uses a substring match. Client IP must match exactly. Times are local to this browser.</p>
+        <span class="row-end muted small" id="q-count" role="status" aria-live="polite"></span>
+      </div>
+      ${raw(networks ? '' : html`<p class="form-error" role="status">Network names unavailable. Existing network filters still apply. <button type="button" class="btn btn-ghost btn-sm" data-page-retry>Retry</button></p>`)}
+    </div>`;
+}
+
+// A request owns its rows until the route changes. Both the initial request
+// and pagination use the same guard, so a late page cannot replace a new filter
+// and repeated clicks cannot append the same cursor twice.
+function createQueryLoader({ read, filters, isCurrent, onLoading, onData, onError }) {
+  const state = { cursor: 0, rows: [], loading: false };
+  return {
+    state,
+    async load(append = false) {
+      if (state.loading || !isCurrent() || (append && !state.cursor)) return false;
+      state.loading = true;
+      onLoading(true, append);
+      const params = queryParameters(filters);
+      params.set('limit', '100');
+      if (append) params.set('cursor', String(state.cursor));
+      try {
+        const data = await read(`/queries?${params}`);
+        if (!isCurrent()) return false;
+        if (!data || !Array.isArray(data.queries)) throw new Error('The query log returned an unreadable response.');
+        state.cursor = data.nextCursor || 0;
+        state.rows = append ? state.rows.concat(data.queries) : data.queries;
+        onData(state, append);
+        return true;
+      } catch (err) {
+        if (isCurrent() && err.name !== 'AbortError') onError(err, append);
+        return false;
+      } finally {
+        state.loading = false;
+        if (isCurrent()) onLoading(false, append);
+      }
+    },
+  };
+}
+
 pages.queries = {
   title: 'Query log',
-  subtitle: 'Every lookup, with a plain-English reason.',
-  state: { cursor: 0, rows: [] },
-  async render() {
-    const [networks] = await Promise.all([apiGet('/networks')]);
-    this.state = { cursor: 0, rows: [] };
-
+  subtitle: 'Inspect recorded lookups, then open a row for its explanation.',
+  async render(context = {}) {
+    const hash = context.hash === undefined ? window.location.hash : context.hash;
+    const filters = queryFilters(hash);
+    const networks = await apiGet('/networks', { signal: context.signal }).catch((err) => {
+      if (err.status === 401 || err.name === 'AbortError') throw err;
+      return null;
+    });
     return html`
-      <div class="card section">
-        <div class="row" id="q-filters">
-          <input id="q-domain" class="w-260" placeholder="Filter by domain…">
-          <select id="q-action" class="w-150">
-            <option value="">All actions</option>
-            <option value="blocked">Blocked</option>
-            <option value="allowed">Allowed</option>
-            <option value="error">Errors</option>
-          </select>
-          <select id="q-network" class="w-200">
-            <option value="">All networks</option>
-            ${raw(networks.networks.map((n) => html`<option value="${n.id}">${n.name}</option>`).join(''))}
-          </select>
-          <button class="btn btn-observe" id="q-apply">Apply</button>
-          <span class="row-end muted small" id="q-count"></span>
-        </div>
-      </div>
-      <div id="q-results">${raw(emptyState('Loading…', 'Fetching matching queries.', { icon: '·' }))}</div>
-      <div class="row mt-4">
-        <button class="btn btn-ghost" id="q-more" hidden>Load more</button>
-      </div>
+      ${raw(queryFilterForm(networks ? networks.networks || [] : null, filters))}
+      <div id="q-results" aria-busy="true">${raw(emptyState('Loading queries…', 'Fetching matching queries.', { icon: '·' }))}</div>
+      <p class="form-error" id="q-error" role="alert" hidden></p>
+      <div class="row mt-4"><button type="button" class="btn btn-ghost" id="q-more" hidden>Load more</button></div>
     `;
   },
-  async mounted() {
-    const load = async (append) => {
-      const params = new URLSearchParams({ limit: '100' });
-      const domain = $('#q-domain').value.trim();
-      const action = $('#q-action').value;
-      const network = $('#q-network').value;
-      if (domain) params.set('domain', domain);
-      if (action) params.set('action', action);
-      if (network) params.set('networkId', network);
-      if (append && this.state.cursor) params.set('cursor', String(this.state.cursor));
-
-      try {
-        const data = await apiGet(`/queries?${params}`);
-        this.state.cursor = data.nextCursor;
-        this.state.rows = append ? this.state.rows.concat(data.queries) : data.queries;
-        // Through sanitize() like every page render. Nothing queryTable
-        // builds today puts server data in an href or src, so escaping alone
-        // is currently enough — but that is a property of today's markup, not
-        // of this assignment, and the next data-derived link added to a query
-        // row would arrive here having skipped the pass that strips
-        // javascript: URLs everywhere else.
-        $('#q-results').innerHTML = sanitize(queryTable(this.state.rows));
-        $('#q-count').textContent = `${this.state.rows.length} row${this.state.rows.length === 1 ? '' : 's'}`;
-        $('#q-more').hidden = !data.nextCursor;
-      } catch (err) {
-        reportError(err);
-      }
-    };
-
-    $('#q-apply').addEventListener('click', () => {
-      this.state.cursor = 0;
-      load(false);
+  async mounted(context = {}) {
+    const host = $('#q-results');
+    const form = $('#q-filters');
+    const apply = $('#q-apply');
+    const more = $('#q-more');
+    const count = $('#q-count');
+    const error = $('#q-error');
+    const hash = context.hash === undefined ? window.location.hash : context.hash;
+    const filters = queryFilters(hash);
+    const isCurrent = () => host.isConnected && window.location.hash === hash &&
+      (!context.isCurrent || context.isCurrent());
+    const loader = createQueryLoader({
+      filters,
+      isCurrent,
+      read: (path) => apiGet(path, { signal: context.signal }),
+      onLoading: (loading, append) => {
+        host.setAttribute('aria-busy', String(loading));
+        apply.disabled = loading;
+        more.disabled = loading;
+        more.textContent = loading && append ? 'Loading more…' : 'Load more';
+        if (loading) {
+          error.hidden = true;
+          count.textContent = append ? `${num(loader.state.rows.length)} shown · Loading more…` : 'Loading…';
+        }
+      },
+      onData: (state) => {
+        host.innerHTML = sanitize(queryTable(state.rows, { filtered: Object.values(filters).some(Boolean), filters }));
+        paintDynamic(host);
+        count.textContent = `${num(state.rows.length)} quer${state.rows.length === 1 ? 'y' : 'ies'} shown`;
+        more.hidden = !state.cursor;
+      },
+      onError: (err, append) => {
+        if (append) {
+          error.textContent = `Could not load more queries. ${err.message || 'Try again.'}`;
+          error.hidden = false;
+          count.textContent = `${num(loader.state.rows.length)} shown · More rows unavailable`;
+        } else {
+          host.innerHTML = sanitize(unavailableState('Query log unavailable', err.message || 'The query log could not be retrieved. Try again.'));
+          count.textContent = 'Results unavailable';
+          more.hidden = true;
+        }
+      },
     });
-    $('#q-domain').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        this.state.cursor = 0;
-        load(false);
-      }
+    this.state = loader.state;
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (loader.state.loading) return;
+      setQueryFilters(Object.fromEntries(new FormData(form)));
     });
-    $('#q-more').addEventListener('click', () => load(true));
-
-    // The in-row "every query for this domain" shortcut. Delegated because
-    // rows are replaced on every load, and bound once rather than per row.
-    $('#q-results').addEventListener('click', (e) => {
-      const el = e.target.closest('[data-filter-domain]');
-      if (!el) return;
-      e.preventDefault();
-      $('#q-domain').value = el.dataset.filterDomain;
-      this.state.cursor = 0;
-      load(false);
-    });
-
-    // Arrived here from the topbar search. Prefill and consume it, so a later
-    // visit to this page is not still filtered by something typed once.
-    if (this.pendingDomain) {
-      $('#q-domain').value = this.pendingDomain;
-      this.pendingDomain = '';
-    }
-
-    await load(false);
+    $('#q-clear').addEventListener('click', () => setQueryFilters({}));
+    more.addEventListener('click', () => loader.load(true));
+    await loader.load();
   },
 };
 
@@ -2110,7 +2207,7 @@ function findingDetail(detail) {
 }
 
 pages.detections = {
-  title: 'Detections',
+  title: 'Findings',
   subtitle: 'Behavioural findings. Observed and explained, never blocked.',
   async render() {
     const [catalogue, findings, summary] = await Promise.all([
@@ -4422,50 +4519,163 @@ function routeName(hash) {
   return pages[name] ? name : 'dashboard';
 }
 
+// A route owns the right to paint, not just the name of the page. Two
+// requests for different filters can share a route and finish out of order.
+function createRenderGate() {
+  let generation = 0;
+  return {
+    begin() {
+      const mine = ++generation;
+      return () => mine === generation;
+    },
+    cancel() { generation++; },
+  };
+}
+
+function isEditableTarget(target) {
+  return Boolean(target && target.closest && target.closest(
+    'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]'
+  ));
+}
+
+function shouldFocusSearch(event) {
+  return String(event.key).toLowerCase() === 'k' && Boolean(event.ctrlKey || event.metaKey) &&
+    !event.altKey && !event.shiftKey && !event.repeat && !event.defaultPrevented && !isEditableTarget(event.target);
+}
+
+function shouldAutoRefresh({ route, paused, hidden, authenticated, busy, interacting }) {
+  return Boolean(!paused && !hidden && authenticated && !busy && !interacting &&
+    (route === 'dashboard' || route === 'threats'));
+}
+
+function pageInteractionActive() {
+  const view = $('#view');
+  return Boolean($('#sidebar').classList.contains('open') || $('details[open]', view) ||
+    (document.activeElement && document.activeElement !== view && view.contains(document.activeElement)) ||
+    isEditableTarget(document.activeElement));
+}
+
+function mobileNavigation() {
+  return window.matchMedia('(max-width: 760px)').matches;
+}
+
+function setNavigation(open, { restoreFocus = true } = {}) {
+  const sidebar = $('#sidebar');
+  const mobile = mobileNavigation();
+  const wasOpen = sidebar.classList.contains('open');
+  const activeWasInside = sidebar.contains(document.activeElement) || document.activeElement === $('#nav-backdrop');
+  open = Boolean(open && mobile);
+  sidebar.classList.toggle('open', open);
+  sidebar.hidden = mobile && !open;
+  sidebar.inert = mobile && !open;
+  $('.main').inert = open;
+  $('#menu-btn').setAttribute('aria-expanded', String(open));
+  $('#menu-btn').setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+  const backdrop = $('#nav-backdrop');
+  if (backdrop) backdrop.hidden = !open;
+  document.body.classList.toggle('nav-is-open', open);
+  if (open && !wasOpen) {
+    ($('#nav-close') || $('.nav a', sidebar)).focus();
+  } else if (wasOpen && !open && restoreFocus && activeWasInside && mobile) {
+    $('#menu-btn').focus();
+  }
+}
+
 const router = {
   current: 'dashboard',
+  currentHash: null,
+  busy: false,
+  gate: createRenderGate(),
+  controller: null,
 
   route() {
     return routeName(window.location.hash);
   },
 
-  async navigate() {
+  invalidate() {
+    this.gate.cancel();
+    if (this.controller) this.controller.abort();
+    this.busy = false;
+    $('#refresh-btn').disabled = false;
+    $('#view').setAttribute('aria-busy', 'false');
+  },
+
+  async navigate({ automatic = false } = {}) {
+    if (automatic && (this.busy || pageInteractionActive())) return false;
+    const hash = window.location.hash;
     const name = this.route();
+    const routeChanged = this.currentHash !== hash;
+    const stillLatest = this.gate.begin();
+    if (this.controller) this.controller.abort();
+    this.controller = new AbortController();
+    const context = {
+      hash,
+      signal: this.controller.signal,
+      isCurrent: () => stillLatest() && window.location.hash === hash && !$('#app').hidden,
+    };
     this.current = name;
+    this.currentHash = hash;
+    this.busy = true;
     const page = pages[name];
 
-    $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === name));
+    $$('.nav a').forEach((a) => {
+      const active = a.dataset.route === name;
+      a.classList.toggle('active', active);
+      if (active) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
+    });
     $('#page-title').textContent = page.title;
     $('#page-subtitle').textContent = page.subtitle || '';
-    $('#sidebar').classList.remove('open');
-
+    if (name === 'queries') $('#global-search').value = queryFilters(hash).domain;
+    document.title = `${page.title} · DNS Daddy`;
+    if (!automatic) setNavigation(false, { restoreFocus: false });
+    $('#refresh-btn').disabled = true;
     const view = $('#view');
     view.setAttribute('aria-busy', 'true');
+    if (routeChanged) {
+      view.innerHTML = sanitize(emptyState('Loading…', `Opening ${page.title.toLowerCase()}.`, { icon: '·' }));
+    }
 
     try {
-      view.innerHTML = sanitize(await page.render());
-      if (page.mounted) await page.mounted();
+      const markup = await page.render(context);
+      if (!context.isCurrent() || (automatic && pageInteractionActive())) return false;
+      view.innerHTML = sanitize(markup);
+      if (page.mounted) await page.mounted(context);
+      if (!context.isCurrent()) return false;
       paintDynamic(view);
       bindCopyButtons();
       $('#refresh-note').textContent = `Updated ${new Date().toLocaleTimeString('en-GB')}`;
+      if (routeChanged && !automatic) view.focus({ preventScroll: true });
+      return true;
     } catch (err) {
-      if (!(err instanceof ApiError && err.status === 401)) {
-        view.innerHTML = sanitize(emptyState('Could not load this page', esc(err.message || 'The request failed.'), { icon: '!' }));
+      if (context.isCurrent() && err.name !== 'AbortError' && !(err instanceof ApiError && err.status === 401)) {
+        $('#refresh-note').textContent = 'Update unavailable';
+        if (!automatic || !pageInteractionActive()) {
+          view.innerHTML = sanitize(unavailableState('Could not load this page', err.message || 'The request failed. Try again.'));
+        }
         reportError(err);
       }
+      return false;
     } finally {
-      view.setAttribute('aria-busy', 'false');
+      if (stillLatest()) {
+        this.busy = false;
+        view.setAttribute('aria-busy', 'false');
+        $('#refresh-btn').disabled = false;
+      }
     }
   },
 
-  reload() {
-    return this.navigate();
+  reload(options) {
+    return this.navigate(options);
   },
 };
 
 /* ---------- auth & bootstrap -------------------------------------------- */
 
 function showLogin() {
+  router.invalidate();
+  sidebarGate.cancel();
+  setNavigation(false, { restoreFocus: false });
   $('#app').hidden = true;
   $('#login').hidden = false;
   $('#password').focus();
@@ -4476,22 +4686,31 @@ function showApp() {
   $('#app').hidden = false;
 }
 
+function sidebarStatus(overview) {
+  if (!overview) return { tone: 'warn', text: 'Status unavailable', version: '—' };
+  const status = {
+    protected: ['ok', 'Filtering configured'],
+    degraded: ['warn', 'No blocking rules'],
+    offline: ['warn', 'No intelligence loaded'],
+  }[overview.protectionStatus] || ['warn', 'Status unknown'];
+  return { tone: status[0], text: status[1], version: overview.version ? `v${overview.version}` : '—' };
+}
+
+const sidebarGate = createRenderGate();
+
 async function refreshSidebarStatus() {
+  const stillLatest = sidebarGate.begin();
+  let overview = null;
   try {
-    const overview = await apiGet('/overview');
-    const chip = $('#sidebar-status');
-    const map = { protected: 'ok', degraded: 'warn', offline: 'bad' };
-    chip.className = `status-chip ${map[overview.protectionStatus] || ''}`;
-    $('#sidebar-status-text').textContent =
-      overview.protectionStatus === 'protected'
-        ? 'Resolver online'
-        : overview.protectionStatus === 'degraded'
-          ? 'Not enforcing'
-          : 'No blocklist loaded';
-    $('#sidebar-version').textContent = `v${overview.version}`;
+    overview = await apiGet('/overview');
   } catch {
-    /* the page render will surface the real error */
+    // A previous green badge is not evidence of the current state.
   }
+  if (!stillLatest() || $('#app').hidden) return;
+  const state = sidebarStatus(overview);
+  $('#sidebar-status').className = `status-chip ${state.tone}`;
+  $('#sidebar-status-text').textContent = state.text;
+  $('#sidebar-version').textContent = state.version;
 }
 
 async function boot() {
@@ -4525,30 +4744,85 @@ async function boot() {
     refreshSidebarStatus();
   });
 
-  $('#menu-btn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+  $('#menu-btn').addEventListener('click', () => setNavigation(!$('#sidebar').classList.contains('open')));
+  if ($('#nav-close')) $('#nav-close').addEventListener('click', () => setNavigation(false));
+  if ($('#nav-backdrop')) $('#nav-backdrop').addEventListener('click', () => setNavigation(false));
+  const navMedia = window.matchMedia('(max-width: 760px)');
+  navMedia.addEventListener('change', () => setNavigation(false));
+  setNavigation(false, { restoreFocus: false });
 
-  // The search box goes to the Query log filtered by what was typed. That is
-  // the whole of what it claims to do, and the whole of what the API supports
-  // today: there is no cross-page investigation index behind it, so it does
-  // not pretend to be one.
-  $('#search-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const term = $('#global-search').value.trim();
-    if (!term) return;
-    pages.queries.pendingDomain = term;
-    if (router.route() === 'queries') {
-      router.reload();
-    } else {
-      window.location.hash = '#/queries';
+  const skip = $('.skip-link');
+  if (skip) skip.addEventListener('click', (event) => {
+    event.preventDefault();
+    if ($('#app').hidden) $('#password').focus();
+    else {
+      setNavigation(false, { restoreFocus: false });
+      $('#view').focus();
     }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if ($('#app').hidden) return;
+    const sidebar = $('#sidebar');
+    if (event.key === 'Escape' && sidebar.classList.contains('open')) {
+      event.preventDefault();
+      setNavigation(false);
+      return;
+    }
+    if (event.key === 'Tab' && sidebar.classList.contains('open') && mobileNavigation()) {
+      const targets = $$('a[href], button:not([disabled]), input:not([disabled]), [tabindex="0"]', sidebar)
+        .filter((el) => !el.hidden);
+      const first = targets[0];
+      const last = targets[targets.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    if (shouldFocusSearch(event)) {
+      event.preventDefault();
+      setNavigation(false, { restoreFocus: false });
+      $('#global-search').focus();
+    }
+  });
+
+  // This search is the query log's domain filter. The URL carries it through
+  // refresh, browser history and links copied to another signed-in operator.
+  $('#search-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const domain = $('#global-search').value.trim();
+    if (domain) setQueryFilters({ domain });
+  });
+
+  $('#view').addEventListener('click', (event) => {
+    const retry = event.target.closest('[data-page-retry]');
+    if (!retry) return;
+    retry.disabled = true;
+    router.reload();
+    refreshSidebarStatus();
   });
 
   window.addEventListener('hashchange', () => router.navigate());
 
-  // Keep the dashboard fresh without hammering a single-vCPU box.
+  let updatesPaused = false;
+  const pause = $('#auto-refresh-btn');
+  if (pause) pause.addEventListener('click', () => {
+    updatesPaused = !updatesPaused;
+    pause.setAttribute('aria-pressed', String(updatesPaused));
+    pause.textContent = updatesPaused ? 'Resume updates' : 'Pause updates';
+  });
+
+  // Keep the two live pages fresh without closing explanations or discarding
+  // an operator's input. A pause stops automatic reads until explicitly resumed.
   setInterval(() => {
-    if (document.hidden || $('#app').hidden) return;
-    if (router.current === 'dashboard' || router.current === 'threats') router.reload();
+    if (!shouldAutoRefresh({
+      route: router.current, paused: updatesPaused, hidden: document.hidden,
+      authenticated: !$('#app').hidden, busy: router.busy, interacting: pageInteractionActive(),
+    })) return;
+    router.reload({ automatic: true });
     refreshSidebarStatus();
   }, 30000);
 
@@ -4601,6 +4875,15 @@ if (typeof module !== 'undefined' && module.exports) {
     diagnosticsBanner,
     queryTable,
     queryRow,
+    queryFilters,
+    queryHash,
+    queryFilterForm,
+    createQueryLoader,
+    createRenderGate,
+    shouldAutoRefresh,
+    shouldFocusSearch,
+    sidebarStatus,
+    areaChart,
     feedHealth,
     repeatOffenders,
     firstClientCard,

@@ -1,92 +1,46 @@
-/*
- * DNS Daddy dashboard — V3.
- *
- * The identity is a globe carrying network nodes under a protective shield,
- * and the palette says the same thing the mark does: cyan is the network you
- * are watching, green is the protection over it. That split is the whole
- * point of the V3 colour system and it is load-bearing, not decorative —
- * "everything accented green" was what made V2 read as a dark admin panel
- * with lime buttons rather than as a security console.
- *
- * The rule, stated once so it can be applied everywhere below:
- *
- *   CYAN    observation, network, telemetry, selection, "here is data"
- *   GREEN   protection, healthy, success, the primary affirmative action
- *   RED     genuine danger — malicious, failed, blocked-because-hostile
- *   AMBER   warning, degraded, needs attention but not broken
- *   VIOLET  behavioural detections, which are alerts and not verdicts
- *
- * Never green for a thing that is merely clickable. Never colour alone for a
- * state: every coloured signal in this file has a word beside it.
+/* DNS Daddy · Neo Aqua workspace
+ * Local system fonts, restrained depth, and semantic colour with readable labels.
+ * Blue denotes an action or selection. Green is reserved for reported success.
+ * Component behaviour remains progressively enhanced HTML; no remote assets.
  */
-
 :root {
-  /* Ground and surfaces.
-   *
-   * Midnight navy rather than V2's neutral graphite. The hue is what lets
-   * cyan sit on the page as a sibling of the background instead of as a
-   * sticker on top of it, and it gives the surfaces somewhere to go: each
-   * step up is lighter AND very slightly bluer, so depth reads even where
-   * there is no border at all. */
-  --background: #060B14;   /* Deep midnight. The page itself. */
-  --surface: #0C1524;      /* Card, sidebar */
-  --surface-2: #121D30;    /* Input, hover, table head */
-  --surface-3: #18263D;    /* Highest: hero, popovers, active nav */
-  --border: #1E2C42;       /* Quiet separation */
-  --border-strong: #2A3D59; /* Where a line has to be seen */
-
-  --foreground: #EAF2FA;   /* Near white, faintly cool */
-  --muted-foreground: #94A9C4;  /* 5.1:1 on --surface */
-  --faint: #7E93B0;        /* 4.6:1 on --surface, so small labels pass AA */
-
-  /* Brand cyan — the network. Used for observation, telemetry, selection and
-   * the decorative topology motifs. Three weights because a hover state, a
-   * chart line and a 1px indicator need different amounts of presence. */
-  --brand-cyan: #22D3EE;
-  --brand-cyan-soft: #67E8F9;   /* Lighter: nodes, small text on dark */
-  --brand-cyan-dim: #0E7490;    /* Darker: rules, inactive indicators */
-  --brand-cyan-bg: rgb(34 211 238 / 0.10);
-
-  /* Brand green — protection. The primary action colour, and deliberately
-   * rationed: if everything affirmative is green then nothing is. */
-  --primary: #BFED6D;      /* DNS Lime */
-  --primary-foreground: #06121A;
-  --primary-dim: #A8D644;  /* Text weight on dark */
-  --primary-bg: rgb(191 237 109 / 0.10);
-
-  /* Semantic. Each has one job. */
-  --danger: #FF6B7A;       /* Genuine security or error conditions only */
-  --warn: #F5B05A;         /* Warnings, never errors */
-  --info: var(--brand-cyan);  /* Informational is the network colour */
-  --violet: #B48EF0;       /* Detections */
-  --danger-bg: rgb(255 107 122 / 0.10);
-  --warn-bg: rgb(245 176 90 / 0.10);
+  color-scheme: light;
+  --background: #F4F6FA;
+  --surface: #FFFFFF;
+  --surface-2: #F0F3F8;
+  --surface-3: #E8EEF7;
+  --border: #DCE2EB;
+  --border-strong: #8593A6;
+  --foreground: #202B3E;
+  --muted-foreground: #546175;
+  --faint: #5D6A7D;
+  --brand-cyan: #1B5CB8;
+  --brand-cyan-soft: #174E9D;
+  --brand-cyan-dim: #ACC6EC;
+  --brand-cyan-bg: #EAF1FF;
+  --primary: #205AC9;
+  --primary-foreground: #FFFFFF;
+  --primary-dim: #164BAC;
+  --primary-bg: #EAF0FD;
+  --success: #1D694F;
+  --danger: #AF2940;
+  --warn: #8C4B0E;
+  --info: var(--brand-cyan);
+  --violet: #7248AA;
+  --danger-bg: #FDEEF1;
+  --warn-bg: #FFF4E5;
   --info-bg: var(--brand-cyan-bg);
-  --violet-bg: rgb(180 142 240 / 0.10);
-  --ok-bg: var(--primary-bg);
-  /* Keylines at the same hue as the tints above. Each semantic colour needs a
-   * background AND a border weight, and hand-writing the second one is how a
-   * palette drifts: three rules below still carried V2's blue and V2's red
-   * long after the tokens moved, so a "cyan" badge was drawing itself in the
-   * old sky blue. Derived once, used everywhere. */
-  --danger-line: rgb(255 107 122 / 0.35);
-  /* A deeper red for the one place danger is a fill rather than a mark.
-   * --danger is tuned to be read AS TEXT on midnight, which makes it a hot
-   * pink when it becomes a background: fifty filled pills down a block log
-   * looked like a consumer app shouting, and loud is not the same as serious.
-   * The deeper fill is still unmistakably the heaviest thing on the row. */
-  --danger-solid: #B3273A;
-  --warn-line: rgb(245 176 90 / 0.35);
-  --info-line: rgb(34 211 238 / 0.35);
-  --violet-line: rgb(180 142 240 / 0.35);
-  --ok-line: rgb(191 237 109 / 0.35);
-
-  --radius: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-sm: 0.375rem;
-
-  /* Spacing scale. Every margin, gap and pad below comes from this, so the
-   * page has one rhythm rather than a dozen hand-picked pixel values. */
+  --violet-bg: #F4EEFB;
+  --ok-bg: #EAF6EF;
+  --danger-line: #EDB9C2;
+  --danger-solid: #AF2940;
+  --warn-line: #E5C29A;
+  --info-line: #B8CFF0;
+  --violet-line: #D2C0E8;
+  --ok-line: #B3D5C4;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-sm: 5px;
   --s1: 4px;
   --s2: 8px;
   --s3: 12px;
@@ -95,39 +49,16 @@
   --s6: 24px;
   --s7: 32px;
   --s8: 40px;
-
-  /* Depth. Tonal layering does most of the work; shadows stay faint so cards
-   * separate from the background without looking like they float, and there is
-   * no glow on ordinary content. Glow is reserved for the two or three places
-   * that carry the brand. */
-  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35);
-  --shadow-2: 0 4px 16px rgb(0 0 0 / 0.40), 0 1px 2px rgb(0 0 0 / 0.30);
-
-  /* Focus is cyan, not green.
-   *
-   * Green is the action colour, so a green ring on a focused destructive
-   * button said two contradictory things at once. Cyan is the selection and
-   * attention colour throughout, it has more contrast against midnight than
-   * lime does, and it never collides with the meaning of the control it is
-   * sitting on. */
-  --ring: 0 0 0 2px rgb(34 211 238 / 0.55);
-
-  /* A hairline lift on raised surfaces: one pixel of light along the top edge
-   * reads as depth far more cheaply than a glow. NOTE: this is a box-shadow,
-   * not a colour. Using it in a `border` silently produces no border at all.  */
-  --edge: inset 0 1px 0 rgb(255 255 255 / 0.05);
-
-  /* Atmosphere. Two radial washes used sparingly — the status hero and the
-   * login aside — to give the brand somewhere to breathe. Anything that uses
-   * these should still be legible with them switched off. */
-  --glow-cyan: radial-gradient(60% 80% at 78% 8%, rgb(34 211 238 / 0.13), transparent 70%);
-  --glow-green: radial-gradient(50% 70% at 12% 100%, rgb(191 237 109 / 0.09), transparent 72%);
-
-  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-display: 'Space Grotesk', 'Inter', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-
-  --sidebar-w: 244px;
+  --shadow-1: 0 1px 2px rgb(32 43 62 / 0.06);
+  --shadow-2: 0 8px 32px rgb(32 43 62 / 0.08);
+  --ring: 0 0 0 3px rgb(27 92 184 / 0.25);
+  --edge: inset 0 1px 0 rgb(255 255 255 / 0.8);
+  --glow-cyan: linear-gradient(140deg, var(--surface), var(--surface-3));
+  --glow-green: linear-gradient(transparent, transparent);
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: var(--font-sans);
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  --sidebar-w: 218px;
 }
 
 *,
@@ -143,9 +74,8 @@ body {
   line-height: 1.55;
   color: var(--foreground);
   background-color: var(--background);
-  /* One faint wash, not two. V1's crossing gradients read as decoration on a
-   * page whose job is to be believed. */
-  background-image: radial-gradient(1100px 520px at 12% -12%, rgb(191 237 109 / 0.035), transparent 62%);
+
+  background-image: radial-gradient(1100px 520px at 12% -12%, rgb(29 105 79 / 0.035), transparent 62%);
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
 }
@@ -156,8 +86,6 @@ h1, h2, h3, h4 {
   margin: 0;
 }
 
-/* Selection is cyan, not green: the same colour that marks the selected nav
-   item, the focus ring and the active filter. Green is reserved for actions. */
 ::selection { background: var(--brand-cyan); color: var(--primary-foreground); }
 
 a { color: var(--primary-dim); }
@@ -169,20 +97,13 @@ code, pre, .mono { font-family: var(--font-mono); }
 .nowrap { white-space: nowrap; }
 [hidden] { display: none !important; }
 
-/* ---------- login ------------------------------------------------------- */
-
-/* Two panels: what this is, and the way in. The left one is the only
-   decorative surface in the product, and it is a diagram of what a resolver
-   does rather than an abstract pattern. */
 .login {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 1.15fr 1fr;
   align-items: stretch;
-  /* The form side is a shade lighter than the brand side, so the split reads
-     as two deliberate halves rather than as a panel floating next to a void.
-     Very slight: enough to see the seam, not enough to become a second card. */
-  background: linear-gradient(180deg, #0A1120 0%, var(--background) 70%);
+
+  background: linear-gradient(180deg, #F0F3F8 0%, var(--background) 70%);
 }
 
 .login-aside {
@@ -193,11 +114,9 @@ code, pre, .mono { font-family: var(--font-mono); }
   align-items: center;
   padding: var(--s8);
   overflow: hidden;
-  background: var(--glow-cyan), var(--glow-green), linear-gradient(160deg, #0A1526 0%, var(--background) 62%);
+  background: var(--glow-cyan), var(--glow-green), linear-gradient(160deg, #E8EEF7 0%, var(--background) 62%);
   border-right: 1px solid var(--border);
-  /* The wireframe inherits this, so the whole illustration is one colour and
-     the nodes read as part of the same network rather than as decoration
-     scattered over it. */
+
   color: var(--brand-cyan);
 }
 
@@ -206,12 +125,9 @@ code, pre, .mono { font-family: var(--font-mono); }
   height: auto;
   flex: none;
   opacity: 1;
-  filter: drop-shadow(0 0 46px rgb(34 211 238 / 0.22));
+  filter: drop-shadow(0 0 46px rgb(27 92 184 / 0.22));
 }
 
-/* The one live node in the illustration. A slow pulse, because a resolver
-   that is running is doing something; everything else in the drawing is
-   still. Switched off entirely under reduced motion. */
 .login-globe-core {
   color: var(--primary);
   animation: node-pulse 3.4s ease-in-out infinite;
@@ -224,8 +140,6 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .login-aside-copy { position: relative; max-width: 36ch; text-align: center; margin-top: var(--s7); }
 
-/* PROTECT. OBSERVE. RESPOND. — the supporting phrase, used here and on
-   Assurance, and deliberately not in the sidebar where it would be noise. */
 .login-tagline {
   margin: 0 0 var(--s3);
   font-family: var(--font-display);
@@ -261,7 +175,7 @@ code, pre, .mono { font-family: var(--font-mono); }
   gap: 11px;
   margin-bottom: 26px;
 }
-.logo-mark-lg { width: 38px; height: 38px; filter: drop-shadow(0 0 14px rgb(34 211 238 / 0.3)); }
+.logo-mark-lg { width: 38px; height: 38px; filter: drop-shadow(0 0 14px rgb(27 92 184 / 0.3)); }
 .wordmark-lg { font-size: 21px; }
 
 .login-card h1 { font-size: 22px; }
@@ -278,7 +192,6 @@ code, pre, .mono { font-family: var(--font-mono); }
 .login-hint { margin: 16px 0 0; font-size: 11.5px; line-height: 1.5; }
 .login-hint code { font-size: 11px; color: var(--muted-foreground); }
 
-/* Below the split, the panel stops earning its column. */
 @media (max-width: 860px) {
   .login { grid-template-columns: 1fr; }
   .login-aside { display: none; }
@@ -291,8 +204,6 @@ code, pre, .mono { font-family: var(--font-mono); }
   font-size: 12.5px;
 }
 
-/* ---------- shell ------------------------------------------------------- */
-
 .app {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
@@ -301,12 +212,10 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .sidebar {
   border-right: 1px solid var(--border);
-  /* A very slight vertical lift and one cyan hairline down the inside edge.
-   * The hairline is what makes the sidebar read as the edge of a console
-   * rather than as a column of links on the same sheet as the content. */
+
   background:
-    linear-gradient(180deg, rgb(24 38 61 / 0.55) 0%, rgb(12 21 36 / 0.75) 42%, rgb(12 21 36 / 0.75) 100%);
-  box-shadow: inset -1px 0 0 rgb(34 211 238 / 0.07);
+    linear-gradient(180deg, rgb(232 238 247 / 0.55) 0%, rgb(240 243 248 / 0.75) 42%, rgb(240 243 248 / 0.75) 100%);
+  box-shadow: inset -1px 0 0 rgb(27 92 184 / 0.07);
   backdrop-filter: blur(10px);
   display: flex;
   flex-direction: column;
@@ -325,9 +234,7 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .logo-mark { width: 28px; height: 28px; flex: none; }
 
-/* The mark carries the only glow in the sidebar, and a small one: it marks
- * the product, and nothing else in the chrome competes with it. */
-.brand .logo-mark { filter: drop-shadow(0 0 10px rgb(34 211 238 / 0.28)); }
+.brand .logo-mark { filter: drop-shadow(0 0 10px rgb(27 92 184 / 0.28)); }
 
 .wordmark {
   font-family: var(--font-display);
@@ -341,7 +248,6 @@ code, pre, .mono { font-family: var(--font-mono); }
 .nav { display: flex; flex-direction: column; }
 .nav-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
 
-/* Section labels break twelve flat links into groups a reader can scan. */
 .nav-group {
   margin: 0;
   padding: var(--s5) var(--s3) 6px;
@@ -368,7 +274,7 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 
 .nav a:hover {
-  background: rgb(34 211 238 / 0.06);
+  background: rgb(27 92 184 / 0.06);
   color: var(--foreground);
 }
 .nav a .nav-ico {
@@ -380,7 +286,7 @@ code, pre, .mono { font-family: var(--font-mono); }
   opacity: 0.72;
   transition: opacity 0.12s ease;
 }
-/* The dashboard glyph is four filled tiles; stroking it would render nothing. */
+
 .nav a .nav-ico [id^="i-dashboard"] rect, .nav a[data-route="dashboard"] .nav-ico rect { fill: currentColor; stroke: none; }
 .nav a[data-route="networks"] .nav-ico circle { fill: currentColor; stroke: none; }
 .nav a[data-route="feeds"] .nav-ico circle { fill: currentColor; stroke: none; }
@@ -388,15 +294,6 @@ code, pre, .mono { font-family: var(--font-mono); }
 .nav a[data-route="threats"] .nav-ico circle { fill: currentColor; stroke: none; }
 .nav a:hover .nav-ico, .nav a.active .nav-ico { opacity: 1; }
 
-/* The active item.
- *
- * V2 made it green text on a green-tinted rectangle, which put the action
- * colour on a thing that is not an action and left "where am I" competing
- * with "what should I click". V3 states it three ways instead, none of them
- * green: a cyan rail, a cyan surface, and full-contrast text against the
- * muted rest of the list. Colour is never the only carrier — the text weight
- * and contrast shift too, so the current item is findable with the hue
- * removed entirely. */
 .nav a.active::before {
   content: '';
   position: absolute;
@@ -406,11 +303,11 @@ code, pre, .mono { font-family: var(--font-mono); }
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--brand-cyan);
-  box-shadow: 0 0 8px rgb(34 211 238 / 0.5);
+  box-shadow: 0 0 8px rgb(27 92 184 / 0.5);
 }
 
 .nav a.active {
-  background: linear-gradient(90deg, rgb(34 211 238 / 0.14), rgb(34 211 238 / 0.04));
+  background: linear-gradient(90deg, rgb(27 92 184 / 0.14), rgb(27 92 184 / 0.04));
   color: var(--foreground);
   font-weight: 600;
 }
@@ -438,17 +335,14 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 
 .status-chip.ok .dot {
-  background: var(--primary);
-  box-shadow: 0 0 0 3px rgb(191 237 109 / 0.15);
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgb(29 105 79 / 0.15);
   animation: live-pulse 3s ease-in-out infinite;
 }
 
-/* The one ambient animation in the chrome: a slow breath on the "resolver
-   online" dot, because a resolver that is up is doing something continuously.
-   Nothing else in the interface moves on its own. */
 @keyframes live-pulse {
-  0%, 100% { box-shadow: 0 0 0 3px rgb(191 237 109 / 0.15); }
-  50%      { box-shadow: 0 0 0 5px rgb(191 237 109 / 0.06); }
+  0%, 100% { box-shadow: 0 0 0 3px rgb(29 105 79 / 0.15); }
+  50%      { box-shadow: 0 0 0 5px rgb(29 105 79 / 0.06); }
 }
 .status-chip.warn .dot { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-bg); }
 .status-chip.bad .dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-bg); }
@@ -463,14 +357,12 @@ code, pre, .mono { font-family: var(--font-mono); }
   position: sticky;
   top: 0;
   z-index: 20;
-  background: rgb(6 11 20 / 0.88);
+  background: rgb(255 255 255 / 0.88);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
 }
 .topbar-title { flex: 0 1 auto; min-width: 0; }
 
-/* Search sits between the title and the actions, and takes the slack. A future
- * investigation view can grow into this slot without moving anything else. */
 .topbar-search {
   flex: 1 1 260px;
   max-width: 420px;
@@ -507,14 +399,11 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .icon-btn { display: grid; place-items: center; }
 .icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; }
-/* After .icon-btn, so the narrow-screen rule that shows it wins on cascade
-   order rather than on a specificity hack. */
+
 .menu-btn { display: none; }
 
 .content { padding: var(--s6) var(--s6) var(--s8); max-width: 1280px; width: 100%; }
 .content:focus { outline: none; }
-
-/* ---------- controls ---------------------------------------------------- */
 
 .btn {
   font: inherit;
@@ -530,8 +419,6 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Some actions are links rather than buttons — "View details" goes to the
-   feeds page — and should still read as a button. */
 a.btn { display: inline-block; text-decoration: none; color: var(--foreground); }
 a.btn.btn-primary { color: var(--primary-foreground); }
 
@@ -544,9 +431,6 @@ a.btn.btn-primary { color: var(--primary-foreground); }
 .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 84%, #fff); }
 .btn-primary:active:not(:disabled) { background: var(--primary-dim); }
 
-/* Ghost is the default control: quiet, neutral, and the one used most.
- * Hover picks up a cyan edge rather than a green one — these are things you
- * look at with, not things you commit with. */
 .btn-ghost {
   background: var(--surface-2);
   border-color: var(--border);
@@ -557,16 +441,13 @@ a.btn.btn-primary { color: var(--primary-foreground); }
   border-color: var(--brand-cyan-dim);
 }
 
-/* Investigation actions — "Query log", "All threats", "View details" — are
- * cyan-tinted so a page's navigational verbs are visibly a different family
- * from its committing verbs. */
 .btn-observe {
-  background: rgb(34 211 238 / 0.09);
-  border-color: rgb(34 211 238 / 0.28);
+  background: rgb(27 92 184 / 0.09);
+  border-color: rgb(27 92 184 / 0.28);
   color: var(--brand-cyan-soft);
 }
 .btn-observe:hover:not(:disabled) {
-  background: rgb(34 211 238 / 0.16);
+  background: rgb(27 92 184 / 0.16);
   border-color: var(--brand-cyan);
 }
 
@@ -598,25 +479,10 @@ input, select, textarea {
   border-radius: var(--radius);
 }
 
-/* Checkboxes and radios are the last unbranded thing on the page.
- *
- * Nothing set accent-color, so every tick in the product — the blocked
- * categories, the resolver-access boxes, the query-log filters — was drawn in
- * the browser's default blue, a colour that appears nowhere in the palette.
- * Cyan, because a tick is a selection, and selection is cyan throughout. */
 input[type="checkbox"], input[type="radio"] { accent-color: var(--brand-cyan); }
 
-/* A text field a thousand pixels wide holding "10.0.10.0/24" is not generous,
-   it is unmeasured. Wide screens get whitespace; the field keeps a length that
-   matches what goes in it. Grid columns narrower than this are unaffected. */
 label.field { max-width: 46rem; }
 
-
-/* Focus is cyan everywhere, including on green and red controls.
- *
- * A focus ring says "keyboard is here". Drawing it in the action colour meant
- * a focused Delete button wore a green ring, which is the colour that means
- * "safe, go ahead" two lines above it. One colour, one meaning. */
 input:focus-visible, select:focus-visible, textarea:focus-visible,
 .btn:focus-visible, .nav a:focus-visible, a:focus-visible, summary:focus-visible {
   outline: none;
@@ -655,12 +521,6 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 .checkline input { width: auto; margin-top: 2px; flex: none; }
 .checkline .cat-desc { display: block; font-size: 11.5px; color: var(--muted-foreground); }
 
-/* A ticked box that enforces nothing.
- *
- * The count beside each category is honest on its own, but "Cryptomining ✓ ·
- * 0 domains indexed" reads at a glance as "cryptomining is handled" when what
- * it means is that the list behind it never loaded. Amber, because this is a
- * gap in protection the operator has not been told about anywhere else. */
 .checkline .cat-empty {
   display: block;
   margin-top: 3px;
@@ -669,43 +529,18 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 }
 .checkline .cat-empty a { color: var(--warn); }
 
-/* ---------- layout primitives ------------------------------------------- */
-
-/* Grids size their cards to content, not to the tallest sibling.
- *
- * Stretching left a category breakdown with three rows sitting in a card as
- * tall as the eight-row list beside it, and half of a dashboard column was
- * empty navy. Cards that genuinely want to fill their row opt in with
- * .grid-stretch. */
 .grid { display: grid; gap: var(--s4); align-items: start; }
 .grid-stretch { align-items: stretch; }
 .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-/* A narrow summary beside the thing it summarises.
- *
- * Two equal columns are wrong when one holds a four-row breakdown and the
- * other holds twenty-five records: the short card leaves a column of empty
- * page as tall as the long one, and the long one is squeezed into half the
- * width it needs. Sized to the content instead. */
+
 .grid-side { grid-template-columns: minmax(0, 320px) minmax(0, 1fr); }
 .stack { display: flex; flex-direction: column; gap: var(--s4); }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row-end { margin-left: auto; }
 .section { margin-bottom: var(--s6); }
 
-/* Cards.
- *
- * A card should exist because information belongs together, not because text
- * needs a rectangle. V2 gave every card the same border, the same radius and
- * the same shadow, so a page of six sections read as six identical boxes and
- * the hierarchy came entirely from the headings inside them.
- *
- * V3 keeps one card class but makes it quieter: the separation comes from the
- * surface being a step lighter than the page and from a hairline along the top
- * edge, with the border reduced to something you notice only where two cards
- * meet. Radius is smaller — a 12px radius on a 900px panel reads as a widget,
- * not as a console. */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -714,13 +549,8 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
   box-shadow: var(--edge);
 }
 
-/* Cards that carry an accent do it with a single left rule in the semantic
- * colour, which is cheaper than a tinted background and never fights the
- * content sitting on it. */
 .card.is-accent { border-left: 2px solid var(--brand-cyan-dim); }
 
-/* A card that leads a page carries a little more presence than one in a
- * grid of four. */
 .card.lead { padding: var(--s6); }
 
 .card-head {
@@ -739,8 +569,6 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 }
 .card-head p { margin: 3px 0 0; font-size: 12px; color: var(--muted-foreground); max-width: 68ch; }
 
-/* An eyebrow above a card title carries the category without spending a
- * heading level on it. */
 .card-eyebrow {
   font-size: 10.5px;
   font-weight: 600;
@@ -770,29 +598,17 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 
 .metric .sub { font-size: 12px; color: var(--muted-foreground); margin-top: 2px; }
 
-/* Tones, named for the words the callers actually pass.
- *
- * These were `.accent` and `.danger`, which nothing produced: metricCard is
- * called with tone 'bad' and 'detect', so a non-zero high-severity count —
- * the one number on the page that has to be seen — rendered in the same
- * neutral white as the zeroes beside it. A style rule keyed to a class name
- * no caller emits is not a subtle bug; it is a control that silently does
- * nothing, which is the same failure mode as an unreachable branch. */
-.metric.ok .value { color: var(--primary); }
+.metric.ok .value { color: var(--success); }
 .metric.warn .value { color: var(--warn); }
 .metric.bad .value { color: var(--danger); }
 .metric.detect .value { color: var(--violet); }
-
-/* ---------- badges ------------------------------------------------------ */
 
 .badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   padding: 2px 8px;
-  /* A chip, not a pill. A capsule reads as a sticker applied to the page; at
-   * the density these appear — one per log row, several per table row — the
-   * softer corner keeps them as what they are, a value in a column. */
+
   border-radius: var(--radius-sm);
   font-size: 11.5px;
   font-weight: 600;
@@ -802,14 +618,9 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
   white-space: nowrap;
 }
 
-/* A dot carries state faster than a colour-shifted label, and survives being
- * read by someone who cannot separate the hues. */
 .badge .dot { width: 6px; height: 6px; border-radius: 999px; background: currentColor; flex: none; }
-.badge.ok { color: var(--primary); border-color: var(--ok-line); background: var(--ok-bg); }
-/* Filled rather than outlined, so a blocked threat is visibly heavier than
-   the amber warning badge beside it. In the query log both appear on the same
-   row, and the outlined pair gave a transient resolver error the same weight
-   as a malware block. */
+.badge.ok { color: var(--success); border-color: var(--ok-line); background: var(--ok-bg); }
+
 .badge.bad {
   color: #FFECEF;
   border-color: var(--danger-solid);
@@ -817,14 +628,9 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
   font-weight: 700;
 }
 .badge.warn { color: var(--warn); border-color: var(--warn-line); background: var(--warn-bg); }
-/* Detections are violet across the product, and a maturity tier is a property
-   of the detector rather than a caution about the traffic. It used to be amber,
-   sitting one column from an amber "medium" severity: two different meanings
-   wearing the same colour, in the same row. */
+
 .badge.tier { color: var(--violet); border-color: var(--violet-line); background: var(--violet-bg); }
 
-/* A claim chip sits inside a heading, so it must not inherit the heading's
-   weight or ride its baseline. */
 .badge.claim {
   font-size: 10.5px;
   letter-spacing: 0.04em;
@@ -833,13 +639,10 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
   margin-left: var(--s2);
 }
 
-/* The key that gives those chips their meaning. Definition list, because that
-   is what it is: a term and what the term is being used to say. */
 .claim-key { margin: var(--s4) 0 0; display: grid; gap: var(--s3); }
 .claim-key-row {
   display: grid;
-  /* The term column is as wide as the longest chip, not a guessed pixel
-     value: "Not verified" is half as wide again as "Tested". */
+
   grid-template-columns: max-content minmax(0, 1fr);
   gap: var(--s4);
   align-items: baseline;
@@ -853,13 +656,6 @@ label.field .hint { font-weight: 400; font-size: 11.5px; margin-top: 4px; displa
 }
 .badge.info { color: var(--info); border-color: var(--info-line); background: var(--info-bg); }
 
-/* ---------- tables ------------------------------------------------------ */
-
-/* Tables are still right where the content genuinely is tabular — a report's
-   figures, an assurance checklist, a settings summary. They are read down a
-   column and compared, which is what a table is for. What changed is that they
-   now share the record rows' quieter borders and the same hairline rhythm, so
-   the two do not read as two different products. */
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); }
 
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -881,7 +677,7 @@ thead th {
 }
 
 tbody td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
-/* The first column is what a reader scans down; give it the weight. */
+
 tbody td:first-child { color: var(--foreground); font-weight: 500; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: var(--surface-2); }
@@ -889,11 +685,6 @@ tbody tr:hover { background: var(--surface-2); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
 
-/* Empty states.
- *
- * A fresh install is mostly empty states, so they are the first impression
- * the product makes. They should read as "nothing has happened yet, and here
- * is what happens next" rather than as a missing feature. */
 .empty {
   padding: var(--s8) var(--s5);
   text-align: center;
@@ -904,13 +695,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   align-items: center;
   gap: var(--s2);
 }
-/* Empty states.
- *
- * An absence is not a success, so the badge is not green. It is the network
- * colour with a faint node ring around it — the same motif as the mark — which
- * says "nothing has arrived here yet" rather than "all clear". The
- * distinction matters on a security product: a dashboard that renders an
- * unmeasured state in the safe colour is lying by decoration. */
+
 .empty-ico {
   position: relative;
   width: 40px;
@@ -919,25 +704,23 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   place-items: center;
   border-radius: 999px;
   margin-bottom: var(--s2);
-  background: rgb(34 211 238 / 0.07);
-  border: 1px solid rgb(34 211 238 / 0.2);
+  background: rgb(27 92 184 / 0.07);
+  border: 1px solid rgb(27 92 184 / 0.2);
   color: var(--brand-cyan-soft);
   font-size: 15px;
 }
-/* One concentric ring, echoing the hero topology. Decorative. */
+
 .empty-ico::after {
   content: '';
   position: absolute;
   inset: -7px;
   border-radius: 999px;
-  border: 1px solid rgb(34 211 238 / 0.12);
+  border: 1px solid rgb(27 92 184 / 0.12);
 }
 .empty p { margin: 0; max-width: 46ch; line-height: 1.6; }
 .empty .row { justify-content: center; margin-top: var(--s2); }
 
 .empty strong { display: block; color: var(--foreground); font-size: 14px; margin-bottom: 4px; }
-
-/* ---------- charts ------------------------------------------------------ */
 
 .chart { width: 100%; height: 180px; display: block; }
 .chart-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; font-size: 12px; }
@@ -946,11 +729,8 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 
 .bar-row { display: grid; grid-template-columns: 130px 1fr 62px; gap: 10px; align-items: center; padding: 5px 0; font-size: 12.5px; }
 .bar-track { display: block; height: 7px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
-/* display:block is load-bearing — a bare <span> is inline, and height/width
-   on an inline box are ignored, so the fill would never render. */
-.bar-fill { display: block; height: 100%; border-radius: 999px; }
 
-/* ---------- code blocks ------------------------------------------------- */
+.bar-fill { display: block; height: 100%; border-radius: 999px; }
 
 .code {
   background: var(--background);
@@ -965,13 +745,8 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   color: var(--foreground);
 }
 
-/* Capped for the same reason the form fields are: a resolver address or a
-   DoH URL is sixty characters, and a box a thousand pixels wide holding sixty
-   characters puts the Copy button a hand's width from the text it copies. */
 .copy-row { display: flex; gap: 8px; align-items: stretch; max-width: 46rem; }
 .copy-row .code { flex: 1; min-width: 0; }
-
-/* ---------- toasts ------------------------------------------------------ */
 
 .toasts {
   position: fixed;
@@ -991,7 +766,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   border-radius: var(--radius);
   padding: 11px 14px;
   font-size: 13px;
-  box-shadow: 0 12px 30px rgb(0 0 0 / 0.45);
+  box-shadow: 0 12px 30px rgb(32 43 62 / 0.12);
   animation: toast-in 0.18s ease-out;
 }
 
@@ -1004,15 +779,11 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
-  /* Explicitly stopped rather than left to the blanket rule above: an
-     infinite loop with a 0.001ms duration still runs, it just runs
-     imperceptibly fast, which is not the same as being off. */
+
   .status-chip.ok .dot,
   .login-globe-core { animation: none !important; }
   .login-globe-core { opacity: 1; transform: none; }
 }
-
-/* ---------- responsive -------------------------------------------------- */
 
 @media (max-width: 980px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1042,15 +813,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   #refresh-note { display: none; }
 }
 
-/* ---------- utilities --------------------------------------------------- */
-/*
- * The dashboard runs under a strict Content-Security-Policy with no
- * 'unsafe-inline' for styles, so `style="…"` attributes are refused by the
- * browser. Static spacing and sizing therefore lives here as classes, and
- * genuinely dynamic values (bar widths, category colours) are applied through
- * the CSSOM by paintDynamic() in app.js — which CSP permits.
- */
-
 .w-150 { max-width: 150px; }
 .w-200 { max-width: 200px; }
 .w-260 { max-width: 260px; }
@@ -1071,10 +833,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 
 .token-reveal { border-color: var(--primary); margin-bottom: 14px; }
 
-/* ---------- detections -------------------------------------------------- */
-
-/* A standing caveat rather than a dismissible banner: these findings are
-   experimental heuristics and the page should keep saying so. */
 .card.notice {
   border-left: 3px solid var(--warn);
 }
@@ -1119,8 +877,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   color: var(--muted-foreground);
 }
 
-/* Key/value grid for the evidence block. Two columns on a desktop, stacked on
-   a phone, with long values wrapping rather than forcing a horizontal scroll. */
 .kv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; margin: 0; }
 .kv > div { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
 .kv dt { color: var(--muted-foreground); flex: 0 0 auto; }
@@ -1131,20 +887,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .finding-body { padding-left: 8px; }
 }
 
-/* ---------- threat observatory ------------------------------------------ */
-
-/*
- * The activation card. Given a lime edge because it is the one card on the
- * page that asks the operator for a decision — not because the Observatory is
- * better intelligence than the independent feeds it sits alongside.
- */
-/* Cyan, not green.
- *
- * This card is an offer of threat intelligence, not a report that anything is
- * healthy — and it sits above the actual threat data, so a green rail made the
- * brightest thing on a page about blocked malware read as reassurance. Cyan is
- * the colour of information and of the feeds themselves. The Enable button
- * inside it stays green: that one really is a protective commitment. */
 .observatory {
   border-left: 3px solid var(--brand-cyan-dim);
 }
@@ -1172,8 +914,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 
 .obs-progress-lead { color: var(--muted-foreground); }
 
-/* An indeterminate bar: the download reports no byte count, so a percentage
-   would be invented. This says "working", which is the honest amount. */
 .obs-progress {
   height: 4px;
   border-radius: 999px;
@@ -1202,8 +942,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .obs-error { margin-top: 6px; }
 .obs-error-text { overflow-wrap: anywhere; margin: 0 2px 10px 22px; }
 
-/* ---------- threat intelligence panel ----------------------------------- */
-
 .intel-list { display: flex; flex-direction: column; }
 
 .intel-row {
@@ -1218,10 +956,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .intel-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .intel-status { flex: 0 0 auto; }
 
-/* --- Configuration problems -------------------------------------------- */
-/* Shown above everything on the dashboard. A resolver that reports itself
-   operational while refusing every client is the failure this exists to make
-   impossible, so these are loud on purpose. */
 .diag-banner { margin-bottom: 1.25rem; border-left: 3px solid var(--warn); }
 .diag-banner.diag-fail { border-left-color: var(--danger); }
 .diag-title { font-weight: 600; letter-spacing: 0.04em; font-size: 0.8rem; color: var(--warn); }
@@ -1238,9 +972,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 }
 .diag-action { margin-top: 0.35rem; font-size: 0.85rem; }
 
-/* --- First-client onboarding -------------------------------------------- */
-/* Shown only until a real device has used the resolver. Informational, not an
-   alarm: nothing is wrong, there is just nothing to show yet. */
 .first-client { margin-bottom: 1.25rem; border-left: 3px solid var(--info); }
 .first-client-title { font-weight: 600; margin-bottom: 0.35rem; }
 .first-client-cmd {
@@ -1253,9 +984,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   overflow-x: auto;
 }
 
-/* The ordered steps shown when nothing is permitted yet. Numbered because the
-   order matters: testing before the permission exists fails for a reason the
-   test cannot report. */
 .first-client-steps { margin: 0.5rem 0 0.6rem 1.1rem; padding: 0; }
 .first-client-steps li { margin-bottom: 0.3rem; }
 .first-client-steps code {
@@ -1263,13 +991,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   font-size: 0.85em;
 }
 
-/* ---------- client access ----------------------------------------------- */
-
-/*
- * The policy/access distinction, stated beside the control rather than in the
- * documentation. It is the single most confusing thing about configuring this
- * product, and burying it in docs/ is what made a healthy resolver look broken.
- */
 .access-explainer {
   margin: 10px 0 14px;
   padding: 10px 12px;
@@ -1286,26 +1007,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 
 .icon-sprite { position: absolute; }
 
-/* ============================================================================
- * Dashboard V2
- *
- * The page answers, in order: is it working, am I protected, what has it
- * stopped, does anything need me, what is happening, are the feeds healthy.
- * The components below exist in that order and are sized in that order — the
- * status block is the largest thing on the page and the feed list is the
- * smallest, because that is the order an operator asks the questions in.
- * ==========================================================================*/
-
-/* --- Status hero ---------------------------------------------------------- */
-/* The status hero.
- *
- * This is the one element allowed atmosphere: a cyan wash from the top right
- * and a green one from the bottom left, echoing the mark's own split. It also
- * carries a decorative topology motif (.hero-topo below), which is drawn in
- * CSS and is explicitly NOT data — see the note there.
- *
- * Everything here must stay legible with both washes removed, because they
- * are the first thing a reduced-transparency or forced-colours mode drops. */
 .hero {
   position: relative;
   isolation: isolate;
@@ -1322,13 +1023,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   box-shadow: var(--shadow-2), var(--edge);
 }
 
-/* Decorative topology.
- *
- * Concentric rings and a faint grid, drawn behind the hero's content at very
- * low opacity. It is a brand motif and nothing more: it encodes no value, is
- * identical on every install, and is marked aria-hidden where it is emitted.
- * It must never be mistaken for a measurement, so it has no labels, no scale,
- * and no relationship to any number on the page. */
 .hero-topo {
   position: absolute;
   inset: 0;
@@ -1337,36 +1031,31 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   opacity: 0.5;
   background-image:
     repeating-radial-gradient(circle at 88% 12%,
-      transparent 0 38px, rgb(34 211 238 / 0.055) 38px 39px, transparent 39px 76px),
-    linear-gradient(rgb(34 211 238 / 0.028) 1px, transparent 1px),
-    linear-gradient(90deg, rgb(34 211 238 / 0.028) 1px, transparent 1px);
+      transparent 0 38px, rgb(27 92 184 / 0.055) 38px 39px, transparent 39px 76px),
+    linear-gradient(rgb(27 92 184 / 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(27 92 184 / 0.028) 1px, transparent 1px);
   background-size: auto, 34px 34px, 34px 34px;
   -webkit-mask-image: radial-gradient(70% 100% at 85% 10%, #000 10%, transparent 78%);
   mask-image: radial-gradient(70% 100% at 85% 10%, #000 10%, transparent 78%);
 }
 .hero-top { display: flex; align-items: flex-start; gap: var(--s5); flex-wrap: wrap; }
-/* Shrinkable, so the period badge stays on the same line as the status rather
-   than wrapping under it the moment the prose gets long. */
+
 .hero-state { display: flex; align-items: flex-start; gap: var(--s3); flex: 1 1 320px; min-width: 0; }
 
-/* The state dot is never the only signal: the word beside it says the same
- * thing, and the shape changes with severity for anyone who cannot separate
- * lime from amber. */
 .hero-dot {
   width: 12px;
   height: 12px;
   margin-top: 9px;
   border-radius: 999px;
   flex: none;
-  background: var(--primary);
-  box-shadow: 0 0 0 4px rgb(191 237 109 / 0.14);
+  background: var(--success);
+  box-shadow: 0 0 0 4px rgb(29 105 79 / 0.14);
 }
 .hero.is-warn .hero-dot { background: var(--warn); box-shadow: 0 0 0 4px var(--warn-bg); border-radius: 3px; }
 .hero.is-bad .hero-dot  { background: var(--danger); box-shadow: 0 0 0 4px var(--danger-bg); border-radius: 2px; }
 
 .hero-word {
-  /* Uppercased in the stylesheet rather than in the markup: the DOM keeps an
-     ordinary capitalised word, which is what a screen reader should announce. */
+
   margin: 0;
   font-family: var(--font-display);
   font-size: 26px;
@@ -1381,8 +1070,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .hero-sub { margin: 6px 0 0; color: var(--muted-foreground); font-size: 13.5px; max-width: 62ch; }
 .hero-intel { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
 
-/* Metric strip. Large numbers, tabular, with the unit underneath rather than
- * beside it so the digits line up down the row. */
 .hero-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -1408,14 +1095,11 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   text-transform: uppercase;
   color: var(--faint);
 }
-/* Red here is a genuine security condition: these are malicious domains this
-   network asked for. It matches the blocked series in the chart below, so the
-   two never disagree about which colour means "blocked". */
+
 .hero-stat.is-blocked .n { color: var(--danger); }
 .hero-stat.is-detect .n  { color: var(--violet); }
 .hero-period { flex: none; margin-left: auto; align-self: flex-start; }
 
-/* --- Needs attention ------------------------------------------------------ */
 .attn-item {
   display: flex;
   gap: var(--s3);
@@ -1424,24 +1108,15 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   align-items: flex-start;
 }
 .attn-item:first-of-type { border-top: 0; }
-/* The severity is a badge with a word in it, not a coloured dot: at 6px a
-   shape difference is not a reliable second channel, and "Fault"/"Warning"
-   reads the same to everyone. */
+
 .attn-badge { flex: none; margin-top: 1px; }
-/* Diagnostic summaries quote file paths and URLs, which are one unbreakable
-   word to a layout engine. Without this they push the whole page sideways on a
-   phone. */
+
 .attn-body { min-width: 0; overflow-wrap: anywhere; }
 .attn-body strong { display: block; font-weight: 600; font-size: 13.5px; }
 .attn-body p { margin: 3px 0 0; font-size: 12.5px; color: var(--muted-foreground); }
 .attn-clear { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) 0; }
-.attn-clear .hero-dot { width: 9px; height: 9px; margin-top: 5px; box-shadow: 0 0 0 3px rgb(191 237 109 / 0.14); }
+.attn-clear .hero-dot { width: 9px; height: 9px; margin-top: 5px; box-shadow: 0 0 0 3px rgb(29 105 79 / 0.14); }
 
-/* --- Blocked domain rows -------------------------------------------------- */
-/* Two lines that behave as one where there is room: the domain claims the row
-   and the metadata sits beside it, and on a narrow screen — or beside a long
-   domain — the metadata wraps underneath rather than squeezing the name to
-   nothing. The name is what is being read, so it is what gets the space. */
 .dom-row {
   display: flex;
   flex-wrap: wrap;
@@ -1471,9 +1146,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   color: var(--muted-foreground);
 }
 
-/* --- Category breakdown --------------------------------------------------- */
-/* Not a progress bar: a proportion of blocks with the count stated, because
- * "62% of a bar" invites the reading that something is 62% full. */
 .cat-row { display: grid; grid-template-columns: 1fr auto; gap: 2px var(--s3); padding: 9px 0; border-top: 1px solid var(--border); }
 .cat-row:first-of-type { border-top: 0; }
 .cat-name { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
@@ -1481,15 +1153,13 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .cat-meter { grid-column: 1 / -1; height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin-top: 3px; }
 .cat-meter > span { display: block; height: 100%; border-radius: 999px; }
 
-/* --- Feed health ---------------------------------------------------------- */
 .feed-row { display: flex; align-items: center; gap: var(--s3); padding: 9px 0; border-top: 1px solid var(--border); }
 .feed-row:first-of-type { border-top: 0; }
 .feed-name { flex: 1 1 auto; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
 .feed-meta { font-size: 12px; color: var(--faint); flex: none; font-variant-numeric: tabular-nums; }
 
-/* --- Chart ---------------------------------------------------------------- */
 .chart { height: 210px; }
-/* The time axis lives here rather than inside the SVG, which stretches. */
+
 .chart-axis {
   display: flex;
   justify-content: space-between;
@@ -1503,18 +1173,10 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .chart-axis span:last-child { text-align: right; }
 .chart-wrap { margin: 0 calc(var(--s2) * -1); }
 
-/* --- Responsive ------------------------------------------------------------
- * 1440 desktop: the two-column grids hold.
- * 1024 laptop/tablet: sidebar narrows, grids collapse to one column.
- * 390 mobile: sidebar becomes an overlay, search leaves the bar, hero numbers
- * wrap to two per row rather than shrinking below legibility.
- * ------------------------------------------------------------------------ */
 @media (max-width: 1100px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  /* The subtitle is the first thing to go: it is context the page itself
-     already gives, and keeping it squeezes the search box below the width at
-     which its placeholder can be read. */
+
   .topbar p { display: none; }
   .topbar-search { flex: 0 1 240px; min-width: 180px; }
 }
@@ -1530,19 +1192,10 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .content { padding: var(--s4) var(--s4) var(--s7); }
   .hero-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hero-period { margin-left: 0; }
-  /* 44px minimum touch target. */
+
   .nav a { padding: 11px 12px; }
   .btn { min-height: 38px; }
 }
-
-/* ============================================================================
- * Query log
- *
- * A stream of events, not a table. Every entry is one line until somebody
- * wants more, and the accent rail is the fastest way to find the blocked ones
- * while scrolling — with the word "Blocked" beside it, because a colour on its
- * own is not a status.
- * ========================================================================== */
 
 .qlog { display: flex; flex-direction: column; }
 
@@ -1554,9 +1207,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .qrow:hover { background: var(--surface-2); }
 .qrow[open] { background: var(--surface-2); }
 
-/* Flex, not grid. The number of children varies — a category is only present
-   when the server recorded one — and a fixed column count put the last child
-   on a second row for exactly the entries that had the most to say. */
 .qrow > summary {
   display: flex;
   align-items: baseline;
@@ -1569,7 +1219,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .qrow > summary::-webkit-details-marker { display: none; }
 .qrow > summary:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--radius); }
 
-/* The rail. Decorative — every row also carries its outcome as a word. */
 .qmark {
   flex: none;
   width: 3px;
@@ -1582,15 +1231,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .qrow.is-error   .qmark { background: var(--warn); }
 .qrow.is-allowed .qmark { background: var(--border-strong); }
 
-/* Capped, not greedy.
- *
- * Left to grow without a limit the domain absorbed every spare pixel, so on a
- * 1440 screen each row put the name hard against the left edge and the verdict,
- * category, client and time hard against the right, with a thousand pixels of
- * nothing in between. The columns lined up; nobody could read across to them.
- * A maximum turns the same flex line into a fixed set of columns whenever
- * there is room — the metadata sits a readable distance from the name — while
- * still shrinking on a narrow window, which a fixed width would not. */
 .qdomain {
   flex: 1 1 auto;
   min-width: 0;
@@ -1601,7 +1241,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .qrow.is-allowed .qdomain { color: var(--muted-foreground); }
 
 .qact { flex: none; }
-/* An allowed query is the common case and should not shout. */
+
 .qact-allowed { color: var(--faint); border-color: var(--border); }
 
 .qcat {
@@ -1620,7 +1260,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   white-space: nowrap;
 }
 
-/* The detail. Only the rows somebody opened pay for this. */
 .qfacts {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
@@ -1645,8 +1284,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .qactions { padding: 0 var(--s3) var(--s4) 18px; }
 
 @media (max-width: 720px) {
-  /* The domain claims a full line and the metadata wraps under it, rather
-     than five things competing for a phone's width. */
+
   .qrow > summary { flex-wrap: wrap; row-gap: 3px; }
   .qdomain { flex: 1 1 100%; order: 1; }
   .qmark { order: 0; }
@@ -1654,13 +1292,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .qfacts { grid-template-columns: 1fr; }
 }
 
-/* --- Repeat offenders ------------------------------------------------------
- *
- * The bar is the recurrence, drawn as a proportion of the worst offender, and
- * the count that produced it is stated beside it in words. A domain asked for
- * forty-seven times is a different problem from one asked for once, and the
- * table this replaced made them look identical apart from a digit.
- */
 .offender {
   display: flex;
   align-items: center;
@@ -1669,13 +1300,10 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   border-top: 1px solid var(--border);
 }
 .offender:first-of-type { border-top: 0; }
-/* A proportion of the worst offender, drawn under the name rather than as a
-   rail beside it: a percentage width needs a horizontal track, and a
-   percentage height would need the row to have a definite one. Purely a
-   second reading of the count already stated in words above it. */
+
 .offender-meter {
   display: block;
-  /* Capped, so it reads as a bar rather than as a rule under the row. */
+
   max-width: 200px;
   height: 3px;
   margin-top: 6px;
@@ -1689,9 +1317,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   border-radius: 2px;
   opacity: 0.75;
 }
-/* Capped for the same reason .qdomain is: with the card given its full width,
-   an uncapped body pushed Investigate a thousand pixels away from the domain
-   it investigates. */
+
 .offender-body { flex: 1 1 auto; min-width: 0; max-width: 46rem; }
 .offender-name {
   display: block;
@@ -1716,8 +1342,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .offender-go { margin-left: 6px; }
 }
 
-/* A consequence stated before the control that causes it, rather than in a
-   toast afterwards. Amber: this is a warning about scope, not an error. */
 .notice-inline {
   margin: 0 0 var(--s4);
   padding: var(--s3) var(--s4);
@@ -1729,16 +1353,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   color: var(--muted-foreground);
 }
 .notice-inline strong { color: var(--foreground); }
-
-/* ============================================================================
- * Policies — a list you can scan, not three stacked editors
- *
- * Every policy used to render its full editing surface at once: three policies
- * were 2,500 pixels of identical checkbox columns, and there was no way to see
- * which one enforced what without reading all of them. The summary answers
- * that in one line; the editor is behind it, using the same <details>
- * disclosure as the query log so there is one interaction to learn.
- * ========================================================================== */
 
 .policy { padding: 0; }
 .policy > summary {
@@ -1754,8 +1368,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .policy:hover > summary { background: var(--surface-2); border-radius: var(--radius-lg); }
 .policy[open] > summary { border-bottom: 1px solid var(--border); border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
 
-/* A disclosure triangle that rotates. Decorative — the state is also carried
-   by the element's own open attribute, which assistive technology reports. */
 .policy-caret {
   flex: none;
   width: 0;
@@ -1768,13 +1380,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 }
 .policy[open] > summary .policy-caret { transform: rotate(90deg); }
 
-/* Shrinkable, and the name inside it wraps.
- *
- * `flex: none` here meant a policy called anything longer than a few words
- * pushed the summary row wider than its own card, and with nothing clipping it
- * the whole page gained a horizontal scrollbar: 398px of overflow at 1024 and
- * 654px at 768 from a single 130-character name. Names come from operators,
- * so their length is not something the layout gets to assume. */
 .policy-title { flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
 .policy-title strong { font-size: 14px; color: var(--foreground); overflow-wrap: anywhere; }
 .policy-what {
@@ -1794,16 +1399,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .policy-what { flex: 1 1 100%; }
   .policy-body { padding: var(--s4); }
 }
-
-/* ============================================================================
- * Record rows — the shared shape for a configured thing
- *
- * A network, a feed, a token: something with a name, some facts about it, and
- * a control or two. These were eight-column tables that gave the name, the
- * traffic figures and the one interactive control equal weight, which made the
- * control hard to find and the name hard to scan. Same disclosure-free row as
- * .qrow and .offender, so the product has one way of presenting a list.
- * ========================================================================== */
 
 .rec {
   display: flex;
@@ -1827,8 +1422,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   align-items: center;
   gap: 3px var(--s4);
   margin-top: 4px;
-  /* Feed URLs are one unbreakable word to a layout engine, and without this
-     they push the whole page sideways on a phone. */
+
   min-width: 0;
   font-size: 12px;
   color: var(--faint);
@@ -1841,7 +1435,7 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   line-height: 1.5;
   color: var(--muted-foreground);
   max-width: 78ch;
-  /* Feed errors quote URLs, which are unbreakable words. */
+
   overflow-wrap: anywhere;
 }
 .rec-note.is-warn { color: var(--warn); }
@@ -1858,17 +1452,8 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .rec-actions { flex: 1 1 100%; padding-left: 0; }
 }
 
-/* ---------- external API providers -------------------------------------- */
+.rec-note.is-ok { color: var(--success); }
 
-/* A test result that went well. The green here is the same affirmative green
-   as a working provider's badge, so "it answered" and "it is working" say the
-   same thing in the same colour rather than two shades of approval. */
-.rec-note.is-ok { color: var(--primary); }
-
-/* The per-policy scope, folded away. A provider applies to every policy by
-   default and most operators never change that, so the control is one line
-   until somebody wants it — the same treatment a policy's category editor
-   gets, for the same reason. */
 .provider-scope { margin-top: var(--s3); }
 .provider-scope > summary {
   cursor: pointer;
@@ -1889,9 +1474,6 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .provider-scope > summary:hover { color: var(--foreground); }
 .provider-scope .checkline { margin-top: 2px; }
 
-/* Destructive and non-destructive actions on one row. The gap is wider than a
-   button row elsewhere because Delete sits next to Test connection, and a
-   mis-click there costs an operator their configuration. */
 .provider-actions {
   margin-top: var(--s3);
   gap: var(--s3);
@@ -1900,16 +1482,10 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .provider-actions .btn-danger { margin-left: auto; }
 
 @media (max-width: 620px) {
-  /* Stacked, Delete no longer pushed to an edge it would share with a thumb
-     reaching for Test connection. */
+
   .provider-actions .btn-danger { margin-left: 0; }
 }
 
-/* ---------- decision records -------------------------------------------- */
-
-/* Folded away by default, like a policy's editor and for the same reason: the
-   list is scanned, and the evidence is read only for the one row that raised a
-   question. */
 .decision { border-top: 1px solid var(--border); }
 .decision:first-of-type { border-top: none; }
 .decision > summary {
@@ -1924,13 +1500,10 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 .decision[open] > summary .policy-caret { transform: rotate(90deg); }
 .decision-title { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
 .decision-title strong { overflow-wrap: anywhere; }
-/* Pushed to the trailing edge so the timestamps line up down the column and
-   can be compared without reading each row. */
+
 .decision-when { margin-left: auto; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
 .decision-body { padding: 0 0 var(--s4) calc(1em + var(--s3)); }
 
-/* The stored sentence. Given the weight of body text rather than a caption,
-   because it is the answer to the question the page is named after. */
 .decision-why { margin: 0 0 var(--s2); font-size: 13.5px; line-height: 1.55; max-width: 78ch; }
 
 .decision-path {
@@ -1954,4 +1527,388 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
   .decision-when { margin-left: 0; }
   .decision > summary { flex-wrap: wrap; }
   .decision-body { padding-left: 0; }
+}
+
+
+/* Workspace shell. Narrow, stable navigation leaves room for the evidence. */
+body { font-size: 14px; line-height: 1.6; background-image: none; }
+h1, h2, h3, h4 { letter-spacing: -0.025em; }
+a { color: var(--primary); text-underline-offset: 3px; }
+a:hover { color: var(--primary-dim); }
+button, input, select, textarea, summary { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--brand-cyan); outline-offset: 3px; }
+.small { font-size: 12.5px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.skip-link {
+  position: fixed; top: 12px; left: 12px; z-index: 110;
+  padding: 10px 16px; background: var(--surface); border: 2px solid var(--primary);
+  border-radius: var(--radius); transform: translateY(-180%);
+}
+.skip-link:focus { transform: none; }
+.sidebar {
+  background: linear-gradient(180deg, var(--surface-2), var(--background));
+  padding: 26px 14px 18px; border-right-color: var(--border);
+  box-shadow: inset -1px 0 0 var(--surface); backdrop-filter: none;
+  height: 100dvh; overflow-y: auto;
+}
+.brand { padding: 0 9px 25px; gap: 10px; }
+.brand .logo-mark, .logo-mark-lg { filter: none; }
+.brand .logo-mark { width: 31px; height: 31px; }
+.wordmark { font-size: 18px; letter-spacing: -0.035em; color: var(--foreground); }
+.wordmark b { font-weight: 700; color: var(--foreground); }
+.brand-note { display: block; font-size: 11px; color: var(--faint); letter-spacing: 0.02em; margin-top: -3px; }
+.nav { gap: 2px; }
+.nav-group { font-size: 10.5px; opacity: 1; letter-spacing: 0.1em; padding: 19px 12px 8px; }
+.nav-group:first-child { padding-top: 8px; }
+.nav a { padding: 9px 12px; min-height: 39px; gap: 10px; font-size: 13px; border: 1px solid transparent; }
+.nav a .nav-ico { width: 17px; height: 17px; opacity: 0.9; }
+.nav a:hover { background: var(--surface-3); }
+.nav a.active {
+  color: var(--primary-dim); background: var(--surface); border-color: var(--border);
+  box-shadow: var(--shadow-1); font-weight: 650;
+}
+.nav a.active::before { display: none; }
+.nav a.active .nav-ico { color: var(--primary); }
+.sidebar-foot { padding: 18px 10px 0; margin-top: auto; }
+.sidebar-foot .small { font-size: 11.5px; }
+.sidebar-foot #logout-btn { margin-top: 12px; padding: 5px 0; box-shadow: none; color: var(--muted-foreground); }
+.sidebar-foot #logout-btn:hover { color: var(--foreground); text-decoration: underline; }
+.status-chip { font-size: 12px; }
+.status-chip.ok .dot { background: var(--success); animation: none; box-shadow: none; }
+.nav-close, .nav-backdrop { display: none; }
+.topbar {
+  padding: 20px 32px; min-height: 96px; align-items: center; gap: 20px;
+  background: var(--background); backdrop-filter: none; border-bottom-color: var(--border);
+}
+.topbar h1 { font-size: 24px; font-weight: 680; line-height: 1.2; }
+.topbar p { font-size: 12.5px; margin-top: 5px; max-width: 42ch; }
+.topbar-title { flex: 1 1 245px; }
+.topbar-search {
+  flex: 0 1 370px; max-width: 440px; border-radius: var(--radius);
+  border-color: var(--border-strong); background: var(--surface); padding: 3px 6px 3px 12px;
+  min-width: 220px; box-shadow: var(--shadow-1);
+}
+.topbar-search input { font-size: 13px; min-height: 34px; padding: 5px 0; }
+.topbar-search input::placeholder { color: var(--muted-foreground); opacity: 1; }
+.topbar-search:focus-within { background: var(--surface); }
+.search-key {
+  font: 12px var(--font-mono); color: var(--muted-foreground); padding: 0 5px;
+  line-height: 22px; border: 1px solid var(--border); border-radius: 4px;
+  flex: none; white-space: nowrap;
+}
+.search-submit {
+  min-height: 30px; padding: 4px 9px; border: 0; border-radius: 5px;
+  background: var(--surface-2); color: var(--primary-dim); font: inherit; font-size: 12px;
+  cursor: pointer;
+}
+.search-submit:hover { background: var(--surface-3); }
+.topbar-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 235px; }
+#refresh-note { flex-basis: 100%; font-size: 11px; text-align: right; min-height: 16px; }
+.topbar-actions .btn { font-size: 11.5px; padding: 5px 8px; min-height: 30px; }
+#logout-btn { background: transparent; border-color: transparent; }
+#auto-refresh-btn[aria-pressed="true"] { color: var(--warn); border-color: var(--warn-line); background: var(--warn-bg); }
+.content { max-width: 1510px; margin: 0 auto; padding: 28px 32px 48px; }
+.content:focus { outline: none; }
+
+/* Controls retain a little tactile depth; content remains quiet and flat. */
+.btn { min-height: 36px; padding: 7px 13px; font-size: 13px; font-weight: 600; }
+.btn-sm { min-height: 30px; font-size: 12px; padding: 4px 10px; }
+.btn-primary {
+  background: linear-gradient(180deg, var(--primary), var(--primary-dim));
+  border-color: var(--primary-dim); color: var(--primary-foreground);
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgb(255 255 255 / 0.18);
+}
+.btn-primary:hover:not(:disabled) { background: var(--primary-dim); }
+.btn-ghost { background: var(--surface); border-color: var(--border-strong); box-shadow: var(--shadow-1); }
+.btn-ghost:hover:not(:disabled) { background: var(--surface-2); border-color: var(--faint); }
+.btn-observe { background: var(--primary-bg); border-color: var(--info-line); color: var(--primary-dim); }
+a.btn.btn-observe { color: var(--primary-dim); }
+.btn-observe:hover:not(:disabled) { background: var(--surface-3); border-color: var(--brand-cyan); }
+.btn-danger { border-color: var(--danger-line); }
+.icon-btn { width: 38px; height: 38px; border-color: var(--border-strong); }
+input, select, textarea { min-height: 40px; background: var(--surface); border-color: var(--border-strong); font-size: 13px; }
+input::placeholder, textarea::placeholder { color: var(--muted-foreground); opacity: 1; }
+input[type="checkbox"], input[type="radio"] { min-height: auto; }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--brand-cyan); outline-offset: 2px; box-shadow: none; }
+.badge { font-size: 11.5px; font-weight: 600; padding: 2px 7px; border-radius: 5px; }
+.badge.ok { color: var(--success); }
+.badge.bad { background: var(--danger-bg); border-color: var(--danger-line); color: var(--danger); }
+.badge.claim { font-size: 10.5px; }
+.card { padding: 22px; box-shadow: none; border-radius: var(--radius-lg); }
+.card-head { margin-bottom: 18px; align-items: flex-start; }
+.card-head h2 { font-size: 16px; font-weight: 650; line-height: 1.3; }
+.card-head p { font-size: 12.5px; margin-top: 5px; }
+.card + .card { margin-top: 20px; }
+.grid > .card + .card { margin-top: 0; }
+.card.notice { padding: 16px 20px; background: var(--warn-bg); }
+.section { margin-bottom: 22px; }
+.metric { border-radius: var(--radius); padding: 18px 20px; }
+.metric .label { font-size: 12px; text-transform: none; letter-spacing: 0; }
+.metric .value { font-size: 30px; font-weight: 620; }
+.empty { padding: 40px 24px; }
+.empty-ico { box-shadow: none; border: 1px solid var(--info-line); background: var(--info-bg); }
+.empty-ico::after { display: none; }
+.empty strong { font-size: 15px; }
+.code { background: var(--surface-2); }
+.toast { box-shadow: var(--shadow-2); border-left-color: var(--primary); }
+
+/* Overview: compact status, one metric ruler, then activity beside attention. */
+.hero {
+  background: var(--surface); padding: 25px 28px 0; margin-bottom: 22px;
+  box-shadow: var(--shadow-1); border-color: var(--border); border-radius: var(--radius-lg);
+}
+.hero-topo { display: none; }
+.hero-top { gap: 18px; padding-bottom: 22px; }
+.hero-state { gap: 14px; flex-basis: 400px; }
+.hero-dot { width: 9px; height: 9px; margin-top: 9px; background: var(--success); box-shadow: 0 0 0 5px var(--ok-bg); }
+.hero-word { font-size: 22px; line-height: 1.25; text-transform: none; letter-spacing: -0.025em; color: var(--foreground); font-weight: 650; }
+.hero-sub { max-width: 78ch; font-size: 13px; margin-top: 6px; }
+.hero-intel { gap: 10px; font-size: 12px; margin-top: 12px; }
+.hero-period .badge { background: var(--surface-2); border-color: var(--border); font-weight: 500; }
+.hero-stats {
+  grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0;
+  padding: 20px 0 22px; margin-top: 0; border-color: var(--border);
+}
+.hero-stat { padding: 0 26px; border-left: 1px solid var(--border); min-width: 0; }
+.hero-stat:first-child { padding-left: 0; border-left: 0; }
+.hero-stat:last-child { padding-right: 0; }
+.hero-stat .n { font-size: 32px; font-weight: 620; letter-spacing: -0.04em; overflow-wrap: anywhere; }
+.hero-stat .k { font-size: 12px; text-transform: none; letter-spacing: 0; margin-top: 7px; }
+.overview-primary { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(280px, 1fr); gap: 22px; margin-bottom: 22px; align-items: start; }
+.overview-primary .section { margin-bottom: 0; }
+.overview-primary .overview-activity { margin: 0; min-width: 0; }
+.overview-primary .overview-attention { margin: 0; min-width: 0; }
+.overview-primary .overview-attention > .card { min-height: 100%; }
+.overview-workspace > .grid { gap: 22px; }
+.overview-workspace .chart { height: 170px; }
+.chart-legend { font-size: 11.5px; margin-top: 14px; }
+.chart-axis { font-size: 10.5px; }
+.chart-wrap { margin: 0; }
+.attn-item { gap: 10px; padding: 13px 0; }
+.attn-body strong { font-size: 13px; line-height: 1.5; }
+.attn-body p { font-size: 12px; line-height: 1.65; }
+.attn-details { margin-top: 4px; }
+.attn-details > summary { color: var(--primary); font-size: 12px; cursor: pointer; min-height: 26px; padding: 2px 0; }
+.attn-details[open] > summary { margin-bottom: 5px; }
+.attn-clear { padding: 8px 0 14px; align-items: flex-start; }
+.attn-clear .hero-dot { margin-top: 6px; }
+.dom-row { padding: 12px 0; }
+.dom-name { font-size: 12px; font-weight: 500; }
+a.dom-name { text-decoration: none; color: var(--primary-dim); }
+a.dom-name:hover { text-decoration: underline; }
+.dom-meta { font-size: 11.5px; gap: 6px; }
+.dom-meta .badge { font-size: 10.5px; }
+.cat-row { padding: 13px 0; }
+.cat-meter { height: 5px; margin-top: 8px; }
+.feed-row { padding: 11px 0; }
+.feed-name { font-size: 12.5px; }
+
+/* Query investigation: explicit filters and a consistent row rhythm. */
+.query-filters { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+.query-filter { display: flex; flex-direction: column; gap: 6px; flex: 1 1 140px; min-width: 0; font-size: 12px; font-weight: 600; color: var(--muted-foreground); }
+.query-filter:first-child { flex: 1.8 1 220px; }
+.query-filter input, .query-filter select { max-width: none; width: 100%; font-weight: 400; }
+.query-filter-actions { display: flex; align-items: center; gap: 8px; }
+#q-count { font-size: 12px; color: var(--muted-foreground); }
+.query-filter-summary { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 16px; font-size: 12px; }
+.qlog { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.qrow > summary { gap: 14px; min-height: 57px; padding: 14px 18px; align-items: center; font-size: 13px; }
+.qrow > summary::after { content: '›'; margin-left: auto; color: var(--faint); font: 21px var(--font-sans); transform: rotate(0deg); }
+.qrow[open] > summary::after { transform: rotate(90deg); }
+.qrow[open] { background: var(--surface-2); }
+.qrow[open] > summary { border-bottom: 1px solid var(--border); }
+.qrow > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; box-shadow: none; }
+.qdomain { max-width: none; flex: 1 1 300px; font-size: 12.5px; line-height: 1.5; }
+.qrow.is-allowed .qdomain { color: var(--foreground); }
+.qmark { width: 3px; min-height: 20px; }
+.qcat { flex: 0 1 120px; font-size: 11px; text-transform: none; letter-spacing: 0; }
+.qclient { flex: 0 1 160px; font-size: 12px; overflow-wrap: anywhere; white-space: normal; }
+.qtime { font-size: 12px; }
+.qact { min-width: 63px; justify-content: center; }
+.qact-allowed { color: var(--muted-foreground); background: var(--surface); }
+.qfacts { padding: 22px 36px 16px; gap: 16px 28px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.qfact dt { font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 600; margin-bottom: 5px; }
+.qfact dd { font-size: 13px; }
+.qactions { padding: 6px 36px 24px; display: flex; flex-wrap: wrap; gap: 8px; }
+.qactions .btn { white-space: normal; }
+.query-error, .query-loading { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.query-state-note { margin: 0 0 16px; padding: 12px 16px; border-left: 3px solid var(--warn); background: var(--warn-bg); color: var(--warn); }
+
+/* Detail and administration surfaces inherit the same readable type and spacing. */
+thead th { font-size: 11px; text-transform: none; letter-spacing: 0.01em; padding: 12px 14px; }
+tbody td { padding: 13px 14px; }
+.table-wrap { border-radius: var(--radius); }
+.finding > summary { min-height: 52px; padding: 12px 4px; }
+.finding-body { padding: 12px 8px 22px 24px; }
+.finding-body h4 { text-transform: none; font-size: 13px; letter-spacing: 0; color: var(--foreground); }
+.finding > summary:hover { background: var(--surface-2); }
+.policy > summary { min-height: 76px; align-items: center; }
+.policy-title strong { font-size: 14px; }
+.policy-body { padding: 24px; }
+.rec { padding: 17px 0; }
+.rec-title strong { font-size: 14px; }
+.rec-meta, .rec-note { font-size: 12.5px; }
+.rec-note.is-ok { color: var(--success); }
+.provider-scope > summary { min-height: 30px; }
+.notice-inline { font-size: 13px; padding: 14px 18px; }
+.first-client { margin-bottom: 22px; }
+.first-client-guide { margin-top: 12px; }
+.first-client-guide > summary { color: var(--primary); font-size: 13px; cursor: pointer; min-height: 30px; padding: 4px 0; }
+.first-client-guide[open] > summary { margin-bottom: 8px; }
+
+/* Sign-in contains product identity, never instance data or health claims. */
+.login { background: var(--background); grid-template-columns: 1fr 1fr; }
+.login-aside { background: linear-gradient(150deg, var(--surface), var(--surface-3)); color: var(--brand-cyan); }
+.login-globe { width: min(74%, 420px); filter: none; opacity: 0.68; }
+.login-globe-core { color: var(--primary); animation: none; }
+.login-aside-copy { text-align: left; max-width: 340px; margin-top: 5px; }
+.login-tagline { font-size: 12px; letter-spacing: 0.08em; color: var(--primary-dim); }
+.login-lede { font-size: 28px; line-height: 1.3; letter-spacing: -0.035em; color: var(--foreground); }
+.login-card { max-width: 410px; padding: 34px; }
+.login-card h1 { font-size: 30px; font-weight: 650; }
+.login-brand { margin-bottom: 44px; gap: 12px; }
+.login-card label { font-size: 13px; color: var(--foreground); }
+.login-card input { height: 46px; }
+.login-card .btn-primary { min-height: 44px; margin-top: 18px; }
+.login-hint { font-size: 12px; line-height: 1.7; }
+.login-hint code { font-size: 11px; }
+
+@media (max-width: 1200px) {
+  :root { --sidebar-w: 204px; }
+  .sidebar { padding-left: 10px; padding-right: 10px; }
+  .topbar { padding: 18px 24px; gap: 14px; flex-wrap: wrap; }
+  .topbar-title { flex: 1 1 250px; }
+  .topbar-search { display: flex; flex: 1 1 290px; max-width: none; order: 3; }
+  .topbar-actions { max-width: none; flex: 0 0 auto; }
+  #refresh-note { flex-basis: 100%; }
+  .content { padding: 24px; }
+  .overview-primary { grid-template-columns: minmax(0, 1fr); }
+  .overview-attention { order: -1; }
+  .hero-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 20px; }
+  .hero-stat { padding: 0 18px; }
+  .hero-stat:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .hero-stat .n { font-size: 29px; }
+  .grid-2 { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .sidebar {
+    width: min(296px, 86vw); z-index: 60; background: var(--surface-2);
+    height: 100dvh; padding: 23px 16px; box-shadow: var(--shadow-2);
+    visibility: hidden;
+  }
+  .sidebar.open { visibility: visible; }
+  .sidebar .brand { padding-bottom: 22px; }
+  .nav-close { display: grid; position: absolute; top: 22px; right: 14px; width: 32px; height: 32px; font-size: 23px; }
+  .nav a { min-height: 42px; font-size: 14px; }
+  .nav-backdrop:not([hidden]) {
+    display: block; position: fixed; inset: 0; z-index: 50; border: 0;
+    background: rgb(32 43 62 / 0.25); cursor: pointer;
+  }
+  .menu-btn { display: grid; }
+  .topbar { padding: 16px; min-height: 0; gap: 12px; }
+  .topbar-title { flex: 1 1 0; }
+  .topbar h1 { font-size: 21px; }
+  .topbar p { display: none; }
+  .topbar-search { display: flex; flex: 1 1 100%; min-width: 0; order: 4; margin: 0; }
+  .topbar-search input { min-height: 36px; }
+  .topbar-actions { flex: 0 0 auto; gap: 4px; }
+  .topbar-actions .btn { font-size: 11px; padding: 5px 7px; min-height: 34px; }
+  #refresh-note { display: none; }
+  #auto-refresh-btn { display: none; }
+  .topbar-actions #auto-refresh-btn { display: inline-block; }
+  .search-key { display: none; }
+  .content { padding: 18px 16px 32px; }
+  .card { padding: 18px; }
+  .card-head { gap: 12px; flex-wrap: wrap; }
+  .card-head h2 { font-size: 16px; }
+  .card-head p { font-size: 12.5px; }
+  .hero { padding: 20px 18px 0; }
+  .hero-top { gap: 12px; padding-bottom: 18px; }
+  .hero-state { flex-basis: 100%; gap: 12px; }
+  .hero-word { font-size: 20px; }
+  .hero-sub { font-size: 12.5px; }
+  .hero-period { margin-left: 20px; }
+  .hero-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 20px; padding: 20px 0; }
+  .hero-stat { padding: 0 16px; }
+  .hero-stat:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .hero-stat .n { font-size: 29px; }
+  .overview-primary { gap: 18px; margin-bottom: 18px; }
+  .overview-workspace > .grid { gap: 18px; }
+  .overview-workspace .chart { height: 160px; }
+  .query-filter, .query-filter:first-child { flex: 1 1 130px; }
+  .query-filter:first-child { flex-basis: 100%; }
+  .query-filter-actions { flex-basis: 100%; }
+  #q-apply, #q-clear { min-height: 40px; }
+  .qrow > summary { display: flex; flex-wrap: wrap; gap: 8px 10px; padding: 14px; }
+  .qdomain { flex: 1 1 calc(100% - 18px); order: 1; }
+  .qrow > summary::after { order: 3; margin-left: auto; }
+  .qmark { order: 0; align-self: auto; height: 17px; }
+  .qact, .qcat, .qclient, .qtime { order: 2; flex: 0 1 auto; font-size: 11.5px; }
+  .qfacts { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 18px; }
+  .qactions { padding: 0 18px 20px; }
+  .qactions .btn { min-height: 38px; }
+  .policy > summary { padding: 16px; }
+  .policy-body { padding: 18px; }
+  .login { grid-template-columns: 1fr; }
+  .login-aside { display: none; }
+  .login-card { max-width: 410px; padding: 26px; }
+  .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 430px) {
+  .topbar-actions { gap: 1px; }
+  .topbar-actions .btn { padding: 5px 6px; font-size: 10.5px; }
+  .topbar-title { flex-basis: calc(100% - 55px); }
+  .topbar-actions { flex: 1 1 100%; justify-content: flex-start; order: 5; }
+  .topbar-actions .btn { min-height: 32px; font-size: 12px; padding: 5px 10px; }
+  #refresh-note { display: inline; flex: 1 1 100%; order: 6; text-align: left; margin-top: 3px; }
+  .qfacts { grid-template-columns: 1fr; }
+  .hero-period { margin-left: 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+}
+@media (forced-colors: active) {
+  .nav a.active { border: 2px solid Highlight; }
+  .badge { border: 1px solid CanvasText; }
+  .qrow > summary:focus-visible, :focus-visible { outline: 2px solid Highlight; }
+}
+
+/* Stable columns keep adjacent records comparable; details stay native HTML. */
+.query-log-head, .qrow > .query-grid {
+  display: grid;
+  grid-template-columns: 3px minmax(180px, 2.8fr) 76px minmax(90px, 1fr) minmax(100px, 1.2fr) 66px 12px;
+  gap: 14px; align-items: center;
+}
+.query-log-head {
+  background: var(--surface-2); color: var(--muted-foreground);
+  padding: 11px 18px; font-size: 11px; font-weight: 600; border-bottom: 1px solid var(--border);
+}
+.qrow > .query-grid .qdomain, .qrow > .query-grid .qclient, .qrow > .query-grid .qcat { min-width: 0; width: auto; }
+.qrow > .query-grid .qcat { overflow-wrap: anywhere; }
+.chart-data { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.chart-data > summary { font-size: 12px; color: var(--primary); cursor: pointer; min-height: 28px; }
+.chart-data .table-wrap { margin-top: 10px; max-height: 280px; overflow-y: auto; }
+.hero-stat .n.is-unavailable { font-size: 18px; line-height: 1.9; letter-spacing: -0.02em; }
+@media (max-width: 1000px) {
+  .query-log-head, .qrow > .query-grid { grid-template-columns: 3px minmax(130px, 2.4fr) 69px minmax(66px, 1fr) minmax(82px, 1fr) 60px 10px; gap: 8px; }
+}
+@media (max-width: 980px) {
+  .query-log-head { display: none; }
+  .qrow > .query-grid { display: flex; flex-wrap: wrap; gap: 8px 10px; }
+  .qrow > .query-grid .qdomain { width: auto; flex: 1 1 calc(100% - 18px); order: 1; }
+  .qrow > .query-grid::after { order: 3; margin-left: auto; }
+  .qrow > .query-grid .qmark { order: 0; align-self: auto; height: 17px; }
+  .qrow > .query-grid .qact, .qrow > .query-grid .qcat,
+  .qrow > .query-grid .qclient, .qrow > .query-grid .qtime { order: 2; flex: 0 1 auto; }
+  .qfacts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  body.nav-is-open { overflow: hidden; }
+}
+@media (max-width: 430px) {
+  .qfacts { grid-template-columns: 1fr; }
 }
