@@ -129,9 +129,12 @@ dnsdaddy daddybound validate -scenario tampered-answer -trace
 ```
 
 These commands build a signed hierarchy in memory. They cannot be pointed at
-a running deployment: no configuration wires Daddybound into the query path,
-and the isolation is checked as a property of the import graph rather than
-promised here.
+a running deployment. Learn mode is what runs against real traffic, and it is
+wired in at exactly one point — after a client's answer is final — so nothing
+Daddybound concludes can reach the answer path; the isolation is checked as a
+property of the import graph rather than promised here. The Assurance page and
+`GET /api/v1/dnssec/status` report what a running instance's Learn mode is
+doing.
 
 The live differential corpus is a separate, opt-in test rather than a
 subcommand, for the same reason it is not in CI — it needs the network, both

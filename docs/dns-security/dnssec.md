@@ -192,12 +192,14 @@ its statuses are named the way they are.
 
 ## What DNS Daddy actually does
 
-**DNS Daddy does not validate DNSSEC.** It is a forwarding resolver: it does
-not walk the root zone, does not hold a trust anchor, and does not verify a
-single signature.
+**DNS Daddy does not enforce DNSSEC.** The answer a client receives is a
+forwarding resolver's: it comes from a configured upstream, and no signature
+is verified on the way to the client. Daddybound, in Learn mode, does walk the
+root zone, hold managed trust anchors and verify signatures — for its own
+observations, described above — and nothing it concludes changes that answer.
 
-What it does is **ask the upstream to report its verdict, and record the
-answer.**
+What the client-serving path does is **ask the upstream to report its
+verdict, and record the answer.**
 
 ### The mechanism
 

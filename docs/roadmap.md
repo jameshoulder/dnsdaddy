@@ -107,19 +107,25 @@ documentation changes with it.
 
 ## Medium — worth doing, needs design
 
-### Local DNSSEC validation
+### Local DNSSEC enforcement
 
-The most significant capability gap in the project.
-[dnssec.md](dns-security/dnssec.md) is explicit that DNS Daddy records the
-*upstream's* verdict and cannot verify anything itself, which leaves
+The most significant capability gap in the project, and one that has narrowed.
+[dnssec.md](dns-security/dnssec.md) describes what exists now: Daddybound
+validates the same names clients ask for in **Learn** mode, resolving them
+itself from the root and following [RFC 5011] trust-anchor rollover, and
+records what it concludes. What it still does not do is act: every client
+answer is the upstream's, the AD bit is the upstream's, and
 [T11 — compromised upstream](threat-model.md#t11--compromised-upstream-infrastructure)
-essentially unmitigated. The AD bit is self-reported, and a lying upstream will
-set it happily.
+stays mitigated only by observation.
 
-**What it needs:** trust-anchor management including [RFC 5011] rollover,
-authenticated denial-of-existence handling (NSEC/NSEC3), a considered failure
-mode, and negative-answer caching that does not become a memory problem on a
-1 GB box.
+**What enforcement needs:** the evidence and the decisions listed in
+[issue #67](https://github.com/jameshoulder/dnsdaddy/issues/67) — a
+disagreement rate over real traffic and real time with every
+local-bogus-upstream-validated case investigated individually, a considered
+answer to what a client receives when validation cannot complete, resource
+measurements on the 1 vCPU target with the answer waiting on validation, and
+decided AD/CD/DO semantics. The Assurance page reports the measurements it
+can and says the evidence is insufficient; it applies no threshold.
 
 **Why it is genuinely hard:** the failure mode is the difficult part, not the
 cryptography. Fail-closed on validation failure means a broken signature at a

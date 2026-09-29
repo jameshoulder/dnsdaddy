@@ -31,7 +31,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 
 | Capability | Notes |
 |---|---|
-| Forwarding resolver over UDP and TCP | Not recursive — it does not walk the root zone. |
+| Forwarding resolver over UDP and TCP | Every client answer comes from a configured upstream; the client-serving path is not recursive. Daddybound's Learn mode resolves natively for its own observations only (Experimental, below). |
 | DNS-over-TLS listener | Requires a certificate; off unless configured. |
 | DNS-over-HTTPS endpoint | RFC 8484, at `/dns-query/<token>`. |
 | Encrypted upstream (DoT) | The shipped default. Upstream certificates are verified. |
@@ -102,10 +102,11 @@ validating upstream concluded, which is a strictly weaker statement. In
 particular `unvalidated` covers "the zone is unsigned" and "the upstream does
 not validate" equally, because a forwarder cannot distinguish them.
 
-Local validation is still **Planned** for the resolver. Work has started on
-the engine that would eventually do it — see **Daddybound** under Experimental
-— but nothing in the resolution path can reach it, and a test asserts that.
-See [dns-security/dnssec.md](dns-security/dnssec.md).
+Local validation exists and runs against real traffic in Learn mode — see
+**Daddybound** under Experimental — but it decides nothing. Local
+*enforcement* is still **Planned**: nothing in the resolution path can act on
+a Daddybound verdict, and a test asserts that. See
+[dns-security/dnssec.md](dns-security/dnssec.md).
 
 ---
 
