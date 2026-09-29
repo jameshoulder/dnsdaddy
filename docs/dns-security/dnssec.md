@@ -123,10 +123,24 @@ support.
 ### What it does not do
 
 No enforcement. No AD bit of DNS Daddy's own — the AD bit on a response to your
-client still means what it always meant, which is what the upstream said. No
-RFC 5011 automatic trust-anchor rollover: the IANA root keys are compiled in,
-both current ones, and `dns.local_dnssec_trust_anchor_file` overrides them if
-you need to move faster than a release.
+client still means what it always meant, which is what the upstream said.
+
+Trust anchors are managed, not fixed: the IANA root keys are compiled in as the
+seed, `dns.local_dnssec_trust_anchor_file` overrides them, and from there
+Daddybound follows [RFC 5011] — a key the root announces and signs for becomes
+an anchor after the thirty-day hold-down, and a self-signed revocation
+withdraws one. The managed state lives in `daddybound-anchors.json` beside the
+database; losing it costs hold-down progress, never the ability to validate,
+because the compiled-in digests are never discarded. `GET /api/v1/dnssec/status`
+and the Assurance page report each key's state, the last refresh and whether
+the state file is being written.
+
+Learn resolves for itself. Since native recursion landed, the supporting
+queries do not go through your configured upstreams: Daddybound walks from the
+root hints to the authoritative servers over ordinary port 53, in the clear,
+with QNAME minimisation. That is separate from — and not protected by — any
+DoT or DoH upstream you configured for client answers, and the status page
+says so.
 
 If query logging is off, observations are still counted but the per-query rows
 are not written. Turning off the query log is a privacy decision, and a
@@ -178,12 +192,14 @@ its statuses are named the way they are.
 
 ## What DNS Daddy actually does
 
-**DNS Daddy does not validate DNSSEC.** It is a forwarding resolver: it does
-not walk the root zone, does not hold a trust anchor, and does not verify a
-single signature.
+**DNS Daddy does not enforce DNSSEC.** The answer a client receives is a
+forwarding resolver's: it comes from a configured upstream, and no signature
+is verified on the way to the client. Daddybound, in Learn mode, does walk the
+root zone, hold managed trust anchors and verify signatures — for its own
+observations, described above — and nothing it concludes changes that answer.
 
-What it does is **ask the upstream to report its verdict, and record the
-answer.**
+What the client-serving path does is **ask the upstream to report its
+verdict, and record the answer.**
 
 ### The mechanism
 
@@ -364,3 +380,4 @@ roadmap alongside validation itself.
 [RFC 6840]: https://www.rfc-editor.org/rfc/rfc6840
 [RFC 8624]: https://www.rfc-editor.org/rfc/rfc8624
 [RFC 9364]: https://www.rfc-editor.org/rfc/rfc9364
+[RFC 5011]: https://www.rfc-editor.org/rfc/rfc5011

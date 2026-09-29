@@ -165,3 +165,96 @@ cfb6f9d7675ca6ca4e1e414d0ec3919682cf43da148b1f65078b20b629455133  assurance.png
 44ac5456c05dc46bca79745bc9b184604e6dc5d76b92196fdc0901319cee3be9  queries.png
 536e08c07077280026ee045f37d5adc87cfd83e5dbc9766d36ffe19be1f6582b  mobile.png
 ```
+
+---
+
+# Increment captures (29 September 2026, PR #75)
+
+The six `increment-*.png` files were captured from a running `dnsdaddy` built
+from this branch, by a Playwright script, after the same isolated lab pattern
+as above. They are real application output over **synthetic laboratory data
+only**: loopback clients, reserved `.example` / `.test` names, two local feed
+files and a local sink as the only upstream. Nothing in them is a real
+network, device or indicator, and no credential is visible in any image.
+
+## Image inventory
+
+| File | Output size | Capture | Route | Visible state |
+|---|---:|---|---|---|
+| [increment-overview.png](increment-overview.png) | 1440 × 2007 | Full page | `#/dashboard` | Blocked queries split into security and preference; resolver card with clients seen, networks by state and the windowed failure rate. The loopback-only connection notice is still shown, as in the canonical captures. |
+| [increment-investigate.png](increment-investigate.png) | 1440 × 3013 | Full page | `#/investigate?domain=malware-host.example&client=127.0.0.2` | After the name was allow-listed: stored decisions still read *blocked*, the read-only preview reads *allowed*. |
+| [increment-investigate-390.png](increment-investigate-390.png) | 390 × 1500 | Full page, clipped | same | The same page at phone width. |
+| [increment-findings-review.png](increment-findings-review.png) | 1440 × 2150 | Full page, clipped | `#/detections?state=all` | First finding expanded; a review recorded with a hostile note rendered as text. |
+| [increment-daddybound-status.png](increment-daddybound-status.png) | 1158 × 1292 | Element | `#/assurance` | The Daddybound runtime card with Learn off. |
+| [increment-daddybound-learn.png](increment-daddybound-learn.png) | 1158 × 1822 | Element | `#/assurance` | The same card with Learn on in a container that cannot reach the root servers: timeouts and unreachable outcomes counted as operational results, the trust point seeded but never refreshed, evidence still *not quantified*. |
+
+The two element captures hid the sticky top bar through the CSSOM for the
+crop only; nothing in the served files changed, and the production Content
+Security Policy stayed in force (an attempt to inject a capture-only inline
+stylesheet was refused by it).
+
+## Runtime and capture conditions
+
+| Setting | Value |
+|---|---|
+| Source revision | `12d75b4` plus the working-tree change committed as `7a92ba8` (the rendering fix those captures verified); the build label in the images reads `dev+12d75b4` |
+| Go | `go1.25.13 linux/amd64`; `CGO_ENABLED=0` |
+| Browser | Chromium `141.0.7390.37` (Playwright build 1194) |
+| Capture driver | Playwright `1.56.1`, Node.js `v22.22.2` |
+| Viewport | 1440 × 900 desktop, 390 × 844 mobile; device scale 1 |
+| Application origin | `http://127.0.0.1:8085` |
+| DNS listeners | UDP and TCP on `127.0.0.1:5353` |
+| Only upstream | `dnsdaddy-lab -sink 127.0.0.1:5300` |
+| Allowed client ranges | `127.0.0.0/8`, `10.0.0.0/8`, `192.168.0.0/16` |
+| Catalog feeds / Observatory | All disabled |
+| External API integrations | None configured |
+| Local DNSSEC observation | `off` for five images; `observe` for `increment-daddybound-learn.png` |
+| Query / decision records | Enabled, synthetic data only; retention 7 days |
+| Detection timing | `window_scale: 0.1` |
+
+## Synthetic data shown
+
+Two local hosts-format feeds, `Lab malware list` (`malware-host.example`,
+`blocked.example`, `c2.example`) and `Lab ads list` (`ads.example`,
+`tracker.example`), loaded through the ordinary feed-refresh path. Three
+networks reproduce the attribution case from the brief: a broad monitor-only
+`127.0.0.0/8` plus an unrelated `192.0.2.123/32`, a narrower blocking
+`127.0.0.0/29` on `p_standard` (with `custom-blocked.example` on its block
+list and `phish.example` on its allow list), and a guest `127.0.0.8/29` on an
+ads-blocking policy. The client `127.0.0.2` is named `laptop-normal`. The
+seven built-in `dnsdaddy-lab` scenarios ran at tenfold speed from their own
+loopback addresses, followed by manual queries under `.example` and `.test`
+names; the API reported about 2,600 queries, 19 blocks and nine findings at
+capture time.
+
+## Procedure and verification
+
+The capture script signed in with a lab-only password read from a private
+file, waited for `#view[aria-busy="false"]` on every route, and used
+`page.screenshot` with `fullPage` where listed. Before the captures, a
+51-check Playwright run against the same instance passed in full: production
+CSP served; no console errors other than the three non-2xx responses the run
+provokes on purpose (a stale review, a routed synthetic 500, a hostile client
+parameter); no CSP violations, external requests or failed resource requests;
+the attribution scenario reproduced through real queries; a filtered query-log
+URL surviving reload and back/forward into the investigation; stored decisions
+unchanged and the preview changing after an allow-list rule; a stale review
+refused with the other review shown; a false positive changing no rule and no
+detector; keyboard order and a visible focus ring; no horizontal scroll on the
+overview, investigation, findings and assurance pages at 1440, 1024, 768, 390
+and 320 CSS pixels and at 200 % zoom. The rendering defect those checks
+exposed (nested notes shown as literal tag text) was fixed and re-captured
+before these images were taken.
+
+Re-running the lab reproduces the scenarios, not identical bytes.
+
+### PNG SHA-256 checksums
+
+```text
+002caf6393c5c9b63b2bfa23778f32e163264a6840817183ce6ec0bfb7264091  increment-overview.png
+999fefcf622b97f2abf7c9bcf43eea92e6f4c487a27c1d8c5699ded24e08a147  increment-investigate.png
+db04cf3a960d2999917d6ba7edcbbe5c8c3f3f5f4b638b4cc7dafbb8afa91d52  increment-investigate-390.png
+82dfc9846b4382b1904d2f91063633656bcf95f28d0b85a0806a0803c6e70c8e  increment-findings-review.png
+b021647e2702f0a269d5777f3cdb7d0ddfb8fb19385680946100cb75dc00679a  increment-daddybound-status.png
+93339f4cab56da0062af3d23581aa16a2675a1f1bee0961cbb28ca887552fad6  increment-daddybound-learn.png
+```

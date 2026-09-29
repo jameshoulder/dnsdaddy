@@ -47,6 +47,11 @@ type Store struct {
 	// an open resolver that nobody ever opted into. Set once at startup,
 	// before any request is served.
 	bootstrapCIDRs []string
+
+	// clientHours remembers which (hour, client) rows client_hourly already
+	// holds, so the query-log writer does not re-upsert the same row for
+	// every batch a busy client appears in. See rememberClientHours.
+	clientHours clientHourSet
 }
 
 // SetBootstrapClientCIDRs records dns.allowed_client_cidrs so writes can be
@@ -203,7 +208,23 @@ var addedColumns = []struct{ table, column, definition string }{
 	// verdict, and zero on every pre-existing row.
 	{"dnssec_observations", "queries", "INTEGER NOT NULL DEFAULT 0"},
 	{"dnssec_observations", "delegations", "INTEGER NOT NULL DEFAULT 0"},
+	// Failed resolutions, in the same row as the queries they are a fraction
+	// of, so an error rate can be derived from one window and one scope.
+	// Zero on every pre-existing row — those hours were never counted — and
+	// the moment the column arrived is recorded in the settings table (see
+	// SettingStatsErrorsSince) so a reader can tell "no errors" from "not
+	// yet measured".
+	{"stats_hourly", "errors", "INTEGER NOT NULL DEFAULT 0"},
 }
+
+// SettingStatsErrorsSince is when stats_hourly.errors began being counted on
+// this database, recorded once by the migration that added the column.
+//
+// Absent on a database created with the column already in its schema, which
+// means every retained hour has been counted. Present on an upgraded
+// database, where hours before that moment read zero errors because nothing
+// counted them — a statement about the measurement, not about the resolver.
+const SettingStatsErrorsSince = "stats.errors_since"
 
 func migrate(db *sql.DB) error {
 	for _, c := range addedColumns {
@@ -213,6 +234,15 @@ func migrate(db *sql.DB) error {
 				continue // already applied
 			}
 			return fmt.Errorf("migrate %s.%s: %w", c.table, c.column, err)
+		}
+		if c.table == "stats_hourly" && c.column == "errors" {
+			// The column was just added, so this database has hours that
+			// were never counted. Recorded at most once: a later start finds
+			// the column present and never reaches here.
+			if _, err := db.Exec(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
+				SettingStatsErrorsSince, time.Now().UTC().Format(time.RFC3339)); err != nil {
+				return fmt.Errorf("migrate stats_hourly.errors: record start: %w", err)
+			}
 		}
 	}
 	return nil

@@ -236,3 +236,14 @@ func dnssecWriterOrNil(d *dnssecObservation) api.DNSSECWriterStats {
 	}
 	return d.writer
 }
+
+// dnssecAnchorsOrNil exposes the trust-anchor manager's reporting face to the
+// API, so the status page can show the keys in force, the refresh schedule
+// and whether the state file is being written — without handing it a non-nil
+// interface wrapping a nil pointer.
+func dnssecAnchorsOrNil(d *dnssecObservation) api.DNSSECAnchors {
+	if d == nil || d.anchors == nil {
+		return nil
+	}
+	return d.anchors
+}

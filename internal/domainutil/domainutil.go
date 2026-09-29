@@ -7,7 +7,13 @@
 // into a block list.
 package domainutil
 
-import "strings"
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"golang.org/x/net/idna"
+)
 
 // MaxLen is the maximum length of a DNS name in presentation format.
 const MaxLen = 253
@@ -101,4 +107,49 @@ func IsSubdomainOf(domain, parent string) bool {
 	return len(domain) > len(parent) &&
 		strings.HasSuffix(domain, parent) &&
 		domain[len(domain)-len(parent)-1] == '.'
+}
+
+// NormalizeInput turns an operator-typed name into the form the query log
+// holds, or reports why it cannot.
+//
+// The query log stores what arrived on the wire, which for an
+// internationalised name is its A-label ("xn--bcher-kva.example"), and an
+// operator investigating "bücher.example" has to land on the same rows.
+// This converts a Unicode name to its A-labels first — IDNA 2008 lookup
+// rules, which is the same conversion a browser applies before sending a
+// query — and then applies Normalize, so case, a trailing dot and a pasted
+// URL are handled exactly as they are everywhere else.
+//
+// Not for the DNS hot path: it allocates, and names on the wire are already
+// A-labels. It is for the one place a person types a name.
+func NormalizeInput(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", errors.New("a domain name is required")
+	}
+	if len(s) > 4*MaxLen {
+		return "", errors.New("the name is too long to be a domain")
+	}
+	ascii := s
+	if !isASCII(s) {
+		converted, err := idna.Lookup.ToASCII(s)
+		if err != nil {
+			return "", fmt.Errorf("the name is not a valid internationalised domain: %v", err)
+		}
+		ascii = converted
+	}
+	out := Normalize(ascii)
+	if out == "" {
+		return "", errors.New("the name is not a valid domain")
+	}
+	return out, nil
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }

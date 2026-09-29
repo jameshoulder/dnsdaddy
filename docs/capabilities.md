@@ -31,7 +31,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 
 | Capability | Notes |
 |---|---|
-| Forwarding resolver over UDP and TCP | Not recursive — it does not walk the root zone. |
+| Forwarding resolver over UDP and TCP | Every client answer comes from a configured upstream; the client-serving path is not recursive. Daddybound's Learn mode resolves natively for its own observations only (Experimental, below). |
 | DNS-over-TLS listener | Requires a certificate; off unless configured. |
 | DNS-over-HTTPS endpoint | RFC 8484, at `/dns-query/<token>`. |
 | Encrypted upstream (DoT) | The shipped default. Upstream certificates are verified. |
@@ -47,7 +47,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 |---|---|
 | Category blocking from public threat feeds | Malware, phishing, C2, cryptomining on by default; ads, adult, gambling, newly-registered available. |
 | Custom allow and block lists, per policy | Allow-list wins, so an operator can always override a bad feed entry. |
-| Per-network policies | Matched by CIDR, most specific prefix first. |
+| Per-network policies | Matched by CIDR. The most specific prefix containing the client wins, decided per CIDR rather than per network, so a network's unrelated narrow range cannot promote its broad one. Equal prefixes in two networks resolve by network name, deterministically. |
 | Roaming attribution by DoH token | A per-network token in the DoH path applies that network's policy from any IP. |
 | Configurable block response | NXDOMAIN, 0.0.0.0/::, or REFUSED. |
 | Immediate allow-listing | The answer cache is purged on a policy change, so a fix applies on the next query. |
@@ -57,11 +57,15 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Capability | Notes |
 |---|---|
 | Per-query logging with plain-English reasons | Non-blocking and batched; drops rather than delaying a lookup. |
-| Hourly and daily rollups | Survive query-log pruning, so reporting history outlives browsing history. |
+| Hourly and daily rollups | Survive query-log pruning, so reporting history outlives browsing history. Failed resolutions are counted in the same hourly rows as the queries they are a fraction of. |
+| Overview measurements | `GET /api/v1/overview` carries a `measured` block stating each count separately with its window and scope: configured, enabled, permitted and traffic-bearing networks; attributed clients in the window or the reason there is no count; feeds enabled, loaded, failing and never downloaded; blocking policies and whether any enabled network uses one; blocked queries split into security, precaution, preference, custom and unclassified; and an error rate derived from one window, or the reason it cannot be. No field combines two scopes and none is a verdict about protection. |
 | DNSSEC status per query | The **upstream's** verdict. See below and [dns-security/dnssec.md](dns-security/dnssec.md). |
 | Prometheus metrics | Hand-rolled, no client library. |
 | Markdown reports | A period summary written for someone who does not run the network. |
-| Structured security findings | Stored, queryable, and exportable as NDJSON. See [detection/README.md](detection/README.md). |
+| Structured security findings | Stored, queryable, and exportable as NDJSON, paged by a keyset cursor so an export says whether it is complete. See [detection/README.md](detection/README.md) and [siem.md](siem.md). |
+| Daddybound status | `GET /api/v1/dnssec/status` and the Assurance page report the Learn runtime as a bounded snapshot: configured and effective mode and who chose it, resolution source and the plaintext port 53 transport Learn uses (distinct from the encrypted client-serving upstream), each RFC 5011 trust-anchor key's lifecycle state, the last refresh and its error, whether the state file is being written, observer counters since start against stored rows within a window, and disagreement populations separated by resolution source, cache state and comparability. It states that the evidence is insufficient for enforcement and applies no threshold; Live is reported as unavailable. Polling it resolves nothing and touches no trust state. |
+| Finding review | Each finding carries a review record beside it: `new`, `acknowledged`, `resolved` or `false_positive`, with a bounded plain-text note, a version for optimistic concurrency, the authenticated actor as the API knows it (`session:admin` or `token:<name>`) and a change history. The finding's own measurements are never modified, and a review changes nothing about enforcement: a false positive disables no detector, relaxes no policy, deletes no evidence and allows no domain. See [detection/README.md](detection/README.md#reviewing-findings). |
+| Domain and client investigation | `GET /api/v1/investigate/domain/{domain}` and `/client/{ip}`, and the dashboard's Investigate page: what the query log recorded for one exact name or address, the decisions stored at the time, a read-only preview of what the current configuration would decide now, what is on file and whether any of it ever decided a query, and related experimental findings and Daddybound observations — each in its own section. Nothing is written and no external provider is contacted; a name an external provider would be asked about is reported as *not evaluated*, never guessed allowed. Enrichment is a separate POST that uses the configured providers within their existing mode and budget. Exact name match only: it is not a substring search, a passive-DNS history, an IP-reputation source or a device discovery tool. |
 
 ### Management
 
@@ -98,10 +102,11 @@ validating upstream concluded, which is a strictly weaker statement. In
 particular `unvalidated` covers "the zone is unsigned" and "the upstream does
 not validate" equally, because a forwarder cannot distinguish them.
 
-Local validation is still **Planned** for the resolver. Work has started on
-the engine that would eventually do it — see **Daddybound** under Experimental
-— but nothing in the resolution path can reach it, and a test asserts that.
-See [dns-security/dnssec.md](dns-security/dnssec.md).
+Local validation exists and runs against real traffic in Learn mode — see
+**Daddybound** under Experimental — but it decides nothing. Local
+*enforcement* is still **Planned**: nothing in the resolution path can act on
+a Daddybound verdict, and a test asserts that. See
+[dns-security/dnssec.md](dns-security/dnssec.md).
 
 ---
 

@@ -140,6 +140,12 @@ CREATE INDEX IF NOT EXISTS query_log_ts_idx        ON query_log (ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_action_ts_idx ON query_log (action, ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_network_idx   ON query_log (network_id, ts DESC);
 CREATE INDEX IF NOT EXISTS query_log_qname_idx     ON query_log (qname);
+-- The client investigation reads one address's rows in a window. Without this
+-- the only route to them is a scan of every row in the window, which on the
+-- reference deployment is a million rows for one page. Created on upgrade by
+-- the same idempotent statement as the rest, which on a large existing log
+-- takes a few seconds once at startup.
+CREATE INDEX IF NOT EXISTS query_log_client_ts_idx ON query_log (client_ip, ts DESC);
 
 -- Local DNSSEC validation observations, one row per query Daddybound looked
 -- at. Separate from query_log because the two are written independently: the
@@ -204,7 +210,28 @@ CREATE TABLE IF NOT EXISTS stats_hourly (
     category   TEXT    NOT NULL,
     total      INTEGER NOT NULL DEFAULT 0,
     blocked    INTEGER NOT NULL DEFAULT 0,
+    -- Queries that failed to resolve, counted in the same row as the queries
+    -- they are a fraction of. An error rate is only meaningful when its
+    -- numerator and denominator share a window and a scope, and these two
+    -- columns are the only pair in the database that do.
+    errors     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (hour, network_id, category)
+);
+
+-- Which attributed clients were seen in which hour. One row per (hour, client),
+-- so "how many devices used the resolver today" is a count over at most
+-- clients × 24 rows rather than a scan of every query-log row in the window —
+-- on the reference deployment the latter is a million rows per dashboard load.
+--
+-- Written only when a per-query row would also be written: an operator who
+-- switched query logging off, instance-wide or per policy, has asked for
+-- client addresses not to be kept, and an hourly presence table would keep
+-- them. Pruned on log.retention_days for the same reason, never on the longer
+-- rollup window.
+CREATE TABLE IF NOT EXISTS client_hourly (
+    hour       INTEGER NOT NULL,
+    client_ip  TEXT    NOT NULL,
+    PRIMARY KEY (hour, client_ip)
 );
 
 CREATE TABLE IF NOT EXISTS blocked_domain_stats (
@@ -257,6 +284,51 @@ CREATE INDEX IF NOT EXISTS findings_ts_idx       ON findings (ts DESC);
 CREATE INDEX IF NOT EXISTS findings_severity_idx ON findings (severity, ts DESC);
 CREATE INDEX IF NOT EXISTS findings_type_idx     ON findings (event_type, ts DESC);
 CREATE INDEX IF NOT EXISTS findings_client_idx   ON findings (client_ip, ts DESC);
+
+-- An operator's review of a finding: separate from the finding on purpose.
+--
+-- The findings row is what the detector measured, and it is never updated:
+-- an acknowledgement, a resolution or a "false positive" is a statement by a
+-- person about the finding, kept in its own row so the measurement it is
+-- about cannot be edited by the act of reviewing it. A finding with no row
+-- here is in the implicit "new" state.
+--
+-- A review changes nothing else. Marking a finding a false positive does not
+-- disable a detector, relax a policy, delete evidence or allow a domain; those
+-- are separate actions with their own routes. The version column supports
+-- optimistic concurrency so two operators cannot silently overwrite each
+-- other. actor is the authenticated principal as the API actually knows it —
+-- "session:admin" or "token:<name>" — never a session secret, and never a
+-- named user this product does not have.
+CREATE TABLE IF NOT EXISTS finding_reviews (
+    finding_id TEXT    PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+    state      TEXT    NOT NULL DEFAULT 'new',
+    note       TEXT    NOT NULL DEFAULT '',
+    version    INTEGER NOT NULL DEFAULT 1,
+    actor      TEXT    NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS finding_reviews_state_idx ON finding_reviews (state);
+
+-- Every review change, in order. Application history for explaining what an
+-- operator did and when; it is written by the same process and the same
+-- database file as everything else, so it is not tamper-proof evidence
+-- against a host administrator, and nothing here claims otherwise.
+CREATE TABLE IF NOT EXISTS finding_review_history (
+    id         INTEGER PRIMARY KEY,
+    finding_id TEXT    NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    version    INTEGER NOT NULL,
+    from_state TEXT    NOT NULL,
+    to_state   TEXT    NOT NULL,
+    note       TEXT    NOT NULL DEFAULT '',
+    actor      TEXT    NOT NULL DEFAULT '',
+    at         INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS finding_review_history_finding_idx
+    ON finding_review_history (finding_id, id);
 
 -- ---------------------------------------------------------------------------
 -- External API providers: "bring your own intelligence".

@@ -1059,6 +1059,100 @@ paths:
                     items: { $ref: "#/components/schemas/Decision" }
         "400": { description: A domain is required }
 
+  /api/v1/investigate/domain/{domain}:
+    get:
+      tags: [Investigation]
+      summary: Everything recorded about one name, in sections that stay apart
+      description: |
+        A read-only investigation of one domain name: what the query log
+        recorded, what was decided at the time, what the current
+        configuration would decide now, what is on file about it, what the
+        experimental detectors inferred, and what Daddybound concluded
+        locally. The sections answer different questions and are never
+        merged.
+
+        Nothing here writes. No query-log row, decision record, cache entry
+        or configuration changes as a result of this request, and no
+        external provider is contacted: the policy preview runs on the same
+        compiled snapshot and code path as a live query, minus the provider
+        step, and reads only what the provider cache already holds.
+
+        The name is normalised the way a browser would send it — IDNA
+        lookup rules to A-labels, lower case, no trailing dot — and matched
+        **exactly** against recorded names. `www.evil.example` and
+        `evil.example` are different names; this is not a substring
+        search and not a global domain index.
+      parameters:
+        - { name: domain, in: path, required: true, schema: { type: string }, description: The name to investigate, Unicode or A-label form. }
+        - { name: client, in: query, schema: { type: string }, description: Optional client IP address. Narrows activity, decisions and findings to it and makes the preview use its attributed policy. }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 8760 }, description: Retained-data window. Defaults to the query-log retention. }
+      responses:
+        "200":
+          description: The investigation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainInvestigation" }
+        "400":
+          description: Not a valid domain name, or `client` is not an IP address
+  /api/v1/investigate/domain/{domain}/enrich:
+    post:
+      tags: [Investigation]
+      summary: Ask the configured external providers about a name, now
+      description: |
+        The one deliberate action in the investigation surface. It consults
+        the configured providers exactly as the resolution path would in the
+        configured reputation mode — `off` consults nobody, `cache_only`
+        queues a lookup for next time, `blocking` waits at most the
+        configured budget — and queues enrichment where that is enabled.
+        Nothing about this request widens what the operator configured.
+
+        A POST, so it sits behind the same-origin check and a link cannot
+        trigger a provider call. Answers `503` when external providers are
+        not enabled on this deployment.
+      parameters:
+        - { name: domain, in: path, required: true, schema: { type: string } }
+        - { name: client, in: query, schema: { type: string }, description: Optional client IP, to consult under its attributed policy. }
+      responses:
+        "200":
+          description: What was requested and what came back
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domain: { type: string }
+                  policyId: { type: string }
+                  mode: { type: string, enum: [off, cache_only, blocking] }
+                  lookup: { type: string, enum: [not_performed, answered, queued, no_answer] }
+                  verdict: { type: [object, "null"] }
+                  note: { type: string }
+        "503":
+          description: External providers are not enabled
+  /api/v1/investigate/client/{ip}:
+    get:
+      tags: [Investigation]
+      summary: Everything recorded about one client address
+      description: |
+        The client-focused view: the names an address asked for, its
+        recorded outcomes, the decisions and findings attributed to it, and
+        the network and policy the current configuration maps it to now.
+
+        Read-only. When client addresses are not recorded
+        (`log.log_client_ip` off) the activity section is reported as
+        unavailable with the reason, and nothing is reconstructed from other
+        columns to stand in for it.
+      parameters:
+        - { name: ip, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 8760 } }
+      responses:
+        "200":
+          description: The investigation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClientInvestigation" }
+        "400":
+          description: The path does not name an IP address
+
   /api/v1/clients:
     get:
       tags: [Administration]
@@ -1193,9 +1287,20 @@ paths:
           in: query
           schema: { type: string, enum: ["true"] }
           description: Include the full finding document with each row. Off by default; a document is several kilobytes.
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: |
+            Continue from a previous page: the `nextCursor` it returned.
+            Omit to start from the newest finding. A cursor this server did
+            not issue is answered `400` rather than silently restarted.
+        - name: state
+          in: query
+          schema: { type: string, enum: [new, acknowledged, resolved, false_positive] }
+          description: Keep only findings whose review is in this state. `new` includes findings nobody has reviewed.
       responses:
         "200":
-          description: Matching findings
+          description: One page of matching findings, newest first
           content:
             application/json:
               schema:
@@ -1204,8 +1309,21 @@ paths:
                   findings:
                     type: array
                     items: { $ref: "#/components/schemas/FindingSummaryRow" }
-                  count: { type: integer }
+                  count: { type: integer, description: Rows in this page. }
+                  limit: { type: integer, description: The page size applied. }
+                  nextCursor:
+                    type: string
+                    description: |
+                      Pass back as `cursor` for the following page. Empty
+                      when this page was the last. The cursor is a keyset
+                      position in `(time, id)` order rather than an offset,
+                      so a finding written while a consumer is paging neither
+                      repeats nor displaces a row. Stop on an empty cursor,
+                      not on a short page: a page is short whenever fewer
+                      rows than the limit matched.
                   enforcement: { type: string, enum: [none] }
+        "400":
+          description: An unrecognised cursor, or an invalid severity
 
   /api/v1/findings/summary:
     get:
@@ -1232,6 +1350,10 @@ paths:
                         eventType: { type: string }
                         severity: { type: string }
                         count: { type: integer, format: int64 }
+                  byState:
+                    type: object
+                    description: Findings in the same period by review state, every state present at zero. `new` includes findings nobody has reviewed.
+                    additionalProperties: { type: integer, format: int64 }
 
   /api/v1/findings/export:
     get:
@@ -1251,12 +1373,37 @@ paths:
         - { name: type, in: query, schema: { type: string } }
         - { name: hours, in: query, schema: { type: integer, default: 24, minimum: 1, maximum: 8760 } }
         - { name: limit, in: query, schema: { type: integer, default: 1000, maximum: 1000 } }
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: |
+            Continue from a previous response: the value of its
+            `X-Next-Cursor` header. Omit to start from the oldest finding in
+            the window. An unrecognised cursor is answered `400`.
       responses:
         "200":
-          description: NDJSON stream
+          description: |
+            NDJSON stream, oldest first. NDJSON has no envelope, so the
+            continuation travels in headers. `X-Truncated: true` means
+            matching findings remain beyond this response and
+            `X-Next-Cursor` names where to continue; `X-Truncated: false`
+            means this response is complete. A response exactly at `limit`
+            lines is not complete unless the header says so.
+          headers:
+            X-Export-Count:
+              schema: { type: integer }
+              description: Lines in this body.
+            X-Truncated:
+              schema: { type: string, enum: ["true", "false"] }
+              description: Whether matching findings remain beyond this response.
+            X-Next-Cursor:
+              schema: { type: string }
+              description: Present only when truncated. Pass back as `cursor`.
           content:
             application/x-ndjson:
               schema: { $ref: "#/components/schemas/Finding" }
+        "400":
+          description: An unrecognised cursor, or an invalid severity
 
   /api/v1/findings/{id}:
     get:
@@ -1270,6 +1417,104 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FindingSummaryRow" }
+        "404":
+          description: No such finding
+
+  /api/v1/findings/{id}/review:
+    put:
+      tags: [Detections]
+      summary: Record an operator's disposition of a finding
+      description: |
+        The one write on findings, and it writes beside the finding rather
+        than to it: the measurements, severity, confidence and evidence the
+        detector produced are never modified by a review.
+
+        States are `new`, `acknowledged`, `resolved` and `false_positive`.
+        From `new` any other state may be chosen; `acknowledged` may return
+        to `new` or close as either; a closed finding reopens to
+        `acknowledged` or is reclassified as the other closed state, and
+        never returns straight to `new`. Writing the same state again with a
+        different note is allowed and recorded.
+
+        The request carries the `version` the caller read (0 for a finding
+        nobody has reviewed). A write naming any other version is answered
+        `409` with the current review, so two operators cannot silently
+        overwrite each other.
+
+        **A review changes nothing else.** Marking a finding a false
+        positive does not disable a detector, relax a policy, delete
+        evidence or allow a domain. It records an assessment.
+
+        The actor recorded is the principal as the API knows it —
+        `session:admin` or `token:<name>` — because that is the identity
+        model this product has. No named user is invented and no session
+        secret is stored.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state, version]
+              properties:
+                state: { type: string, enum: [new, acknowledged, resolved, false_positive] }
+                note: { type: string, maxLength: 2000, description: Plain text. Control characters other than newline and tab are stripped; markup is kept as literal text and escaped by every renderer. }
+                version: { type: integer, format: int64, description: The version read. 0 for an unreviewed finding. }
+      responses:
+        "200":
+          description: The review as stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FindingReview" }
+        "400":
+          description: Unknown state, a transition the workflow does not allow, or an over-long note
+        "404":
+          description: No such finding
+        "409":
+          description: The review moved on since the caller read it
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  current: { $ref: "#/components/schemas/FindingReview" }
+  /api/v1/findings/{id}/review/history:
+    get:
+      tags: [Detections]
+      summary: A finding's review changes, oldest first
+      description: |
+        Application history for explaining what an operator did and when. It
+        is written by the same process into the same database file as the
+        findings, so it is not tamper-proof evidence against a host
+        administrator, and the payload says so.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  findingId: { type: string }
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer, format: int64 }
+                        findingId: { type: string }
+                        version: { type: integer, format: int64 }
+                        fromState: { type: string }
+                        toState: { type: string }
+                        note: { type: string }
+                        actor: { type: string }
+                        at: { type: string, format: date-time }
+                  note: { type: string }
         "404":
           description: No such finding
 
@@ -1312,6 +1557,7 @@ paths:
           schema: { type: string, enum: ["1"] }
         - name: limit
           in: query
+          description: Size of the recent list, default 50. `scope.recentTruncated` reports whether the window held more.
           schema: { type: integer, minimum: 1, maximum: 500 }
       responses:
         "200":
@@ -1331,21 +1577,83 @@ paths:
                   summary: { $ref: "#/components/schemas/DNSSECObservationSummary" }
                   recent:
                     type: array
+                    description: Stored observations within the same window as `summary`, newest first, at most `limit` of them.
                     items: { $ref: "#/components/schemas/DNSSECObservation" }
+                  scope:
+                    type: object
+                    description: |
+                      Names the two populations in this payload so neither is
+                      read as the other. `summary` and `recent` are stored
+                      rows within the window — and only the rows the query-log
+                      settings allowed to be stored. `runtime` is the
+                      process's own counters since it started, covering every
+                      observation whether or not a row was kept.
+                    properties:
+                      summary: { type: string }
+                      recent: { type: string }
+                      runtime: { type: string }
+                      window:
+                        type: object
+                        properties:
+                          hours: { type: integer }
+                          from: { type: string, format: date-time }
+                          to: { type: string, format: date-time }
+                      recentLimit: { type: integer }
+                      recentTruncated:
+                        type: boolean
+                        description: The window holds more matching observations than `recent` shows.
                   runtime:
                     type: object
                     description: |
                       Health of the observer itself, which is deliberately
                       separate from the health of DNS resolution. Dropped
                       observations are a gap in the sample, not a gap in
-                      service.
+                      service. Counters here are since process start, not
+                      within the window.
                     properties:
                       available:  { type: boolean }
+                      scope:      { type: string, enum: [since_start] }
+                      uptimeSeconds: { type: integer, format: int64 }
                       observed:   { type: integer, format: int64 }
                       dropped:    { type: integer, format: int64 }
                       panics:     { type: integer, format: int64 }
                       lastAt:     { type: string, format: date-time }
                       lastStatus: { type: string }
+                      stored:     { type: integer, format: int64 }
+                      unrecorded: { type: integer, format: int64 }
+                      writeErrors: { type: integer, format: int64 }
+
+  /api/v1/dnssec/status:
+    get:
+      tags: [Detections]
+      summary: The Daddybound runtime as a bounded snapshot
+      description: |
+        What the process already holds about local DNSSEC validation:
+        the configured and effective mode, how records are obtained and over
+        what transport, the RFC 5011 trust anchors with each key's lifecycle
+        state and the refresh and persistence outcomes, the observer's
+        counters since start, the stored observations within a window, the
+        stored disagreement populations separated by resolution source and
+        comparability, and a plain statement that the evidence is not
+        sufficient for enforcement.
+
+        Polling this changes nothing: it resolves no name, refreshes no
+        anchor and touches no trust state. Key material and host paths are
+        not included. `experimental` is always true and `enforcing` always
+        false; Live is reported as unavailable with the reason.
+
+        There is no readiness percentage and no threshold in this
+        endpoint. Each criterion under `evidence` reports a measurement and
+        the status `not_quantified`; the criteria themselves are the subject
+        of the linked issues.
+      parameters:
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 2160 }, description: Window for the stored counts and populations, default 168. }
+      responses:
+        "200":
+          description: The snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DNSSECStatus" }
 
   /api/v1/detectors:
     get:
@@ -1461,7 +1769,16 @@ components:
           description: |
             `offline` means no blocklist is loaded. `degraded` means a blocklist
             is loaded but no policy is enforcing anything.
-        resolverStatus: { type: string, enum: [operational, degraded] }
+        resolverStatus:
+          type: string
+          enum: [operational, degraded]
+          description: |
+            `degraded` when more than 5% of the last 24 hours' queries failed
+            to resolve, measured from the same hourly rollups as
+            `queries24h`. Reads `operational` when that rate cannot be
+            measured — no queries in the window, or an upgraded database
+            whose error counting does not yet cover it — and
+            `measured.resolver.errorRate` says which.
         queries24h: { type: integer, format: int64 }
         threatsBlocked24h: { type: integer, format: int64 }
         blockRate24h: { type: number, format: double }
@@ -1530,6 +1847,137 @@ components:
 
             The refused addresses themselves are deliberately not recorded — an
             unauthorised source could otherwise fill the log.
+        measured:
+          $ref: "#/components/schemas/OverviewMeasured"
+
+    OverviewMeasured:
+      type: object
+      description: |
+        The overview's factual companion. Every headline field above keeps
+        its name and its meaning; this block states each underlying
+        measurement separately, with the window and the scope it was taken
+        over, and gives a reason wherever a number cannot be measured
+        instead of a zero.
+
+        Nothing here is a verdict about whether anything is protected. A
+        configured network is not an observed device, a blocking policy
+        nobody is assigned to protects nobody, a feed that downloaded is not
+        a feed in the index, and a blocked query is an outcome rather than
+        proof the name was malicious. The fields are cut so that none of
+        those can be read into another.
+      required: [window, networks, clients, filtering, feeds, outcomes, resolver]
+      properties:
+        window:
+          type: object
+          description: The period every windowed count in this block covers.
+          properties:
+            hours: { type: integer }
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+            measuredAt: { type: string, format: date-time }
+            source:
+              type: string
+              enum: [hourly_rollups]
+              description: Rollups are written whether or not per-query rows are, so disabling the query log does not blank these counts.
+            rollupRetentionDays: { type: integer }
+        networks:
+          type: object
+          properties:
+            configured: { type: integer, description: Every network row, the built-in catch-all included. }
+            enabled: { type: integer }
+            resolverPermitted:
+              type: integer
+              description: Enabled networks carrying their own permission to query. The catch-all is excluded, as for `permittedNetworks`.
+            adHocAccess: { type: boolean, description: Whether unmatched clients inside the configured pool are served. }
+            withBlockingPolicy: { type: integer, description: Enabled networks whose policy has any category or domain blocking configured. }
+            monitorOnly: { type: integer, description: Enabled networks whose policy blocks nothing. }
+            withTrafficInWindow: { type: integer, description: Configured networks that recorded at least one query in the window. }
+        clients:
+          type: object
+          properties:
+            attribution: { type: boolean, description: Whether client addresses are recorded at all. }
+            observedInWindow:
+              type: [integer, "null"]
+              format: int64
+              description: Distinct attributed client addresses seen in the window, or null when not measurable. Never a zero standing in for "not recorded".
+            unavailable: { type: string, description: Why `observedInWindow` is null. Absent otherwise. }
+            everSeen: { type: boolean, description: "`hasSeenClients`, restated beside the other client fact." }
+        filtering:
+          type: object
+          description: What is configured, as distinct from what happened.
+          properties:
+            policies: { type: integer }
+            blockingPolicies: { type: integer, description: Policies with at least one category or block-list entry. }
+            blockingPoliciesAssigned: { type: integer, description: Blocking policies that some enabled network actually uses. }
+            monitorOnlyPolicies: { type: integer }
+            customBlockingPolicies: { type: integer, description: Policies carrying operator block-list entries, which block with or without a feed index. }
+            categoryBlockingAvailable: { type: boolean, description: The feed index holds anything. Category selections block nothing while it is empty. }
+            indexedDomains: { type: integer }
+        feeds:
+          type: object
+          properties:
+            configured: { type: integer }
+            enabled: { type: integer }
+            loaded: { type: integer, description: Enabled feeds whose cached copy is in the index answering queries now. The only feed count that says a feed is contributing. }
+            failing: { type: integer, description: Enabled feeds whose most recent refresh attempt failed. Such a feed may still be loaded from an earlier download. }
+            neverDownloaded: { type: integer, description: Enabled feeds with no successful download. }
+            lastSuccessAt: { type: [string, "null"], format: date-time }
+            lastAttemptAt: { type: [string, "null"], format: date-time }
+            refreshing: { type: boolean }
+        outcomes:
+          type: object
+          properties:
+            queries: { type: integer, format: int64 }
+            blocked: { type: integer, format: int64 }
+            blockedByClass:
+              type: object
+              description: |
+                `blocked` split by what kind of decision each block was, from
+                the category recorded on the query. Every class is present,
+                at zero where nothing happened, and the values sum to
+                `blocked`.
+
+                `security`: malware, phishing, C2 and cryptomining listings.
+                `precaution`: newly-registered domains — a risk indicator,
+                not a verdict. `preference`: ads, adult and gambling content
+                the operator chose not to serve. `custom`: the operator's own
+                block-list. `unclassified`: a category this build does not
+                recognise (one an external provider named, or one a newer
+                build wrote) or no category at all; counted rather than
+                dropped, and never counted as security.
+              additionalProperties: { type: integer, format: int64 }
+            errors:
+              type: object
+              properties:
+                count: { type: integer, format: int64, description: Queries that failed to resolve, from the same rollup rows as `queries`. }
+                measuredSince:
+                  type: [string, "null"]
+                  format: date-time
+                  description: When this database began counting errors, on an upgraded installation. Null when every retained hour has been counted.
+                complete: { type: boolean, description: Every hour in the window was counted. }
+        resolver:
+          type: object
+          properties:
+            errorRate:
+              type: object
+              description: Failed resolutions over queries, both from the window, or a stated reason it could not be computed.
+              properties:
+                available: { type: boolean }
+                unavailable: { type: string, description: Why the rate is unavailable. Absent when it is available. }
+                numerator: { type: integer, format: int64 }
+                denominator: { type: integer, format: int64 }
+                ratio: { type: number, format: double, description: 0 to 1. Meaningful only when `available`. }
+                windowHours: { type: integer }
+            sinceStart:
+              type: object
+              description: The process's own lifetime counters, scoped to its uptime and nothing else. Not comparable with the windowed counts unless `coversWindow`.
+              properties:
+                uptimeSeconds: { type: integer, format: int64 }
+                queries: { type: integer, format: int64 }
+                blocked: { type: integer, format: int64 }
+                errors: { type: integer, format: int64 }
+                refused: { type: integer, format: int64 }
+                coversWindow: { type: boolean }
 
     ActivityBucket:
       type: object
@@ -1974,6 +2422,10 @@ components:
           properties:
             queries: { type: integer, format: int64 }
             blocked: { type: integer, format: int64 }
+            errors:
+              type: integer
+              format: int64
+              description: Queries that failed to resolve in the period. Zero for hours recorded before this build began counting them.
         blockRate: { type: number, format: double }
         blocklistDomains: { type: integer }
         categories:
@@ -2003,11 +2455,23 @@ components:
               domains: { type: integer }
               lastRefreshedAt: { type: [string, "null"], format: date-time }
 
+    FindingReview:
+      type: object
+      description: An operator's disposition of a finding, kept beside the finding. An unreviewed finding is `new` at version 0.
+      properties:
+        findingId: { type: string }
+        state: { type: string, enum: [new, acknowledged, resolved, false_positive] }
+        note: { type: string }
+        version: { type: integer, format: int64 }
+        actor: { type: string, description: "`session:admin` or `token:<name>`. Never a secret." }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     FindingSummaryRow:
       type: object
       description: A finding as the REST API returns it. `detail` is the complete document.
       properties:
         id: { type: string }
+        review: { $ref: "#/components/schemas/FindingReview" }
         time: { type: string, format: date-time }
         eventType: { type: string, example: dns_tunnel_suspected }
         severity: { type: string, enum: [info, low, medium, high] }
@@ -2463,6 +2927,338 @@ components:
         failed: { type: integer }
         queueDepth: { type: integer }
 
+    InvestigationWindow:
+      type: object
+      properties:
+        hours: { type: integer }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        retentionDays: { type: integer, description: Per-query rows older than this cannot exist, whatever the window. }
+        queryLog: { type: boolean }
+        clientAttribution: { type: boolean }
+    InvestigationActivity:
+      type: object
+      description: What the query log recorded. Outcomes, not verdicts.
+      properties:
+        source: { type: string, enum: [query_log] }
+        available: { type: boolean, description: False when no per-query rows exist for this subject by configuration. }
+        unavailable: { type: string, description: Why, when not available. }
+        summary:
+          type: object
+          properties:
+            queries: { type: integer, format: int64 }
+            allowed: { type: integer, format: int64 }
+            blocked: { type: integer, format: int64 }
+            errors: { type: integer, format: int64 }
+            firstSeen: { type: [string, "null"], format: date-time }
+            lastSeen: { type: [string, "null"], format: date-time }
+            qtypes: { type: object, additionalProperties: { type: integer, format: int64 } }
+            cached: { type: integer, format: int64 }
+            avgElapsedMs: { type: number }
+            maxElapsedMs: { type: integer, format: int64 }
+        clients:
+          type: array
+          description: On a domain investigation, the attributed clients that asked for it, busiest first. Absent when addresses are not recorded.
+          items:
+            type: object
+            properties:
+              clientIp: { type: string }
+              clientName: { type: string }
+              networkId: { type: string }
+              queries: { type: integer, format: int64 }
+              blocked: { type: integer, format: int64 }
+              lastSeen: { type: [string, "null"], format: date-time }
+        domains:
+          type: array
+          description: On a client investigation, the names it asked for, most asked first.
+          items:
+            type: object
+            properties:
+              domain: { type: string }
+              queries: { type: integer, format: int64 }
+              blocked: { type: integer, format: int64 }
+              category: { type: string, description: The most recent recorded block category, if any. }
+              lastSeen: { type: [string, "null"], format: date-time }
+        recent:
+          type: array
+          items: { $ref: "#/components/schemas/QueryEvent" }
+        recentCursor: { type: integer, format: int64, description: Continue through /api/v1/queries with the same filters; 0 when complete. }
+        recentLimit: { type: integer }
+        note: { type: string }
+    InvestigationDecisions:
+      type: object
+      description: Stored decisions, as written when they were made. Never re-derived.
+      properties:
+        recording: { type: boolean, description: Whether decision records are on at all. }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Decision" }
+        truncated: { type: boolean }
+        note: { type: string }
+    InvestigationPreview:
+      type: object
+      description: |
+        What the current configuration would decide now. Labelled a
+        preview because it is one: it is not what happened, and it must not
+        be read as the reason for any recorded decision.
+      properties:
+        readOnly: { type: boolean, enum: [true] }
+        context:
+          type: object
+          properties:
+            client: { type: string }
+            attribution: { type: string, enum: [none, catch_all, network_prefix] }
+            networkId: { type: string }
+            networkName: { type: string }
+            policyId: { type: string }
+            policyName: { type: string }
+        decision:
+          type: object
+          properties:
+            outcome:
+              type: string
+              enum: [blocked, allowed, not_evaluated]
+              description: |
+                `not_evaluated` means the live outcome would depend on an
+                external provider lookup this preview did not perform. It
+                is never rendered as `allowed`.
+            rule: { type: string }
+            reason: { type: string }
+            category: { type: string }
+            source: { type: string }
+            blockMode: { type: string }
+        external:
+          type: object
+          properties:
+            configured: { type: boolean }
+            mode: { type: string }
+            reached: { type: boolean, description: No local rule decided first, so a provider would be asked. }
+            evaluated: { type: boolean, description: A cached verdict answered. }
+            fromCache: { type: boolean }
+            provider: { type: string }
+            note: { type: string }
+        byPolicy:
+          type: array
+          description: The same name under every configured policy, so a different assignment can be compared without changing anything.
+          items:
+            type: object
+            properties:
+              policyId: { type: string }
+              policyName: { type: string }
+              assignedNetworks: { type: integer }
+              decision: { type: object }
+        note: { type: string }
+    InvestigationEvidence:
+      type: object
+      properties:
+        assessment: { $ref: "#/components/schemas/Assessment" }
+        items:
+          type: array
+          items:
+            allOf:
+              - { $ref: "#/components/schemas/Evidence" }
+              - type: object
+                properties:
+                  expired: { type: boolean, description: Past its own expiry and excluded from the assessment; shown because "listed until Tuesday" is useful. }
+                  contributedTo: { type: integer, format: int64, description: Recorded decisions this claim was cited as having decided. Zero means on file, never load-bearing. }
+        note: { type: string }
+    InvestigationFindings:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        enforcement: { type: string, enum: [none] }
+        experimental: { type: boolean, enum: [true] }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/FindingSummaryRow" }
+        truncated: { type: boolean }
+        note: { type: string }
+    InvestigationObservations:
+      type: object
+      properties:
+        mode: { type: string, enum: [off, observe] }
+        available: { type: boolean }
+        enforcing: { type: boolean, enum: [false] }
+        experimental: { type: boolean, enum: [true] }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/DNSSECObservation" }
+        truncated: { type: boolean }
+        note: { type: string }
+    DomainInvestigation:
+      type: object
+      properties:
+        subject:
+          type: object
+          properties:
+            domain: { type: string, description: The normalised name that was searched. }
+            input: { type: string, description: The name as supplied. }
+            client: { type: string }
+        window: { $ref: "#/components/schemas/InvestigationWindow" }
+        activity: { $ref: "#/components/schemas/InvestigationActivity" }
+        decisions: { $ref: "#/components/schemas/InvestigationDecisions" }
+        preview: { $ref: "#/components/schemas/InvestigationPreview" }
+        evidence: { $ref: "#/components/schemas/InvestigationEvidence" }
+        findings: { $ref: "#/components/schemas/InvestigationFindings" }
+        observations: { $ref: "#/components/schemas/InvestigationObservations" }
+    ClientInvestigation:
+      type: object
+      properties:
+        subject:
+          type: object
+          properties:
+            client: { type: string }
+            name: { type: string, description: The operator-assigned name, if any. }
+            attribution:
+              type: object
+              description: The network and policy the current configuration maps this address to. Current, not historical.
+        window: { $ref: "#/components/schemas/InvestigationWindow" }
+        activity: { $ref: "#/components/schemas/InvestigationActivity" }
+        decisions: { $ref: "#/components/schemas/InvestigationDecisions" }
+        findings: { $ref: "#/components/schemas/InvestigationFindings" }
+    DNSSECStatus:
+      type: object
+      properties:
+        experimental: { type: boolean, enum: [true] }
+        enforcing: { type: boolean, enum: [false] }
+        measuredAt: { type: string, format: date-time }
+        mode:
+          type: object
+          properties:
+            configured: { type: string, description: "`off`, `observe` or `unset`." }
+            effective: { type: string, enum: [off, observe] }
+            chosenBy: { type: string, enum: [config, installation_default] }
+            experimental: { type: boolean }
+            enforcing: { type: boolean, enum: [false] }
+            live:
+              type: object
+              properties:
+                available: { type: boolean, enum: [false] }
+                reason: { type: string }
+        resolution:
+          type: object
+          description: How Daddybound obtains records, as distinct from how clients are answered.
+          properties:
+            source: { type: string, enum: [native, forwarded, none] }
+            transport: { type: string, description: In Learn, plaintext DNS over port 53 to authoritative servers, separate from any encrypted upstream. }
+            clientPath: { type: string }
+            note: { type: string }
+        anchors:
+          type: object
+          properties:
+            available: { type: boolean }
+            unavailable: { type: string }
+            zone: { type: string }
+            viable: { type: boolean, description: The trust point has at least one usable anchor. }
+            needsIntervention: { type: boolean }
+            interventionNote: { type: string }
+            trustedKeys: { type: integer }
+            keys:
+              type: array
+              description: Every managed key with its RFC 5011 state. No key material.
+              items:
+                type: object
+                properties:
+                  keyTag: { type: integer }
+                  algorithm: { type: integer }
+                  flags: { type: integer }
+                  state: { type: string, enum: [addpend, valid, missing, revoked, removed] }
+                  trusted: { type: boolean }
+                  seeded: { type: boolean }
+                  firstSeen: { type: [string, "null"], format: date-time }
+                  lastSeen: { type: [string, "null"], format: date-time }
+                  addHoldDownUntil: { type: string, format: date-time }
+                  revokedAt: { type: string, format: date-time }
+                  removeHoldDownUntil: { type: string, format: date-time }
+            refresh:
+              type: object
+              properties:
+                lastAttempt: { type: [string, "null"], format: date-time }
+                lastSuccess: { type: [string, "null"], format: date-time }
+                lastError: { type: string }
+                next: { type: [string, "null"], format: date-time }
+            persistence:
+              type: object
+              description: Whether what the resolver has learned survives a restart. Independent of whether the anchors in force work.
+              properties:
+                state: { type: string, enum: [ok, not_yet_written, failing, load_failed] }
+                file: { type: string, description: The state file's name, without its directory. }
+                seeded: { type: boolean }
+                loadError: { type: string }
+                lastSaveError: { type: string }
+                saves: { type: integer, format: int64 }
+                saveErrors: { type: integer, format: int64 }
+                lastSaveAt: { type: [string, "null"], format: date-time }
+        runtime:
+          type: object
+          description: The observer's counters since process start. Not within the window.
+          properties:
+            available: { type: boolean }
+            scope: { type: string, enum: [since_start] }
+            uptimeSeconds: { type: integer, format: int64 }
+            observed: { type: integer, format: int64 }
+            dropped: { type: integer, format: int64, description: Queries never observed because the queue was full. }
+            stored: { type: integer, format: int64 }
+            unrecorded: { type: integer, format: int64, description: Observations completed and then lost before storage. }
+            writeErrors: { type: integer, format: int64 }
+            panics: { type: integer, format: int64 }
+            seamPanics: { type: integer, format: int64 }
+            byStatus: { type: object, additionalProperties: { type: integer, format: int64 } }
+            timeouts: { type: integer, format: int64 }
+            resourceLimit: { type: integer, format: int64 }
+            unreachable: { type: integer, format: int64 }
+            disagreements: { type: object, additionalProperties: { type: integer, format: int64 } }
+            resolution: { type: string }
+            queries: { type: integer, format: int64 }
+            delegations: { type: integer, format: int64 }
+            lastAt: { type: [string, "null"], format: date-time }
+            lastStatus: { type: string }
+            health: { type: string, enum: [ok, degraded, unavailable], description: From the counters alone. Any drop, loss, write error or panic is degraded. }
+            healthNote: { type: string }
+        stored:
+          type: object
+          description: Stored observations within the window, and the span of everything retained.
+          properties:
+            windowHours: { type: integer }
+            total: { type: integer, format: int64 }
+            byStatus: { type: object, additionalProperties: { type: integer, format: int64 } }
+            disagreements: { type: object, additionalProperties: { type: integer, format: int64 } }
+            observingSince: { type: [string, "null"], format: date-time }
+            observedUntil: { type: [string, "null"], format: date-time }
+            retainedRows: { type: integer, format: int64 }
+            retentionDays: { type: integer }
+        populations:
+          type: array
+          description: |
+            Stored observations in the window, grouped by how the records
+            were obtained, whether the client's answer came from cache, and
+            whether the two sides made comparable claims. A disagreement in
+            a cached population is not evidence that the client's answer was
+            forged, and a non-comparable population never counts one.
+          items:
+            type: object
+            properties:
+              resolution: { type: string }
+              cached: { type: boolean }
+              comparable: { type: boolean }
+              total: { type: integer, format: int64 }
+              disagreements: { type: object, additionalProperties: { type: integer, format: int64 } }
+              note: { type: string }
+        evidence:
+          type: object
+          properties:
+            sufficient: { type: boolean, enum: [false], description: Always false in this release; no threshold exists that could make it true. }
+            note: { type: string }
+            criteria:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  title: { type: string }
+                  measured: { type: string }
+                  status: { type: string, enum: [not_quantified] }
+            issues: { type: array, items: { type: string } }
     DNSSECObservation:
       type: object
       description: |

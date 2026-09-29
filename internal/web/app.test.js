@@ -37,6 +37,27 @@ const {
   protectionState,
   feedHealth,
   statusHero,
+  blockedSplit,
+  measuredFacts,
+  investigateFilters,
+  investigateHash,
+  investigateForm,
+  findingLinks,
+  activitySection,
+  decisionSection,
+  previewSection,
+  evidenceSection,
+  relatedFindingsSection,
+  observationsSection,
+  reviewBadge,
+  reviewForm,
+  findingRow,
+  findingFilters,
+  findingHash,
+  findingFilterForm,
+  createFindingLoader,
+  reviewHistoryList,
+  REVIEW_STATES,
   attentionItems,
   attentionPanel,
   recentlyBlocked,
@@ -55,6 +76,8 @@ const {
   localDnssecBadge,
   localDnssecCard,
   daddyboundModes,
+  daddyboundStatusCard,
+  anchorKeyRows,
   networkRow,
   adHocBadge,
   DEFAULT_NETWORK_ID,
@@ -3038,4 +3061,482 @@ test('an absent or non-Boolean cache observation is omitted rather than stated a
   for (const cached of [undefined, null, 0, 'false']) {
     assert.doesNotMatch(queryRow(q({ cached })), /<dt>Cache hit<\/dt>|Answered from/);
   }
+});
+
+/* ---------- the measured block ------------------------------------------ */
+
+function measured(o = {}) {
+  return {
+    window: { hours: 24, source: 'hourly_rollups', rollupRetentionDays: 90 },
+    networks: { configured: 3, enabled: 2, resolverPermitted: 1, adHocAccess: true, withBlockingPolicy: 1, monitorOnly: 1, withTrafficInWindow: 1 },
+    clients: { attribution: true, observedInWindow: 41, everSeen: true },
+    filtering: { policies: 3, blockingPolicies: 2, blockingPoliciesAssigned: 1, monitorOnlyPolicies: 1, customBlockingPolicies: 1, categoryBlockingAvailable: true, indexedDomains: 412345 },
+    feeds: { configured: 6, enabled: 4, loaded: 3, failing: 1, neverDownloaded: 1, lastSuccessAt: now(), lastAttemptAt: now(), refreshing: false },
+    outcomes: { queries: 128491, blocked: 327, blockedByClass: { security: 12, precaution: 3, preference: 300, custom: 10, unclassified: 2 }, errors: { count: 64, measuredSince: null, complete: true } },
+    resolver: { errorRate: { available: true, numerator: 64, denominator: 128491, ratio: 0.000498, windowHours: 24 }, sinceStart: { uptimeSeconds: 90061, queries: 1, blocked: 0, errors: 0, refused: 0, coversWindow: true } },
+    ...o,
+  };
+}
+
+test('blocked queries are split by class only when the server measured it', () => {
+  // The headline total counts an ads block and a C2 block alike. The split is
+  // what stops "327 blocked" being read as 327 threats, and it comes from the
+  // server's own classification of each recorded category — never from the
+  // total, and never from a server that sent no split.
+  const withSplit = statusHero(overview({ measured: measured() }), healthyFeeds, { enabled: true, total: 6 });
+  assert.match(withSplit, /327/);
+  assert.match(withSplit, /12 security · 315 other/);
+
+  const legacy = statusHero(overview(), healthyFeeds, { enabled: true, total: 6 });
+  assert.doesNotMatch(legacy, /security ·/);
+  assert.equal(blockedSplit(undefined), '');
+  assert.equal(blockedSplit({ outcomes: { blockedByClass: {} } }), '');
+});
+
+test('clients seen is stated as not recorded when attribution is off, never as zero', () => {
+  const on = measuredFacts(overview({ measured: measured() }));
+  assert.match(on, /Clients seen \(24h\)/);
+  assert.match(on, />41</);
+
+  const off = measuredFacts(overview({ measured: measured({
+    clients: { attribution: false, observedInWindow: null, unavailable: 'client addresses are not recorded (log.log_client_ip is off)', everSeen: false },
+  }) }));
+  assert.match(off, /Not recorded/);
+  assert.match(off, /log\.log_client_ip is off/);
+  assert.doesNotMatch(off, /Clients seen \(24h\)<\/div><div>0/);
+});
+
+test('the resolution failure rate is shown as unmeasured with the reason when it cannot be computed', () => {
+  const measuredRate = measuredFacts(overview({ measured: measured() }));
+  assert.match(measuredRate, /Resolution failures \(24h\)/);
+  assert.match(measuredRate, /&lt;0\.1%/); // escaped once, as text
+  assert.match(measuredRate, /64 of 128,491/);
+
+  const noTraffic = measuredFacts(overview({ measured: measured({
+    outcomes: { queries: 0, blocked: 0, blockedByClass: {}, errors: { count: 0, measuredSince: null, complete: true } },
+    resolver: { errorRate: { available: false, unavailable: 'no queries in the window', numerator: 0, denominator: 0, ratio: 0, windowHours: 24 }, sinceStart: { uptimeSeconds: 5, coversWindow: false } },
+  }) }));
+  assert.match(noTraffic, /Unmeasured/);
+  assert.match(noTraffic, /no queries in the window/);
+  assert.doesNotMatch(noTraffic, /Resolution failures \(24h\)<\/div><div>0%/);
+
+  // Partial counting after an upgrade is stated as such, not rendered as a
+  // clean rate.
+  const partial = measuredFacts(overview({ measured: measured({
+    outcomes: { queries: 10, blocked: 0, blockedByClass: {}, errors: { count: 1, measuredSince: '2026-09-29T09:00:00Z', complete: false } },
+    resolver: { errorRate: { available: false, unavailable: 'errors have only been counted since 2026-09-29T09:00:00Z; the window is not fully covered', numerator: 1, denominator: 10, ratio: 0, windowHours: 24 }, sinceStart: {} },
+  }) }));
+  assert.match(partial, /Unmeasured/);
+  assert.match(partial, /counted since/);
+});
+
+test('an unused blocking policy is not counted as in use, and networks are counted by state', () => {
+  const out = measuredFacts(overview({ measured: measured({
+    filtering: { policies: 2, blockingPolicies: 2, blockingPoliciesAssigned: 0, monitorOnlyPolicies: 0, customBlockingPolicies: 0, categoryBlockingAvailable: false, indexedDomains: 0 },
+    networks: { configured: 3, enabled: 2, resolverPermitted: 1, withBlockingPolicy: 0, monitorOnly: 2, withTrafficInWindow: 0 },
+    feeds: { configured: 6, enabled: 4, loaded: 0, failing: 4, neverDownloaded: 4 },
+  }) }));
+  assert.match(out, /Blocking policies in use<\/div><div>0 of 2/);
+  assert.match(out, /2 enabled networks monitor-only/);
+  assert.match(out, /3 configured/);
+  assert.match(out, /2 enabled · 1 permitted · 0 with traffic \(24h\)/);
+  // A feed that downloaded is not a feed in the index, and an empty index is
+  // said in words.
+  assert.match(out, /0 of 4 loaded/);
+  assert.match(out, /4 failing · 4 never downloaded · index empty/);
+});
+
+test('an older server without a measured block still renders the legacy facts', () => {
+  const out = measuredFacts(overview());
+  assert.match(out, /Configured networks<\/div><div>2/);
+  assert.doesNotMatch(out, /Clients seen|Unmeasured|Not recorded/);
+});
+
+test('measured facts escape server-supplied text', () => {
+  const out = measuredFacts(overview({ measured: measured({
+    clients: { attribution: false, observedInWindow: null, unavailable: '<img src=x onerror=alert(1)>' },
+  }) }));
+  assert.doesNotMatch(out, /<img/);
+  assert.match(out, /&lt;img/);
+});
+
+/* ---------- investigation --------------------------------------------- */
+
+test('the investigate route is served and its state survives a bookmark', () => {
+  assert.equal(routeName('#/investigate?domain=evil.example'), 'investigate');
+  const hash = investigateHash({ domain: 'Evil.Example', client: '2001:db8::1', hours: '24' });
+  const back = investigateFilters(hash);
+  assert.equal(back.domain, 'Evil.Example');
+  assert.equal(back.client, '2001:db8::1');
+  assert.equal(back.hours, '24');
+  // Unsupported windows are dropped rather than sent; hostile text survives
+  // the round trip as text.
+  assert.equal(investigateFilters(investigateHash({ domain: 'a', hours: '999' })).hours, '');
+  const hostile = '<img src=x onerror=alert(1)>';
+  assert.equal(investigateFilters(investigateHash({ domain: hostile })).domain, hostile);
+  const form = investigateForm({ domain: hostile, client: '', hours: '' });
+  assert.doesNotMatch(form, /<img/);
+  assert.match(form, /&lt;img/);
+  assert.match(form, /not a passive-DNS history/);
+});
+
+test('query rows and findings link into the investigation with the subject they concern', () => {
+  const row = queryRow({ domain: 'evil.example', action: 'blocked', clientIp: '10.0.0.5', time: now() }, { hours: '24' });
+  assert.match(row, /data-investigate-domain="evil.example"/);
+  assert.match(row, /href="#\/investigate\?domain=evil.example&amp;client=10.0.0.5&amp;hours=24"/);
+  assert.match(row, /data-investigate-client="10.0.0.5"/);
+  // An unattributed row offers no client investigation: there is no address
+  // to investigate and nothing is inferred to stand in for one.
+  const anon = queryRow({ domain: 'evil.example', action: 'allowed', time: now() });
+  assert.doesNotMatch(anon, /data-investigate-client/);
+
+  const links = findingLinks({ domain: 'evil.example', clientIp: '10.0.0.5' });
+  assert.match(links, /Investigate domain/);
+  assert.match(links, /Investigate client/);
+  assert.equal(findingLinks({}), '');
+  assert.doesNotMatch(findingLinks({ domain: '<b>x</b>' }), /<b>/);
+});
+
+test('the preview is labelled as a preview and never renders not-evaluated as allowed', () => {
+  const base = {
+    readOnly: true, note: 'what the current configuration would decide now; not what happened',
+    context: { client: '10.0.0.5', attribution: 'network_prefix', networkName: 'Office', policyName: 'Standard' },
+    byPolicy: [{ policyId: 'p_strict', policyName: 'Strict', assignedNetworks: 0, decision: { outcome: 'blocked', rule: 'category', category: 'adult' } }],
+  };
+  const pending = previewSection({ ...base,
+    decision: { outcome: 'not_evaluated', reason: 'not evaluated: an external provider would be consulted and no cached verdict exists; provider lookup not performed' },
+    external: { configured: true, mode: 'blocking', reached: true, evaluated: false, note: 'provider lookup not performed' },
+  });
+  assert.match(pending, /Preview · current configuration · read-only/);
+  assert.match(pending, /not what happened/);
+  assert.match(pending, />Not evaluated</);
+  assert.doesNotMatch(pending, /badge qact-allowed">Allowed/);
+  assert.match(pending, /lookup not performed/);
+  assert.match(pending, /id="inv-enrich"/);
+  assert.match(pending, /A comparison, not a change/);
+
+  const cached = previewSection({ ...base,
+    decision: { outcome: 'blocked', rule: 'reputation', reason: 'Blocked by external threat intelligence (TestIntel)', source: 'TestIntel' },
+    external: { configured: true, mode: 'blocking', reached: true, evaluated: true, fromCache: true, provider: 'TestIntel', note: 'cached verdict used' },
+  });
+  assert.match(cached, />Blocked</);
+  assert.match(cached, /cached verdict used/);
+  assert.doesNotMatch(cached, /id="inv-enrich"/);
+
+  const local = previewSection({ ...base,
+    decision: { outcome: 'allowed', rule: 'allow_list', reason: 'Allowed by policy allow-list' },
+    external: { configured: true, mode: 'blocking', reached: false, evaluated: false, note: 'decided by a local rule before any provider would be asked' },
+  });
+  assert.match(local, />Allowed</);
+  assert.match(local, /not reached/);
+});
+
+test('historical decisions render the stored explanation and say when none is recorded', () => {
+  const off = decisionSection({ recording: false, items: [] });
+  assert.match(off, /Not recording decisions/);
+  assert.match(off, /not a substitute/);
+  const none = decisionSection({ recording: true, items: [], note: 'stored when made' });
+  assert.match(none, /No decision recorded/);
+  const some = decisionSection({ recording: true, note: 'stored when made', items: [
+    { id: 'dec_1', time: now(), action: 'blocked', subject: { value: 'evil.example' }, explanation: 'Blocked because URLhaus listed as malware.', policyPath: 'network:Office → policy:Standard → category:malware → BLOCK' },
+  ] });
+  assert.match(some, /Blocked because URLhaus listed as malware\./);
+  assert.match(some, /stored when made/);
+  // No composed reason: the page renders what was stored and nothing else.
+  assert.doesNotMatch(some, /would be/i);
+});
+
+test('evidence shows freshness and whether a claim ever decided anything', () => {
+  const out = evidenceSection({
+    note: 'expired claims are shown and excluded from the assessment',
+    assessment: { verdict: 'malicious', summary: 'Listed as malware by URLhaus.', corroborated: false, inferenceOnly: false },
+    items: [
+      { id: 'a', source: 'f_urlhaus', sourceName: 'URLhaus', kind: 'feed', confidence: 'high', claim: 'listed as malware', category: 'malware', observedAt: now(), expiresAt: now(), expired: false, contributedTo: 3 },
+      { id: 'b', source: 'f_old', sourceName: 'Old feed', kind: 'feed', confidence: 'low', claim: 'listed as <b>phishing</b>', observedAt: hoursAgo(72), expiresAt: hoursAgo(24), expired: true, contributedTo: 0 },
+    ],
+  });
+  assert.match(out, /decided 3 queries/);
+  assert.match(out, /on file only/);
+  assert.match(out, />expired</);
+  assert.match(out, /is-expired/);
+  assert.match(out, /Listed as malware by URLhaus\./);
+  assert.doesNotMatch(out, /<b>phishing/);
+  assert.match(out, /&lt;b&gt;phishing/);
+});
+
+test('recorded activity states why it is unavailable rather than showing zeroes', () => {
+  const off = activitySection({ available: false, unavailable: 'client addresses are not recorded (log.log_client_ip)' });
+  assert.match(off, /Not recorded/);
+  assert.match(off, /log\.log_client_ip/);
+  assert.doesNotMatch(off, /Queries<\/dt>/);
+
+  const empty = activitySection({ available: true, note: 'exact name only', summary: { queries: 0, qtypes: {} }, recent: [] });
+  assert.match(empty, /Nothing recorded in this window/);
+
+  const some = activitySection({
+    available: true, note: 'exact name only',
+    summary: { queries: 12, allowed: 9, blocked: 3, errors: 0, firstSeen: hoursAgo(5), lastSeen: now(), qtypes: { A: 8, AAAA: 4 }, cached: 2, avgElapsedMs: 3.25, maxElapsedMs: 40 },
+    clients: [{ clientIp: '10.0.0.5', clientName: 'laptop', networkId: 'n_default', queries: 7, blocked: 2, lastSeen: now() }],
+    recent: [{ domain: '<script>x</script>.example', action: 'blocked', category: 'malware', clientIp: '10.0.0.5', time: now() }],
+    recentCursor: 99, recentLimit: 100,
+  });
+  assert.match(some, /9 allowed · 3 blocked · 0 failed/);
+  // The notes beside each figure are markup, not text: a leaked "<span" means
+  // a nested template was escaped instead of inserted.
+  assert.doesNotMatch(some, /&lt;span/);
+  assert.match(some, /<span class="muted small">9 allowed/);
+  assert.match(some, /A 8 · AAAA 4/);
+  assert.match(some, /Clients that asked/);
+  assert.match(some, /laptop/);
+  assert.match(some, /More rows exist/);
+  assert.doesNotMatch(some, /<script>/);
+  assert.match(some, /&lt;script&gt;/);
+});
+
+test('related findings and observations keep their experimental, non-enforcing labels', () => {
+  const noFindings = relatedFindingsSection({ enabled: true, enforcement: 'none', experimental: true, items: [], note: 'they block nothing' });
+  assert.match(noFindings, /Experimental · alert-only/);
+  assert.match(noFindings, /not evidence that it is clean/);
+  const off = relatedFindingsSection({ enabled: false, items: [] });
+  assert.match(off, /switched off/);
+
+  const obsOff = observationsSection({ available: false, items: [] });
+  assert.match(obsOff, /enforces nothing/);
+  assert.match(obsOff, /Learn mode is off/);
+  const obs = observationsSection({ available: true, note: 'changed nothing', items: [
+    { id: 'o1', time: now(), qtype: 'A', upstream: 'validated', status: 'bogus', reasonCode: 'x', reason: 'signature did not verify', disagreement: 'local_bogus_upstream_validated' },
+  ] });
+  assert.match(obs, /Daddybound concluded/);
+  assert.match(obs, /local_bogus_upstream_validated/);
+  // The existing badge wording carries the guarantee: a bogus verdict says
+  // nothing was blocked.
+  assert.match(obs, /not blocked|changed nothing|nothing was blocked/i);
+});
+
+/* ---------- finding review ------------------------------------------- */
+
+test('a review badge names every state in words and treats no review as new', () => {
+  assert.match(reviewBadge(undefined), />New</);
+  assert.match(reviewBadge({ state: 'new', version: 0 }), />New</);
+  for (const [state, label] of REVIEW_STATES) {
+    assert.match(reviewBadge({ state }), new RegExp(`>${label}<`));
+  }
+  // An unknown state from a newer server is shown, not silently called new.
+  const odd = reviewBadge({ state: 'escalated' });
+  assert.match(odd, /escalated/);
+  assert.doesNotMatch(odd, />New</);
+});
+
+test('the review form offers only the moves the workflow allows and says what it does not do', () => {
+  const fresh = reviewForm({ id: 'f1', review: { state: 'new', version: 0 } });
+  assert.match(fresh, /data-version="0"/);
+  assert.match(fresh, /<option value="new" selected>New/);
+  assert.match(fresh, /<option value="acknowledged">/);
+  assert.match(fresh, /<option value="false_positive">/);
+  assert.match(fresh, /does not disable a detector, relax a policy, delete evidence or allow a domain/);
+  assert.match(fresh, /Not yet reviewed/);
+
+  // A resolved finding cannot go straight back to new.
+  const closed = reviewForm({ id: 'f1', review: { state: 'resolved', version: 3, actor: 'session:admin', updatedAt: now(), note: 'ticket 9' } });
+  assert.doesNotMatch(closed, /<option value="new"/);
+  assert.match(closed, /<option value="acknowledged">/);
+  assert.match(closed, /Version 3/);
+  assert.match(closed, /session:admin/);
+  assert.match(closed, />ticket 9</);
+});
+
+test('a review note and actor render as inert text', () => {
+  const hostile = reviewForm({ id: 'f<1>', review: { state: 'acknowledged', version: 1, actor: '<b>x</b>', note: '<img src=x onerror=alert(1)>', updatedAt: now() } });
+  assert.doesNotMatch(hostile, /<img|<b>x/);
+  assert.match(hostile, /&lt;img/);
+  assert.match(hostile, /&lt;b&gt;x/);
+  assert.doesNotMatch(hostile, /data-review-form="f<1>"/);
+
+  const history = reviewHistoryList([
+    { at: now(), fromState: 'new', toState: 'acknowledged', actor: 'token:<soc>', note: '<script>x</script>' },
+  ]);
+  assert.doesNotMatch(history, /<script>|<soc>/);
+  assert.match(history, /&lt;script&gt;/);
+  assert.match(history, /not tamper-evident/);
+  assert.match(reviewHistoryList([]), /No review recorded yet/);
+});
+
+test('a finding row carries its review badge, its links and its review form beside the evidence', () => {
+  const row = findingRow({
+    id: 'f1', eventType: 'dns_tunnel_suspected', severity: 'high', confidence: 0.8, score: 0.7,
+    domain: 'tunnel.example', clientIp: '10.0.0.5', detector: 'dns_tunnel', summary: 's', time: now(),
+    review: { state: 'false_positive', version: 2 },
+    detail: { signals: [{ name: 'unique_subdomains', description: 'd', value: 187, floor: 20, ceiling: 200, weight: 0.3, contribution: 0.2 }], evidence: {}, mitre: [], falsePositives: [], nextSteps: [] },
+  });
+  assert.match(row, />False positive</);
+  assert.match(row, /data-review-form="f1"/);
+  assert.match(row, /Investigate domain/);
+  // The measurements are still rendered from the detail, untouched by the review.
+  assert.match(row, /unique_subdomains/);
+  assert.match(row, /187/);
+});
+
+test('finding filters live in the URL and drop what the server does not accept', () => {
+  const hash = findingHash({ state: 'acknowledged', severity: 'high', days: '30' });
+  assert.equal(hash, '#/detections?state=acknowledged&severity=high&days=30');
+  const back = findingFilters(hash);
+  assert.deepEqual(back, { state: 'acknowledged', severity: 'high', days: '30' });
+  assert.equal(findingHash({}), '#/detections');
+  assert.deepEqual(findingFilters('#/detections?state=escalated&severity=catastrophic&days=999'), { state: '', severity: '', days: '7' });
+  assert.equal(routeName('#/detections?state=new'), 'detections');
+});
+
+test('the finding filter form shows review counts for the period and never invents them', () => {
+  const withCounts = findingFilterForm({ state: 'new', severity: '', days: '7' }, { new: 4, acknowledged: 1, resolved: 0, false_positive: 2 });
+  assert.match(withCounts, /New \(4\)/);
+  assert.match(withCounts, /False positive \(2\)/);
+  assert.match(withCounts, /<option value="new" selected>/);
+  const without = findingFilterForm({ state: '', severity: '', days: '7' }, null);
+  assert.doesNotMatch(without, /\(\d+\)/);
+});
+
+test('the finding loader pages by cursor and respects route ownership', async () => {
+  const calls = [];
+  let current = true;
+  const loader = createFindingLoader({
+    filters: { state: 'new', severity: 'high', days: '7' },
+    isCurrent: () => current,
+    read: async (path) => {
+      calls.push(path);
+      return calls.length === 1
+        ? { findings: [{ id: 'a' }, { id: 'b' }], nextCursor: '123:b' }
+        : { findings: [{ id: 'c' }], nextCursor: '' };
+    },
+    onLoading() {}, onData() {}, onError() {},
+  });
+  assert.equal(await loader.load(), true);
+  assert.match(calls[0], /state=new/);
+  assert.match(calls[0], /severity=high/);
+  assert.match(calls[0], /hours=168/);
+  assert.match(calls[0], /detail=true/);
+  assert.equal(loader.state.cursor, '123:b');
+  assert.equal(await loader.load(true), true);
+  assert.match(calls[1], /cursor=123%3Ab/);
+  assert.deepEqual(loader.state.rows.map((r) => r.id), ['a', 'b', 'c']);
+  // Exhausted: a further append is a no-op, and a stale route loads nothing.
+  assert.equal(await loader.load(true), false);
+  current = false;
+  assert.equal(await loader.load(), false);
+  assert.equal(calls.length, 2);
+});
+
+/* ---------- Daddybound runtime status --------------------------------- */
+
+function runtimeStatus(o = {}) {
+  return {
+    experimental: true, enforcing: false,
+    mode: { configured: 'unset', effective: 'observe', chosenBy: 'installation_default', experimental: true, enforcing: false, live: { available: false, reason: 'Live requires enforcement in the answer path, which is not implemented' } },
+    resolution: { source: 'native', transport: 'plaintext DNS over UDP and TCP port 53 to authoritative servers; separate from, and not protected by, any encrypted upstream', clientPath: 'clients are answered by the forwarding resolver', note: '' },
+    anchors: { available: true, zone: '.', viable: true, needsIntervention: false, trustedKeys: 1,
+      keys: [{ keyTag: 20326, algorithm: 8, flags: 257, state: 'valid', trusted: true, seeded: true, firstSeen: hoursAgo(900), lastSeen: now() },
+             { keyTag: 38696, algorithm: 8, flags: 257, state: 'addpend', trusted: false, firstSeen: hoursAgo(48), lastSeen: now(), addHoldDownUntil: new Date(Date.now() + 28 * 86400000).toISOString() }],
+      refresh: { lastAttempt: now(), lastSuccess: hoursAgo(1), lastError: '', next: new Date(Date.now() + 3600000).toISOString() },
+      persistence: { state: 'ok', file: 'daddybound-anchors.json', saves: 3, saveErrors: 0 } },
+    runtime: { available: true, scope: 'since_start', uptimeSeconds: 3600, observed: 120, dropped: 0, stored: 118, unrecorded: 2, writeErrors: 0, panics: 0, seamPanics: 0, timeouts: 3, resourceLimit: 0, unreachable: 1, queries: 900, delegations: 300, health: 'degraded', healthNote: 'some queries were not stored' },
+    stored: { windowHours: 168, total: 118, retainedRows: 118, retentionDays: 7, observingSince: hoursAgo(20), observedUntil: now() },
+    populations: [
+      { resolution: 'native', cached: false, comparable: true, total: 100, disagreements: { local_bogus_upstream_validated: 1 }, note: 'each disagreement is a case to investigate individually' },
+      { resolution: 'native', cached: true, comparable: true, total: 10, disagreements: { local_bogus_upstream_validated: 2 }, note: 'not evidence that the answer the client received was forged' },
+      { resolution: 'native', cached: false, comparable: false, total: 8, disagreements: {}, note: 'not comparable' },
+    ],
+    evidence: { sufficient: false, note: 'insufficient evidence for enforcement, by definition', criteria: [
+      { id: 'disagreement', title: 'local_bogus_upstream_validated among comparable native observations', measured: '1 of 100 comparable native, non-cached observations in the window; no rate or interval is claimed', status: 'not_quantified' },
+    ], issues: ['https://github.com/jameshoulder/dnsdaddy/issues/67', 'https://github.com/jameshoulder/dnsdaddy/issues/65'] },
+    ...o,
+  };
+}
+
+test('the runtime status card inserts its notes as markup rather than escaped text', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.doesNotMatch(out, /&lt;span/);
+  assert.doesNotMatch(out, /&lt;p class/);
+  assert.match(out, /<span class="muted small">configured: /);
+  const off = daddyboundStatusCard(runtimeStatus({ mode: { configured: 'off', effective: 'off', chosenBy: 'config', experimental: true, enforcing: false, live: { available: false, reason: 'not implemented' } }, resolution: { source: 'none', transport: 'none: Learn is off, so Daddybound sends nothing', clientPath: 'clients are answered by the forwarding resolver', note: '' } }));
+  assert.doesNotMatch(off, /&lt;span/);
+  assert.match(off, /Learn is off, so Daddybound sends nothing/);
+});
+
+test('the runtime status card never scores readiness and keeps Live unavailable', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.match(out, /Live — unavailable/);
+  assert.match(out, /Learn — active/);
+  assert.match(out, />insufficient</);
+  assert.match(out, /No number on this page is a readiness score/);
+  assert.match(out, /not quantified/);
+  assert.doesNotMatch(out, /\d+(\.\d+)?%/);
+  assert.doesNotMatch(out, /safe to enforce|ready to enforce/i);
+  assert.match(out, /issues\/67/);
+  assert.match(out, /issues\/65/);
+});
+
+test('the runtime status card names the transport as separate from the encrypted upstream and keeps scopes apart', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.match(out, /port 53/);
+  assert.match(out, /not protected by/);
+  assert.match(out, /since this process started/);
+  assert.match(out, /rows within the last 168h/);
+  // Runtime and stored figures are both present and labelled.
+  assert.match(out, /Observed<\/dt>/);
+  assert.match(out, /In window<\/dt>/);
+  assert.match(out, /2 lost before storage/);
+  assert.match(out, /3 timeout · 0 limit · 1 unreachable/);
+  assert.match(out, /operational outcomes, not DNSSEC states/);
+});
+
+test('cached and non-comparable populations are shown as such rather than as disagreements', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.match(out, /from cache/);
+  assert.match(out, /not evidence that the answer the client received was forged/);
+  // The non-comparable row shows a dash, not a count, in the disagreement column.
+  const rows = out.split('<tr>').filter((r) => r.includes('not comparable'));
+  assert.equal(rows.length, 1);
+  assert.match(rows[0], /<td class="num">—<\/td>/);
+});
+
+test('anchor keys are listed by tag and state, with no key material and no host path', () => {
+  const out = daddyboundStatusCard(runtimeStatus());
+  assert.match(out, /20326/);
+  assert.match(out, />valid</);
+  assert.match(out, />addpend</);
+  assert.match(out, /add hold-down until/);
+  assert.match(out, /daddybound-anchors\.json/);
+  assert.doesNotMatch(out, /AwEAA|\/var\/lib|\/home\//);
+  assert.match(anchorKeyRows([]), /No managed keys yet/);
+
+  const broken = daddyboundStatusCard(runtimeStatus({ anchors: { available: true, zone: '.', viable: false, needsIntervention: true, interventionNote: 'every key has been revoked', trustedKeys: 0, keys: [], refresh: { lastError: 'fetching the . DNSKEY RRset: timeout' }, persistence: { state: 'failing', file: 'daddybound-anchors.json', lastSaveError: 'read-only file system' } } }));
+  assert.match(broken, />not viable</);
+  assert.match(broken, /intervention required/);
+  assert.match(broken, /last attempt failed: fetching the \. DNSKEY RRset: timeout/);
+  assert.match(broken, /state file cannot be written/);
+  assert.match(broken, /read-only file system/);
+});
+
+test('a missing or off runtime status is unavailable, never a healthy zero', () => {
+  const missing = daddyboundStatusCard(null);
+  assert.match(missing, /Runtime status unavailable/);
+  assert.doesNotMatch(missing, />0</);
+  const off = daddyboundStatusCard(runtimeStatus({
+    mode: { configured: 'off', effective: 'off', chosenBy: 'config', live: { available: false, reason: 'not implemented' } },
+    resolution: { source: 'none', transport: 'none: Learn is off, so Daddybound sends nothing', clientPath: 'clients are answered by the forwarding resolver' },
+    anchors: { available: false, unavailable: 'no trust-anchor manager is running: Learn is off' },
+    runtime: { available: false, health: 'unavailable', healthNote: 'no observer is running' },
+    stored: { windowHours: 168, total: 0, retainedRows: 0, retentionDays: 7 },
+    populations: [],
+  }));
+  assert.match(off, /Learn — off/);
+  assert.match(off, /no trust-anchor manager is running/);
+  assert.match(off, /no observer is running/);
+  assert.match(off, /no stored observations/);
+  assert.match(off, />insufficient</);
+});
+
+test('runtime status text from the server is escaped', () => {
+  const out = daddyboundStatusCard(runtimeStatus({ anchors: { available: true, zone: '<b>.</b>', viable: true, trustedKeys: 1, keys: [], refresh: { lastError: '<img src=x>' }, persistence: { state: 'ok', file: 'x' } } }));
+  assert.doesNotMatch(out, /<b>\.|<img/);
+  assert.match(out, /&lt;b&gt;/);
 });

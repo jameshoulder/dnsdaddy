@@ -312,3 +312,66 @@ func (h *harness) getMetrics() string {
 }
 
 var _ = json.Marshal
+
+// The recent list and the summary describe one population. Before this, the
+// summary was filtered to the window and the list was not, so an operator
+// reading "3 observations in the last hour" beside a list of forty from last
+// week had two answers to one question.
+func TestTheRecentListSharesTheSummarysWindow(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	old := obs("old", "stale.example", "validated", "secure", "")
+	old.Time = time.Now().UTC().Add(-72 * time.Hour)
+	seedObservations(t, h.store,
+		old,
+		obs("fresh1", "a.example", "validated", "secure", ""),
+		obs("fresh2", "b.example", "validated", "secure", ""),
+	)
+
+	var body struct {
+		Summary store.DNSSECObservationSummary `json:"summary"`
+		Recent  []store.DNSSECObservation      `json:"recent"`
+		Scope   struct {
+			Summary         string `json:"summary"`
+			Runtime         string `json:"runtime"`
+			RecentLimit     int    `json:"recentLimit"`
+			RecentTruncated bool   `json:"recentTruncated"`
+			Window          struct {
+				Hours int `json:"hours"`
+			} `json:"window"`
+		} `json:"scope"`
+	}
+	h.getJSON("/api/v1/dnssec/observations?hours=24", &body)
+
+	if body.Summary.Total != 2 {
+		t.Errorf("summary total = %d, want the 2 in the window", body.Summary.Total)
+	}
+	if len(body.Recent) != 2 {
+		t.Fatalf("recent lists %d rows, want the same 2 the summary counted", len(body.Recent))
+	}
+	for _, r := range body.Recent {
+		if r.ID == "old" {
+			t.Error("an observation outside the window appeared in the recent list")
+		}
+	}
+	if body.Scope.Window.Hours != 24 || body.Scope.RecentTruncated {
+		t.Errorf("scope = %+v, want a 24-hour window with nothing truncated", body.Scope)
+	}
+	if body.Scope.Summary == "" || body.Scope.Runtime == "" {
+		t.Error("the two scopes are not named")
+	}
+
+	// A wider window brings the old row back into both.
+	h.getJSON("/api/v1/dnssec/observations?hours=168", &body)
+	if body.Summary.Total != 3 || len(body.Recent) != 3 {
+		t.Errorf("168h window: summary %d, recent %d, want 3 and 3", body.Summary.Total, len(body.Recent))
+	}
+
+	// A list shorter than the window's population says so.
+	h.getJSON("/api/v1/dnssec/observations?hours=168&limit=2", &body)
+	if len(body.Recent) != 2 || !body.Scope.RecentTruncated || body.Scope.RecentLimit != 2 {
+		t.Errorf("limited list: %d rows, truncated=%v, limit=%d; want 2, true, 2",
+			len(body.Recent), body.Scope.RecentTruncated, body.Scope.RecentLimit)
+	}
+}

@@ -22,6 +22,206 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### The overview says what it measured
+
+`GET /api/v1/overview` gains a `measured` block. Every field it had keeps its
+name and its meaning — `protectedNetworks` still counts configured networks,
+`threatsBlocked24h` still counts every block, `protectionStatus` is still the
+same coarse derivation — because a v1 field is never repurposed. The new block
+is where each of those is stated as the specific thing it measures, with its
+window and scope:
+
+- **Networks** configured, enabled, permitted to resolve on their own, on a
+  blocking policy, monitor-only, and with traffic in the window. A configured
+  network is not an observed device.
+- **Clients** observed in the window, or `null` with a reason when client
+  addresses are not recorded. Never a zero standing in for "not measured".
+- **Filtering**: blocking policies, and how many of them an enabled network
+  actually uses. A blocking policy nobody is assigned to protects nobody, and
+  the headline still calls that "protected".
+- **Feeds** enabled, loaded into the index, failing their refresh, and never
+  downloaded — four different facts that one "feeds refreshed" timestamp
+  blurred.
+- **Outcomes**: blocks split into `security`, `precaution`, `preference`,
+  `custom` and `unclassified` from the category recorded on each query, so an
+  ads block is no longer a "threat". The classes always sum to the total.
+- **Resolver**: an error rate whose numerator and denominator come from the
+  same 24 hours of rollups, or a stated reason it cannot be computed. The
+  process's lifetime counters are reported separately, with whether its
+  uptime even covers the window.
+
+Two additive storage changes make that possible. `stats_hourly` gains an
+`errors` column, so failed resolutions are counted in the same rows as the
+queries they are a fraction of; on an upgraded database the moment counting
+began is recorded, hours before it read zero, and both the block and the
+`resolverStatus` derivation say so rather than dividing a partial numerator by
+a full denominator. `client_hourly` records which client addresses were seen
+in which hour, bounded by clients × hours, so the count of devices in a day is
+a few rows rather than a scan of the day's query log. It is written only when
+a per-query row is, and pruned on the query log's retention; see
+`docs/privacy.md`.
+
+`resolverStatus` is now derived from that windowed rate. It used to divide the
+process's lifetime error counter by the last day's queries, which on a
+long-running resolver with a quiet day read as degraded for a fault weeks
+past.
+
+### Daddybound reports what it is actually doing
+
+`GET /api/v1/dnssec/status` and a new block on the Assurance page expose the
+facts the Learn runtime already held and nobody could see:
+
+- the configured and effective mode, who chose it (the file or the
+  installation default), `experimental: true`, `enforcing: false`, and Live
+  reported as unavailable with the reason;
+- the resolution source and its transport — native, from the root hints to
+  the authoritative servers over plaintext port 53 with QNAME minimisation —
+  stated as separate from, and not protected by, the encrypted upstream that
+  answers clients;
+- the RFC 5011 trust point: every managed key with its lifecycle state and
+  hold-down timers, whether the trust point is viable, the last refresh
+  attempt and success and the last error, and whether the state file is
+  being written. Key material and host paths are not included;
+- the observer's counters since start beside the stored rows within a window,
+  never merged: observed, dropped, stored, unrecorded, write errors, panics,
+  timeouts, resource limits and unreachable outcomes;
+- the stored disagreement populations separated by resolution source, cache
+  state and comparability. A disagreement about a cached answer says nothing
+  about the answer the client received, and an operational outcome never
+  counts as a disagreement; each population says which it is.
+
+It also says, in its own payload, that the evidence is insufficient for
+enforcement. There is no readiness percentage and no threshold in the code;
+each criterion from the readiness issue is reported as a measurement with the
+status `not_quantified`, and the payload links to the two issues where the
+criteria and the corpus work live. Polling it resolves nothing and mutates no
+trust state. Four `dnsdaddy_dnssec_anchor_*` metrics carry the anchor facts
+with closed label sets.
+
+`docs/dns-security/dnssec.md` no longer says there is no RFC 5011 rollover;
+there has been since native recursion landed, and the page now describes it.
+
+Fixed on the same page: the notes beside the runtime counters, the "verdicts
+counted but not stored" paragraph, the panic notice and the "seeded" badge on
+a managed key were escaped rather than inserted, so a browser showed the
+literal tag text. A test now fails on any leaked `<span` in the card.
+
+### Findings can be reviewed
+
+A finding now carries a review beside it: **new**, **acknowledged**,
+**resolved** or **false positive**, with a plain-text note of up to 2,000
+characters, a version, the actor and a change history. The Findings page
+gains a review form on every finding, a state filter that lives in the URL,
+review counts for the selected period, and a **Load more** that pages by
+cursor without disturbing open findings.
+
+The finding is never modified by reviewing it — the measurements, severity,
+confidence and evidence stay exactly as the detector wrote them, and a test
+compares them byte for byte. A review changes nothing else either: marking a
+false positive disables no detector, relaxes no policy, deletes no evidence
+and allows no domain. It records an assessment.
+
+Writes carry the version that was read, and a stale write is answered `409`
+with the current review so two operators cannot silently overwrite each other;
+the dashboard shows the other person's review in place of a bare error. The
+actor is recorded as `session:admin` or `token:<name>`, the identity model the
+product has; no named user is invented and no session secret is stored. The
+history is application history, in write order, and says of itself that it is
+not tamper-evident.
+
+`GET /api/v1/findings` gains `state`, every row gains `review`, and
+`GET /api/v1/findings/summary` gains `byState` for the same period as its
+severity counts. Reviews follow their finding when it is pruned.
+
+### Investigate one name or one address
+
+A new **Investigate** page and two read-only routes,
+`GET /api/v1/investigate/domain/{domain}` and `GET /api/v1/investigate/client/{ip}`,
+put everything already recorded about one subject on one screen — in
+sections that stay apart, because they answer different questions:
+
+1. **Recorded activity**: outcomes, the clients that asked, record types,
+   cache hits and latency where retained, first and last seen, and the
+   newest rows with their local DNSSEC observation. Exact name only; the
+   query log's substring search is a different tool and the page says so.
+2. **Historical decisions**: the stored records, with the explanation that
+   was written when each was made. Never re-derived from today's policy.
+3. **Current policy preview**: what the current configuration would decide
+   now, for the supplied client or the catch-all, and under every policy
+   for comparison. It runs on the live engine's compiled snapshot through
+   the same code as a real query, and writes nothing: no query-log row, no
+   decision, no cache entry. It does not contact external providers. Where
+   the live outcome would depend on a provider lookup and no cached verdict
+   exists, it says **not evaluated — provider lookup not performed** rather
+   than guessing "allowed".
+4. **Current evidence**: every claim on file with its source, when it was
+   observed, when it expires, and how many recorded decisions it actually
+   decided. Expired claims are shown and excluded from the assessment.
+5. **Related findings and Daddybound observations**, with their
+   experimental and non-enforcing labels intact.
+
+Names are normalised the way a browser sends them (IDNA lookup rules, lower
+case, no trailing dot), so `Bücher.Example.` lands on the rows for
+`xn--bcher-kva.example`. Clients are IP addresses; a name is refused. The
+client view respects `log.log_client_ip`: with addresses not recorded it
+reports the activity as unavailable and reconstructs nothing from other
+columns. Query-log rows and findings link to the page from the dashboard,
+and its state lives in the URL.
+
+`POST /api/v1/investigate/domain/{domain}/enrich` is the one deliberate
+action: it asks the configured providers within their existing mode and
+budget, and answers `503` where none are enabled.
+
+Two small store additions support the page: an exact-name filter on the
+query log and an index on `(client_ip, ts)`, created once at startup on
+upgrade.
+
+### Findings page by cursor, and an export says when it is a prefix
+
+`GET /api/v1/findings` now pages. Each response carries `nextCursor`; passing
+it back continues from the row after the last one returned, and an empty
+cursor means the last page. The cursor is a keyset position in `(time, id)`
+order rather than an offset, so a finding the detection engine writes while a
+consumer is paging neither repeats nor displaces a row, and two findings
+written in the same millisecond have a stable order between them. The
+`cursor` field the store declared and never applied is now applied. A cursor
+the server did not issue is answered `400` rather than silently restarted from
+the top.
+
+`GET /api/v1/findings/export` walks oldest first and pages the same way,
+reporting its continuation in headers because NDJSON has no envelope:
+`X-Truncated` says whether matching findings remain, `X-Next-Cursor` says
+where to continue, and `X-Export-Count` says how many lines the body holds. A
+1,000-line export used to look exactly like a complete one; it no longer can.
+`docs/siem.md` has a backfill loop.
+
+`GET /api/v1/dnssec/observations` applies its `hours` window to the recent
+list as well as the summary, so the two describe one population, and names its
+scopes: `summary` and `recent` are stored rows within the window, `runtime` is
+the process's counters since start. `scope.recentTruncated` says when the
+window holds more than the list shows.
+
+### Policy attribution is decided per CIDR
+
+A client is now attributed to the network owning the **most specific prefix
+that contains it**. It always said so; it did not always do so. The engine
+ranked whole networks by the longest prefix anywhere in their CIDR list, so a
+network holding `10.0.0.0/8` and an unrelated `192.0.2.123/32` outranked a
+second network's `10.42.0.0/16` for a client at `10.42.1.10` — the `/32`
+promoted the `/8` — and that client silently received the broad network's
+policy. On the configuration that found it, that was a monitor-only policy in
+place of a blocking one, and a listed domain resolved.
+
+Matching now walks a table with one entry per CIDR, longest prefix first, and
+takes the first entry that contains the client. Two networks claiming the same
+range are broken by network name and then ID, so attribution cannot flip
+between reloads. Disabled networks contribute no entries, unmatched clients
+still land on the catch-all, and nothing about *whether* a client may resolve
+changes — the client ACL is a separate decision and is untouched.
+
+`TestAnUnrelatedNarrowPrefixDoesNotPromoteABroadNetwork` in `internal/policy`
+is the regression, and fails on the previous engine.
+
 ### Ad-hoc resolver access, on the Default network
 
 The system **Default** row now carries a real control — *Ad-hoc DNS access* —

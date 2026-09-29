@@ -511,7 +511,9 @@ and nothing about whether they may resolve: permitting it grants no range, so
 its access column reads *Depends on the client*.
 
 Most specific prefix wins, so a `/32` exception inside a `/24` behaves the way
-you would expect.
+you would expect. That is decided per range, not per network: a network that
+lists a `/8` and, separately, one `/32` host does not thereby outrank another
+network's `/16` inside that `/8`.
 
 **Setup page.** This shows the exact addresses to paste into your firewall,
 plus a per-network DoH URL for roaming devices.

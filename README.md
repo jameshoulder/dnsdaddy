@@ -282,7 +282,7 @@ Worth knowing before you rely on DNS Daddy:
 
 - **No independent professional security review.**
 - **Early software.** Interfaces, deployment behaviour and storage formats may change between releases.
-- **Forwarding, not recursive.** DNS Daddy forwards to upstream resolvers.
+- **Forwarding, not recursive — for clients.** Every client answer comes from a configured upstream resolver. Daddybound's Learn mode resolves natively, from the root hints to the authoritative servers, for its own observations only; nothing it resolves is ever returned to a client.
 - **No DNSSEC enforcement.** It records the upstream's validation verdict, and — in Learn mode, which new installations start in — what its own experimental validator, Daddybound, concludes about the same name. Neither blocks anything: a forged answer for a signed zone is recorded rather than refused.
 - **Behavioural detection is experimental and alert-only.** There is no measured production false-positive rate yet.
 - **Browser DoH can bypass network DNS.** Mitigations require network/endpoint configuration.
@@ -311,9 +311,14 @@ observations say what enforcing would cost. The dashboard shows the future
 **Live** mode as unavailable rather than hiding it, so nothing implies
 Daddybound is protecting traffic today.
 
-That is a step, not a finish line. It performs no recursive resolution of its
-own, does not implement aggressive NSEC use or trust anchor rollover, and
-keeps one documented assumption about zone cuts.
+That is a step, not a finish line. Since native recursion landed, Learn
+resolves each observed name itself — from the root hints to the authoritative
+servers, over plaintext port 53 with QNAME minimisation, a transport that is
+separate from and not protected by your encrypted upstream — and follows RFC
+5011 trust-anchor rollover from the compiled-in IANA digests. It still does
+not use NSEC aggressively, and the Assurance page and
+`GET /api/v1/dnssec/status` report what it is doing rather than leaving it to
+this paragraph.
 
 **It is experimental and must not be relied upon as a production DNSSEC
 validator.** It enforces no policy: no configuration lets a Daddybound verdict

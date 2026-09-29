@@ -1,10 +1,28 @@
 # ADR 0002 — Daddybound observe mode
 
-**Status:** accepted
+**Status:** accepted; §4 superseded in part (see the note below)
 **Date:** 2026-09-09
 **Implements:** [issue #63](https://github.com/jameshoulder/dnsdaddy/issues/63)
 **Builds on:** [ADR 0001](0001-local-dnssec-validation.md),
 [docs/daddybound/](../daddybound/README.md)
+
+> **Superseding note, 2026-09-29.** §4 below records the transport decided
+> at the time: supporting DNSSEC queries went through the operator's own
+> configured upstreams, so an encrypted upstream implied encrypted supporting
+> traffic. That is no longer how Learn mode works. Since native recursion
+> landed (`internal/daddybound/recursive`, `internal/daddybound/native`),
+> Learn resolves each observed name **itself, from the root hints to the
+> authoritative servers, over plaintext UDP and TCP port 53 with QNAME
+> minimisation** — a transport that is separate from, and not protected by,
+> whatever DoT or DoH upstream answers clients. The reason is the one §2
+> gives for observing at all: evidence collected through a forwarder is
+> evidence about a code path nobody proposes to switch on, and Live would
+> resolve natively. Everything else in this ADR stands, including §1, §3,
+> §5–§9 and the isolation rule in §4 ("why the observer does not import the
+> resolver"), which native Learn honours. The startup log, the Assurance page
+> and `GET /api/v1/dnssec/status` state the transport in force rather than
+> leaving it to this document. Trust anchors are now managed under RFC 5011
+> (§11 listed rollover as undecided); see `docs/daddybound/roadmap.md`.
 
 ---
 

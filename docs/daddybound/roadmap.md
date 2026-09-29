@@ -67,40 +67,47 @@ delv over a public recursive resolver. It found two defects on its first runs,
 both in shapes no laboratory scenario reached. See
 [validation-lab.md](validation-lab.md).
 
-This is not recursion. Daddybound still validates records something else
-supplies; the harness supplies them from a resolver rather than from memory.
+The corpus harness reads records through a public resolver, so it exercises
+the validator on a forwarder's view. Native recursion, below, is what Learn
+mode now runs on.
 
-## Next: recursive resolution
+## Done: recursive resolution
 
-**Unblocks:** knowing that what was validated is what the authoritative
+**Unblocked:** knowing that what was validated is what the authoritative
 servers sent.
 
-A recursive resolver of its own would let Daddybound discover records rather
-than be handed them, and would strengthen one rule that is currently weaker
-than it should be: R-SIG-02's check that the signer's name is the zone
-containing the RRset is enforced strictly by the chain walk, and only loosely
-by `rrsigAdmissible` on its own, because learning zone cuts needs resolution.
+`internal/daddybound/recursive` walks from the root hints to the authoritative
+servers, and `internal/daddybound/native` hands the validator the exact
+replies that walk pinned — so the message validated is the message resolved,
+with no second fetch for the two to disagree about. Zone cuts are established
+from referrals actually followed, which closes the zone-cut assumption on this
+path; reading through a forwarder, which cannot see the path, the one-sided
+assumption remains and is measured by a property test. Learn mode drives this
+engine for every observed name.
 
-It would also close the last zone-cut assumption. Where a delegation response
-supplies no proof either way, the walk assumes the name is not a zone cut —
-one-sided, costing a false Bogus and never a false Secure, and measured as
-such by a property test.
+## Done: RFC 5011 trust anchor rollover
 
-## Then: RFC 5011 trust anchor rollover
-
-**Unblocks:** running against the root without manual intervention when the
+**Unblocked:** running against the root without manual intervention when the
 root key rolls.
 
-Trust anchors are configuration today. The DNSKEY revoke bit is observed and
-reported and deliberately not acted on: honouring revocation without the rest
-of RFC 5011 implements half a protocol whose other half provides the safety.
+`internal/daddybound/trustanchors` maintains the trust point: a key the zone
+announces in a validly signed DNSKEY RRset enters the thirty-day add hold-down
+and becomes an anchor after it, a self-signed REVOKE withdraws one, and a
+trust point whose every key has been revoked is kept and marked as needing an
+operator rather than deleted — so verdicts become Indeterminate, never
+Insecure. The compiled-in IANA digests seed the state and are never discarded.
+State persists in `daddybound-anchors.json`; `GET /api/v1/dnssec/status`
+reports each key's state, the refresh schedule and whether the file is being
+written.
 
 ## Then: transports
 
-DNS over TLS (RFC 7858), DNS over HTTPS (RFC 8484), DNS over QUIC (RFC 9250),
-and QNAME minimisation (RFC 9156). These are properties of how records are
-fetched rather than of how they are validated, so they sit behind the `Source`
-interface and change nothing above it.
+QNAME minimisation (RFC 9156) is in the native resolver. DNS over TLS (RFC
+7858), DNS over HTTPS (RFC 8484) and DNS over QUIC (RFC 9250) are not, because
+authoritative servers do not offer them: native recursion speaks plaintext
+port 53, and the status page says so. Should authoritative encrypted transport
+become deployable, it sits behind the `Exchanger` interface and changes nothing
+above it.
 
 ## Then: aggressive use of NSEC (RFC 8198), extended DNS errors (RFC 8914)
 

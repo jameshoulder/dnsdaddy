@@ -284,6 +284,34 @@ curl -H "Authorization: Bearer dnsd_…" \
 NDJSON, **oldest first**, so a consumer appending to its own store keeps time
 order. Deduplicate on `id`.
 
+One response carries at most `limit` lines (default and maximum 1,000), and
+the headers say whether that was everything:
+
+| Header | Meaning |
+|---|---|
+| `X-Export-Count` | Lines in this body. |
+| `X-Truncated` | `true` when matching findings remain beyond this response; `false` when it is complete. |
+| `X-Next-Cursor` | Present only when truncated: pass it back as `?cursor=` to continue from the line after the last one. |
+
+The cursor is a position in time order, not an offset, so a finding written
+while you are paging neither repeats nor displaces a line. A poller that keeps
+the last cursor it received and starts its next run from it collects every
+finding exactly once. An unrecognised cursor is answered `400` rather than
+silently restarted from the top, because a restart nobody noticed would
+re-ingest everything.
+
+```bash
+# Backfill everything, following the cursor until the server says it is done.
+cursor=
+while :; do
+  resp=$(curl -sS -D headers.txt -H "Authorization: Bearer dnsd_…" \
+    "https://dns.example.co.uk/api/v1/findings/export?hours=8760&limit=1000${cursor:+&cursor=$cursor}")
+  printf '%s\n' "$resp" >> findings.jsonl
+  cursor=$(awk 'tolower($1)=="x-next-cursor:" {print $2}' headers.txt | tr -d '\r')
+  [ -n "$cursor" ] || break
+done
+```
+
 The file is better for continuous ingestion: it survives a restart of your
 collector, has no request limit, and does not depend on the API being reachable.
 The endpoint is better for backfilling and for a system that cannot reach the

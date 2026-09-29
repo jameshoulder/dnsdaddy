@@ -28,14 +28,28 @@ func (a *API) handleDNSSECObservations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The list covers the same window as the summary, so the two describe
+	// one population: a summary of the last day beside a list reaching back
+	// a month would invite a reader to reconcile numbers that do not agree.
+	// One extra row is fetched so the response can say whether the window
+	// holds more than it shows.
+	limit := intParam(r, "limit", 50)
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
 	recent, err := a.Store.ListDNSSECObservations(r.Context(), store.DNSSECObservationFilter{
 		Status:            r.URL.Query().Get("status"),
 		DisagreementsOnly: r.URL.Query().Get("disagreements") == "1",
-		Limit:             intParam(r, "limit", 50),
+		Since:             since,
+		Limit:             limit + 1,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	recentTruncated := len(recent) > limit
+	if recentTruncated {
+		recent = recent[:limit]
 	}
 
 	// Every status and every disagreement class is present even at zero, so a
@@ -64,6 +78,23 @@ func (a *API) handleDNSSECObservations(w http.ResponseWriter, r *http.Request) {
 		"recent":       recent,
 		"runtime":      a.dnssecRuntime(),
 		"windowHours":  hours,
+		// Two scopes, named. `summary` and `recent` are stored rows within
+		// the window, and only rows the query-log settings allowed to be
+		// stored. `runtime` is the process's own counters since it started,
+		// covering every observation whether or not a row was kept. They
+		// are different populations and neither is derivable from the other.
+		"scope": map[string]any{
+			"summary": "stored observations within the window",
+			"recent":  "stored observations within the window, newest first",
+			"runtime": "process counters since start, stored or not",
+			"window": map[string]any{
+				"hours": hours,
+				"from":  since.UTC(),
+				"to":    time.Now().UTC(),
+			},
+			"recentLimit":     limit,
+			"recentTruncated": recentTruncated,
+		},
 	})
 }
 
@@ -81,6 +112,8 @@ func (a *API) dnssecRuntime() map[string]any {
 		return out
 	}
 	s := a.DNSSEC.Stats()
+	out["scope"] = "since_start"
+	out["uptimeSeconds"] = int64(time.Since(a.StartedAt).Seconds())
 	out["observed"] = s.Observed
 	out["dropped"] = s.Dropped
 	out["panics"] = s.Panics

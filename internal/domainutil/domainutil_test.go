@@ -105,3 +105,36 @@ func BenchmarkSuffixes(b *testing.B) {
 		Suffixes("deeply.nested.subdomain.of.evil.com", func(s string) bool { return set[s] })
 	}
 }
+
+// A person types names the way they read them; the query log holds them the
+// way they were sent. NormalizeInput has to bridge the two, and refuse what
+// is not a name at all.
+func TestNormalizeInputBridgesTypedNamesToTheWireForm(t *testing.T) {
+	cases := map[string]string{
+		"Example.COM.":                 "example.com",
+		"  https://Evil.Example/path ": "evil.example",
+		"bücher.example":               "xn--bcher-kva.example",
+		"Bücher.Example.":              "xn--bcher-kva.example",
+		"xn--bcher-kva.example":        "xn--bcher-kva.example",
+		"10.0.0.1":                     "10.0.0.1",
+	}
+	for in, want := range cases {
+		got, err := NormalizeInput(in)
+		if err != nil {
+			t.Errorf("NormalizeInput(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("NormalizeInput(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// What the lookup profile maps or accepts is not for this test to
+	// second-guess — a zero-width space maps away and a symbol becomes an
+	// A-label, as in a browser. What can never be a name is refused.
+	for _, bad := range []string{"", "   ", ".", "a..b", "not a domain", "exa mple.com", "tab\there.example",
+		strings.Repeat("a", 64) + ".example", strings.Repeat("ab.", 200) + "example"} {
+		if got, err := NormalizeInput(bad); err == nil {
+			t.Errorf("NormalizeInput(%q) = %q, want an error", bad, got)
+		}
+	}
+}

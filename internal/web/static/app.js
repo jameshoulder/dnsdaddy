@@ -1180,6 +1180,74 @@ function toneBadgeClass(tone) {
  * Nothing here relies on colour: every state that has a colour also has a word
  * beside it, and the dot's shape changes with severity.
  */
+/**
+ * The class split under "Blocked queries".
+ *
+ * A blocked query is an outcome, not proof that the name was malicious: an
+ * ads block and a C2 block are both blocks. The server splits the total by
+ * the category recorded on each query, and this line states the security
+ * share on its own so the headline total is never read as a threat count.
+ * Rendered only from a measured split the server actually sent — an older
+ * server sends none, and nothing is inferred from the total.
+ */
+function blockedSplit(measured) {
+  const by = measured && measured.outcomes && measured.outcomes.blockedByClass;
+  if (!by || typeof by.security !== 'number') return '';
+  const other = ['precaution', 'preference', 'custom', 'unclassified']
+    .reduce((sum, k) => sum + (typeof by[k] === 'number' ? by[k] : 0), 0);
+  return html`<span class="hero-split">${num(by.security)} security · ${num(other)} other</span>`;
+}
+
+/**
+ * The resolver card's facts, from the measured block where the server sent
+ * one and from the legacy fields where it did not.
+ *
+ * Each cell is one measurement with its scope in the label. "Unmeasured" and
+ * "Unavailable" are rendered as words rather than as a zero, because a zero
+ * says something happened and was counted, and these say nobody counted.
+ */
+function measuredFacts(overview) {
+  const m = overview && overview.measured;
+  // `value` is already-escaped markup and `note` is plain text. The note's
+  // own span is built with html`` — which escapes the text once — and then
+  // marked raw, because interpolating one html`` result into another escapes
+  // it a second time and the reader sees the markup as text.
+  const cell = (label, value, note) => html`<div><div class="label muted small">${label}</div><div>${raw(value)}${raw(note ? html` <span class="muted small">${note}</span>` : '')}</div></div>`;
+  if (!m) {
+    return html`
+      ${raw(cell('Configured networks', html`${num(overview.protectedNetworks)}`))}
+      ${raw(cell('Policies', html`${num(overview.activePolicies)}`))}`;
+  }
+  const n = m.networks || {};
+  const c = m.clients || {};
+  const f = m.filtering || {};
+  const feeds = m.feeds || {};
+  const rate = (m.resolver && m.resolver.errorRate) || {};
+  const errors = (m.outcomes && m.outcomes.errors) || {};
+  const hours = m.window && m.window.hours ? `${m.window.hours}h` : 'window';
+
+  const clients = c.attribution && typeof c.observedInWindow === 'number'
+    ? html`${num(c.observedInWindow)}`
+    : html`<span class="muted is-unavailable">Not recorded</span>`;
+  const rateText = rate.available
+    ? html`${rate.ratio >= 0.0005 || rate.ratio === 0 ? rate.ratio === 0 ? '0%' : `${(rate.ratio * 100).toFixed(1)}%` : '<0.1%'}`
+    : html`<span class="muted is-unavailable">Unmeasured</span>`;
+  const rateNote = rate.available
+    ? `${num(rate.numerator)} of ${num(rate.denominator)}`
+    : (rate.unavailable || '');
+  const errorNote = errors.complete === false && errors.measuredSince
+    ? `counted since ${new Date(errors.measuredSince).toLocaleString('en-GB')}`
+    : '';
+
+  return html`
+    ${raw(cell('Networks', html`${num(n.configured)} configured`, `${num(n.enabled)} enabled · ${num(n.resolverPermitted)} permitted · ${num(n.withTrafficInWindow)} with traffic (${hours})`))}
+    ${raw(cell(`Clients seen (${hours})`, clients, c.attribution ? '' : (c.unavailable || 'client addresses are not recorded')))}
+    ${raw(cell('Blocking policies in use', html`${num(f.blockingPoliciesAssigned)} of ${num(f.blockingPolicies)}`, `${num(n.monitorOnly)} enabled network${n.monitorOnly === 1 ? '' : 's'} monitor-only`))}
+    ${raw(cell('Feeds', html`${num(feeds.loaded)} of ${num(feeds.enabled)} loaded`, `${num(feeds.failing)} failing · ${num(feeds.neverDownloaded)} never downloaded${f.categoryBlockingAvailable ? '' : ' · index empty'}`))}
+    ${raw(cell(`Resolution failures (${hours})`, rateText, rateNote))}
+    ${raw(cell('Failed queries', html`${num(errors.count)}`, errorNote || `in the last ${hours}`))}`;
+}
+
 function statusHero(overview, feedsData, detections) {
   const state = protectionState(overview.protectionStatus);
   const intel = feedHealth(feedsData);
@@ -1216,7 +1284,7 @@ function statusHero(overview, feedsData, detections) {
       </div>
       <div class="hero-stats">
         <div class="hero-stat"><span class="n">${num(overview.queries24h)}</span><span class="k">DNS queries</span></div>
-        <div class="hero-stat is-blocked"><span class="n">${num(overview.threatsBlocked24h)}</span><span class="k">Blocked queries</span></div>
+        <div class="hero-stat is-blocked"><span class="n">${num(overview.threatsBlocked24h)}</span><span class="k">Blocked queries</span>${raw(blockedSplit(overview.measured))}</div>
         <!-- No queries in the period means no rate to state. Zero per cent is
              a measurement; this is the absence of one. -->
         <div class="hero-stat">
@@ -1549,12 +1617,12 @@ pages.dashboard = {
         <div class="section grid grid-2">
           ${raw(threatIntelPanel(feeds))}
           <div class="card">
-            <div class="card-head"><div><h2>Resolver</h2><p>This instance and its configured scope.</p></div></div>
+            <div class="card-head"><div><h2>Resolver</h2><p>This instance, its configured scope and what was measured. Each figure names its own window.</p></div></div>
             <div class="grid grid-3">
               <div><div class="label muted small">Status</div><div>${raw(statusBadge(overview.resolverStatus))}</div></div>
               <div><div class="label muted small">Uptime</div><div>${duration(overview.uptimeSeconds)}</div></div>
               <div><div class="label muted small">Feeds refreshed</div><div>${relTime(overview.lastFeedRefresh)}</div></div>
-              <div><div class="label muted small">Configured networks</div><div>${num(overview.protectedNetworks)}</div></div>
+              ${raw(measuredFacts(overview))}
               <div><div class="label muted small">Policies</div><div>${num(overview.activePolicies)}</div></div>
               <div><div class="label muted small">Version</div><div class="mono small">${overview.version}</div></div>
             </div>
@@ -1909,7 +1977,9 @@ function queryRow(q, filters = {}) {
       </summary>
       <dl class="qfacts">${raw(facts)}</dl>
       <div class="qactions">
-        <a class="btn btn-observe btn-sm" href="${queryHash({ ...context, domain: q.domain })}" data-filter-domain="${q.domain}">Filter this domain</a>
+        <a class="btn btn-observe btn-sm" href="${investigateHash({ domain: q.domain, client: q.clientIp, hours: context.hours })}" data-investigate-domain="${q.domain}">Investigate this domain</a>
+        <a class="btn btn-ghost btn-sm" href="${queryHash({ ...context, domain: q.domain })}" data-filter-domain="${q.domain}">Filter this domain</a>
+        ${raw(q.clientIp ? html`<a class="btn btn-ghost btn-sm" href="${investigateHash({ client: q.clientIp, hours: context.hours })}" data-investigate-client="${q.clientIp}">Investigate this client</a>` : '')}
         ${raw(q.clientIp ? html`<a class="btn btn-ghost btn-sm" href="${queryHash({ ...context, clientIp: q.clientIp })}">Filter this client</a>` : '')}
       </div>
     </details>`;
@@ -2206,14 +2276,167 @@ function findingDetail(detail) {
   `;
 }
 
+/* ---------- finding review ------------------------------------------------ */
+
+/*
+ * An operator's disposition of a finding sits beside the finding, never
+ * inside it: the measurements, severity, confidence and evidence are what the
+ * detector produced and stay as they were. Marking a finding a false positive
+ * records that assessment and does nothing else — no detector is disabled, no
+ * policy relaxed, no domain allowed — and the form says so.
+ *
+ * Writes carry the version that was read. A 409 means somebody else reviewed
+ * the finding in the meantime, and the form shows what they wrote instead of
+ * overwriting it.
+ */
+
+const REVIEW_STATES = [
+  ['new', 'New', ''],
+  ['acknowledged', 'Acknowledged', 'info'],
+  ['resolved', 'Resolved', 'ok'],
+  ['false_positive', 'False positive', 'warn'],
+];
+
+const REVIEW_LABEL = Object.fromEntries(REVIEW_STATES.map(([v, l]) => [v, l]));
+
+function reviewBadge(review) {
+  const state = review && review.state ? review.state : 'new';
+  const entry = REVIEW_STATES.find(([v]) => v === state);
+  const cls = entry ? entry[2] : 'warn';
+  const label = entry ? entry[1] : String(state);
+  return html`<span class="badge ${cls} review-badge" data-review-badge>${label}</span>`;
+}
+
+// The moves the server allows from each state, mirrored here so the form
+// offers only what will be accepted. The server remains the authority.
+const REVIEW_MOVES = {
+  new: ['acknowledged', 'resolved', 'false_positive'],
+  acknowledged: ['new', 'resolved', 'false_positive'],
+  resolved: ['acknowledged', 'false_positive'],
+  false_positive: ['acknowledged', 'resolved'],
+};
+
+// The version line under a review form. Each html`` result is marked raw
+// exactly once where it is inserted: nesting one html`` inside another
+// without raw() escapes it a second time and shows the markup as text.
+function reviewMetaLine(review) {
+  if (!review || !review.version) return 'Not yet reviewed';
+  const by = review.actor ? html`by <span class="mono">${review.actor}</span> · ` : '';
+  return html`Version ${review.version} · ${raw(by)}updated ${relTime(review.updatedAt)}`;
+}
+
+function reviewForm(finding) {
+  const review = finding.review || { state: 'new', version: 0, note: '' };
+  const state = REVIEW_LABEL[review.state] ? review.state : 'new';
+  const options = [state, ...(REVIEW_MOVES[state] || [])];
+  const id = finding.id;
+  return html`
+    <form class="review-form" data-review-form="${id}" data-version="${review.version || 0}">
+      <h4>Review</h4>
+      <p class="muted small">Records your assessment. It does not disable a detector, relax a policy, delete evidence or allow a domain.</p>
+      <div class="review-fields">
+        <label class="field"><span>Disposition</span>
+          <select name="state">
+            ${raw(options.map((v) => html`<option value="${v}"${raw(v === state ? ' selected' : '')}>${REVIEW_LABEL[v]}</option>`).join(''))}
+          </select></label>
+        <label class="field review-note"><span>Note</span>
+          <textarea name="note" maxlength="2000" rows="2" placeholder="What you found, a ticket reference, why it is benign…">${review.note || ''}</textarea></label>
+        <div class="field"><span>&nbsp;</span><button type="submit" class="btn btn-observe btn-sm">Save review</button></div>
+      </div>
+      <p class="muted small review-meta">
+        ${raw(reviewMetaLine(review))}
+        · <a href="#" data-review-history="${id}">History</a>
+      </p>
+      <p class="form-error" role="alert" hidden data-review-error></p>
+      <div class="review-history" data-review-history-for="${id}" hidden></div>
+    </form>`;
+}
+
+function findingRow(f) {
+  return html`
+    <details class="finding" data-finding="${f.id}">
+      <summary>
+        ${raw(severityBadge(f.severity))}
+        ${raw(reviewBadge(f.review))}
+        <span class="mono">${f.eventType}</span>
+        <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
+        <span class="muted small nowrap">confidence ${f.confidence}</span>
+        <span class="muted small nowrap">${relTime(f.time)}</span>
+      </summary>
+      <div class="finding-body">
+        <p>${f.summary}</p>
+        <p class="muted small">
+          Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> ·
+          Detector: <span class="mono">${f.detector}</span> ·
+          Score: <span class="mono">${f.score}</span>
+        </p>
+        ${raw(findingLinks(f))}
+        ${raw(reviewForm(f))}
+        ${raw(findingDetail(f.detail))}
+      </div>
+    </details>`;
+}
+
+function normaliseFindingFilters(input = {}) {
+  return {
+    state: REVIEW_LABEL[input.state] ? String(input.state) : '',
+    severity: ['high', 'medium', 'low', 'info'].includes(input.severity) ? String(input.severity) : '',
+    days: ['1', '7', '30', '90'].includes(String(input.days)) ? String(input.days) : '7',
+  };
+}
+
+function findingFilters(hash) {
+  const params = new URLSearchParams(String(hash || '').split('?')[1] || '');
+  return normaliseFindingFilters(Object.fromEntries(params));
+}
+
+function findingHash(filters) {
+  const f = normaliseFindingFilters(filters);
+  const query = new URLSearchParams(Object.entries(f).filter(([k, v]) => v && !(k === 'days' && v === '7'))).toString();
+  return `#/detections${query ? `?${query}` : ''}`;
+}
+
+function findingFilterForm(filters, byState) {
+  const option = (value, label, selected) => html`<option value="${value}"${raw(value === selected ? ' selected' : '')}>${label}</option>`;
+  const count = (state) => (byState && typeof byState[state] === 'number' ? ` (${num(byState[state])})` : '');
+  return html`
+    <div class="card section query-filter-card">
+      <form class="query-filters" id="f-filters">
+        <div class="query-filter"><label for="f-state">Review state</label>
+          <select id="f-state" name="state">
+            ${raw(option('', 'All states', filters.state))}
+            ${raw(REVIEW_STATES.map(([v, l]) => option(v, l + count(v), filters.state)).join(''))}
+          </select></div>
+        <div class="query-filter"><label for="f-severity">Severity</label>
+          <select id="f-severity" name="severity">
+            ${raw([['', 'All severities'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low'], ['info', 'Info']].map(([v, l]) => option(v, l, filters.severity)).join(''))}
+          </select></div>
+        <div class="query-filter"><label for="f-days">Period</label>
+          <select id="f-days" name="days">
+            ${raw([['1', 'Last 24 hours'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days']].map(([v, l]) => option(v, l, filters.days)).join(''))}
+          </select></div>
+        <div class="query-filter-actions">
+          <button type="submit" class="btn btn-observe" id="f-apply">Apply</button>
+          <button type="button" class="btn btn-ghost" id="f-clear">Clear</button>
+        </div>
+      </form>
+      <div class="query-filter-note query-filter-summary row">
+        <p class="muted small">Counts are for the selected period. A finding nobody has reviewed is New.</p>
+        <span class="row-end muted small" id="f-count" role="status" aria-live="polite"></span>
+      </div>
+    </div>`;
+}
+
 pages.detections = {
   title: 'Findings',
   subtitle: 'Behavioural findings. Observed and explained, never blocked.',
-  async render() {
-    const [catalogue, findings, summary] = await Promise.all([
-      apiGet('/detectors'),
-      apiGet('/findings?limit=100&detail=true'),
-      apiGet('/findings/summary?days=7'),
+  async render(context = {}) {
+    const hash = context.hash === undefined ? window.location.hash : context.hash;
+    const filters = findingFilters(hash);
+    const read = (path) => apiGet(path, { signal: context.signal });
+    const [catalogue, summary] = await Promise.all([
+      read('/detectors'),
+      read(`/findings/summary?days=${encodeURIComponent(filters.days)}`),
     ]);
 
     if (!catalogue.enabled) {
@@ -2230,6 +2453,8 @@ pages.detections = {
     for (const row of summary.byType || []) {
       if (bySeverity[row.severity] !== undefined) bySeverity[row.severity] += row.count;
     }
+    const byState = summary.byState || null;
+    const period = `Last ${filters.days} day${filters.days === '1' ? '' : 's'}`;
 
     return html`
       <div class="card notice">
@@ -2237,52 +2462,25 @@ pages.detections = {
           heuristics: they score traffic, explain the score, and alert. Blocking is done by the
           policy and threat-feed engine, from curated intelligence rather than inference. Every
           detector below is <strong>experimental</strong> — the thresholds are calibrated against
-          synthetic traffic, not a production network.</p>
+          synthetic traffic, not a production network. Reviewing a finding records your assessment
+          and changes none of that.</p>
       </div>
 
       <div class="section grid grid-4">
-        ${raw(metricCard({ label: 'High', value: num(bySeverity.high), sub: 'Last 7 days', tone: bySeverity.high ? 'bad' : '' }))}
-        ${raw(metricCard({ label: 'Medium', value: num(bySeverity.medium), sub: 'Last 7 days' }))}
-        ${raw(metricCard({ label: 'Low', value: num(bySeverity.low), sub: 'Last 7 days' }))}
+        ${raw(metricCard({ label: 'High', value: num(bySeverity.high), sub: period, tone: bySeverity.high ? 'bad' : '' }))}
+        ${raw(metricCard({ label: 'Medium', value: num(bySeverity.medium), sub: period }))}
+        ${raw(metricCard({ label: 'Awaiting review', value: byState ? num(byState.new) : '—', sub: byState ? `${num(byState.acknowledged)} acknowledged · ${num(byState.resolved)} resolved · ${num(byState.false_positive)} false positive` : 'Review counts unavailable', tone: byState && byState.new ? 'warn' : '' }))}
         ${raw(metricCard({ label: 'Detectors', value: num(catalogue.detectors.length), sub: 'All alert-only', tone: 'detect' }))}
       </div>
 
+      ${raw(findingFilterForm(filters, byState))}
+
       <div class="card">
-        <div class="card-head"><div><h2>Recent findings</h2><p>Newest first. Expand one to see the
-          measurements behind it.</p></div></div>
-        ${raw(
-          findings.findings.length
-            ? findings.findings
-                .map(
-                  (f) => html`
-                    <details class="finding">
-                      <summary>
-                        ${raw(severityBadge(f.severity))}
-                        <span class="mono">${f.eventType}</span>
-                        <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
-                        <span class="muted small nowrap">confidence ${f.confidence}</span>
-                        <span class="muted small nowrap">${relTime(f.time)}</span>
-                      </summary>
-                      <div class="finding-body">
-                        <p>${f.summary}</p>
-                        <p class="muted small">
-                          Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> ·
-                          Detector: <span class="mono">${f.detector}</span> ·
-                          Score: <span class="mono">${f.score}</span>
-                        </p>
-                        ${raw(findingDetail(f.detail))}
-                      </div>
-                    </details>
-                  `
-                )
-                .join('')
-            : emptyState(
-                'No findings yet',
-                'Either nothing has behaved unusually, or not enough traffic has passed through yet. ' +
-                  'This is not a statement that the network is clean: it is a statement that these ' +
-                  'detectors have not raised anything.'
-              )
-        )}
+        <div class="card-head"><div><h2>Findings</h2><p>Newest first. Expand one to see the
+          measurements behind it and to record a review.</p></div></div>
+        <div id="f-results" aria-busy="true">${raw(emptyState('Loading findings…', 'Fetching matching findings.', { icon: '·' }))}</div>
+        <p class="form-error" id="f-error" role="alert" hidden></p>
+        <div class="row mt-4"><button type="button" class="btn btn-ghost" id="f-more" hidden>Load more</button></div>
       </div>
 
       <div class="card">
@@ -2313,6 +2511,603 @@ pages.detections = {
         </div>
       </div>
     `;
+  },
+  async mounted(context = {}) {
+    const host = $('#f-results');
+    if (!host) return; // detection off
+    const form = $('#f-filters');
+    const more = $('#f-more');
+    const count = $('#f-count');
+    const error = $('#f-error');
+    const hash = context.hash === undefined ? window.location.hash : context.hash;
+    const filters = findingFilters(hash);
+    const isCurrent = () => host.isConnected && window.location.hash === hash &&
+      (!context.isCurrent || context.isCurrent());
+
+    const loader = createFindingLoader({
+      filters,
+      isCurrent,
+      read: (path) => apiGet(path, { signal: context.signal }),
+      onLoading: (loading, append) => {
+        host.setAttribute('aria-busy', String(loading));
+        more.disabled = loading;
+        more.textContent = loading && append ? 'Loading more…' : 'Load more';
+        if (loading) {
+          error.hidden = true;
+          count.textContent = append ? `${num(loader.state.rows.length)} shown · Loading more…` : 'Loading…';
+        }
+      },
+      onData: (state, append) => {
+        if (append) {
+          // Append rather than re-render, so open findings and half-written
+          // reviews above stay exactly as they were.
+          const fragment = document.createElement('div');
+          fragment.innerHTML = sanitize(state.added.map(findingRow).join(''));
+          while (fragment.firstChild) host.appendChild(fragment.firstChild);
+        } else {
+          host.innerHTML = sanitize(state.rows.length
+            ? state.rows.map(findingRow).join('')
+            : emptyState(
+                filters.state || filters.severity ? 'No matching findings' : 'No findings yet',
+                filters.state || filters.severity
+                  ? 'Nothing matches these filters in the selected period.'
+                  : 'Either nothing has behaved unusually, or not enough traffic has passed through yet. ' +
+                    'This is not a statement that the network is clean: it is a statement that these ' +
+                    'detectors have not raised anything.'
+              ));
+        }
+        paintDynamic(host);
+        bindReviewForms(host);
+        count.textContent = `${num(state.rows.length)} finding${state.rows.length === 1 ? '' : 's'} shown`;
+        more.hidden = !state.cursor;
+      },
+      onError: (err, append) => {
+        if (append) {
+          error.textContent = `Could not load more findings. ${err.message || 'Try again.'}`;
+          error.hidden = false;
+        } else {
+          host.innerHTML = sanitize(unavailableState('Findings unavailable', err.message || 'The findings could not be retrieved. Try again.'));
+          count.textContent = 'Results unavailable';
+          more.hidden = true;
+        }
+      },
+    });
+    this.state = loader.state;
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const next = findingHash(Object.fromEntries(new FormData(form)));
+      if (window.location.hash === next) router.reload();
+      else window.location.hash = next;
+    });
+    $('#f-clear').addEventListener('click', () => { window.location.hash = findingHash({}); });
+    more.addEventListener('click', () => loader.load(true));
+    await loader.load();
+  },
+};
+
+// The findings list pages by keyset cursor; the same ownership rule as the
+// query log applies, so a late page cannot land on a different filter.
+function createFindingLoader({ read, filters, isCurrent, onLoading, onData, onError }) {
+  const state = { cursor: '', rows: [], added: [], loading: false };
+  return {
+    state,
+    async load(append = false) {
+      if (state.loading || !isCurrent() || (append && !state.cursor)) return false;
+      state.loading = true;
+      onLoading(true, append);
+      const params = new URLSearchParams({ limit: '50', detail: 'true' });
+      if (filters.state) params.set('state', filters.state);
+      if (filters.severity) params.set('severity', filters.severity);
+      params.set('hours', String(Number(filters.days || '7') * 24));
+      if (append) params.set('cursor', state.cursor);
+      try {
+        const data = await read(`/findings?${params}`);
+        if (!isCurrent()) return false;
+        if (!data || !Array.isArray(data.findings)) throw new Error('The findings list returned an unreadable response.');
+        state.cursor = data.nextCursor || '';
+        state.added = data.findings;
+        state.rows = append ? state.rows.concat(data.findings) : data.findings;
+        onData(state, append);
+        return true;
+      } catch (err) {
+        if (isCurrent() && err.name !== 'AbortError') onError(err, append);
+        return false;
+      } finally {
+        state.loading = false;
+        if (isCurrent()) onLoading(false, append);
+      }
+    },
+  };
+}
+
+// applyReviewResult updates one finding's row in place after a write or a
+// conflict, so the rest of the list is untouched.
+function applyReviewResult(form, review) {
+  const row = form.closest('[data-finding]');
+  form.dataset.version = String(review.version || 0);
+  const select = $('select[name="state"]', form);
+  const state = REVIEW_LABEL[review.state] ? review.state : 'new';
+  const options = [state, ...(REVIEW_MOVES[state] || [])];
+  select.innerHTML = sanitize(options.map((v) => html`<option value="${v}"${raw(v === state ? ' selected' : '')}>${REVIEW_LABEL[v]}</option>`).join(''));
+  $('textarea[name="note"]', form).value = review.note || '';
+  const meta = $('.review-meta', form);
+  if (meta) {
+    meta.innerHTML = sanitize(html`${raw(reviewMetaLine(review))}
+      · <a href="#" data-review-history="${form.dataset.reviewForm}">History</a>`);
+  }
+  if (row) {
+    const badge = $('[data-review-badge]', row);
+    if (badge) badge.outerHTML = sanitize(reviewBadge(review));
+  }
+}
+
+function reviewHistoryList(events) {
+  if (!events || !events.length) return html`<p class="muted small">No review recorded yet.</p>`;
+  return html`<ol class="review-history-list">${raw(events.map((e) => html`<li>
+      <span class="muted small">${new Date(e.at).toLocaleString('en-GB')}</span>
+      ${REVIEW_LABEL[e.fromState] || e.fromState} → <strong>${REVIEW_LABEL[e.toState] || e.toState}</strong>
+      ${raw(e.actor ? html` <span class="muted small">by <span class="mono">${e.actor}</span></span>` : '')}
+      ${raw(e.note ? html`<div class="small review-history-note">${e.note}</div>` : '')}
+    </li>`).join(''))}</ol>
+    <p class="muted small">Application history, in write order. It explains what an operator did; it is not tamper-evident.</p>`;
+}
+
+function bindReviewForms(root) {
+  $$('[data-review-form]', root).forEach((form) => {
+    if (form.dataset.bound) return;
+    form.dataset.bound = '1';
+    const id = form.dataset.reviewForm;
+    const errorEl = $('[data-review-error]', form);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = $('button[type="submit"]', form);
+      button.disabled = true;
+      errorEl.hidden = true;
+      try {
+        const review = await apiSend('PUT', `/findings/${encodeURIComponent(id)}/review`, {
+          state: $('select[name="state"]', form).value,
+          note: $('textarea[name="note"]', form).value,
+          version: Number(form.dataset.version || 0),
+        });
+        applyReviewResult(form, review);
+        toast('Review saved');
+      } catch (err) {
+        if (err && err.status === 409 && err.body && err.body.current) {
+          applyReviewResult(form, err.body.current);
+          errorEl.textContent = 'Somebody else reviewed this finding first. The form now shows their review; check it and save again if you still want to change it.';
+        } else {
+          errorEl.textContent = err && err.message ? err.message : 'The review could not be saved.';
+        }
+        errorEl.hidden = false;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    form.addEventListener('click', async (event) => {
+      const link = event.target.closest('[data-review-history]');
+      if (!link) return;
+      event.preventDefault();
+      const host = $('[data-review-history-for]', form);
+      host.hidden = !host.hidden;
+      if (host.hidden || host.dataset.loaded) return;
+      host.dataset.loaded = '1';
+      host.innerHTML = sanitize(html`<p class="muted small">Loading…</p>`);
+      try {
+        const data = await apiGet(`/findings/${encodeURIComponent(id)}/review/history`);
+        host.innerHTML = sanitize(reviewHistoryList(data.history));
+      } catch (err) {
+        host.innerHTML = sanitize(html`<p class="rec-note is-warn">${err.message}</p>`);
+      }
+    });
+  });
+}
+
+/* ---------- investigation ------------------------------------------------ */
+
+/*
+ * One name or one address, everything already recorded about it, in sections
+ * that never blur into each other. The order is the operator's question in
+ * order: what happened, why it was decided then, what would be decided now,
+ * what is on file, what the detectors think. The first screen answers the
+ * first two; everything raw lives in labelled disclosures at the end.
+ *
+ * Nothing on this page is written by this page. The preview is the server's
+ * evaluation of current configuration and is labelled as such, next to the
+ * stored decisions it must never be confused with.
+ */
+
+// Links from a finding to the subjects it concerns.
+function findingLinks(f) {
+  const links = [];
+  if (f.domain) links.push(html`<a class="btn btn-ghost btn-sm" href="${investigateHash({ domain: f.domain })}" data-investigate-domain="${f.domain}">Investigate domain</a>`);
+  if (f.clientIp) links.push(html`<a class="btn btn-ghost btn-sm" href="${investigateHash({ client: f.clientIp })}" data-investigate-client="${f.clientIp}">Investigate client</a>`);
+  return links.length ? html`<div class="row finding-links">${raw(links.join(''))}</div>` : '';
+}
+
+function normaliseInvestigateFilters(input = {}) {
+  return {
+    domain: String(input.domain || '').trim(),
+    client: String(input.client || '').trim(),
+    hours: ['1', '24', '168', '720'].includes(String(input.hours)) ? String(input.hours) : '',
+  };
+}
+
+function investigateFilters(hash) {
+  const params = new URLSearchParams(String(hash || '').split('?')[1] || '');
+  return normaliseInvestigateFilters(Object.fromEntries(params));
+}
+
+function investigateHash(filters) {
+  const f = normaliseInvestigateFilters(filters);
+  const query = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
+  return `#/investigate${query ? `?${query}` : ''}`;
+}
+
+function investigateForm(filters) {
+  const option = (value, label, selected) => html`<option value="${value}"${raw(value === selected ? ' selected' : '')}>${label}</option>`;
+  return html`
+    <div class="card section">
+      <form class="query-filters" id="inv-form">
+        <div class="query-filter"><label for="inv-domain">Domain</label>
+          <input id="inv-domain" name="domain" type="search" placeholder="exact name, e.g. evil.example" autocomplete="off" spellcheck="false" value="${filters.domain}"></div>
+        <div class="query-filter"><label for="inv-client">Client IP</label>
+          <input id="inv-client" name="client" type="search" placeholder="optional, exact address" autocomplete="off" spellcheck="false" value="${filters.client}"></div>
+        <div class="query-filter"><label for="inv-hours">Retained data window</label>
+          <select id="inv-hours" name="hours">
+            ${raw([['', 'Retention window'], ['1', 'Last hour'], ['24', 'Last 24 hours'], ['168', 'Last 7 days'], ['720', 'Last 30 days']].map(([v, l]) => option(v, l, filters.hours)).join(''))}
+          </select></div>
+        <div class="query-filter-actions">
+          <button type="submit" class="btn btn-observe" id="inv-apply">Investigate</button>
+          <button type="button" class="btn btn-ghost" id="inv-clear">Clear</button>
+        </div>
+      </form>
+      <p class="muted small query-filter-note">Exact names only, as this resolver recorded them. A domain alone investigates the name;
+        a client alone investigates the address; both together narrow the name to that client. This is not a passive-DNS history,
+        an IP-reputation source or a device discovery tool — it reads what this resolver kept.</p>
+    </div>`;
+}
+
+function windowLine(w) {
+  if (!w) return '';
+  return html`<span class="badge">Last ${w.hours}h</span>
+    <span class="muted small">Per-query rows are retained for ${w.retentionDays} day${w.retentionDays === 1 ? '' : 's'}${w.queryLog ? '' : ' · query log off'}${w.clientAttribution ? '' : ' · client addresses not recorded'}</span>`;
+}
+
+const OUTCOME_BADGE = {
+  blocked: ['bad', 'Blocked'],
+  allowed: ['qact-allowed', 'Allowed'],
+  not_evaluated: ['warn', 'Not evaluated'],
+};
+
+function outcomeBadge(outcome) {
+  const [cls, label] = OUTCOME_BADGE[outcome] || ['warn', String(outcome || 'unknown')];
+  return html`<span class="badge ${cls}">${label}</span>`;
+}
+
+// 1. What happened.
+function activitySection(act, { client = false } = {}) {
+  if (!act || !act.available) {
+    return html`
+      <div class="card section" id="inv-activity">
+        <div class="card-head"><div><h2>Recorded activity</h2><p>What the query log holds for this subject.</p></div></div>
+        ${raw(emptyState('Not recorded', (act && act.unavailable) || 'No per-query rows exist for this subject by configuration.', { icon: '○' }))}
+      </div>`;
+  }
+  const s = act.summary || {};
+  const qtypes = Object.entries(s.qtypes || {}).sort((a, b) => b[1] - a[1]);
+  const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${raw(note ? html` <span class="muted small">${note}</span>` : '')}</dd></div>`;
+  const clients = (act.clients || []).length
+    ? html`<h4>Clients that asked</h4>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Client</th><th>Network</th><th class="num">Queries</th><th class="num">Blocked</th><th>Last seen</th><th></th></tr></thead>
+          <tbody>${raw(act.clients.map((c) => html`<tr>
+            <td class="mono">${c.clientName || c.clientIp}${raw(c.clientName ? html` <span class="muted small">${c.clientIp}</span>` : '')}</td>
+            <td class="mono small">${c.networkId || '—'}</td>
+            <td class="num">${num(c.queries)}</td><td class="num">${num(c.blocked)}</td>
+            <td class="muted">${relTime(c.lastSeen)}</td>
+            <td><a class="btn btn-ghost btn-sm" href="${investigateHash({ client: c.clientIp })}">Investigate client</a></td></tr>`).join(''))}
+          </tbody></table></div>`
+    : '';
+  const domains = (act.domains || []).length
+    ? html`<h4>Names this client asked for</h4>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Domain</th><th class="num">Queries</th><th class="num">Blocked</th><th>Category</th><th>Last seen</th><th></th></tr></thead>
+          <tbody>${raw(act.domains.map((d) => html`<tr>
+            <td class="mono">${d.domain}</td>
+            <td class="num">${num(d.queries)}</td><td class="num">${num(d.blocked)}</td>
+            <td>${raw(d.category ? categoryBadge(d.category) : '—')}</td>
+            <td class="muted">${relTime(d.lastSeen)}</td>
+            <td><a class="btn btn-ghost btn-sm" href="${investigateHash({ domain: d.domain })}">Investigate domain</a></td></tr>`).join(''))}
+          </tbody></table></div>`
+    : '';
+  return html`
+    <div class="card section" id="inv-activity">
+      <div class="card-head"><div><h2>Recorded activity</h2><p>${act.note}</p></div></div>
+      ${raw(s.queries
+        ? html`<dl class="claim-key">
+            ${raw(stat('Queries', html`<span class="mono">${num(s.queries)}</span>`, `${num(s.allowed)} allowed · ${num(s.blocked)} blocked · ${num(s.errors)} failed`))}
+            ${raw(stat('Seen', html`${relTime(s.firstSeen)} → ${relTime(s.lastSeen)}`))}
+            ${raw(stat('Record types', html`<span class="mono">${qtypes.map(([t, n]) => `${t} ${num(n)}`).join(' · ')}</span>`))}
+            ${raw(stat('Answer cache', html`<span class="mono">${num(s.cached)}</span>`, 'allowed answers served from cache'))}
+            ${raw(stat('Latency', html`<span class="mono">${(s.avgElapsedMs || 0).toFixed(1)} ms</span>`, `average · max ${num(s.maxElapsedMs)} ms`))}
+          </dl>`
+        : emptyState('Nothing recorded in this window', 'No query-log row matches this exact subject in the selected window. Widen the window, or check the name is spelt as clients ask for it.', { icon: '○' }))}
+      ${raw(client ? domains : clients)}
+      ${raw((act.recent || []).length
+        ? html`<h4>Newest rows${act.recentCursor ? ` (first ${act.recentLimit})` : ''}</h4>
+            <div class="qlog">${raw(act.recent.map((q) => queryRow(q)).join(''))}</div>
+            ${raw(act.recentCursor ? html`<p class="muted small">More rows exist. <a href="${queryHash(client ? { clientIp: act.recent[0].clientIp } : { domain: act.recent[0].domain })}">Open the query log</a> to page through them.</p>` : '')}`
+        : '')}
+    </div>`;
+}
+
+// 2. What was decided at the time.
+function decisionSection(dec) {
+  const rows = (dec && dec.items) || [];
+  return html`
+    <div class="card section" id="inv-decisions">
+      <div class="card-head"><div><h2>Historical decisions</h2><p>${(dec && dec.note) || 'Stored when each decision was made.'}</p></div></div>
+      ${raw(!dec || !dec.recording
+        ? emptyState('Not recording decisions', 'Decision records are switched off (log.decision_records), so no stored explanation exists. The current policy preview below is not a substitute: it says what would be decided now, not why anything was decided then.', { icon: '○' })
+        : rows.length
+          ? rows.map(decisionRow).join('') + (dec.truncated ? html`<p class="muted small">Only the newest decisions are shown.</p>` : '')
+          : emptyState('No decision recorded', 'No stored decision matches this subject. An allowed query records no decision; a block before decision records were enabled has none either.', { icon: '○' }))}
+    </div>`;
+}
+
+function previewDecisionLine(d) {
+  return html`${raw(outcomeBadge(d.outcome))}
+    ${raw(d.rule ? html`<span class="badge">${d.rule}</span>` : '')}
+    ${raw(d.category ? categoryBadge(d.category) : '')}
+    ${raw(d.reason ? html`<span class="muted small">${d.reason}</span>` : '')}
+    ${raw(d.source ? html`<span class="muted small">source: ${d.source}</span>` : '')}`;
+}
+
+// 3. What would be decided now. Labelled as a preview everywhere it appears.
+function previewSection(pv) {
+  if (!pv) return '';
+  const c = pv.context || {};
+  const ext = pv.external || {};
+  return html`
+    <div class="card section" id="inv-preview">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">Preview · current configuration · read-only</div>
+        <h2>Current policy preview</h2>
+        <p>${pv.note}</p>
+      </div></div>
+      <dl class="claim-key">
+        <div class="qfact"><dt>Context</dt><dd>
+          ${raw(c.client ? html`client <span class="mono">${c.client}</span> · ` : html`no client supplied · `)}
+          ${raw(c.attribution === 'catch_all' ? 'catch-all network' : c.attribution === 'network_prefix' ? 'matched by network prefix' : 'no network')}
+          ${raw(c.networkName ? html` · <span class="mono">${c.networkName}</span>` : '')}
+          ${raw(c.policyName ? html` · policy <span class="mono">${c.policyName}</span>` : '')}
+        </dd></div>
+        <div class="qfact"><dt>Would be</dt><dd>${raw(previewDecisionLine(pv.decision || {}))}</dd></div>
+        <div class="qfact"><dt>External providers</dt><dd>
+          ${raw(!ext.configured
+            ? html`<span class="badge">none configured</span>`
+            : html`<span class="badge ${ext.evaluated ? 'ok' : ext.reached ? 'warn' : ''}">${ext.evaluated ? 'cached verdict used' : ext.reached ? 'lookup not performed' : 'not reached'}</span>`)}
+          ${raw(ext.mode ? html` <span class="muted small">mode ${ext.mode}</span>` : '')}
+          ${raw(ext.provider ? html` <span class="muted small">${ext.provider}</span>` : '')}
+          ${raw(ext.note ? html`<div class="muted small">${ext.note}</div>` : '')}
+          ${raw(ext.configured && ext.reached && !ext.evaluated ? html`<div class="row note-tight"><button type="button" class="btn btn-ghost btn-sm" id="inv-enrich">Ask the configured providers now</button> <span class="muted small">A deliberate lookup within the configured mode and budget.</span></div>` : '')}
+        </dd></div>
+      </dl>
+      <details class="chart-data"><summary>Under every policy</summary>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Policy</th><th class="num">Enabled networks</th><th>Would be</th></tr></thead>
+          <tbody>${raw((pv.byPolicy || []).map((p) => html`<tr>
+            <td>${p.policyName} <span class="muted small mono">${p.policyId}</span></td>
+            <td class="num">${num(p.assignedNetworks)}</td>
+            <td>${raw(previewDecisionLine(p.decision || {}))}</td></tr>`).join(''))}
+          </tbody></table></div>
+        <p class="muted small">A comparison, not a change: nothing is assigned or edited from this page.</p>
+      </details>
+    </div>`;
+}
+
+// 4. What is on file now.
+function evidenceSection(ev) {
+  if (!ev) return '';
+  const a = ev.assessment || {};
+  const items = ev.items || [];
+  const row = (e) => html`
+    <div class="ev-row${e.expired ? ' is-expired' : ''}">
+      <div class="ev-main">
+        <div class="ev-title">
+          <strong>${e.sourceName || e.source}</strong>
+          <span class="badge">${e.kind || 'unknown'}</span>
+          ${raw(e.confidence ? html`<span class="badge">${CONFIDENCE_LABEL[e.confidence] || e.confidence} confidence</span>` : '')}
+          ${raw(e.expired ? html`<span class="badge warn">expired</span>` : '')}
+          ${raw(e.contributedTo ? html`<span class="badge ok">decided ${num(e.contributedTo)} quer${e.contributedTo === 1 ? 'y' : 'ies'}</span>` : html`<span class="badge">on file only</span>`)}
+        </div>
+        <div class="ev-claim">${e.claim}</div>
+        <div class="rec-meta">
+          ${raw(e.category ? html`<span>${e.category}</span>` : '')}
+          <span>observed ${relTime(e.observedAt)}</span>
+          ${raw(e.expiresAt ? html`<span>${e.expired ? 'expired' : 'expires'} ${relTime(e.expiresAt)}</span>` : html`<span>does not expire</span>`)}
+        </div>
+      </div>
+    </div>`;
+  return html`
+    <div class="card section" id="inv-evidence">
+      <div class="card-head"><div><h2>Current evidence</h2><p>${ev.note}</p></div></div>
+      <p><strong>${a.summary || 'Nothing on file for this subject.'}</strong>
+        ${raw(a.verdict ? html` <span class="badge ${a.verdict === 'malicious' ? 'bad' : a.verdict === 'suspicious' ? 'warn' : a.verdict === 'benign' ? 'ok' : ''}">${a.verdict}</span>` : '')}
+        ${raw(a.inferenceOnly ? html` <span class="badge warn">inference only</span>` : '')}
+        ${raw(a.corroborated ? html` <span class="badge">corroborated</span>` : '')}</p>
+      ${raw(items.length ? items.map(row).join('') : '')}
+    </div>`;
+}
+
+// 5. What the detectors inferred, and what Daddybound concluded.
+function relatedFindingsSection(fd) {
+  if (!fd) return '';
+  const items = fd.items || [];
+  return html`
+    <div class="card section" id="inv-findings">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">Experimental · alert-only</div>
+        <h2>Related findings</h2>
+        <p>${fd.note}</p>
+      </div></div>
+      ${raw(!fd.enabled
+        ? emptyState('Behavioural detection is switched off', 'No findings can exist while detection.enabled is false.', { icon: '○' })
+        : items.length
+          ? items.map((f) => html`
+              <details class="finding">
+                <summary>
+                  ${raw(severityBadge(f.severity))}
+                  <span class="mono">${f.eventType}</span>
+                  <span>${f.domain || f.clientName || f.clientIp || '—'}</span>
+                  <span class="muted small nowrap">confidence ${f.confidence}</span>
+                  <span class="muted small nowrap">${relTime(f.time)}</span>
+                </summary>
+                <div class="finding-body">
+                  <p>${f.summary}</p>
+                  <p class="muted small">Client: <span class="mono">${f.clientName || f.clientIp || 'not attributed'}</span> · Detector: <span class="mono">${f.detector}</span> · Score: <span class="mono">${f.score}</span></p>
+                  ${raw(findingDetail(f.detail))}
+                </div>
+              </details>`).join('') + (fd.truncated ? html`<p class="muted small">Only the newest findings are shown.</p>` : '')
+          : emptyState('No related finding', 'No detector raised anything about this subject in the window. That is not evidence that it is clean.', { icon: '○' }))}
+    </div>`;
+}
+
+function observationsSection(ob) {
+  if (!ob) return '';
+  const items = ob.items || [];
+  return html`
+    <div class="card section" id="inv-observations">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">Experimental · Daddybound · enforces nothing</div>
+        <h2>Local DNSSEC observations</h2>
+        <p>${ob.note}</p>
+      </div></div>
+      ${raw(!ob.available
+        ? emptyState('Learn mode is off', 'Daddybound is not observing traffic on this instance, so no local verdict exists for any name.', { icon: '○' })
+        : items.length
+          ? html`<div class="table-wrap"><table>
+              <thead><tr><th>When</th><th>Type</th><th>Upstream said</th><th>Daddybound concluded</th><th>Differs</th><th>Reason</th></tr></thead>
+              <tbody>${raw(items.map((o) => html`<tr>
+                <td class="muted">${relTime(o.time)}${o.cached ? ' (cached answer)' : ''}</td>
+                <td class="mono">${o.qtype}</td>
+                <td>${raw(o.upstream ? dnssecBadge(o.upstream) : '—')}</td>
+                <td>${raw(localDnssecBadge(o))}</td>
+                <td>${o.disagreement || '—'}</td>
+                <td class="muted small">${o.reason || ''}</td></tr>`).join(''))}
+              </tbody></table></div>${raw(ob.truncated ? html`<p class="muted small">Only the newest observations are shown.</p>` : '')}`
+          : emptyState('No observation for this name', 'Daddybound observes only resolved queries, and only those the queue accepted.', { icon: '○' }))}
+    </div>`;
+}
+
+function rawJsonSection(data) {
+  let text;
+  try {
+    text = JSON.stringify(data, null, 2);
+  } catch {
+    text = 'unavailable';
+  }
+  return html`<details class="chart-data section"><summary>Raw response</summary><pre class="mono small inv-raw">${text}</pre></details>`;
+}
+
+function investigationHeader(subject, w) {
+  return html`
+    <div class="card section">
+      <div class="card-head inv-head"><div class="inv-subject">
+        <div class="card-eyebrow">${subject.kind}</div>
+        <h2 class="mono">${subject.title}</h2>
+        ${raw(subject.sub ? html`<p>${subject.sub}</p>` : '')}
+      </div><div class="row-end hero-intel">${raw(windowLine(w))}</div></div>
+    </div>`;
+}
+
+pages.investigate = {
+  title: 'Investigate',
+  subtitle: 'One name or one address: what happened, why, and what would happen now.',
+  async render(context = {}) {
+    const hash = context.hash === undefined ? window.location.hash : context.hash;
+    const filters = investigateFilters(hash);
+    const read = (path) => apiGet(path, { signal: context.signal });
+    const form = investigateForm(filters);
+
+    if (!filters.domain && !filters.client) {
+      return html`${raw(form)}
+        ${raw(emptyState('Enter a domain or a client address', 'Query-log rows and findings link here. The page reads what this resolver kept: recorded activity, stored decisions, a read-only preview of current policy, evidence on file, and related findings.', { icon: '⌕' }))}`;
+    }
+
+    const hours = filters.hours ? `hours=${encodeURIComponent(filters.hours)}` : '';
+    if (!filters.domain) {
+      let data;
+      try {
+        data = await read(`/investigate/client/${encodeURIComponent(filters.client)}${hours ? `?${hours}` : ''}`);
+      } catch (err) {
+        if (err.status === 401 || err.name === 'AbortError') throw err;
+        return html`${raw(form)}${raw(unavailableState('Could not investigate this client', err.message || 'The request failed.'))}`;
+      }
+      const sub = data.subject || {};
+      const att = sub.attribution || {};
+      return html`${raw(form)}
+        ${raw(investigationHeader({
+          kind: 'Client', title: sub.name ? `${sub.name} · ${sub.client}` : sub.client,
+          sub: `Current attribution: ${att.attribution === 'catch_all' ? 'catch-all network' : att.attribution === 'network_prefix' ? 'matched by network prefix' : 'none'}${att.networkName ? ` · ${att.networkName}` : ''}${att.policyName ? ` · policy ${att.policyName}` : ''} — as configured now, not as recorded then.`,
+        }, data.window))}
+        ${raw(activitySection(data.activity, { client: true }))}
+        ${raw(decisionSection(data.decisions))}
+        ${raw(relatedFindingsSection(data.findings))}
+        ${raw(rawJsonSection(data))}`;
+    }
+
+    const params = [filters.client ? `client=${encodeURIComponent(filters.client)}` : '', hours].filter(Boolean).join('&');
+    let data;
+    try {
+      data = await read(`/investigate/domain/${encodeURIComponent(filters.domain)}${params ? `?${params}` : ''}`);
+    } catch (err) {
+      if (err.status === 401 || err.name === 'AbortError') throw err;
+      return html`${raw(form)}${raw(unavailableState('Could not investigate this domain', err.message || 'The request failed.'))}`;
+    }
+    const sub = data.subject || {};
+    this.enrich = { domain: sub.domain, client: sub.client };
+    return html`${raw(form)}
+      ${raw(investigationHeader({
+        kind: sub.client ? 'Domain · one client' : 'Domain',
+        title: sub.domain,
+        sub: `${sub.input && sub.input !== sub.domain ? `Entered as ${sub.input}. ` : ''}${sub.client ? `Narrowed to client ${sub.client}.` : ''}`,
+      }, data.window))}
+      ${raw(activitySection(data.activity))}
+      ${raw(decisionSection(data.decisions))}
+      ${raw(previewSection(data.preview))}
+      ${raw(evidenceSection(data.evidence))}
+      ${raw(relatedFindingsSection(data.findings))}
+      ${raw(observationsSection(data.observations))}
+      ${raw(rawJsonSection(data))}`;
+  },
+  async mounted() {
+    const form = $('#inv-form');
+    if (form) {
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const next = investigateHash(Object.fromEntries(new FormData(form)));
+        if (window.location.hash === next) router.reload();
+        else window.location.hash = next;
+      });
+      $('#inv-clear').addEventListener('click', () => { window.location.hash = '#/investigate'; });
+    }
+    mountDecisionCards();
+    const enrich = $('#inv-enrich');
+    if (enrich && this.enrich) {
+      enrich.addEventListener('click', async () => {
+        enrich.disabled = true;
+        try {
+          const q = this.enrich.client ? `?client=${encodeURIComponent(this.enrich.client)}` : '';
+          const res = await apiSend('POST', `/investigate/domain/${encodeURIComponent(this.enrich.domain)}/enrich${q}`);
+          toast(res && res.note ? res.note : `Lookup ${res && res.lookup ? res.lookup : 'requested'}`);
+          router.reload();
+        } catch (err) {
+          reportError(err);
+          enrich.disabled = false;
+        }
+      });
+    }
   },
 };
 
@@ -4071,7 +4866,7 @@ function localDnssecCard(data) {
   const withheld = (observed || 0) > 0 && stored === 0;
 
   const stat = (label, value, note) => html`
-    <div class="qfact"><dt>${label}</dt><dd><span class="mono">${value ?? 0}</span>${note ? html` <span class="muted small">${note}</span>` : ''}</dd></div>`;
+    <div class="qfact"><dt>${label}</dt><dd><span class="mono">${value ?? 0}</span>${raw(note ? html` <span class="muted small">${note}</span>` : '')}</dd></div>`;
 
   return html`
     <div class="card section">
@@ -4102,14 +4897,14 @@ function localDnssecCard(data) {
         ${raw(stat('p95 latency', (s.p95DurationMs || 0).toFixed(1) + ' ms'))}
       </dl>
 
-      ${withheld ? html`<p class="muted small">Verdicts are being counted but no rows are being stored, so the
+      ${raw(withheld ? html`<p class="muted small">Verdicts are being counted but no rows are being stored, so the
         counts by status stay at zero. Query logging is off, and an observation row names the domain it
         validated — recording it anyway would undo that setting through a feature you enabled to measure
-        DNSSEC. The totals here are aggregate and name nothing.</p>` : ''}
+        DNSSEC. The totals here are aggregate and name nothing.</p>` : '')}
 
-      ${runtime.panics ? html`<p class="muted small"><span class="badge bad">${runtime.panics}</span>
+      ${raw(runtime.panics ? html`<p class="muted small"><span class="badge bad">${runtime.panics}</span>
         validator panics were contained. That is a defect in the validator, not a property of your traffic —
-        please report it.</p>` : ''}
+        please report it.</p>` : '')}
 
       <p class="muted small note-tight">
         "Differs from upstream" is not a fault in either side. Your upstream and Daddybound
@@ -4117,6 +4912,115 @@ function localDnssecCard(data) {
         Daddybound validated the name shortly afterwards — and the disagreements are the
         evidence that decides whether local validation could ever be trusted to enforce.
       </p>
+    </div>`;
+}
+
+/*
+ * The Daddybound status block: what the runtime holds, section by section,
+ * with every scope named. The rule for the wording is the rule for the API
+ * it reads: say what was measured, say when it is not enough, never turn a
+ * count into a readiness score. A missing status is rendered as unavailable
+ * rather than as a healthy zero.
+ */
+function anchorKeyRows(keys) {
+  if (!keys || !keys.length) return html`<p class="muted small">No managed keys yet. The configured anchors are in force until the first RFC 5011 refresh seeds the trust point.</p>`;
+  return html`<div class="table-wrap"><table>
+    <thead><tr><th>Key tag</th><th>Algorithm</th><th>State</th><th>Trusted</th><th>Seen</th><th>Timer</th></tr></thead>
+    <tbody>${raw(keys.map((k) => html`<tr>
+      <td class="mono">${k.keyTag}${raw(k.seeded ? html` <span class="badge">seeded</span>` : '')}</td>
+      <td class="mono">${k.algorithm}</td>
+      <td><span class="badge ${k.trusted ? 'ok' : k.state === 'revoked' || k.state === 'removed' ? 'bad' : 'warn'}">${k.state}</span></td>
+      <td>${k.trusted ? 'yes' : 'no'}</td>
+      <td class="muted small">${relTime(k.firstSeen)} → ${relTime(k.lastSeen)}</td>
+      <td class="muted small">${k.addHoldDownUntil ? `add hold-down until ${new Date(k.addHoldDownUntil).toLocaleDateString('en-GB')}` : k.removeHoldDownUntil ? `remove hold-down until ${new Date(k.removeHoldDownUntil).toLocaleDateString('en-GB')}` : '—'}</td>
+    </tr>`).join(''))}</tbody></table></div>`;
+}
+
+function daddyboundStatusCard(status) {
+  if (!status) {
+    return html`
+      <div class="card section">
+        <div class="card-head"><div><div class="card-eyebrow">Experimental</div><h2>Daddybound runtime</h2></div></div>
+        ${raw(unavailableState('Runtime status unavailable', 'The status request failed. Nothing here is inferred from an older reading.'))}
+      </div>`;
+  }
+  const mode = status.mode || {};
+  const res = status.resolution || {};
+  const an = status.anchors || {};
+  const rt = status.runtime || {};
+  const st = status.stored || {};
+  const ev = status.evidence || {};
+  const stat = (label, value, note) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}${raw(note ? html` <span class="muted small">${note}</span>` : '')}</dd></div>`;
+  const n = (v) => (typeof v === 'number' ? num(v) : '—');
+  const persistence = an.persistence || {};
+  const persistenceBadge = { ok: ['ok', 'state file written'], not_yet_written: ['', 'state file not yet written'], failing: ['bad', 'state file cannot be written'], load_failed: ['warn', 'stored state could not be read'] }[persistence.state] || ['warn', String(persistence.state || 'unknown')];
+
+  return html`
+    <div class="card section" id="daddybound-status">
+      <div class="card-head"><div>
+        <div class="card-eyebrow">Experimental · enforces nothing</div>
+        <h2>Daddybound runtime ${raw(claimChip('experimental'))}</h2>
+        <p>What the process holds about local validation, with each figure's scope named. Reading this page resolves nothing and changes no trust state.</p>
+      </div></div>
+
+      <dl class="claim-key">
+        ${raw(stat('Mode', html`<span class="badge ${mode.effective === 'observe' ? 'ok' : ''}">${mode.effective === 'observe' ? 'Learn — active' : 'Learn — off'}</span> <span class="badge">Live — unavailable</span>`, `configured: ${mode.configured || '—'} · chosen by ${mode.chosenBy === 'installation_default' ? 'the installation default' : 'configuration'}`))}
+        ${raw(stat('Live', html`<span class="muted small">${mode.live && mode.live.reason ? mode.live.reason : 'not implemented'}</span>`))}
+        ${raw(stat('Resolution source', html`<span class="badge">${res.source || '—'}</span>`, res.transport || ''))}
+        ${raw(stat('Client answers', html`<span class="muted small">${res.clientPath || ''}</span>`))}
+      </dl>
+
+      <h4>Trust anchors (RFC 5011)</h4>
+      ${raw(!an.available
+        ? html`<p class="muted small">${an.unavailable || 'No trust-anchor manager is running.'}</p>`
+        : html`<dl class="claim-key">
+            ${raw(stat('Trust point', html`<span class="mono">${an.zone}</span> <span class="badge ${an.viable ? 'ok' : 'bad'}">${an.viable ? 'viable' : 'not viable'}</span>`, `${n(an.trustedKeys)} trusted key${an.trustedKeys === 1 ? '' : 's'}`))}
+            ${raw(an.needsIntervention ? stat('Needs an operator', html`<span class="badge bad">intervention required</span>`, an.interventionNote || '') : '')}
+            ${raw(stat('Last refresh', html`${an.refresh && an.refresh.lastSuccess ? `succeeded ${relTime(an.refresh.lastSuccess)}` : 'no successful refresh yet'}`, an.refresh && an.refresh.lastError ? `last attempt failed: ${an.refresh.lastError}` : an.refresh && an.refresh.next ? `next ${relTime(an.refresh.next)}` : ''))}
+            ${raw(stat('Persistence', html`<span class="badge ${persistenceBadge[0]}">${persistenceBadge[1]}</span>`, `${persistence.file || ''}${persistence.lastSaveError ? ` · ${persistence.lastSaveError}` : ''}${persistence.loadError ? ` · ${persistence.loadError}` : ''}`))}
+          </dl>
+          ${raw(anchorKeyRows(an.keys))}`)}
+
+      <h4>Runtime <span class="muted small">since this process started</span></h4>
+      ${raw(!rt.available
+        ? html`<p class="muted small">${rt.healthNote || 'No observer is running.'}</p>`
+        : html`<dl class="claim-key">
+            ${raw(stat('Health', html`<span class="badge ${rt.health === 'ok' ? 'ok' : rt.health === 'degraded' ? 'warn' : ''}">${rt.health}</span>`, rt.healthNote || ''))}
+            ${raw(stat('Observed', html`<span class="mono">${n(rt.observed)}</span>`, `${n(rt.dropped)} not observed (queue full) · ${n(rt.unrecorded)} lost before storage · ${n(rt.writeErrors)} write errors`))}
+            ${raw(stat('Could not conclude', html`<span class="mono">${n(rt.timeouts)} timeout · ${n(rt.resourceLimit)} limit · ${n(rt.unreachable)} unreachable</span>`, 'operational outcomes, not DNSSEC states'))}
+            ${raw(stat('Native work', html`<span class="mono">${n(rt.queries)}</span> queries to authoritative servers`, `${n(rt.delegations)} zone cuts crossed`))}
+            ${raw(rt.panics || rt.seamPanics ? stat('Defects', html`<span class="badge bad">${n((rt.panics || 0) + (rt.seamPanics || 0))} contained panics</span>`, 'a defect in the validator, not a property of your traffic — please report it') : '')}
+          </dl>`)}
+
+      <h4>Stored <span class="muted small">rows within the last ${st.windowHours || '—'}h</span></h4>
+      <dl class="claim-key">
+        ${raw(stat('In window', html`<span class="mono">${n(st.total)}</span>`, `${n(st.retainedRows)} retained in total · retention ${n(st.retentionDays)} day(s)`))}
+        ${raw(stat('Observing since', html`${st.observingSince ? relTime(st.observingSince) : 'no stored observations'}`, st.observedUntil ? `latest ${relTime(st.observedUntil)}` : ''))}
+      </dl>
+
+      <h4>Disagreement populations <span class="muted small">stored rows, by how they were obtained</span></h4>
+      ${raw((status.populations || []).length
+        ? html`<div class="table-wrap"><table>
+            <thead><tr><th>Resolution</th><th>Client answer</th><th>Comparable</th><th class="num">Rows</th><th class="num">Local bogus, upstream validated</th><th>Reading</th></tr></thead>
+            <tbody>${raw(status.populations.map((p) => html`<tr>
+              <td class="mono">${p.resolution}</td>
+              <td>${p.cached ? 'from cache' : 'fresh'}</td>
+              <td>${p.comparable ? 'yes' : 'no'}</td>
+              <td class="num">${n(p.total)}</td>
+              <td class="num">${p.comparable ? n(p.disagreements && p.disagreements.local_bogus_upstream_validated) : '—'}</td>
+              <td class="muted small">${p.note}</td></tr>`).join(''))}</tbody></table></div>`
+        : html`<p class="muted small">No stored observations in the window.</p>`)}
+
+      <h4>Evidence for enforcement</h4>
+      <p><span class="badge warn">${ev.sufficient ? 'sufficient' : 'insufficient'}</span> <span class="muted small">${ev.note || ''}</span></p>
+      ${raw((ev.criteria || []).length
+        ? html`<div class="table-wrap"><table>
+            <thead><tr><th>Criterion</th><th>Measured</th><th>Status</th></tr></thead>
+            <tbody>${raw(ev.criteria.map((c) => html`<tr><td>${c.title}</td><td class="muted small">${c.measured}</td><td><span class="badge">${String(c.status || '').replace('_', ' ')}</span></td></tr>`).join(''))}</tbody></table></div>`
+        : '')}
+      <p class="muted small">The criteria and the corpus work are tracked in
+        ${raw((ev.issues || []).map((u) => html`<a href="${u}" target="_blank" rel="noopener noreferrer">${u.replace('https://github.com/', '')}</a>`).join(' and '))}.
+        No number on this page is a readiness score.</p>
     </div>`;
 }
 
@@ -4128,6 +5032,7 @@ pages.assurance = {
     // Best-effort: the Assurance page must render even when local DNSSEC
     // observation is off, unreachable, or has never recorded anything.
     const dnssec = await apiGet('/dnssec/observations?hours=168').catch(() => null);
+    const runtime = await apiGet('/dnssec/status?hours=168').catch(() => null);
 
     return html`
       <div class="card lead section">
@@ -4151,6 +5056,7 @@ pages.assurance = {
       </div>
 
       ${raw(localDnssecCard(dnssec))}
+      ${raw(daddyboundStatusCard(runtime))}
 
       <div class="card section">
         <div class="card-head">
@@ -4893,6 +5799,27 @@ if (typeof module !== 'undefined' && module.exports) {
     emptyState,
     protectionState,
     statusHero,
+    blockedSplit,
+    measuredFacts,
+    investigateFilters,
+    investigateHash,
+    investigateForm,
+    findingLinks,
+    activitySection,
+    decisionSection,
+    previewSection,
+    evidenceSection,
+    relatedFindingsSection,
+    observationsSection,
+    reviewBadge,
+    reviewForm,
+    findingRow,
+    findingFilters,
+    findingHash,
+    findingFilterForm,
+    createFindingLoader,
+    reviewHistoryList,
+    REVIEW_STATES,
     attentionItems,
     attentionPanel,
     recentlyBlocked,
@@ -4918,6 +5845,8 @@ if (typeof module !== 'undefined' && module.exports) {
     localDnssecBadge,
     localDnssecCard,
     daddyboundModes,
+    daddyboundStatusCard,
+    anchorKeyRows,
     networkRow,
     adHocBadge,
     isDefaultNetwork,

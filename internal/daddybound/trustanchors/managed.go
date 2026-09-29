@@ -155,6 +155,43 @@ type Manager struct {
 	// anchors is the set Anchors returns, recomputed whenever tp changes so
 	// that the hot path is a read of a prepared value.
 	anchors dnssec.TrustAnchors
+
+	// health is what the status surface reports about persistence. The
+	// manager already logs a load or save failure; this keeps the last one
+	// where an operator can read it without a log, because a state file
+	// that has been unwritable for a month is a fact about the deployment
+	// that a green "anchors: 2 keys" would hide.
+	health Health
+}
+
+// Health is the persistence state of a trust point, for the status surface.
+//
+// The anchors in force are unaffected by anything here — that is the
+// manager's design — so this answers a different question: whether what the
+// resolver has learned will survive a restart.
+type Health struct {
+	// LoadError is why the stored trust point could not be read at start, or
+	// empty. A first run has no stored state and reports nothing here.
+	LoadError string
+	// Saves is how many writes succeeded since start.
+	Saves uint64
+	// SaveErrors is how many writes failed since start, and LastSaveError is
+	// the most recent reason. A failed save leaves the anchors in force
+	// unchanged; it costs hold-down progress on the next restart.
+	SaveErrors    uint64
+	LastSaveError string
+	// LastSaveAt is when a write last succeeded.
+	LastSaveAt time.Time
+	// Seeded reports that no stored trust point existed at start and the
+	// configured anchors were used alone until the first refresh.
+	Seeded bool
+}
+
+// Health returns a snapshot of the persistence state.
+func (m *Manager) Health() Health {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.health
 }
 
 // NewManager loads the stored trust point, or seeds one from the configured
@@ -184,15 +221,18 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	switch {
 	case errors.Is(err, ErrNoState):
 		tp = TrustPoint{Zone: cfg.Zone}
+		m.health.Seeded = true
 	case err != nil:
 		cfg.Log.Error("stored DNSSEC trust anchors could not be read; "+
 			"validating with the configured anchors until a refresh succeeds",
 			"zone", cfg.Zone, "error", err)
 		tp = TrustPoint{Zone: cfg.Zone}
+		m.health.LoadError = err.Error()
 	case tp.Zone != cfg.Zone:
 		cfg.Log.Error("stored DNSSEC trust anchors are for a different zone; ignoring them",
 			"stored", tp.Zone, "configured", cfg.Zone)
 		tp = TrustPoint{Zone: cfg.Zone}
+		m.health.LoadError = "stored trust point is for zone " + tp.Zone + ", not " + cfg.Zone
 	}
 
 	m.tp = tp

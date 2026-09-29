@@ -125,12 +125,33 @@ type compiledNetwork struct {
 	policyID string
 	prefixes []netip.Prefix
 	enabled  bool
-	// bits is the longest prefix length, used to prefer the most specific match.
+	// maxBits is the longest prefix length across this network's CIDRs.
+	//
+	// It orders snapshot.networks and nothing else. It used to decide
+	// attribution, and that was the defect route fixes: a network is not a
+	// prefix, and ranking whole networks by their narrowest CIDR let an
+	// unrelated /32 promote a /8 over the /16 that actually contained the
+	// client. Attribution now walks snapshot.routes, one entry per CIDR.
 	maxBits int
+}
+
+// route is one CIDR of one enabled network: the unit longest-prefix matching
+// works on.
+//
+// A client is attributed to the most specific prefix that contains it, and
+// "most specific" is a property of a prefix rather than of a network. Two
+// networks can each hold several CIDRs of different lengths, so the ranking has
+// to happen per CIDR or it is not longest-prefix matching at all.
+type route struct {
+	prefix  netip.Prefix
+	network *compiledNetwork
 }
 
 type snapshot struct {
 	networks []compiledNetwork
+	// routes is every CIDR of every enabled network, most specific first,
+	// with a deterministic order among equal lengths. See sortRoutes.
+	routes   []route
 	policies map[string]*compiledPolicy
 	// fallback is the network used for clients matching no CIDR.
 	fallback      *compiledNetwork
@@ -164,6 +185,68 @@ type ReputationVerdict struct {
 	Category  string
 	// ProviderName is written into the block reason, because an operator
 	// looking at a blocked query needs to know which third party decided it.
+	ProviderName string
+}
+
+// CachedReputation is the read-only face of a Reputation: what it already
+// knows, without asking anyone.
+//
+// Optional. A consultant that implements it lets the policy preview say what
+// an external provider has on file for a name without causing a lookup. One
+// that does not is treated as having nothing on file, which makes the preview
+// say "not evaluated" rather than guess.
+type CachedReputation interface {
+	ConsultCached(policyID, domain string) (ReputationVerdict, CacheState)
+}
+
+// CacheState says what a cache-only consultation found.
+type CacheState int
+
+const (
+	// CacheNoProvider: no external provider applies to this policy, or
+	// reputation is off. The live path would not consult anyone either.
+	CacheNoProvider CacheState = iota
+	// CacheMiss: a provider applies and has no usable cached verdict. The
+	// live path would ask it, and the answer is unknown until it does.
+	CacheMiss
+	// CacheHit: every applicable provider had a fresh cached verdict, or one
+	// of them had a malicious one, which is decisive on its own.
+	CacheHit
+)
+
+// Preview is what the current configuration would decide for a question,
+// reached without any side effect.
+//
+// The decision is produced by the same code the DNS handler runs, on the
+// same compiled snapshot, so it cannot drift from what a real query would
+// get. What it does not do is the one step of the live path that has a side
+// effect: asking an external provider. External reports what the provider
+// cache already held instead, and says plainly when the live outcome would
+// depend on a lookup this preview did not perform.
+type Preview struct {
+	Decision Decision
+	// PolicyID and PolicyName are the policy the question was evaluated
+	// under, after falling back to the default for an unknown ID.
+	PolicyID   string
+	PolicyName string
+	External   ExternalPreview
+}
+
+// ExternalPreview describes the external-provider step of a preview.
+type ExternalPreview struct {
+	// Configured reports that a reputation consultant is installed at all.
+	Configured bool
+	// Reached reports that evaluation got as far as the external step: no
+	// local rule decided the question first. An allow-listed name never
+	// reaches a provider, and the preview says so by leaving this false.
+	Reached bool
+	// State is what the cache held, when the step was reached.
+	State CacheState
+	// Evaluated reports that the external step produced an answer — a
+	// cached verdict — rather than being skipped for want of one.
+	Evaluated bool
+	// ProviderName names the provider whose cached verdict decided, if one
+	// did.
 	ProviderName string
 }
 
@@ -260,7 +343,10 @@ func (e *Engine) Reload(ctx context.Context) error {
 		snap.networks = append(snap.networks, cn)
 	}
 
-	// Most specific prefix wins, so a /32 exception beats the /16 it sits in.
+	// The network order decides only which row is the catch-all below; it
+	// does not decide attribution. ListNetworks returns rows by name, and the
+	// stable sort keeps that order among equal lengths, so the choice of
+	// fallback is the same on every reload.
 	sort.SliceStable(snap.networks, func(i, j int) bool {
 		return snap.networks[i].maxBits > snap.networks[j].maxBits
 	})
@@ -277,6 +363,25 @@ func (e *Engine) Reload(ctx context.Context) error {
 		snap.fallback = &snap.networks[len(snap.networks)-1]
 	}
 
+	// The routing table: one entry per CIDR, most specific prefix first.
+	//
+	// Built after snap.networks is complete and sorted, because each route
+	// points into that slice and an append after this point would move it.
+	// Disabled networks contribute no routes at all: a client inside a
+	// disabled network's range falls through to whatever else contains it,
+	// exactly as it did before, and the query path no longer has to check the
+	// flag per prefix.
+	for i := range snap.networks {
+		n := &snap.networks[i]
+		if !n.enabled {
+			continue
+		}
+		for _, p := range n.prefixes {
+			snap.routes = append(snap.routes, route{prefix: p, network: n})
+		}
+	}
+	sortRoutes(snap.routes)
+
 	for _, c := range clients {
 		snap.clients[c.IP] = c.Name
 	}
@@ -286,27 +391,55 @@ func (e *Engine) Reload(ctx context.Context) error {
 }
 
 // MatchClient resolves a client address to its network and policy.
+//
+// The client belongs to the network owning the most specific prefix that
+// contains it. That is decided per CIDR, never per network: a network holding
+// 10.0.0.0/8 and an unrelated 192.0.2.123/32 is not "a /32 network" when a
+// client from 10.42.1.10 arrives, and a second network's 10.42.0.0/16 must win.
+// Equal-length prefixes from different networks are broken by network name and
+// then ID, so the answer is the same on every reload — see sortRoutes.
+//
+// A client inside no enabled prefix lands on the catch-all, whose policy is the
+// deployment's default for unmatched clients.
 func (e *Engine) MatchClient(addr netip.Addr) Match {
 	snap := e.snap.Load()
 	if addr.Is4In6() {
 		addr = addr.Unmap()
 	}
 
-	for i := range snap.networks {
-		n := &snap.networks[i]
-		if !n.enabled || len(n.prefixes) == 0 {
-			continue
-		}
-		for _, p := range n.prefixes {
-			if prefixContains(p, addr) {
-				return e.matchFor(snap, n)
-			}
+	for i := range snap.routes {
+		r := &snap.routes[i]
+		if prefixContains(r.prefix, addr) {
+			return e.matchFor(snap, r.network)
 		}
 	}
 	if snap.fallback != nil {
 		return e.matchFor(snap, snap.fallback)
 	}
 	return Match{}
+}
+
+// sortRoutes orders a routing table most specific prefix first.
+//
+// Longest prefix first is the whole of the correctness argument: the first
+// route that contains a client is then the most specific one that does. The
+// remaining keys exist so that ties are decided the same way every time —
+// two networks claiming the same range is a configuration an operator should
+// fix, but until they do, attribution must not flip between reloads.
+func sortRoutes(routes []route) {
+	sort.SliceStable(routes, func(i, j int) bool {
+		a, b := routes[i], routes[j]
+		if a.prefix.Bits() != b.prefix.Bits() {
+			return a.prefix.Bits() > b.prefix.Bits()
+		}
+		if a.network.name != b.network.name {
+			return a.network.name < b.network.name
+		}
+		if a.network.id != b.network.id {
+			return a.network.id < b.network.id
+		}
+		return a.prefix.String() < b.prefix.String()
+	})
 }
 
 // MatchNetworkID resolves an explicitly identified network, used by DoH and DoT
@@ -355,52 +488,15 @@ func (e *Engine) Evaluate(policyID, domain string) Decision {
 // rather than leaving it to run out its budget.
 func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) Decision {
 	snap := e.snap.Load()
-	p := snap.policies[policyID]
-	if p == nil {
-		p = snap.defaultPolicy
-	}
+	p := snap.policyFor(policyID)
 	if p == nil {
 		return Decision{LogQuery: true, BlockMode: store.BlockNXDOMAIN}
 	}
 
-	d := Decision{BlockMode: p.blockMode, LogQuery: p.logQueries}
-
-	if len(p.allow) > 0 && matchSuffix(p.allow, domain) {
-		d.Reason = "Allowed by policy allow-list"
-		d.Source = "allow-list"
-		d.Basis = &Basis{Rule: RuleAllowList, PolicyID: p.id, PolicyName: p.name}
+	var d Decision
+	evaluateLocal(e.lists, p, domain, &d)
+	if d.Basis.Decided() {
 		return d
-	}
-
-	if len(p.block) > 0 && matchSuffix(p.block, domain) {
-		d.Blocked = true
-		d.Reason = "Blocked by your custom block-list"
-		d.Category = "custom"
-		d.Source = "block-list"
-		d.Basis = &Basis{
-			Rule: RuleBlockList, Category: "custom",
-			PolicyID: p.id, PolicyName: p.name,
-		}
-		return d
-	}
-
-	if len(p.categories) > 0 {
-		// LookupEnabled, not Lookup: a domain can be claimed under several
-		// categories, and this policy blocks it if it enables any one of them.
-		// Asking for the domain's primary category and comparing it here would
-		// miss a C2 domain that a malware feed also lists.
-		if entry, ok := e.lists.Load().LookupEnabled(domain, p.categories); ok {
-			d.Blocked = true
-			d.Category = entry.Category
-			d.Source = entry.FeedName
-			d.Reason = catalog.CategoryReason(entry.Category)
-			d.Basis = &Basis{
-				Rule: RuleCategory, Category: entry.Category,
-				FeedID: entry.FeedID, FeedName: entry.FeedName,
-				PolicyID: p.id, PolicyName: p.name,
-			}
-			return d
-		}
 	}
 
 	// External intelligence, last and only if configured.
@@ -416,26 +512,134 @@ func (e *Engine) EvaluateContext(ctx context.Context, policyID, domain string) D
 	// the default and the overwhelmingly common case.
 	if rep := e.reputation.Load(); rep != nil {
 		if v, ok := (*rep).Consult(ctx, policyID, domain); ok && v.Malicious {
-			d.Blocked = true
-			d.Category = v.Category
-			if d.Category == "" {
-				d.Category = "malware"
-			}
-			d.Source = v.ProviderName
-			d.Basis = &Basis{
-				Rule: RuleReputation, Category: d.Category,
-				ProviderName: v.ProviderName,
-				PolicyID:     p.id, PolicyName: p.name,
-			}
-			// Named rather than generic. An operator looking at a blocked
-			// query has to be able to tell a curated-feed block from a
-			// third-party API's opinion, because only one of those is
-			// something they can inspect offline.
-			d.Reason = "Blocked by external threat intelligence (" + v.ProviderName + ")"
+			applyReputation(&d, p, v)
 		}
 	}
 
 	return d
+}
+
+// Preview evaluates a question exactly as EvaluateContext would, minus the
+// one step with a side effect. See the Preview type.
+//
+// Nothing here writes: no query-log row, no decision record, no cache entry,
+// no provider request. It reads the compiled snapshot and, when the external
+// step is reached, the provider cache.
+func (e *Engine) Preview(policyID, domain string) Preview {
+	snap := e.snap.Load()
+	p := snap.policyFor(policyID)
+	if p == nil {
+		return Preview{Decision: Decision{LogQuery: true, BlockMode: store.BlockNXDOMAIN}}
+	}
+
+	out := Preview{PolicyID: p.id, PolicyName: p.name}
+	evaluateLocal(e.lists, p, domain, &out.Decision)
+	rep := e.reputation.Load()
+	out.External.Configured = rep != nil
+	if out.Decision.Basis.Decided() || rep == nil {
+		return out
+	}
+
+	out.External.Reached = true
+	cached, ok := (*rep).(CachedReputation)
+	if !ok {
+		// A consultant that cannot be asked without a lookup. Treated as a
+		// miss: the live path would ask, and this preview did not.
+		out.External.State = CacheMiss
+		return out
+	}
+	v, state := cached.ConsultCached(policyID, domain)
+	out.External.State = state
+	if state != CacheHit {
+		return out
+	}
+	out.External.Evaluated = true
+	out.External.ProviderName = v.ProviderName
+	if v.Malicious {
+		applyReputation(&out.Decision, p, v)
+	}
+	return out
+}
+
+// policyFor returns the named policy, or the default for an unknown ID.
+func (s *snapshot) policyFor(id string) *compiledPolicy {
+	if p := s.policies[id]; p != nil {
+		return p
+	}
+	return s.defaultPolicy
+}
+
+// applyReputation turns a provider's malicious verdict into the decision.
+func applyReputation(d *Decision, p *compiledPolicy, v ReputationVerdict) {
+	d.Blocked = true
+	d.Category = v.Category
+	if d.Category == "" {
+		d.Category = "malware"
+	}
+	d.Source = v.ProviderName
+	d.Basis = &Basis{
+		Rule: RuleReputation, Category: d.Category,
+		ProviderName: v.ProviderName,
+		PolicyID:     p.id, PolicyName: p.name,
+	}
+	// Named rather than generic. An operator looking at a blocked query has
+	// to be able to tell a curated-feed block from a third-party API's
+	// opinion, because only one of those is something they can inspect
+	// offline.
+	d.Reason = "Blocked by external threat intelligence (" + v.ProviderName + ")"
+}
+
+// evaluateLocal runs the three local rules and writes the decision they
+// reached into d, with Basis set when one of them fired.
+//
+// Shared by the live path and the preview so the two cannot disagree. It
+// allocates nothing on the miss path: see the note on Decision.Basis.
+//
+// It fills the caller's value rather than returning one because a Decision
+// is several strings wide and this function is too large to inline: returning
+// it by value put a copy on the miss path that the hot-path benchmark could
+// see, and the miss path is nearly every query.
+func evaluateLocal(lists *blocklist.Holder, p *compiledPolicy, domain string, d *Decision) {
+	*d = Decision{BlockMode: p.blockMode, LogQuery: p.logQueries}
+
+	if len(p.allow) > 0 && matchSuffix(p.allow, domain) {
+		d.Reason = "Allowed by policy allow-list"
+		d.Source = "allow-list"
+		d.Basis = &Basis{Rule: RuleAllowList, PolicyID: p.id, PolicyName: p.name}
+		return
+	}
+
+	if len(p.block) > 0 && matchSuffix(p.block, domain) {
+		d.Blocked = true
+		d.Reason = "Blocked by your custom block-list"
+		d.Category = "custom"
+		d.Source = "block-list"
+		d.Basis = &Basis{
+			Rule: RuleBlockList, Category: "custom",
+			PolicyID: p.id, PolicyName: p.name,
+		}
+		return
+	}
+
+	if len(p.categories) > 0 {
+		// LookupEnabled, not Lookup: a domain can be claimed under several
+		// categories, and this policy blocks it if it enables any one of them.
+		// Asking for the domain's primary category and comparing it here would
+		// miss a C2 domain that a malware feed also lists.
+		if entry, ok := lists.Load().LookupEnabled(domain, p.categories); ok {
+			d.Blocked = true
+			d.Category = entry.Category
+			d.Source = entry.FeedName
+			d.Reason = catalog.CategoryReason(entry.Category)
+			d.Basis = &Basis{
+				Rule: RuleCategory, Category: entry.Category,
+				FeedID: entry.FeedID, FeedName: entry.FeedName,
+				PolicyID: p.id, PolicyName: p.name,
+			}
+			return
+		}
+	}
+
 }
 
 // PolicyLogsQueries reports whether the named policy records per-query rows.

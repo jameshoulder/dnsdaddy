@@ -1098,6 +1098,27 @@ td.mono { font-family: var(--font-mono); font-size: 12px; word-break: break-all;
 
 .hero-stat.is-blocked .n { color: var(--danger); }
 .hero-stat.is-detect .n  { color: var(--violet); }
+.hero-split { display: block; margin-top: 4px; font-size: 12px; color: var(--muted-foreground); }
+.inv-raw { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; margin: 0; }
+/* The investigated name is untrusted and can be 253 characters long: it must wrap, never widen the page. */
+.inv-head { align-items: flex-start; flex-wrap: wrap; }
+.inv-subject { min-width: 0; flex: 1 1 20rem; }
+.inv-subject h2, .inv-subject p { overflow-wrap: anywhere; }
+.ev-row.is-expired .ev-claim { color: var(--muted-foreground); text-decoration: line-through; }
+.finding-links { margin: 0 0 var(--s3); gap: var(--s2); flex-wrap: wrap; }
+.review-form { margin: var(--s3) 0 var(--s4); padding: var(--s3) var(--s4); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); }
+.review-form h4 { margin: 0 0 4px; }
+.review-fields { display: grid; grid-template-columns: minmax(0, 180px) minmax(0, 1fr) auto; gap: var(--s3); align-items: end; margin-top: var(--s3); }
+.review-fields .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.review-fields textarea { min-height: 44px; font-family: inherit; font-size: 13px; }
+.review-meta { margin: var(--s2) 0 0; }
+.review-history { margin-top: var(--s3); }
+.review-history-list { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.review-history-note { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted-foreground); }
+.review-badge { text-transform: none; }
+@media (max-width: 760px) {
+  .review-fields { grid-template-columns: minmax(0, 1fr); }
+}
 .hero-period { flex: none; margin-left: auto; align-self: flex-start; }
 
 .attn-item {

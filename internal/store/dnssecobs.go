@@ -169,13 +169,21 @@ type DNSSECObservationFilter struct {
 	// DisagreementsOnly keeps only rows where local and upstream differ,
 	// which is what an operator investigating this feature actually wants.
 	DisagreementsOnly bool
-	Limit             int
+	// Since, when set, keeps only rows observed at or after it — the same
+	// window the summary is computed over, so a list and its summary
+	// describe one population.
+	Since time.Time
+	// Domain, when set, keeps only observations of exactly that name.
+	Domain string
+	Limit  int
 }
 
 // ListDNSSECObservations returns recent observations, newest first.
 func (s *Store) ListDNSSECObservations(ctx context.Context, f DNSSECObservationFilter) ([]DNSSECObservation, error) {
+	// 501, not 500: a caller asking for one more than it will show is how
+	// the API learns whether the window holds more rows than the page.
 	limit := f.Limit
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 || limit > 501 {
 		limit = 100
 	}
 
@@ -191,6 +199,14 @@ func (s *Store) ListDNSSECObservations(ctx context.Context, f DNSSECObservationF
 	}
 	if f.DisagreementsOnly {
 		q += " AND disagreement <> ''"
+	}
+	if !f.Since.IsZero() {
+		q += " AND ts >= ?"
+		args = append(args, unixMilli(f.Since))
+	}
+	if f.Domain != "" {
+		q += " AND qname = ?"
+		args = append(args, f.Domain)
 	}
 	q += " ORDER BY ts DESC LIMIT ?"
 	args = append(args, limit)
@@ -302,4 +318,71 @@ func placeholders(n int) string {
 		b = append(b, '?')
 	}
 	return string(b)
+}
+
+// DNSSECPopulationCell is one cell of the population breakdown: how the
+// records were obtained, whether the client's answer came from cache, what
+// the upstream asserted and what Daddybound concluded.
+//
+// Kept as the raw cross-tabulation so a reader can separate the populations
+// that are comparable from those that are not. A disagreement reached
+// through a forwarder is a different claim from one reached natively, and a
+// disagreement about a name whose client answer was minutes old is not
+// evidence about that answer at all.
+type DNSSECPopulationCell struct {
+	Resolution   string `json:"resolution"`
+	Cached       bool   `json:"cached"`
+	Upstream     string `json:"upstream"`
+	Status       string `json:"status"`
+	Disagreement string `json:"disagreement,omitempty"`
+	Count        int64  `json:"count"`
+}
+
+// DNSSECPopulationsSince cross-tabulates stored observations in a window.
+func (s *Store) DNSSECPopulationsSince(ctx context.Context, since time.Time) ([]DNSSECPopulationCell, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT resolution, cached, upstream, status, disagreement, COUNT(*)
+		  FROM dnssec_observations WHERE ts >= ?
+		 GROUP BY resolution, cached, upstream, status, disagreement`, unixMilli(since))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []DNSSECPopulationCell{}
+	for rows.Next() {
+		var (
+			c      DNSSECPopulationCell
+			cached int
+		)
+		if err := rows.Scan(&c.Resolution, &cached, &c.Upstream, &c.Status, &c.Disagreement, &c.Count); err != nil {
+			return nil, err
+		}
+		c.Cached = cached != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// DNSSECObservationSpan reports the oldest and newest stored observation and
+// how many there are, over everything retention has kept.
+//
+// Bounded reads on the ts index. "Observing since" is the honest measure of
+// how long the evidence has been accumulating, and it is bounded by
+// retention rather than by uptime: a restart does not shorten it, and a long
+// retention setting does not lengthen it past the first row.
+func (s *Store) DNSSECObservationSpan(ctx context.Context) (first, last time.Time, count int64, err error) {
+	var minTS, maxTS sql.NullInt64
+	err = s.db.QueryRowContext(ctx,
+		`SELECT MIN(ts), MAX(ts), COUNT(*) FROM dnssec_observations`).Scan(&minTS, &maxTS, &count)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, err
+	}
+	if minTS.Valid {
+		first = fromUnixMilli(minTS.Int64)
+	}
+	if maxTS.Valid {
+		last = fromUnixMilli(maxTS.Int64)
+	}
+	return first, last, count, nil
 }

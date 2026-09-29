@@ -185,7 +185,24 @@ func (c PolicyConsultant) Consult(ctx context.Context, policyID, domain string) 
 	if !ok {
 		return ConsultResult{}, false
 	}
+	return c.translate(v, domain), true
+}
 
+// ConsultCached answers from the cache alone. See Engine.CachedVerdict.
+func (c PolicyConsultant) ConsultCached(policyID, domain string) (ConsultResult, CacheOutcome) {
+	if c.Engine == nil {
+		return ConsultResult{}, CacheOutcomeNoProvider
+	}
+	v, outcome := c.Engine.CachedVerdict(policyID, domain)
+	if outcome != CacheOutcomeHit {
+		return ConsultResult{}, outcome
+	}
+	return c.translate(v, domain), CacheOutcomeHit
+}
+
+// translate turns a verdict into the yes/no the policy engine wants, applying
+// the same threshold whether the verdict came from a lookup or the cache.
+func (c PolicyConsultant) translate(v Verdict, domain string) ConsultResult {
 	threshold := c.Threshold
 	if threshold <= 0 {
 		threshold = 1
@@ -209,7 +226,7 @@ func (c PolicyConsultant) Consult(ctx context.Context, policyID, domain string) 
 		// operator rather than on us.
 		res.Malicious = v.Score >= threshold
 	}
-	return res, true
+	return res
 }
 
 // providerNameFor finds a name for the block reason.

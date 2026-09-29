@@ -453,6 +453,73 @@ func (e *Engine) Consult(ctx context.Context, policyID, domain string) (Verdict,
 	return e.waitForFirst(ctx, subject, misses, worst, haveHit)
 }
 
+// CacheOutcome says what CachedVerdict found.
+type CacheOutcome int
+
+const (
+	// CacheOutcomeNoProvider: reputation is off, or no usable provider
+	// with the reputation capability applies to this policy.
+	CacheOutcomeNoProvider CacheOutcome = iota
+	// CacheOutcomeMiss: at least one applicable provider has no fresh
+	// verdict cached, and no cached verdict was decisive on its own.
+	CacheOutcomeMiss
+	// CacheOutcomeHit: the cache alone answers, exactly as it would on the
+	// live path — every applicable provider was cached, or one cached
+	// verdict was malicious.
+	CacheOutcomeHit
+)
+
+// CachedVerdict answers from memory and nothing else.
+//
+// The read-only twin of Consult, for the policy preview. It applies the same
+// merge — the worst cached verdict wins, and a malicious one is decisive
+// without waiting for the others — and then stops where Consult would start
+// spending: no lookup is queued, no cache is warmed, no budget is waited on.
+// A caller that wants those calls Consult, and says so.
+func (e *Engine) CachedVerdict(policyID, domain string) (Verdict, CacheOutcome) {
+	if *e.mode.Load() == ModeOff {
+		return Verdict{Disposition: DispositionUnknown}, CacheOutcomeNoProvider
+	}
+
+	subject := DomainSubject(domain)
+	now := time.Now()
+
+	e.mu.RLock()
+	instances := e.instances
+	e.mu.RUnlock()
+
+	var (
+		worst      Verdict
+		haveHit    bool
+		applicable int
+		misses     int
+	)
+	for _, inst := range instances {
+		if !inst.HasCapability(CapReputation) || !inst.AppliesTo(policyID) {
+			continue
+		}
+		applicable++
+		hit, ok := e.cache.Get(subject.Value, inst.ID, now)
+		if !ok {
+			misses++
+			continue
+		}
+		if !haveHit || hit.Verdict.Score > worst.Score {
+			worst, haveHit = hit.Verdict, true
+		}
+	}
+	switch {
+	case applicable == 0:
+		return Verdict{Disposition: DispositionUnknown}, CacheOutcomeNoProvider
+	case haveHit && worst.Disposition == DispositionMalicious:
+		return worst, CacheOutcomeHit
+	case misses > 0:
+		return Verdict{Disposition: DispositionUnknown}, CacheOutcomeMiss
+	default:
+		return worst, CacheOutcomeHit
+	}
+}
+
 // waitForFirst enqueues the misses and waits up to the budget.
 func (e *Engine) waitForFirst(ctx context.Context, subject Subject, misses []*Instance, best Verdict, haveBest bool) (Verdict, bool) {
 	// Buffered to the number of senders, so a worker that answers after the
