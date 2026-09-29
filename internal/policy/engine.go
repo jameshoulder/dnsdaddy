@@ -125,12 +125,33 @@ type compiledNetwork struct {
 	policyID string
 	prefixes []netip.Prefix
 	enabled  bool
-	// bits is the longest prefix length, used to prefer the most specific match.
+	// maxBits is the longest prefix length across this network's CIDRs.
+	//
+	// It orders snapshot.networks and nothing else. It used to decide
+	// attribution, and that was the defect route fixes: a network is not a
+	// prefix, and ranking whole networks by their narrowest CIDR let an
+	// unrelated /32 promote a /8 over the /16 that actually contained the
+	// client. Attribution now walks snapshot.routes, one entry per CIDR.
 	maxBits int
+}
+
+// route is one CIDR of one enabled network: the unit longest-prefix matching
+// works on.
+//
+// A client is attributed to the most specific prefix that contains it, and
+// "most specific" is a property of a prefix rather than of a network. Two
+// networks can each hold several CIDRs of different lengths, so the ranking has
+// to happen per CIDR or it is not longest-prefix matching at all.
+type route struct {
+	prefix  netip.Prefix
+	network *compiledNetwork
 }
 
 type snapshot struct {
 	networks []compiledNetwork
+	// routes is every CIDR of every enabled network, most specific first,
+	// with a deterministic order among equal lengths. See sortRoutes.
+	routes   []route
 	policies map[string]*compiledPolicy
 	// fallback is the network used for clients matching no CIDR.
 	fallback      *compiledNetwork
@@ -260,7 +281,10 @@ func (e *Engine) Reload(ctx context.Context) error {
 		snap.networks = append(snap.networks, cn)
 	}
 
-	// Most specific prefix wins, so a /32 exception beats the /16 it sits in.
+	// The network order decides only which row is the catch-all below; it
+	// does not decide attribution. ListNetworks returns rows by name, and the
+	// stable sort keeps that order among equal lengths, so the choice of
+	// fallback is the same on every reload.
 	sort.SliceStable(snap.networks, func(i, j int) bool {
 		return snap.networks[i].maxBits > snap.networks[j].maxBits
 	})
@@ -277,6 +301,25 @@ func (e *Engine) Reload(ctx context.Context) error {
 		snap.fallback = &snap.networks[len(snap.networks)-1]
 	}
 
+	// The routing table: one entry per CIDR, most specific prefix first.
+	//
+	// Built after snap.networks is complete and sorted, because each route
+	// points into that slice and an append after this point would move it.
+	// Disabled networks contribute no routes at all: a client inside a
+	// disabled network's range falls through to whatever else contains it,
+	// exactly as it did before, and the query path no longer has to check the
+	// flag per prefix.
+	for i := range snap.networks {
+		n := &snap.networks[i]
+		if !n.enabled {
+			continue
+		}
+		for _, p := range n.prefixes {
+			snap.routes = append(snap.routes, route{prefix: p, network: n})
+		}
+	}
+	sortRoutes(snap.routes)
+
 	for _, c := range clients {
 		snap.clients[c.IP] = c.Name
 	}
@@ -286,27 +329,55 @@ func (e *Engine) Reload(ctx context.Context) error {
 }
 
 // MatchClient resolves a client address to its network and policy.
+//
+// The client belongs to the network owning the most specific prefix that
+// contains it. That is decided per CIDR, never per network: a network holding
+// 10.0.0.0/8 and an unrelated 192.0.2.123/32 is not "a /32 network" when a
+// client from 10.42.1.10 arrives, and a second network's 10.42.0.0/16 must win.
+// Equal-length prefixes from different networks are broken by network name and
+// then ID, so the answer is the same on every reload — see sortRoutes.
+//
+// A client inside no enabled prefix lands on the catch-all, whose policy is the
+// deployment's default for unmatched clients.
 func (e *Engine) MatchClient(addr netip.Addr) Match {
 	snap := e.snap.Load()
 	if addr.Is4In6() {
 		addr = addr.Unmap()
 	}
 
-	for i := range snap.networks {
-		n := &snap.networks[i]
-		if !n.enabled || len(n.prefixes) == 0 {
-			continue
-		}
-		for _, p := range n.prefixes {
-			if prefixContains(p, addr) {
-				return e.matchFor(snap, n)
-			}
+	for i := range snap.routes {
+		r := &snap.routes[i]
+		if prefixContains(r.prefix, addr) {
+			return e.matchFor(snap, r.network)
 		}
 	}
 	if snap.fallback != nil {
 		return e.matchFor(snap, snap.fallback)
 	}
 	return Match{}
+}
+
+// sortRoutes orders a routing table most specific prefix first.
+//
+// Longest prefix first is the whole of the correctness argument: the first
+// route that contains a client is then the most specific one that does. The
+// remaining keys exist so that ties are decided the same way every time —
+// two networks claiming the same range is a configuration an operator should
+// fix, but until they do, attribution must not flip between reloads.
+func sortRoutes(routes []route) {
+	sort.SliceStable(routes, func(i, j int) bool {
+		a, b := routes[i], routes[j]
+		if a.prefix.Bits() != b.prefix.Bits() {
+			return a.prefix.Bits() > b.prefix.Bits()
+		}
+		if a.network.name != b.network.name {
+			return a.network.name < b.network.name
+		}
+		if a.network.id != b.network.id {
+			return a.network.id < b.network.id
+		}
+		return a.prefix.String() < b.prefix.String()
+	})
 }
 
 // MatchNetworkID resolves an explicitly identified network, used by DoH and DoT

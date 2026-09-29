@@ -47,7 +47,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 |---|---|
 | Category blocking from public threat feeds | Malware, phishing, C2, cryptomining on by default; ads, adult, gambling, newly-registered available. |
 | Custom allow and block lists, per policy | Allow-list wins, so an operator can always override a bad feed entry. |
-| Per-network policies | Matched by CIDR, most specific prefix first. |
+| Per-network policies | Matched by CIDR. The most specific prefix containing the client wins, decided per CIDR rather than per network, so a network's unrelated narrow range cannot promote its broad one. Equal prefixes in two networks resolve by network name, deterministically. |
 | Roaming attribution by DoH token | A per-network token in the DoH path applies that network's policy from any IP. |
 | Configurable block response | NXDOMAIN, 0.0.0.0/::, or REFUSED. |
 | Immediate allow-listing | The answer cache is purged on a policy change, so a fix applies on the next query. |

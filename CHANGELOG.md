@@ -22,6 +22,27 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Policy attribution is decided per CIDR
+
+A client is now attributed to the network owning the **most specific prefix
+that contains it**. It always said so; it did not always do so. The engine
+ranked whole networks by the longest prefix anywhere in their CIDR list, so a
+network holding `10.0.0.0/8` and an unrelated `192.0.2.123/32` outranked a
+second network's `10.42.0.0/16` for a client at `10.42.1.10` — the `/32`
+promoted the `/8` — and that client silently received the broad network's
+policy. On the configuration that found it, that was a monitor-only policy in
+place of a blocking one, and a listed domain resolved.
+
+Matching now walks a table with one entry per CIDR, longest prefix first, and
+takes the first entry that contains the client. Two networks claiming the same
+range are broken by network name and then ID, so attribution cannot flip
+between reloads. Disabled networks contribute no entries, unmatched clients
+still land on the catch-all, and nothing about *whether* a client may resolve
+changes — the client ACL is a separate decision and is untouched.
+
+`TestAnUnrelatedNarrowPrefixDoesNotPromoteABroadNetwork` in `internal/policy`
+is the regression, and fails on the previous engine.
+
 ### Ad-hoc resolver access, on the Default network
 
 The system **Default** row now carries a real control — *Ad-hoc DNS access* —
