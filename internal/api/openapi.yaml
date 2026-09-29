@@ -1193,9 +1193,16 @@ paths:
           in: query
           schema: { type: string, enum: ["true"] }
           description: Include the full finding document with each row. Off by default; a document is several kilobytes.
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: |
+            Continue from a previous page: the `nextCursor` it returned.
+            Omit to start from the newest finding. A cursor this server did
+            not issue is answered `400` rather than silently restarted.
       responses:
         "200":
-          description: Matching findings
+          description: One page of matching findings, newest first
           content:
             application/json:
               schema:
@@ -1204,8 +1211,21 @@ paths:
                   findings:
                     type: array
                     items: { $ref: "#/components/schemas/FindingSummaryRow" }
-                  count: { type: integer }
+                  count: { type: integer, description: Rows in this page. }
+                  limit: { type: integer, description: The page size applied. }
+                  nextCursor:
+                    type: string
+                    description: |
+                      Pass back as `cursor` for the following page. Empty
+                      when this page was the last. The cursor is a keyset
+                      position in `(time, id)` order rather than an offset,
+                      so a finding written while a consumer is paging neither
+                      repeats nor displaces a row. Stop on an empty cursor,
+                      not on a short page: a page is short whenever fewer
+                      rows than the limit matched.
                   enforcement: { type: string, enum: [none] }
+        "400":
+          description: An unrecognised cursor, or an invalid severity
 
   /api/v1/findings/summary:
     get:
@@ -1251,12 +1271,37 @@ paths:
         - { name: type, in: query, schema: { type: string } }
         - { name: hours, in: query, schema: { type: integer, default: 24, minimum: 1, maximum: 8760 } }
         - { name: limit, in: query, schema: { type: integer, default: 1000, maximum: 1000 } }
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: |
+            Continue from a previous response: the value of its
+            `X-Next-Cursor` header. Omit to start from the oldest finding in
+            the window. An unrecognised cursor is answered `400`.
       responses:
         "200":
-          description: NDJSON stream
+          description: |
+            NDJSON stream, oldest first. NDJSON has no envelope, so the
+            continuation travels in headers. `X-Truncated: true` means
+            matching findings remain beyond this response and
+            `X-Next-Cursor` names where to continue; `X-Truncated: false`
+            means this response is complete. A response exactly at `limit`
+            lines is not complete unless the header says so.
+          headers:
+            X-Export-Count:
+              schema: { type: integer }
+              description: Lines in this body.
+            X-Truncated:
+              schema: { type: string, enum: ["true", "false"] }
+              description: Whether matching findings remain beyond this response.
+            X-Next-Cursor:
+              schema: { type: string }
+              description: Present only when truncated. Pass back as `cursor`.
           content:
             application/x-ndjson:
               schema: { $ref: "#/components/schemas/Finding" }
+        "400":
+          description: An unrecognised cursor, or an invalid severity
 
   /api/v1/findings/{id}:
     get:
@@ -1312,6 +1357,7 @@ paths:
           schema: { type: string, enum: ["1"] }
         - name: limit
           in: query
+          description: Size of the recent list, default 50. `scope.recentTruncated` reports whether the window held more.
           schema: { type: integer, minimum: 1, maximum: 500 }
       responses:
         "200":
@@ -1331,21 +1377,51 @@ paths:
                   summary: { $ref: "#/components/schemas/DNSSECObservationSummary" }
                   recent:
                     type: array
+                    description: Stored observations within the same window as `summary`, newest first, at most `limit` of them.
                     items: { $ref: "#/components/schemas/DNSSECObservation" }
+                  scope:
+                    type: object
+                    description: |
+                      Names the two populations in this payload so neither is
+                      read as the other. `summary` and `recent` are stored
+                      rows within the window — and only the rows the query-log
+                      settings allowed to be stored. `runtime` is the
+                      process's own counters since it started, covering every
+                      observation whether or not a row was kept.
+                    properties:
+                      summary: { type: string }
+                      recent: { type: string }
+                      runtime: { type: string }
+                      window:
+                        type: object
+                        properties:
+                          hours: { type: integer }
+                          from: { type: string, format: date-time }
+                          to: { type: string, format: date-time }
+                      recentLimit: { type: integer }
+                      recentTruncated:
+                        type: boolean
+                        description: The window holds more matching observations than `recent` shows.
                   runtime:
                     type: object
                     description: |
                       Health of the observer itself, which is deliberately
                       separate from the health of DNS resolution. Dropped
                       observations are a gap in the sample, not a gap in
-                      service.
+                      service. Counters here are since process start, not
+                      within the window.
                     properties:
                       available:  { type: boolean }
+                      scope:      { type: string, enum: [since_start] }
+                      uptimeSeconds: { type: integer, format: int64 }
                       observed:   { type: integer, format: int64 }
                       dropped:    { type: integer, format: int64 }
                       panics:     { type: integer, format: int64 }
                       lastAt:     { type: string, format: date-time }
                       lastStatus: { type: string }
+                      stored:     { type: integer, format: int64 }
+                      unrecorded: { type: integer, format: int64 }
+                      writeErrors: { type: integer, format: int64 }
 
   /api/v1/detectors:
     get:

@@ -169,13 +169,21 @@ type DNSSECObservationFilter struct {
 	// DisagreementsOnly keeps only rows where local and upstream differ,
 	// which is what an operator investigating this feature actually wants.
 	DisagreementsOnly bool
-	Limit             int
+	// Since, when set, keeps only rows observed at or after it — the same
+	// window the summary is computed over, so a list and its summary
+	// describe one population.
+	Since time.Time
+	// Domain, when set, keeps only observations of exactly that name.
+	Domain string
+	Limit  int
 }
 
 // ListDNSSECObservations returns recent observations, newest first.
 func (s *Store) ListDNSSECObservations(ctx context.Context, f DNSSECObservationFilter) ([]DNSSECObservation, error) {
+	// 501, not 500: a caller asking for one more than it will show is how
+	// the API learns whether the window holds more rows than the page.
 	limit := f.Limit
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 || limit > 501 {
 		limit = 100
 	}
 
@@ -191,6 +199,14 @@ func (s *Store) ListDNSSECObservations(ctx context.Context, f DNSSECObservationF
 	}
 	if f.DisagreementsOnly {
 		q += " AND disagreement <> ''"
+	}
+	if !f.Since.IsZero() {
+		q += " AND ts >= ?"
+		args = append(args, unixMilli(f.Since))
+	}
+	if f.Domain != "" {
+		q += " AND qname = ?"
+		args = append(args, f.Domain)
 	}
 	q += " ORDER BY ts DESC LIMIT ?"
 	args = append(args, limit)

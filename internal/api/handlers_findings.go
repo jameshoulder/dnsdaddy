@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -59,9 +60,14 @@ func toFindingResponse(f store.Finding, includeDetail bool) findingResponse {
 	return r
 }
 
-// handleListFindings returns recent behavioural findings.
+// handleListFindings returns one page of behavioural findings.
 //
-// GET /api/v1/findings?severity=&type=&client=&domain=&hours=&limit=&detail=
+// GET /api/v1/findings?severity=&type=&client=&domain=&hours=&limit=&detail=&cursor=
+//
+// Newest first. `nextCursor` in the response continues from the row after
+// the last one returned; it is empty on the final page. The cursor is a
+// keyset position rather than an offset, so a finding written while a
+// consumer is paging neither repeats nor skips a row.
 func (a *API) handleListFindings(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -71,6 +77,7 @@ func (a *API) handleListFindings(w http.ResponseWriter, r *http.Request) {
 		ClientIP:  strings.TrimSpace(q.Get("client")),
 		Domain:    strings.TrimSpace(q.Get("domain")),
 		Limit:     boundedParam(q.Get("limit"), 100, 1, 1000),
+		Cursor:    strings.TrimSpace(q.Get("cursor")),
 	}
 	if filter.Severity != "" {
 		if _, ok := detect.ParseSeverity(filter.Severity); !ok {
@@ -82,9 +89,9 @@ func (a *API) handleListFindings(w http.ResponseWriter, r *http.Request) {
 		filter.Since = time.Now().Add(-time.Duration(hours) * time.Hour)
 	}
 
-	findings, err := a.Store.ListFindings(r.Context(), filter)
+	findings, next, err := a.Store.ListFindings(r.Context(), filter)
 	if err != nil {
-		writeStoreError(w, err)
+		writeFindingsError(w, err)
 		return
 	}
 
@@ -100,10 +107,29 @@ func (a *API) handleListFindings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"findings": out,
 		"count":    len(out),
+		"limit":    filter.Limit,
+		// Empty when this was the last page. A consumer that stops on an
+		// empty cursor has seen every matching finding; one that stops on a
+		// short page has not necessarily, because a page is short whenever
+		// the filter matched fewer rows than the limit.
+		"nextCursor": next,
 		// Restated on every response so a consumer never has to infer it:
 		// nothing in this list caused anything to be blocked.
 		"enforcement": "none",
 	})
+}
+
+// writeFindingsError maps a findings-store error onto a status code.
+//
+// An unparseable cursor is the caller's error and is answered 400 with the
+// reason, rather than as a silent restart from the top: a consumer that did
+// not notice it had restarted would re-ingest every finding it already held.
+func writeFindingsError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrInvalidCursor) {
+		writeError(w, http.StatusBadRequest, "cursor is not one this server issued; omit it to start from the beginning")
+		return
+	}
+	writeStoreError(w, err)
 }
 
 // handleGetFinding returns one finding with its full detail.
@@ -118,14 +144,37 @@ func (a *API) handleGetFinding(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toFindingResponse(f, true))
 }
 
+// Export continuation headers.
+//
+// NDJSON has no envelope to carry metadata in, and a trailer would be read by
+// almost nothing, so the continuation travels in headers — set before the
+// first byte of body, because the page is fetched whole before streaming.
+const (
+	// headerNextCursor names the position to pass as ?cursor= to continue.
+	// Present only when more matching findings exist beyond this response.
+	headerNextCursor = "X-Next-Cursor"
+	// headerTruncated is "true" when the response stopped at its limit with
+	// more matching findings remaining, and "false" when it is complete.
+	// Stated explicitly so a 1,000-line export cannot be mistaken for the
+	// whole of what matched.
+	headerTruncated = "X-Truncated"
+	// headerExportCount is how many lines the body carries.
+	headerExportCount = "X-Export-Count"
+)
+
 // handleExportFindings streams findings as newline-delimited JSON.
 //
-// GET /api/v1/findings/export?hours=&severity=&limit=
+// GET /api/v1/findings/export?hours=&severity=&type=&limit=&cursor=
 //
 // NDJSON rather than a JSON array, because that is what every log shipper and
 // SIEM ingest pipeline already understands, and because a consumer can process
 // it a record at a time instead of buffering the whole response. See
 // docs/siem.md.
+//
+// Oldest first, and paged forward in time: the X-Next-Cursor header names the
+// position after the last line, and passing it back continues from there. A
+// consumer that keeps its last cursor between runs collects every finding
+// exactly once, however many there are and however many the limit allows.
 func (a *API) handleExportFindings(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -133,6 +182,8 @@ func (a *API) handleExportFindings(w http.ResponseWriter, r *http.Request) {
 		Severity:  strings.ToLower(strings.TrimSpace(q.Get("severity"))),
 		EventType: strings.TrimSpace(q.Get("type")),
 		Limit:     boundedParam(q.Get("limit"), 1000, 1, 1000),
+		Cursor:    strings.TrimSpace(q.Get("cursor")),
+		Ascending: true,
 	}
 	if filter.Severity != "" {
 		if _, ok := detect.ParseSeverity(filter.Severity); !ok {
@@ -144,19 +195,24 @@ func (a *API) handleExportFindings(w http.ResponseWriter, r *http.Request) {
 		filter.Since = time.Now().Add(-time.Duration(hours) * time.Hour)
 	}
 
-	findings, err := a.Store.ListFindings(r.Context(), filter)
+	findings, next, err := a.Store.ListFindings(r.Context(), filter)
 	if err != nil {
-		writeStoreError(w, err)
+		writeFindingsError(w, err)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set(headerExportCount, strconv.Itoa(len(findings)))
+	w.Header().Set(headerTruncated, strconv.FormatBool(next != ""))
+	if next != "" {
+		w.Header().Set(headerNextCursor, next)
+	}
 	w.WriteHeader(http.StatusOK)
 
-	// Oldest first, so a consumer appending to its own store keeps time order.
-	for i := len(findings) - 1; i >= 0; i-- {
-		f := findings[i]
+	// Already oldest first: the store walked forward, so the cursor it
+	// returned continues forward too.
+	for _, f := range findings {
 		line := f.Detail
 		if !json.Valid([]byte(line)) {
 			// Should not happen — detail is written by the engine — but a

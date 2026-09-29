@@ -66,6 +66,31 @@ process's lifetime error counter by the last day's queries, which on a
 long-running resolver with a quiet day read as degraded for a fault weeks
 past.
 
+### Findings page by cursor, and an export says when it is a prefix
+
+`GET /api/v1/findings` now pages. Each response carries `nextCursor`; passing
+it back continues from the row after the last one returned, and an empty
+cursor means the last page. The cursor is a keyset position in `(time, id)`
+order rather than an offset, so a finding the detection engine writes while a
+consumer is paging neither repeats nor displaces a row, and two findings
+written in the same millisecond have a stable order between them. The
+`cursor` field the store declared and never applied is now applied. A cursor
+the server did not issue is answered `400` rather than silently restarted from
+the top.
+
+`GET /api/v1/findings/export` walks oldest first and pages the same way,
+reporting its continuation in headers because NDJSON has no envelope:
+`X-Truncated` says whether matching findings remain, `X-Next-Cursor` says
+where to continue, and `X-Export-Count` says how many lines the body holds. A
+1,000-line export used to look exactly like a complete one; it no longer can.
+`docs/siem.md` has a backfill loop.
+
+`GET /api/v1/dnssec/observations` applies its `hours` window to the recent
+list as well as the summary, so the two describe one population, and names its
+scopes: `summary` and `recent` are stored rows within the window, `runtime` is
+the process's counters since start. `scope.recentTruncated` says when the
+window holds more than the list shows.
+
 ### Policy attribution is decided per CIDR
 
 A client is now attributed to the network owning the **most specific prefix
