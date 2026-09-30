@@ -9,7 +9,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/recursive"
 )
 
-// Learn adapts an Engine to what observe mode drives.
+// Learn adapts the selected local validation engine to observe mode.
 //
 // The classification of a resolution failure lives here because this is the
 // only place that knows both halves: the resolver's sentinel errors are
@@ -23,13 +23,14 @@ import (
 // condemn any zone by dropping its packets; one that reported Insecure would
 // hand them a downgrade. So a failure is always operational, and the observer
 // checks that again on the way past.
-type Learn struct{ e *Engine }
+type Learn struct{ e ClientEngine }
 
-// NewLearn wraps an Engine for observe mode.
-func NewLearn(e *Engine) *Learn { return &Learn{e: e} }
+// NewLearn wraps iterative or encrypted-forwarding validation for observe mode.
+// The observer constructor records which transport was selected.
+func NewLearn(e ClientEngine) *Learn { return &Learn{e: e} }
 
-// ResolveAndValidate resolves the name from the root, validates what it found,
-// and reports the verdict with what the resolution cost.
+// ResolveAndValidate uses the selected transport, locally validates what it
+// found, and reports the verdict with what the resolution cost.
 //
 // The answer itself is discarded. Learn mode does not return records to anyone
 // — the client already has its answer from the forwarding path, decided before
@@ -39,7 +40,17 @@ func NewLearn(e *Engine) *Learn { return &Learn{e: e} }
 func (l *Learn) ResolveAndValidate(ctx context.Context, qname string, rrtype uint16) observe.Outcome {
 	ans, err := l.e.Resolve(ctx, qname, rrtype)
 	if err != nil {
-		return failure(err)
+		out := failure(err)
+		if _, forwarded := l.e.(*ForwardEngine); forwarded {
+			switch out.Failure {
+			case observe.StatusTimeout:
+				out.FailureReason = "the observation deadline expired while using the selected encrypted DNS service; nothing was concluded about this name"
+			case observe.StatusUnreachable:
+				out.FailureCode = "encrypted_upstream_unavailable"
+				out.FailureReason = "the selected encrypted DNS service did not provide a complete response; nothing was concluded about this name"
+			}
+		}
+		return out
 	}
 	return observe.Outcome{
 		Result:      ans.Validation,

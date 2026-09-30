@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,11 @@ type Resolver struct {
 	// requestAD sets the AD bit on outgoing queries so a validating upstream
 	// reports what it concluded. See forward.
 	requestAD bool
+
+	// The controller publishes one immutable route for both the forwarding
+	// answer path and process-owned hostname resolution. The callback is
+	// installed before listeners start; loading it is safe during a reload.
+	routeProvider atomic.Pointer[forwardRouteProvider]
 
 	// inflight collapses identical concurrent questions into one upstream
 	// query. A single machine spraying the same lookup — which is exactly what
@@ -50,9 +56,10 @@ type Resolver struct {
 }
 
 type call struct {
-	done chan struct{}
-	msg  *dns.Msg
-	err  error
+	done     chan struct{}
+	msg      *dns.Msg
+	upstream string
+	err      error
 }
 
 // New builds a Resolver from configuration.
@@ -132,15 +139,30 @@ type Result struct {
 // Resolve answers a question, consulting the cache first. generation is the
 // blocklist generation the answer is valid under.
 func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, generation uint64) (Result, error) {
-	if len(req.Question) == 0 {
+	if req == nil || len(req.Question) == 0 {
 		return Result{}, errors.New("query has no question")
 	}
+	route, err := r.currentRoute()
+	if err != nil {
+		return Result{}, err
+	}
+	ctx, done, err := route.Begin(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	defer done()
 	q := req.Question[0]
 	key := Key(q, dnssecRequested(req))
+	if route != nil {
+		key += ";route=" + strconv.FormatUint(route.Generation(), 10)
+	}
 
 	// reattach rather than SetReply: SetReply forces RcodeSuccess, which would
 	// turn a cached NXDOMAIN into a NOERROR/no-answer response.
 	if cached := r.cache.Get(key, generation); cached != nil {
+		if err := forwardContextError(ctx); err != nil {
+			return Result{}, err
+		}
 		return Result{
 			Msg:       reattach(cached, req),
 			Cached:    true,
@@ -150,8 +172,11 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, generation uint64)
 		}, nil
 	}
 
-	msg, upstream, err := r.forwardOnce(ctx, key, req, generation)
+	msg, upstream, err := r.forwardOnce(ctx, key, req, generation, route)
 	if err != nil {
+		return Result{}, err
+	}
+	if err := forwardContextError(ctx); err != nil {
 		return Result{}, err
 	}
 	return Result{
@@ -165,35 +190,48 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, generation uint64)
 
 // forwardOnce performs the upstream query, collapsing duplicate concurrent
 // questions onto a single flight.
-func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, generation uint64) (*dns.Msg, string, error) {
+func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, generation uint64, route *ForwardRoute) (*dns.Msg, string, error) {
+	// A feed generation change also needs its own flight. Otherwise a caller
+	// admitted after a refresh could join a request started under old policy.
+	flightKey := key + ";blocklist=" + strconv.FormatUint(generation, 10)
 	r.inflightMu.Lock()
-	if c, ok := r.inflight[key]; ok {
+	if c, ok := r.inflight[flightKey]; ok {
 		r.inflightMu.Unlock()
 		r.collapsed.inc()
 		select {
 		case <-c.done:
+			if err := forwardContextError(ctx); err != nil {
+				return nil, "", err
+			}
 			if c.err != nil {
 				return nil, "", c.err
 			}
-			return c.msg.Copy(), "", nil
+			return c.msg.Copy(), c.upstream, nil
 		case <-ctx.Done():
-			return nil, "", ctx.Err()
+			return nil, "", forwardContextError(ctx)
 		}
 	}
 	c := &call{done: make(chan struct{})}
-	r.inflight[key] = c
+	r.inflight[flightKey] = c
 	r.inflightMu.Unlock()
 
-	msg, upstream, err := r.forward(ctx, req)
+	msg, upstream, err := r.forward(ctx, req, route)
+	if ctxErr := forwardContextError(ctx); ctxErr != nil {
+		msg, err = nil, ctxErr
+	}
+	if err == nil && msg == nil {
+		err = errors.New("upstream returned no message")
+	}
 	if err == nil && msg != nil {
 		r.cache.Put(key, msg, generation)
 		c.msg = msg
+		c.upstream = upstream
 	}
 	c.err = err
 	close(c.done)
 
 	r.inflightMu.Lock()
-	delete(r.inflight, key)
+	delete(r.inflight, flightKey)
 	r.inflightMu.Unlock()
 
 	if err != nil {
@@ -203,7 +241,7 @@ func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, ge
 	return msg.Copy(), upstream, nil
 }
 
-func (r *Resolver) forward(ctx context.Context, req *dns.Msg) (*dns.Msg, string, error) {
+func (r *Resolver) forward(ctx context.Context, req *dns.Msg, route *ForwardRoute) (*dns.Msg, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
@@ -226,17 +264,20 @@ func (r *Resolver) forward(ctx context.Context, req *dns.Msg) (*dns.Msg, string,
 	// bit and turns "we forward to validating resolvers" from a claim in the
 	// documentation into a per-query measurement.
 	//
-	// DNS Daddy still does not validate anything itself. What this records is
-	// the upstream's conclusion, which is a weaker statement, and the
-	// documentation and the finding text both say so.
+	// This forwarding path records the upstream's conclusion. Daddybound
+	// Live's independent validation is owned by its native engine, so an AD
+	// bit received here must never be described as a local validation result.
 	if r.requestAD {
 		out.AuthenticatedData = true
 	}
+	if route != nil && route.Encrypted() != nil {
+		return route.exchangeEncrypted(ctx, out)
+	}
 
 	if r.mode == "race" {
-		return r.race(ctx, out)
+		return r.race(ctx, out, route)
 	}
-	return r.failover(ctx, out)
+	return r.failover(ctx, out, route)
 }
 
 // acquireSlot blocks until an upstream concurrency slot is free or ctx is
@@ -264,13 +305,13 @@ func (r *Resolver) releaseSlot() {
 	r.inflightNow.Add(-1)
 }
 
-func (r *Resolver) failover(ctx context.Context, m *dns.Msg) (*dns.Msg, string, error) {
+func (r *Resolver) failover(ctx context.Context, m *dns.Msg, route *ForwardRoute) (*dns.Msg, string, error) {
 	var lastErr error
 	for _, u := range r.upstreams {
 		if ctx.Err() != nil {
 			break
 		}
-		resp, err := u.Exchange(ctx, m)
+		resp, err := exchangeForwardUpstream(ctx, route, u, m)
 		if err == nil && resp != nil {
 			return resp, u.Spec, nil
 		}
@@ -286,7 +327,7 @@ func (r *Resolver) failover(ctx context.Context, m *dns.Msg) (*dns.Msg, string, 
 // race asks every upstream at once and takes the first good answer. It costs
 // more upstream traffic in exchange for latency that tracks the fastest
 // resolver rather than the first configured one.
-func (r *Resolver) race(ctx context.Context, m *dns.Msg) (*dns.Msg, string, error) {
+func (r *Resolver) race(ctx context.Context, m *dns.Msg, route *ForwardRoute) (*dns.Msg, string, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -299,7 +340,10 @@ func (r *Resolver) race(ctx context.Context, m *dns.Msg) (*dns.Msg, string, erro
 
 	for _, u := range r.upstreams {
 		go func(u *Upstream) {
-			resp, err := u.Exchange(ctx, m.Copy())
+			// Every race participant owns an admission. The winning reply may
+			// return while the other transports are still cancelling; retiring
+			// the route must wait for those participants too.
+			resp, err := exchangeForwardUpstream(ctx, route, u, m.Copy())
 			results <- outcome{msg: resp, upstream: u.Spec, err: err}
 		}(u)
 	}

@@ -2029,3 +2029,45 @@ tbody td { padding: 13px 14px; }
 @media (max-width: 430px) {
   .btn { max-width: 100%; white-space: normal; text-align: center; }
 }
+
+.clipboard-buffer { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+/* Client addresses and outbound transport are separate operator decisions. */
+.server-address-card .card-head { margin-bottom: 10px; }
+.server-address-card h2, .transport-card h2 { font-size: 18px; }
+.server-address { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 0; min-width: 0; }
+.server-address-main { min-width: 0; flex: 1; }
+.server-address-value { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.server-address-value > .mono { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.server-address-featured .server-address-value > .mono { font-size: 25px; letter-spacing: -0.035em; }
+.server-address-main p { margin: 5px 0 0; overflow-wrap: anywhere; }
+.server-address > .btn { flex: 0 0 auto; }
+.server-address-note { margin: 4px 0 0; max-width: 95ch; }
+.server-address-details { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 4px; }
+.server-address-details > summary { color: var(--primary); font-size: 12px; cursor: pointer; padding: 11px 0; }
+.server-address-list .server-address + .server-address { border-top: 1px solid var(--border); }
+.server-address-details td { overflow-wrap: anywhere; }
+.transport-mode-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.transport-endpoint-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.transport-endpoint { border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius); padding: 15px 17px 17px; margin: 20px 0; min-width: 0; }
+.transport-endpoint > legend { padding: 0 7px; font-size: 12px; font-weight: 650; color: var(--muted-foreground); }
+.transport-endpoint .field > .small { font-weight: 400; }
+.transport-endpoint .field:last-child { margin-bottom: 0; }
+.transport-endpoint-actions { justify-content: flex-end; margin-top: 12px; gap: 8px; }
+.transport-endpoint-actions [data-transport-action="remove"] { color: var(--danger); }
+.transport-test-summary { display: flex; flex-direction: column; gap: 5px; margin: 20px 0 15px; }
+.transport-test-ok { border-left-color: var(--success); background: var(--ok-bg); }
+.encrypted-transport-stats td { overflow-wrap: anywhere; vertical-align: top; }
+.encrypted-transport-stats td:first-child { min-width: 160px; max-width: 380px; }
+.encrypted-transport-stats td .rec-note { font-size: 12px; }
+.transport-health .claim-key { margin-bottom: 20px; }
+
+@media (max-width: 760px) {
+  .server-address-card .card-head { flex-wrap: wrap; gap: 12px; }
+  .server-address-featured .server-address-value > .mono { font-size: 21px; }
+  .server-address { align-items: flex-start; flex-wrap: wrap; gap: 10px; }
+  .server-address-main { flex-basis: 100%; }
+  .transport-mode-options { grid-template-columns: 1fr; }
+  .transport-endpoint { padding: 12px; }
+  .transport-endpoint-actions { justify-content: flex-start; }
+}

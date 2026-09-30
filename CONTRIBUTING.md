@@ -13,7 +13,8 @@ make test     # run the suite
 make run      # local resolver on 127.0.0.1:5353, data in ./tmp, no root needed
 ```
 
-Go 1.25.13+. That is the whole toolchain — no cgo, no npm, no code generation.
+Go 1.26.8+; CI and container builds use Go 1.27.1. That is the application
+toolchain — no cgo, npm or code generation is needed for a production build.
 
 With `make run` going, query it:
 

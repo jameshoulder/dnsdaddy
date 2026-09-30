@@ -2,6 +2,9 @@
 
 **Status:** implemented, experimental. Supersedes ADR 0002's refusal of
 `enforce`; ADR 0002's independence guarantee continues to apply to Learn.
+The native transport described here remains supported. [ADR 0004](0004-encrypted-forwarding.md)
+adds independently selected encrypted record acquisition with local validation;
+it also defines the transport-aware mode acknowledgement and provenance.
 
 ## Decision
 

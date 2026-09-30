@@ -6,20 +6,37 @@ configured trust anchor to an authenticated answer, an authenticated absence
 or an authenticated redirection — and is honest about every case where it
 cannot.
 
-**Daddybound now supplies native client answers in experimental Live mode.**
-It validates the exact returned data, returns Secure/proved Insecure answers,
-and fails closed for Bogus, Indeterminate and operational failures without
-falling back to an upstream. Live (`dns.local_dnssec_validation: enforce`) is
-the default for a new installation; existing recorded Learn/off choices and
-explicit configuration are preserved. Longer operational evaluation is still
-required before claiming production readiness.
+**Daddybound supplies locally validated client answers in experimental Live
+mode.** Native authoritative recursion remains the default transport. An
+optional encrypted profile obtains answer data through operator-approved DoQ,
+HTTP/3 DoH or HTTP/2 DoH recursive endpoints and validates it locally. With
+checking enabled, Live serves Secure/proved Insecure answers and fails closed
+for Bogus, Indeterminate and operational failures. It never silently changes
+transports to obtain a different answer. Live
+(`dns.local_dnssec_validation: enforce`) is the default for a new installation;
+existing recorded Learn/off choices and explicit configuration are preserved.
+No new encrypted provider is selected automatically. Longer operational
+evaluation is still required before claiming production readiness.
 
-Learn (`observe`) continues to validate independently after the forwarded
-answer is final, so its verdict cannot change that answer. Off constructs no
-native runtime. Both enabled modes use plaintext authoritative UDP/TCP 53,
-independently of any encrypted forwarder. See
-[ADR 0003](../decisions/0003-daddybound-native-live.md) for mode controls,
-CD/DO/AD behaviour, failure outcomes, split-DNS limits and evidence provenance.
+Learn (`observe`) validates independently after the forwarded answer is final,
+so its verdict cannot authenticate or change that answer. Off constructs no
+Daddybound validation runtime and stops its anchor refresh. Off/Learn client
+answers still use forwarding: legacy upstream URLs under the native profile,
+or approved encrypted endpoints under the encrypted profile. Native Live and
+native Learn use plaintext authoritative UDP/TCP 53 for their own lookups. The
+encrypted profile instead uses its approved endpoints for all DNS answer data,
+supporting validation material and anchor refresh, without a native or system
+DNS fallback.
+
+A client's explicit CD bit skips cryptographic checking in Live while client
+admission, policy and rebinding protection remain active; it does not request
+a plaintext transport. Daemon background hostname lookups also use the selected
+encrypted profile, but do not pass through independent Daddybound Live
+validation. Client-to-server encryption and the provider's onward resolution
+are separate connections. See [encrypted DNS](../encrypted-dns.md) for the
+current transport controls and limits, and the historical
+[native Live design](../decisions/0003-daddybound-native-live.md) for its
+answer-binding and wire-semantics decisions.
 
 ## What "first principles" means here
 
@@ -88,6 +105,10 @@ with no identifier is either a bug or an invention.
   verdict cannot authenticate it. Unsigned aliases do not exempt signed
   targets from validation. Cached material is checked against current anchors
   and time, with accepted-signature lifetime constraining TTLs.
+- Applies the same local answer-binding and DNSSEC checks to the exact records
+  obtained from approved encrypted recursive endpoints. Answer data, DS,
+  DNSKEY and denial lookups share bounded query/byte budgets and authenticated
+  transport. Upstream AD is not proof of a local Secure verdict.
 - Applies bounded native client admission and end-to-end deadlines; failures
   have explicit reasons and Extended DNS Errors for EDNS clients.
 - Runs a deterministic signed laboratory offline, and compares its verdicts
@@ -113,13 +134,18 @@ being complete:
   zone cut. That can cost a false Bogus and cannot produce a false Secure —
   argued in standards.md §5.5 and measured by a property test that strips every
   delegation proof and checks no verdict strengthens.
-- **No encrypted transport to authoritative servers.** Native recursion speaks
-  ordinary DNS over port 53. There is no DoT or DoH to the root or to a TLD,
-  because authoritative servers do not offer it; QNAME minimisation limits what
-  each server on the path learns, and does not remove the exposure.
+- **No encrypted native authoritative iteration.** This implementation's native
+  recursion speaks ordinary DNS over port 53; QNAME minimisation limits what
+  each server on that path learns without encrypting it. The optional encrypted
+  profile forwards to approved recursive resolvers. It does not claim that
+  arbitrary authoritative servers accept encrypted DNS or that the selected
+  provider encrypts its onward queries.
 - **No native conditional forwarding.** Native Live does not route private
-  split-DNS names to configured forwarders. Deployments that require that path
-  should select Learn or Off until conditional forwarding is implemented.
+  split-DNS names to configured forwarders. Encrypted Live uses the approved
+  endpoints for every name, not per-zone routing, and does not waive local
+  trust requirements for a private answer. Split-DNS compatibility still
+  depends on the chosen resolver, trust configuration and rebinding exceptions;
+  Off/Learn forwarding is a separate mode choice, not an automatic fallback.
 - **No production-readiness claim.** New deterministic client tests establish
   specific correctness properties. They do not replace target-device load
   testing, extended field use, independent review or real rollover evidence.
@@ -146,10 +172,22 @@ dnsdaddy daddybound validate -scenario tampered-answer -trace
 These commands build a signed hierarchy in memory. They cannot be pointed at
 a running deployment. Runtime mode is controlled separately by configuration
 or the dashboard; the Assurance page and `GET /api/v1/dnssec/status` report
-effective mode, native counters, anchor lifecycle and observation losses.
-Learn rows use `resolution: native`; Live rows use `resolution: native_live`
-and describe the exact native client result. Changing mode does not relabel
-historical evidence. The import-graph test permits only the narrow native and
+effective mode, selected transport, local validation counters, anchor lifecycle
+and observation losses. `GET /api/v1/dns/transport` reports the current approved
+endpoint configuration and transport counters without sending a test query.
+Recorded observation provenance remains immutable:
+
+| Recorded operation | Observation `resolution` | Client query `dnssecSource` |
+| --- | --- | --- |
+| Native Live | `native_live` | `native` |
+| Encrypted Live | `encrypted_live` | `encrypted_forwarded` |
+| Native Learn | `native` | `upstream` for the separately forwarded client answer |
+| Encrypted Learn | `encrypted_forwarded` | `upstream` for the separately forwarded client answer |
+
+Off has no new local validation observation; forwarded client answers retain
+`upstream` provenance. Blank legacy query sources mean unknown. Changing mode
+or transport never relabels historical evidence. The import-graph test permits
+only the narrow native and
 observation seams and keeps lab/oracle packages out of the query path.
 
 The live differential corpus is a separate, opt-in test rather than a
@@ -170,5 +208,6 @@ make corpus
 | [architecture.md](architecture.md) | The packages, the dependency direction, and why the seams are where they are |
 | [security-model.md](security-model.md) | What Daddybound is trusted with, what it is not, and how that is enforced |
 | [ADR 0003](../decisions/0003-daddybound-native-live.md) | Native Live answer binding, mode controls, failure semantics and limits |
+| [Encrypted DNS](../encrypted-dns.md) | Optional encrypted outbound profiles, local validation, recipient and transport boundaries |
 | [validation-lab.md](validation-lab.md) | The laboratory, the scenarios, and the differential comparison |
 | [roadmap.md](roadmap.md) | What comes next, and what each step unblocks |

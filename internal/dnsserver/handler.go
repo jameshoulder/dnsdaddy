@@ -387,6 +387,10 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		res = NativeForwardResult(result)
 		event.DNSSECSource = "native"
 		event.Source = "Daddybound native"
+		if result.ResolutionSource == "encrypted_forwarded" {
+			event.DNSSECSource = result.ResolutionSource
+			event.Source = "Daddybound encrypted forwarding"
+		}
 		event.Reason = result.Reason
 	} else {
 		res, err = h.resolver.Resolve(rctx, req, h.lists.Generation())

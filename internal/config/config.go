@@ -95,15 +95,20 @@ type Integrations struct {
 
 // DNS holds the resolver-side settings: what we listen on and where we forward.
 type DNS struct {
-	ListenUDP    string   `yaml:"listen_udp"`
-	ListenTCP    string   `yaml:"listen_tcp"`
-	ListenDoT    string   `yaml:"listen_dot"`
-	TLSCertFile  string   `yaml:"tls_cert_file"`
-	TLSKeyFile   string   `yaml:"tls_key_file"`
-	Upstreams    []string `yaml:"upstreams"`
-	UpstreamMode string   `yaml:"upstream_mode"` // "failover" or "race"
-	Timeout      Duration `yaml:"timeout"`
-	MaxInflight  int      `yaml:"max_inflight"`
+	ListenUDP   string   `yaml:"listen_udp"`
+	ListenTCP   string   `yaml:"listen_tcp"`
+	ListenDoT   string   `yaml:"listen_dot"`
+	TLSCertFile string   `yaml:"tls_cert_file"`
+	TLSKeyFile  string   `yaml:"tls_key_file"`
+	Upstreams   []string `yaml:"upstreams"`
+	// ResolutionTransport chooses native iteration or authenticated encrypted
+	// forwarding. Empty preserves the dashboard's saved selection. It is
+	// independent of Daddybound's Off, Learn and Live validation modes.
+	ResolutionTransport string              `yaml:"resolution_transport,omitempty"`
+	EncryptedUpstreams  []EncryptedUpstream `yaml:"encrypted_upstreams,omitempty"`
+	UpstreamMode        string              `yaml:"upstream_mode"` // "failover" or "race"
+	Timeout             Duration            `yaml:"timeout"`
+	MaxInflight         int                 `yaml:"max_inflight"`
 
 	// AllowedClientCIDRs restricts which source addresses may resolve.
 	// Queries from anywhere else are REFUSED before any upstream work.
@@ -565,6 +570,7 @@ func applyEnv(cfg *Config) error {
 	envStr("DNSDADDY_TLS_KEY_FILE", &cfg.DNS.TLSKeyFile)
 	envStr("DNSDADDY_UPSTREAM_MODE", &cfg.DNS.UpstreamMode)
 	envStr("DNSDADDY_LOCAL_DNSSEC_VALIDATION", &cfg.DNS.LocalDNSSECValidation)
+	envStr("DNSDADDY_RESOLUTION_TRANSPORT", &cfg.DNS.ResolutionTransport)
 	envStr("DNSDADDY_HTTP_LISTEN", &cfg.HTTP.Listen)
 	envStr("DNSDADDY_ADMIN_PASSWORD", &cfg.HTTP.AdminPassword)
 	envStr("DNSDADDY_BASE_URL", &cfg.HTTP.BaseURL)
@@ -697,6 +703,9 @@ func (c *Config) validate() error {
 	}
 	if len(c.DNS.Upstreams) == 0 {
 		return fmt.Errorf("at least one upstream resolver is required")
+	}
+	if err := c.DNS.ValidateTransport(); err != nil {
+		return err
 	}
 	switch c.DNS.UpstreamMode {
 	case "failover", "race":

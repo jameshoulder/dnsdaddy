@@ -13,8 +13,8 @@ An entry records the authenticated principal (`session:admin` or the API token
 name), operation, target, time, outcome and the actual persisted before/after
 values. Changes cover policies and rules, networks and access, friendly client
 names, feed configuration, provider/webhook configuration and credentials, management
-tokens, the administrator password, protection settings, native DNSSEC mode and
-finding reviews. Operational feed refresh timestamps are excluded from
+tokens, the administrator password, protection settings, local DNSSEC mode,
+DNS transport selection and finding reviews. Operational feed refresh timestamps are excluded from
 configuration differences.
 
 Passwords, credential ciphertext, management-token hashes, network tokens,

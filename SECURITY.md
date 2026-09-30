@@ -74,6 +74,10 @@ one would be a promise nobody could keep.
   DNS message, a DoH request, or a malicious feed file
 - Authentication bypass on the management API or dashboard
 - Cache poisoning, or answers being returned for the wrong question
+- DNSSEC validation bypass, a false local Secure verdict or incorrect answer
+  binding in Daddybound Live when the client has not requested CD
+- Encrypted-profile traffic escaping to plaintext DNS, endpoint certificate
+  verification bypass or an unapproved resolver receiving query names
 - A client being attributed to the wrong network, and so getting the wrong policy
 - Query-log data exposed to an unauthenticated caller
 - Blocklist bypass: a listed domain resolving when policy says it should not
@@ -98,11 +102,15 @@ one would be a promise nobody could keep.
 - **Running an open resolver.** If you expose port 53 to the internet without a
   firewall you will be abused for amplification. Documented in
   [deploy.md](docs/deploy.md#4-never-run-an-open-resolver).
-- **Missing DNSSEC validation.** DNS Daddy forwards rather than validating, and
-  records the upstream's verdict. This is documented at length in
-  [docs/dns-security/dnssec.md](docs/dns-security/dnssec.md), including the
-  point that a lying upstream will set the AD bit happily. Local validation is
-  a feature request, not a vulnerability.
+- **Documented choices to skip local DNSSEC checking.** Off/Learn client
+  answers report the forwarding upstream's verdict; Learn's separate local
+  observation cannot change an answer. Live performs experimental local
+  validation with either native recursion or approved encrypted forwarding.
+  An explicit client CD request skips its cryptographic checking while policy,
+  client admission and rebinding controls remain active. Violating those
+  boundaries or falsely asserting local authentication is in scope. See
+  [the transport guide](docs/encrypted-dns.md) and
+  [DNSSEC behaviour](docs/dns-security/dnssec.md).
 - **False positives from behavioural detectors.** Every one is marked
   *experimental* and none of them block anything. A detector firing on your
   mail gateway is expected, wanted as a report, and is
@@ -137,11 +145,24 @@ parsing, and query names are normalised before they reach any lookup.
 
 ## Design decisions that carry security weight
 
-**Upstream is encrypted by default.** Ships with DNS-over-TLS to Quad9 and
-Cloudflare, with certificate names verified. A `tls://` upstream with no
-`#servername` derives one from the host rather than silently skipping
-verification. The dashboard flags plaintext upstreams in amber, and the resolver
-logs a warning at startup.
+**Native resolution is the default; its authoritative traffic is plaintext.**
+Fresh installations select experimental Daddybound Live using UDP/TCP port 53
+to root and authoritative servers. Existing explicit choices are preserved.
+The default legacy forwarding URLs use certificate-verified DoT, but apply to
+Off/Learn client answers under the native profile, not native Live recursion.
+
+**The optional encrypted profile uses only operator-approved endpoints.**
+Outbound DoQ, HTTP/3 DoH and HTTP/2 DoH require authenticated TLS 1.3 and literal
+bootstrap addresses for named endpoints. There is no skip-verification control,
+implicit provider discovery or plaintext fallback. The same selected endpoints
+carry client answers, local validation material, anchor refresh and daemon
+background hostname DNS. Live authenticates the exact returned client records
+locally; the encrypted provider's AD bit is not a substitute for that validation.
+Background hostname lookup uses the selected transport without an independent
+Daddybound Live verdict. The provider still sees names, and client-to-server
+encryption and the provider's onward connections remain separate. Selection,
+testing and disclosure acknowledgement are authenticated management actions.
+Read [docs/encrypted-dns.md](docs/encrypted-dns.md) for limits and configuration.
 
 **The dashboard has a strict CSP** with no `unsafe-inline` for script or style.
 Dynamic values are applied through the CSSOM, not `style=` attributes. All
@@ -203,6 +224,16 @@ Entitlement is decided from the address that opened the socket and never from a
 forwarding header, so `X-Forwarded-For: 127.0.0.1` buys nothing — including
 from the reverse proxy itself, whose forwarded requests all originate on the
 internet.
+
+**Server-address discovery is authenticated.** `/api/v1/server-addresses`
+reports a bounded local interface inventory and configured DNS listener
+applicability. If interface enumeration is denied, it may use only the accepted
+connection's local socket address, with `source: connection_local_address`,
+`partial: true` and an unknown interface name. Host/forwarding headers and the
+client/peer address cannot populate either result. It does not contact an
+external IP-discovery service, reveal the inventory on public health/login
+routes or claim a NAT mapping or remote reachability. The systemd unit can keep
+AF_NETLINK excluded without weakening that fallback's provenance.
 
 **No forwarding header is trusted by default.** `X-Forwarded-For`,
 `X-Real-IP`, and `X-Forwarded-Proto` are honoured only from a peer listed in
@@ -267,8 +298,9 @@ them.
 
 ### The three deployment modes, and what each exposes
 
-`./deploy/install-docker.sh` offers exactly three, and none of them publishes
-the management interface in plaintext.
+`./deploy/install-docker.sh` offers three deployment modes. Private-LAN mode
+uses plain HTTP on the chosen LAN address; the public-host modes keep the
+backend on loopback and use an SSH tunnel or HTTPS for management access.
 
 | | Management access | Listening publicly | DNS Daddy binds |
 |---|---|---|---|
@@ -431,7 +463,7 @@ starts being honoured without the trusted-peer check being applied to it.
 - [ ] `http.trusted_proxy_cidrs` set to your proxy only, and left empty otherwise
 - [ ] `http.allow_untokenized_doh` left off on anything internet-facing
 - [ ] `feeds.local_feed_dir` left empty unless you use `file://` feeds
-- [ ] Upstreams using `tls://` or `https://`
+- [ ] Effective transport reviewed: native authoritative UDP/TCP 53 is expected, or the encrypted profile has explicit approved endpoints and bootstrap IPs ([guide](docs/encrypted-dns.md))
 - [ ] Query-log retention set to what you can justify ([privacy.md](docs/privacy.md))
 - [ ] `/api/v1/health` monitored, alerting when `status` is `degraded`
 - [ ] Backups running, and restored at least once

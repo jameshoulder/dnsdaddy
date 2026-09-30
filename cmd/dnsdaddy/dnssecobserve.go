@@ -61,31 +61,22 @@ func startDNSSECObserver(
 	if !cfg.DNS.ObserveDNSSEC() {
 		return nil, nil
 	}
+	// The runtime controller supplies the approved encrypted exchange for
+	// both observation and key refresh. This legacy native/test constructor
+	// must fail rather than create plaintext recursion under that selection.
+	if cfg.DNS.TransportMode() != config.ResolutionNative {
+		return nil, fmt.Errorf("encrypted DNSSEC observation requires the transport controller")
+	}
 
 	anchors, err := loadTrustAnchors(cfg.DNS.LocalDNSSECTrustAnchorFile)
 	if err != nil {
 		return nil, fmt.Errorf("local DNSSEC validation: %w", err)
 	}
 
-	// Learn mode resolves for itself, from the root hints to the
-	// authoritative servers, and validates the records it fetched. It does
-	// not read them through the operator's upstreams.
-	//
-	// That is a deliberate change of behaviour and it has a cost worth being
-	// plain about. Native recursion talks to authoritative servers over
-	// ordinary port 53, in the clear: there is no DoT or DoH to the root or
-	// to a TLD, and pretending otherwise would be pretending. An operator who
-	// configured DNS-over-TLS upstreams for privacy is, in Learn, sending
-	// query names to authoritative servers as well. QNAME minimisation limits
-	// what each one learns to the labels it needs — the root sees only the
-	// TLD — but it does not remove the exposure, and Learn mode is on by
-	// default for a fresh install. It is documented in docs/daddybound/ and
-	// stated in the startup log below rather than buried.
-	//
-	// The alternative is worse. Evidence collected through a forwarder would
-	// be evidence about a code path nobody is proposing to switch on: Live
-	// mode returns what Daddybound resolved, so Learn has to exercise
-	// Daddybound resolving.
+	// This native-only constructor walks from root hints to authorities over
+	// UDP/TCP 53. QNAME minimisation limits disclosure, with a compatibility
+	// retry when needed, but does not encrypt packets. The transport controller
+	// constructs encrypted Learn through the approved encrypted bundle instead.
 	resolver := recursive.New(recursive.Config{
 		Timeout: cfg.DNS.LocalDNSSECTimeout.D(),
 	})

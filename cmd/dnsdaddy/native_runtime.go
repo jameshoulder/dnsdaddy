@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -11,52 +12,90 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/native"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/recursive"
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/trustanchors"
+	"github.com/jameshoulder/dnsdaddy/internal/resolver"
 )
 
-// nativeRuntime is one owner of the native resolver and managed anchor
-// refresh. Live and Learn share this engine; running two managers against the
-// same persisted RFC 5011 state would race the trust-point lifecycle.
+// nativeRuntime owns one local validation engine and its refresh loop. Engines
+// may change transport while sharing one RFC 5011 manager, so no second writer
+// can overwrite hold-down progress from an earlier snapshot of the state file.
 type nativeRuntime struct {
-	Engine   *native.Engine
+	Engine   native.ClientEngine
 	Client   *native.Client
-	Resolver *recursive.Resolver
+	Resolver *recursive.Resolver // nil for encrypted forwarding; never a hidden native fallback
 	Anchors  *trustanchors.Manager
 	stop     context.CancelFunc
 	done     chan struct{}
+
+	ctx       context.Context
+	log       *slog.Logger
+	keySource trustanchors.KeySource
+	mu        sync.Mutex
+	prepared  bool
+	activated bool
+	stopped   bool
+	finish    sync.Once
 }
 
-// startNativeRuntime performs no network work for an explicit Off mode. The
-// mode controller calls it only after an enabled selection is accepted and
-// uses the same runtime for subsequent Learn/Live transitions.
-func startNativeRuntime(ctx context.Context, cfg config.Config, log *slog.Logger) (*nativeRuntime, error) {
+// prepareNativeRuntimeWithTransport performs no network work. The next engine
+// can be fully built and configuration persisted while the old route continues
+// serving. If shared is nonnil, the controller must stop/drain its old refresh
+// loop before Activate; queries may already use the new engine in that interval.
+// Reuse is valid only for a transport change with the same trust configuration.
+func prepareNativeRuntimeWithTransport(ctx context.Context, cfg config.Config, log *slog.Logger, encrypted *resolver.EncryptedUpstreams, shared *trustanchors.Manager) (*nativeRuntime, error) {
 	if cfg.DNS.LocalDNSSECMode() == config.LocalDNSSECOff {
 		return nil, nil
 	}
-	anchors, err := loadTrustAnchors(cfg.DNS.LocalDNSSECTrustAnchorFile)
-	if err != nil {
-		return nil, fmt.Errorf("native trust anchors: %w", err)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	resolver := recursive.New(recursive.Config{Timeout: cfg.DNS.LocalDNSSECTimeout.D()})
-	manager, err := trustanchors.NewManager(trustanchors.ManagerConfig{
-		Zone: ".", Configured: anchors,
-		Store:  trustanchors.FileStore{Path: cfg.TrustAnchorStatePath()},
-		Source: native.NewKeySource(resolver), Policy: dnssec.DefaultPolicy(),
-		Verifier: dnssec.StdVerifier(), Limits: dnssec.DefaultLimits(), Log: log,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("native trust-anchor manager: %w", err)
+	var recursiveResolver *recursive.Resolver
+	var keySource trustanchors.KeySource
+	switch cfg.DNS.TransportMode() {
+	case config.ResolutionNative:
+		recursiveResolver = recursive.New(recursive.Config{Timeout: cfg.DNS.LocalDNSSECTimeout.D()})
+		keySource = native.NewKeySource(recursiveResolver)
+	case config.ResolutionEncrypted:
+		if encrypted == nil {
+			return nil, fmt.Errorf("encrypted local validation requires the controller's approved encrypted transport")
+		}
+		keySource = native.NewForwardKeySource(encrypted.Exchange)
+	default:
+		return nil, fmt.Errorf("unsupported local validation transport %q", cfg.DNS.TransportMode())
 	}
-	engine, err := native.New(native.Config{
-		Resolver: resolver, AnchorSource: manager.Anchors,
-		Policy: dnssec.DefaultPolicy(), Clock: dnssec.SystemClock{},
-		Verifier: dnssec.StdVerifier(), Limits: dnssec.DefaultLimits(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("native engine: %w", err)
+	manager := shared
+	if manager == nil {
+		anchors, err := loadTrustAnchors(cfg.DNS.LocalDNSSECTrustAnchorFile)
+		if err != nil {
+			return nil, fmt.Errorf("local validation trust anchors: %w", err)
+		}
+		manager, err = trustanchors.NewManager(trustanchors.ManagerConfig{
+			Zone: ".", Configured: anchors,
+			Store:  trustanchors.FileStore{Path: cfg.TrustAnchorStatePath()},
+			Source: keySource, Policy: dnssec.DefaultPolicy(),
+			Verifier: dnssec.StdVerifier(), Limits: dnssec.DefaultLimits(), Log: log,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("local validation trust-anchor manager: %w", err)
+		}
 	}
-	// Recursion and signatures cost more per query than forwarding. Keep a
-	// conservative independent concurrency cap while honouring a smaller
-	// deployment-wide DNS limit. This is a bound, not a capacity claim.
+	var engine native.ClientEngine
+	var err error
+	if recursiveResolver != nil {
+		engine, err = native.New(native.Config{
+			Resolver: recursiveResolver, AnchorSource: manager.Anchors,
+			Policy: dnssec.DefaultPolicy(), Clock: dnssec.SystemClock{},
+			Verifier: dnssec.StdVerifier(), Limits: dnssec.DefaultLimits(),
+		})
+	} else {
+		engine, err = native.NewForwardEngine(native.ForwardConfig{
+			Exchange: encrypted.Exchange, AnchorSource: manager.Anchors,
+			Policy: dnssec.DefaultPolicy(), Clock: dnssec.SystemClock{},
+			Verifier: dnssec.StdVerifier(), Limits: dnssec.DefaultLimits(),
+		})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("local validation engine: %w", err)
+	}
 	maxInflight := 128
 	if cfg.DNS.MaxInflight > 0 && cfg.DNS.MaxInflight < maxInflight {
 		maxInflight = cfg.DNS.MaxInflight
@@ -68,18 +107,52 @@ func startNativeRuntime(ctx context.Context, cfg config.Config, log *slog.Logger
 		return nil, err
 	}
 	rctx, stop := context.WithCancel(ctx)
-	runtime := &nativeRuntime{Engine: engine, Client: client, Resolver: resolver,
-		Anchors: manager, stop: stop, done: make(chan struct{})}
+	return &nativeRuntime{Engine: engine, Client: client, Resolver: recursiveResolver,
+		Anchors: manager, stop: stop, done: make(chan struct{}), ctx: rctx,
+		log: log, keySource: keySource, prepared: true}, nil
+}
+
+// Activate starts the sole refresh loop after the controller has drained the
+// previous owner. A stopped preparation can never send a late DNSKEY query.
+func (r *nativeRuntime) Activate() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.prepared || r.activated || r.stopped {
+		return
+	}
+	if r.ctx.Err() != nil {
+		r.stopped = true
+		r.finish.Do(func() { close(r.done) })
+		return
+	}
+	r.Anchors.SetSource(r.keySource)
+	if r.ctx.Err() != nil {
+		r.stopped = true
+		r.finish.Do(func() { close(r.done) })
+		return
+	}
+	r.activated = true
 	go func() {
-		defer close(runtime.done)
-		native.RunAnchorRefresh(rctx, manager, time.Now, log)
+		defer r.finish.Do(func() { close(r.done) })
+		native.RunAnchorRefresh(r.ctx, r.Anchors, time.Now, r.log)
 	}()
-	return runtime, nil
 }
 
 func (r *nativeRuntime) Stop() {
-	if r != nil && r.stop != nil {
+	if r == nil {
+		return
+	}
+	if r.stop != nil {
 		r.stop()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stopped = true
+	if r.prepared && !r.activated {
+		r.finish.Do(func() { close(r.done) })
 	}
 }
 

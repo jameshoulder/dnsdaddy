@@ -22,15 +22,16 @@ dns:
   tls_cert_file: ""
   tls_key_file: ""
 
-  # Where queries DNS Daddy does not block are forwarded.
+  # Legacy forwarders for client answers in native Off/Learn mode.
+  # Native Live uses direct authoritative recursion. The encrypted profile
+  # below uses only its approved endpoints, never these as fallback.
   #
   #   9.9.9.9                          plain UDP — visible to your ISP
   #   tls://9.9.9.9:853#dns.quad9.net  DNS-over-TLS, certificate verified
   #   https://dns.quad9.net/dns-query  DNS-over-HTTPS
   #
   # The "#name" suffix on a tls:// upstream is the certificate name to verify.
-  # Without it, a connection to a bare IP cannot be verified and the encryption
-  # buys you nothing.
+  # Without it, the certificate must authenticate the literal IP itself.
   upstreams:
     - "tls://9.9.9.9:853#dns.quad9.net"
     - "tls://1.1.1.1:853#cloudflare-dns.com"
@@ -39,6 +40,30 @@ dns:
   # race:     ask all at once, take the first answer (lower latency, more traffic).
   upstream_mode: failover
 
+  # Empty lets the dashboard manage DNS transport. Without a saved choice,
+  # native is selected. Explicit native/encrypted pins the profile and locks
+  # dashboard transport changes; DNSDADDY_RESOLUTION_TRANSPORT also pins it.
+  resolution_transport: ""
+  encrypted_upstreams: []
+  # To pin encrypted forwarding, replace the two values above with your own
+  # approved endpoints. This reserved example is a template, not a service:
+  # resolution_transport: encrypted
+  # encrypted_upstreams:
+  #   - protocol: doq                    # UDP 853; doq/h3/h2 require TLS 1.3
+  #     address: dns.example.net:853
+  #     bootstrap_ips: [203.0.113.53]     # no plaintext DNS bootstrap
+  #   - protocol: doh3                   # HTTP/3 over QUIC, normally UDP 443
+  #     address: https://dns.example.net/dns-query
+  #     bootstrap_ips: [203.0.113.53]
+  #   - protocol: doh2                   # HTTP/2 over TLS, normally TCP 443
+  #     address: https://dns.example.net/dns-query
+  #     bootstrap_ips: [203.0.113.53]
+  # Entries are tried in order. Certificate checks and encrypted-only failover
+  # are mandatory; no provider is chosen automatically. Live still validates
+  # returned records locally. See docs/encrypted-dns.md for the scope, consent,
+  # server_name, background hostname lookups and bootstrap maintenance.
+
+  # Also the total encrypted exchange budget; encrypted permits at most 30s.
   timeout: 4s
   max_inflight: 2048
 
@@ -104,7 +129,8 @@ dns:
   # validated / unvalidated / servfail.
   #
   # This is upstream telemetry for the forwarding path in Off/Learn modes.
-  # Native Live validates locally and does not use this switch. It does not
+  # Live validates locally on either transport and does not use this switch.
+  # This telemetry switch does not
   # request DNSSEC records from a forwarder, so forwarded response
   # sizes are unchanged, and the AD bit is stripped again before answering a
   # client that did not ask for it (RFC 4035 s3.2.3).
@@ -118,24 +144,26 @@ dns:
   #   off      nothing is constructed and no extra query is sent.
   #   observe  validate alongside resolution and record what it concludes.
   #            The dashboard calls this Learn mode.
-  #   enforce  native Live: answer from native authoritative recursion and
-  #            validate the exact returned data. Bogus/indeterminate answers
-  #            return SERVFAIL; there is no fallback to upstream forwarders.
+  #   enforce  Live: validate the exact data returned from the selected
+  #            acquisition transport. Bogus/indeterminate answers return
+  #            SERVFAIL; no weaker fallback is permitted.
   #
   # Empty or omitted lets the installation decide: a NEW installation runs
   # native Live. Existing recorded Learn/off choices are preserved; an older
   # installation without a first-run record stays off. An explicit mode here
   # or in DNSDADDY_LOCAL_DNSSEC_VALIDATION overrides dashboard mode changes.
   #
-  # Live and Learn contact authoritative servers directly over plaintext
-  # UDP/TCP 53, even if the configured forwarders use DoH/DoT. Native Live is
-  # experimental; longer field evaluation and target-device load evidence are
-  # still needed. For split DNS that requires a private forwarder, explicitly
-  # select Learn or off until native conditional forwarding is supported.
+  # On native transport, Live/Learn contact authoritative servers directly
+  # over plaintext UDP/TCP 53, even if legacy forwarders use DoH/DoT. On the
+  # encrypted profile, answer acquisition, supporting DNSSEC lookups and anchor
+  # refresh use only approved encrypted endpoints. Live remains experimental;
+  # longer field evaluation and target-device load evidence are still needed.
+  # General private trust zones and native conditional forwarding are not added
+  # by encrypted transport. Review split-DNS requirements before enabling Live.
   #
-  # Learn records an independent native validation without changing the
-  # forwarded answer. Off constructs no native runtime and sends no native
-  # queries. See docs/decisions/0003-daddybound-native-live.md.
+  # Learn records an independent validation without changing the forwarded
+  # answer. Off constructs no local validation runtime or anchor refresh.
+  # See docs/decisions/0003-daddybound-native-live.md and docs/encrypted-dns.md.
   local_dnssec_validation: ""
 
   # Learn-only queue controls; both are bounded even when currently off.

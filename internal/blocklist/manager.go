@@ -107,7 +107,13 @@ func NewManager(st *store.Store, holder *Holder, cfg config.Feeds, dataDir strin
 		cfg:    cfg,
 		dir:    dir,
 		log:    log,
-		client: &http.Client{Timeout: timeout},
+		client: &http.Client{Timeout: timeout, Transport: &http.Transport{
+			// Use the process DNS route directly. An implicit environment
+			// proxy could resolve feed hostnames outside the encrypted profile.
+			Proxy: nil, ForceAttemptHTTP2: true,
+			MaxIdleConns: 8, MaxIdleConnsPerHost: 2, MaxConnsPerHost: 4,
+			IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: timeout,
+		}},
 	}, nil
 }
 
