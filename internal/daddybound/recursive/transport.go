@@ -20,6 +20,41 @@ type Exchanger interface {
 	Exchange(ctx context.Context, server netip.AddrPort, m *dns.Msg) (*dns.Msg, error)
 }
 
+// exchange reserves time inside the caller's overall resolution deadline for
+// another authority and the remaining resolution/validation work. Giving one
+// unreachable authority that whole deadline prevented failover, even when its
+// next delegated server was healthy. This is a share of the remaining budget,
+// not a fixed latency threshold: successful exchanges return as soon as their
+// reply arrives, and the configured per-server timeout remains an upper bound.
+// Priming uses this too, since a failed first root hint must not consume the
+// entire first query's lifetime.
+func (r *Resolver) exchange(ctx context.Context, server netip.AddrPort, q *dns.Msg) (*dns.Msg, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	timeout := r.cfg.Timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+		timeout = min(timeout, remaining/2)
+	}
+	attempt, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	msg, err := r.ex.Exchange(attempt, server, q)
+	if parentErr := ctx.Err(); parentErr != nil {
+		return nil, parentErr
+	}
+	if attempt.Err() != nil {
+		// A per-authority timeout is recoverable while the parent is alive.
+		// Do not wrap context.DeadlineExceeded here: the resolution's callers
+		// use that to stop all remaining work when the whole query expires.
+		return nil, fmt.Errorf("%w: authority %s exceeded its exchange time budget", ErrNoReachableServer, server)
+	}
+	return msg, err
+}
+
 // NewNetExchanger builds the production transport.
 //
 // Exported so the deterministic laboratory can wrap it rather than substitute
@@ -125,7 +160,21 @@ func (e *netExchanger) exchange(ctx context.Context, network string, server neti
 		c.UDPSize = e.udpSize
 	}
 
-	reply, _, err := c.ExchangeContext(ctx, q, server.String())
+	conn, err := c.DialContext(ctx, server.String())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	// ExchangeContext applies deadlines but does not interrupt an existing
+	// socket read on early cancellation. This connection belongs to just this
+	// attempt, so closing it promptly releases UDP and TCP work on shutdown
+	// or cancellation without risking a later query's pooled connection.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	reply, _, err := c.ExchangeWithConnContext(ctx, q, conn)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -233,6 +233,30 @@ func (c *Cache) BestDelegation(name string) (string, []netip.AddrPort, bool) {
 	}
 }
 
+// delegation returns the names and glue of an unexpired delegation. It is
+// used only after its known addresses fail, so an out-of-bailiwick backup can
+// be resolved on demand without prefetching every nameserver on the fast path.
+func (c *Cache) delegation(zone string) ([]string, map[string][]netip.Addr) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	zone = dns.CanonicalName(zone)
+	e, ok := c.dels[zone]
+	if !ok {
+		return nil, nil
+	}
+	if !c.opt.Now().Before(e.expires) {
+		delete(c.dels, zone)
+		c.stats.Expired++
+		return nil, nil
+	}
+	glue := make(map[string][]netip.Addr, len(e.glue))
+	for name, addrs := range e.glue {
+		glue[name] = append([]netip.Addr(nil), addrs...)
+	}
+	return append([]string(nil), e.ns...), glue
+}
+
 // KnownCuts returns the names at or above name that the cache holds a live
 // delegation for, deepest first.
 //

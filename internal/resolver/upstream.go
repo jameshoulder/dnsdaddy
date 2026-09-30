@@ -160,7 +160,7 @@ func (u *Upstream) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 func (u *Upstream) exchangeDNS(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	// UDP is stateless; open, ask, close.
 	if u.Protocol == "udp" {
-		resp, _, err := u.client.ExchangeContext(ctx, m, u.Address)
+		resp, err := exchangeDNSContext(ctx, u.client, m, u.Address)
 		if err != nil {
 			return nil, err
 		}
@@ -201,8 +201,26 @@ func (u *Upstream) exchangeDNS(ctx context.Context, m *dns.Msg) (*dns.Msg, error
 
 func (u *Upstream) exchangeOverTCP(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	c := &dns.Client{Net: "tcp", Timeout: u.client.Timeout}
-	resp, _, err := c.ExchangeContext(ctx, m, u.Address)
-	return resp, err
+	return exchangeDNSContext(ctx, c, m, u.Address)
+}
+
+// The DNS library observes context deadlines but does not interrupt a read
+// when its context is cancelled early. Own the connection so cancellation or
+// a transport change can promptly stop the exchange instead of waiting for
+// the original deadline. This helper never returns a pooled connection.
+func exchangeDNSContext(ctx context.Context, client *dns.Client, query *dns.Msg, address string) (*dns.Msg, error) {
+	conn, err := client.DialContext(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	reply, _, err := client.ExchangeWithConnContext(ctx, query, conn)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return reply, err
 }
 
 // borrowConn returns a pooled connection, or dials a new one. The bool reports
@@ -241,7 +259,7 @@ func (u *Upstream) returnConn(c *dns.Conn) {
 	u.connAge = time.Now()
 }
 
-func (u *Upstream) exchangeOnConn(ctx context.Context, conn *dns.Conn, m *dns.Msg) (*dns.Msg, error) {
+func (u *Upstream) exchangeOnConn(ctx context.Context, conn *dns.Conn, m *dns.Msg) (reply *dns.Msg, resultErr error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(u.client.Timeout)
@@ -249,6 +267,21 @@ func (u *Upstream) exchangeOnConn(ctx context.Context, conn *dns.Conn, m *dns.Ms
 	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, err
 	}
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+		close(interrupted)
+	})
+	defer func() {
+		// Synchronize a started cancellation callback before the caller can
+		// return this connection to the pool and lend it to another query.
+		if !stop() {
+			<-interrupted
+		}
+		if ctx.Err() != nil {
+			reply, resultErr = nil, ctx.Err()
+		}
+	}()
 	if err := conn.WriteMsg(m); err != nil {
 		return nil, err
 	}
