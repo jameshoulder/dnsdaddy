@@ -219,7 +219,9 @@ func (c *dnssecControl) SetTransport(ctx context.Context, transport string, endp
 	if next.runtime != nil {
 		next.runtime.base.Activate()
 	}
-	c.log.Info("DNS transport active", "transport", transport, "mode", next.mode,
+	safeTransport := strings.ReplaceAll(transport, "\n", "")
+	safeTransport = strings.ReplaceAll(safeTransport, "\r", "")
+	c.log.Info("DNS transport active", "transport", safeTransport, "mode", next.mode,
 		"approved_endpoints", len(next.endpoints), "plaintext_fallback", false)
 	return nil
 }
