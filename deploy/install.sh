@@ -131,9 +131,6 @@ data_dir: ${DATA_DIR}
 dns:
   listen_udp: ":53"
   listen_tcp: ":53"
-  upstreams:
-    - "tls://9.9.9.9:853#dns.quad9.net"
-    - "tls://1.1.1.1:853#cloudflare-dns.com"
 http:
   listen: "${HTTP_LISTEN}"
 EOF

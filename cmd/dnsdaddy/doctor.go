@@ -699,8 +699,8 @@ func doctorLocalDNSSEC(ctx context.Context, cfg config.Config) diag.Check {
 
 	switch cfg.DNS.LocalDNSSECMode() {
 	case config.LocalDNSSECOff:
-		c.Summary = "Off. DNS Daddy forwards answers through the selected transport and records the upstream's DNSSEC conclusion."
-		c.Evidence = append(c.Evidence, "Daddybound does not perform independent local validation in Off mode.")
+		c.Summary = "Forward. DNS Daddy forwards answers through the selected transport and records the upstream's DNSSEC conclusion."
+		c.Evidence = append(c.Evidence, "Daddybound does not perform independent local validation in Forward mode (off).")
 		return c
 	case config.LocalDNSSECObserve:
 		c.Summary = "Learn. Daddybound records sampled local DNSSEC checks while forwarding answers; those checks do not change the answer."

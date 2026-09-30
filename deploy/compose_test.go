@@ -52,6 +52,9 @@ func TestComposeOptionalSettingsArePassedWithoutInventingModes(t *testing.T) {
 func TestEncryptedComposeExampleKeepsPublishedPortsAndPersistentData(t *testing.T) {
 	base := loadCompose(t, "docker-compose.yml")["dnsdaddy"]
 	overlay := loadCompose(t, "deploy/docker-compose.encrypted.yml")["dnsdaddy"]
+	if _, pinned := overlay.Environment["DNSDADDY_LOCAL_DNSSEC_VALIDATION"]; pinned {
+		t.Error("encrypted starter pins the resolver mode instead of retaining selectable Forward/Learn/Live")
+	}
 	for key, want := range map[string]string{
 		"DNSDADDY_DNS_LISTEN_UDP": ":5353",
 		"DNSDADDY_DNS_LISTEN_TCP": ":5353",
@@ -100,9 +103,15 @@ func TestComposeResolvesEnvAndLeavesOmittedModesUnset(t *testing.T) {
 	}
 	root := t.TempDir()
 	copyFile(t, filepath.Join(repoRoot(t), "docker-compose.yml"), filepath.Join(root, "docker-compose.yml"), 0o644)
-	resolve := func() map[string]any {
+	must(t, os.MkdirAll(filepath.Join(root, "deploy"), 0o755))
+	copyFile(t, filepath.Join(repoRoot(t), "deploy", "docker-compose.encrypted.yml"), filepath.Join(root, "deploy", "docker-compose.encrypted.yml"), 0o644)
+	resolve := func(withEncryptedExample bool) map[string]any {
 		t.Helper()
-		args := append(append([]string{}, compose[1:]...), "--project-directory", root, "config", "--format", "json")
+		args := append(append([]string{}, compose[1:]...), "--project-directory", root, "-f", "docker-compose.yml")
+		if withEncryptedExample {
+			args = append(args, "-f", "deploy/docker-compose.encrypted.yml")
+		}
+		args = append(args, "config", "--format", "json")
 		cmd := exec.Command(compose[0], args...)
 		cmd.Dir = root
 		for _, e := range os.Environ() {
@@ -125,9 +134,12 @@ func TestComposeResolvesEnvAndLeavesOmittedModesUnset(t *testing.T) {
 		must(t, json.Unmarshal(b, &model))
 		return model.Services["dnsdaddy"].Environment
 	}
-	for _, key := range []string{"DNSDADDY_RESOLUTION_TRANSPORT", "DNSDADDY_LOCAL_DNSSEC_VALIDATION", "DNSDADDY_ENCRYPTED_UPSTREAMS"} {
-		if got := resolve()[key]; got != nil {
-			t.Errorf("omitted %s resolves to %#v instead of remaining unset", key, got)
+	for _, withEncryptedExample := range []bool{false, true} {
+		got := resolve(withEncryptedExample)
+		for _, key := range []string{"DNSDADDY_RESOLUTION_TRANSPORT", "DNSDADDY_LOCAL_DNSSEC_VALIDATION", "DNSDADDY_ENCRYPTED_UPSTREAMS"} {
+			if value := got[key]; value != nil {
+				t.Errorf("omitted %s resolves to %#v instead of remaining unset (encrypted overlay=%v)", key, value, withEncryptedExample)
+			}
 		}
 	}
 	values := map[string]string{
@@ -141,10 +153,12 @@ func TestComposeResolvesEnvAndLeavesOmittedModesUnset(t *testing.T) {
 		file.WriteString(key + "='" + value + "'\n")
 	}
 	must(t, os.WriteFile(filepath.Join(root, ".env"), []byte(file.String()), 0o600))
-	got := resolve()
-	for key, want := range values {
-		if got[key] != want {
-			t.Errorf(".env %s resolved to %#v, want %q", key, got[key], want)
+	for _, withEncryptedExample := range []bool{false, true} {
+		got := resolve(withEncryptedExample)
+		for key, want := range values {
+			if got[key] != want {
+				t.Errorf(".env %s resolved to %#v, want %q (encrypted overlay=%v)", key, got[key], want, withEncryptedExample)
+			}
 		}
 	}
 }

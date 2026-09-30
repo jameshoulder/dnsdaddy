@@ -28,8 +28,11 @@ func TestEncryptedExampleStartsWithoutLegacyUpstreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DNS.TransportMode() != ResolutionEncrypted || cfg.DNS.LocalDNSSECMode() != LocalDNSSECEnforce {
-		t.Fatal("encrypted example does not select Live over encrypted transport")
+	if cfg.DNS.TransportMode() != ResolutionEncrypted || !cfg.DNS.TransportConfigured() {
+		t.Fatal("encrypted example does not select the approved encrypted transport")
+	}
+	if cfg.DNS.LocalDNSSECConfigured() {
+		t.Fatal("encrypted example pins the mode and prevents selecting Forward, Learn or Live")
 	}
 	if len(cfg.DNS.Upstreams) != 0 || len(cfg.DNS.EncryptedUpstreams) != 1 {
 		t.Fatal("example requires unused legacy resolvers or lost its explicit encrypted endpoint")
@@ -43,7 +46,7 @@ func TestEncryptedExampleStartsWithoutLegacyUpstreams(t *testing.T) {
 	// Empty legacy upstreams remain invalid if a mode can actually use them.
 	cfg.DNS.ResolutionTransport = ResolutionNative
 	if cfg.validate() == nil {
-		t.Fatal("native Off/Learn configuration accepted without any forwarders")
+		t.Fatal("native Forward/Learn configuration accepted without any forwarders")
 	}
 }
 

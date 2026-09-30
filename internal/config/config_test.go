@@ -2,6 +2,7 @@ package config
 
 import (
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,14 +14,22 @@ func TestDefaultsAreValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the built-in defaults do not validate: %v", err)
 	}
-	if len(cfg.DNS.Upstreams) == 0 {
-		t.Error("no default upstreams")
+	if len(cfg.DNS.Upstreams) != 2 {
+		t.Fatalf("default upstream count = %d, want primary and backup", len(cfg.DNS.Upstreams))
 	}
-	// Shipping plaintext upstreams by default would expose every lookup DNS
-	// Daddy forwards to the operator's ISP.
-	for _, u := range cfg.DNS.Upstreams {
-		if len(u) < 6 || u[:6] != "tls://" {
-			t.Errorf("default upstream %q is not encrypted", u)
+	// HTTPS on port 443 works without DoT egress, and literal IPs cannot ask
+	// the host's DNS resolver to bootstrap DNS Daddy's own upstreams.
+	for i, spec := range cfg.DNS.Upstreams {
+		u, err := url.Parse(spec)
+		if err != nil {
+			t.Fatalf("default upstream %q: %v", spec, err)
+		}
+		if u.Scheme != "https" || u.Path != "/dns-query" || (u.Port() != "" && u.Port() != "443") {
+			t.Errorf("default upstream %q must use DNS-over-HTTPS on port 443", spec)
+		}
+		addr, err := netip.ParseAddr(u.Hostname())
+		if err != nil || addr.String() != []string{"1.1.1.1", "1.0.0.1"}[i] {
+			t.Errorf("default upstream %q must use the explicit Cloudflare IP without bootstrap", spec)
 		}
 	}
 }
@@ -79,6 +88,9 @@ feeds:
 	}
 	if cfg.DNS.UpstreamMode != "race" {
 		t.Errorf("UpstreamMode = %q", cfg.DNS.UpstreamMode)
+	}
+	if len(cfg.DNS.Upstreams) != 1 || cfg.DNS.Upstreams[0] != "tls://9.9.9.9:853#dns.quad9.net" {
+		t.Errorf("the operator's configured upstreams were replaced by the defaults: %v", cfg.DNS.Upstreams)
 	}
 	if cfg.Log.RetentionDays != 30 {
 		t.Errorf("RetentionDays = %d", cfg.Log.RetentionDays)

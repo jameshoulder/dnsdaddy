@@ -35,8 +35,8 @@ func TestAFreshDatabaseSeedsAdHocAccessOff(t *testing.T) {
 	}
 	if got, err := st.GetSetting(context.Background(), SettingLocalDNSSECDefault); err != nil {
 		t.Fatalf("GetSetting(%s): %v", SettingLocalDNSSECDefault, err)
-	} else if got != "enforce" {
-		t.Fatalf("fresh installation DNSSEC default = %q, want enforce (native Live)", got)
+	} else if got != "off" {
+		t.Fatalf("fresh installation DNSSEC default = %q, want off (Forward)", got)
 	}
 }
 
@@ -90,8 +90,8 @@ func TestAnUpgradePreservesTheAccessItAlreadyHad(t *testing.T) {
 	}
 }
 
-// A previous Learn installation and an operator's explicit off choice must
-// not be promoted to Live on reopen. The original installation decision stays
+// Previous Forward, Learn and Live installations must keep their mode on
+// reopen. The original installation decision stays
 // authoritative across seed refreshes, even when the product default changes.
 func TestRecordedDNSSECModesSurviveUpgrades(t *testing.T) {
 	for _, mode := range []string{"observe", "off", "enforce"} {

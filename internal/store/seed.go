@@ -19,10 +19,11 @@ import (
 // no networks in it has never run DNS Daddy before.
 //
 // So the decision is made once, at the moment the difference is still visible,
-// and recorded. Fresh installs get native Live. Existing recorded Learn/off
-// choices stay unchanged; an older unmarked installation gets off. Native
-// authoritative recursion changes egress and availability semantics, which an
-// existing installation must not inherit without an operator decision.
+// and recorded. Fresh installs start in Forward (off), so ordinary forwarding
+// works before the operator opts into local validation. Existing recorded
+// Forward/Learn/Live choices stay unchanged; an older unmarked installation
+// also gets Forward. Native authoritative recursion changes egress and
+// availability semantics and must remain an operator decision.
 const SettingLocalDNSSECDefault = "install.local_dnssec_default"
 
 // installMarkerKey records that first-run decisions have been taken for this
@@ -142,13 +143,9 @@ func (s *Store) seed(ctx context.Context) error {
 	}
 
 	if decided == 0 {
-		dnssecDefault := "off"
-		if freshInstall {
-			dnssecDefault = "enforce"
-		}
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO settings (key, value) VALUES (?, ?)",
-			SettingLocalDNSSECDefault, dnssecDefault,
+			SettingLocalDNSSECDefault, "off",
 		); err != nil {
 			return err
 		}

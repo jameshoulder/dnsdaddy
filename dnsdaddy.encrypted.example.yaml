@@ -1,5 +1,8 @@
-# Working, opt-in example: Daddybound Live over Cloudflare DNS over HTTPS.
+# Working, opt-in starter: Cloudflare DNS over HTTPS with selectable modes.
 # Running this file explicitly chooses Cloudflare to receive DNS questions.
+# A new installation starts in Forward mode. Use Overview or Daddybound to
+# select Forward, Learn or Live, then Apply resolver mode. Existing saved mode
+# choices survive: choose Forward explicitly if an older Live setup is failing.
 # No account, API key, domain name or server certificate is needed for this
 # OUTBOUND connection. Your devices' connection to DNS Daddy is separate.
 # See docs/encrypted-dns.md for Docker, client access and troubleshooting.
@@ -26,11 +29,10 @@ dns:
   allowed_client_cidrs: ["127.0.0.0/8", "::1/128"]
   allow_public_resolver: false
 
-  # These explicit selections keep this example managed by configuration.
-  # For dashboard-managed choices, use the normal configuration and the
-  # dashboard's example instead; removing only a selector leaves an invalid
-  # or incomplete configuration rather than migrating it into the database.
-  local_dnssec_validation: enforce
+  # Transport and endpoints are managed by this file. The resolver mode is
+  # deliberately omitted so Forward/Learn/Live remain editable in the UI.
+  # To manage transport in the UI too, use the normal configuration and its
+  # Add Cloudflare example action; this file is a separate, explicit choice.
   resolution_transport: encrypted
   upstreams: []
   encrypted_upstreams:
@@ -51,6 +53,8 @@ http:
   allow_public_bind: false
 
 # Threat blocking, local protection and advisory learning retain their normal
-# defaults. Live independently checks DNSSEC and returns SERVFAIL on bogus or
-# indeterminate answers. There is no plaintext or weaker-validation fallback.
+# defaults. Forward sends allowed questions to the approved endpoints without
+# local DNSSEC validation. Learn adds background validation; Live enforces it
+# before answering. Live failures never switch modes automatically, and no
+# encrypted mode falls back to plaintext DNS.
 # Provider reference: https://developers.cloudflare.com/1.1.1.1/ip-addresses/

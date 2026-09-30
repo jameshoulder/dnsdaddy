@@ -38,7 +38,6 @@ func controlHarness(t *testing.T, pinned bool) (*dnssecControl, *store.Store, *c
 	t.Helper()
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
-	cfg.DNS.LocalDNSSECValidation = config.LocalDNSSECOff
 	// Off must not read this missing anchor path or start any DNS activity.
 	cfg.DNS.LocalDNSSECTrustAnchorFile = filepath.Join(cfg.DataDir, "absent-anchor-file")
 	st, err := store.Open(cfg.DBPath())
@@ -46,8 +45,19 @@ func controlHarness(t *testing.T, pinned bool) (*dnssecControl, *store.Store, *c
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
+	source := "config"
+	if pinned {
+		cfg.DNS.LocalDNSSECValidation = config.LocalDNSSECOff
+	} else {
+		installation, err := st.GetSetting(context.Background(), store.SettingLocalDNSSECDefault)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.ResolveLocalDNSSEC(installation)
+		source = "installation_default"
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	c, err := newDNSSECControl(ctx, cfg, st, slog.New(slog.NewTextHandler(io.Discard, nil)), pinned, "config")
+	c, err := newDNSSECControl(ctx, cfg, st, slog.New(slog.NewTextHandler(io.Discard, nil)), pinned, source)
 	if err != nil {
 		cancel()
 		t.Fatal(err)

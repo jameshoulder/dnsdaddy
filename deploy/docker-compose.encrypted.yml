@@ -1,13 +1,16 @@
-# Optional complete encrypted Daddybound Live configuration.
+# Optional complete encrypted forwarding starter with selectable resolver modes.
 # From the repository root:
 #   docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml up -d --build
 #   docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml exec dnsdaddy dnsdaddy doctor
 #
 # This explicitly selects the provider in dnsdaddy.encrypted.example.yaml and
-# pins the transport and Daddybound mode. Edit that file for another provider,
-# or use the dashboard preset instead for settings you can change in the UI.
+# pins the transport and endpoints. Forward/Learn/Live remain selectable in the
+# UI: fresh data starts in Forward; existing saved mode choices are preserved.
+# Edit the file for another provider, or use the dashboard example to keep
+# transport settings editable too.
 # Existing .env values still take precedence over YAML; remove conflicting
-# transport/upstream overrides before choosing this example.
+# transport/upstream overrides before choosing this example. Remove an explicit
+# DNSDADDY_LOCAL_DNSSEC_VALIDATION override to unlock the mode chooser.
 #
 # Use BOTH -f arguments for future updates. The base Compose file supplies
 # the protected dashboard binding, client ACL and existing named data volume.
