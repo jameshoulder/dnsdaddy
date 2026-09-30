@@ -9,6 +9,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
+	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
@@ -223,6 +224,9 @@ type Overview struct {
 	// handlers_overview_measured.go. The headline fields keep their names
 	// and meanings; this is where a reader goes to find out what they mean.
 	Measured OverviewMeasured `json:"measured"`
+	// Live is immediate, anonymous handler activity. The separate
+	// /activity/live endpoint can be polled without rebuilding this overview.
+	Live dnsserver.LiveActivity `json:"live"`
 }
 
 func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -325,6 +329,7 @@ func (a *API) handleOverview(w http.ResponseWriter, r *http.Request) {
 		ServesOnlyLoopback: a.ClientACL.Current().ServesOnlyLoopback(),
 		RefusedClients:     a.DNS.RefusedClients(),
 		Measured:           measured,
+		Live:               a.DNS.LiveActivity(),
 	})
 }
 

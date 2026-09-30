@@ -40,8 +40,7 @@ sudo ufw enable
 curl -fsSL https://raw.githubusercontent.com/jameshoulder/dnsdaddy/main/deploy/install.sh | sudo bash
 ```
 
-Or with Docker, which is the supported path and does the rest of this page's
-first-run steps for you:
+Or with Docker, the supported path, which checks and starts the service for you:
 
 ```bash
 git clone https://github.com/jameshoulder/dnsdaddy.git
@@ -66,7 +65,31 @@ It is deliberately **not** written to the log: a credential in
 `docker compose logs` outlives the session and reaches every log shipper
 pointed at the container.
 
-Check it came up:
+### Choose how it resolves
+
+New data starts in **Forward** mode: permitted queries pass through local
+filtering and then go to Cloudflare DoH at `https://1.1.1.1/dns-query` or
+`https://1.0.0.1/dns-query`. This uses outbound TCP 443 and needs no DNS lookup
+to find the upstream. The daemon's ordinary background hostname lookups still
+use the system resolver until you select the complete encrypted profile.
+
+**Overview** and **Daddybound** offer **Forward**, **Learn** and **Live**, with
+**Apply resolver mode** to save your selection. Forward has no local DNSSEC
+validation. Learn forwards answers and checks sampled names independently in
+the background. Live enforces local validation before answering. With the
+native transport, Learn and Live also contact authoritative servers directly
+over UDP/TCP 53. Use the [Cloudflare encrypted starter](encrypted-dns.md#start-with-a-working-example)
+if that traffic must use your approved HTTPS endpoint instead.
+
+**Upgrades retain the saved mode.** A previous installation still in Live is
+not reset to Forward. If it returns `SERVFAIL` for normal names, deliberately
+choose Forward to establish working forwarding before investigating Live.
+If the selector is locked, remove the explicit `dns.local_dnssec_validation`
+or `DNSDADDY_LOCAL_DNSSEC_VALIDATION` setting and restart, then select Forward.
+Keep configuration pins when they are intentional. Existing custom upstreams
+are retained; review old DoT URLs if outbound port 853 is blocked.
+
+### Check the running resolver
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/health
@@ -79,6 +102,11 @@ command. A cold installation can have an empty blocklist until its first feed
 refresh finishes. Doctor checks DNS separately and reports feed readiness;
 `status=ok` alone does not establish that queries work or filtering is loaded.
 After the internal checks pass, permit and test one client as described below.
+Watch **Overview → Resolver activity** while testing. It counts messages reaching
+the DNS handler even when query logging is disabled. Received, answered,
+refused and failed requests distinguish traffic reaching the process from successful
+resolution. Internal health probes count too, so finish with a real lookup
+from the intended device; a running animation alone is not client readiness.
 
 ## 4. Never run an open resolver
 
@@ -152,14 +180,17 @@ separately by `dnsdaddy doctor`, at `GET /api/v1/diagnostics`, and on the
 Networks page, so you can always see which one is responsible for a given
 range.
 
-**That decides which source to put a range in.** A range in the bootstrap list
-is permitted whatever the dashboard says about it: unticking *Allow this
-network to use DNS Daddy*, disabling the network, or deleting it outright
-cannot withdraw a permission that configuration is also granting. So put a
-range in `.env` when you want it fixed by deployment — Ansible, a Compose file,
-an image build — and add it as a Network when you want to be able to revoke it
-from the dashboard. Putting it in both leaves you with a revocation control
-that appears to work and does not.
+**Use a named Network for normal client access.** A non-loopback range in
+the bootstrap list grants access only while ad-hoc access is enabled. Adding
+it to `.env` does not grant access on a fresh installation. Use that list to
+define the pool available to the ad-hoc switch; use enabled, permitted
+Networks for individual grants you can manage from the dashboard.
+
+**When ad-hoc access is on**, unticking *Allow this network to use DNS Daddy*,
+disabling the network or deleting it cannot revoke a grant that the bootstrap
+pool is also supplying. Remove the overlapping bootstrap range or turn
+ad-hoc access off to withdraw that source of permission. Configured loopback
+ranges remain available for local checks in either state.
 
 A dashboard change is stored and then applied to the running resolver, and
 those are two steps. Normally the second follows immediately and the change is

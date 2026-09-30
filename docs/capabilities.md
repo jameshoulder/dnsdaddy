@@ -31,12 +31,12 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 
 | Capability | Notes |
 |---|---|
-| Forwarding resolver over UDP and TCP | Off/Learn use the selected profile's forwarding path. Live uses local validation with native recursion or approved encrypted forwarding; see Experimental below. |
+| Forwarding resolver over UDP and TCP | Forward is the starting mode on a fresh installation. Forward/Learn use the selected profile's forwarding path. Live uses local validation with native recursion or approved encrypted forwarding; see Experimental below. |
 | DNS-over-TLS listener | Requires a certificate; off unless configured. |
 | DNS-over-HTTPS endpoint | RFC 8484, at `/dns-query/<token>`. |
-| Legacy encrypted upstream (DoT) | The default configured forwarding URLs use certificate verification. They apply to Off/Learn under the native profile; native Live instead contacts authoritative servers over plaintext UDP/TCP 53. |
-| Optional encrypted outbound profile | Operator-selected DoQ, HTTP/3 DoH and HTTP/2 DoH endpoints require authenticated TLS 1.3, literal bootstrap IPs for named endpoints and explicit acknowledgement. No automatic provider selection or plaintext fallback. Native remains the default. This adds outbound transports, not inbound DoQ/HTTP3 listeners. Local Live validation remains experimental; see [encrypted-dns.md](encrypted-dns.md). |
-| Complete encrypted setup example | An explicit dashboard action fills Cloudflare DoH2 endpoint, TLS identity and bootstrap addresses without changing active settings. A standalone configuration and Docker overlay combine this selected provider with Daddybound Live; client access still requires the documented listener and network permissions. See [the walkthrough](encrypted-dns.md#start-with-a-working-example). |
+| Standard encrypted upstreams | The default forwarding URLs are `https://1.1.1.1/dns-query` and `https://1.0.0.1/dns-query` (Cloudflare), with certificate verification and no redirects. Literal addresses avoid a bootstrap DNS dependency. These use HTTPS on TCP 443 with TLS 1.2 or later; configured UDP/TCP/DoT forwarders remain supported. Native Live instead contacts authoritative servers over plaintext UDP/TCP 53. |
+| Optional encrypted outbound profile | Operator-selected DoQ, HTTP/3 DoH and HTTP/2 DoH endpoints require authenticated TLS 1.3, literal bootstrap IPs for named endpoints and explicit acknowledgement. This profile also carries daemon background hostname lookups; the standard forwarding profile leaves those to system DNS. There is no plaintext fallback. This adds outbound transports, not inbound DoQ/HTTP3 listeners. Local Live validation remains experimental; see [encrypted-dns.md](encrypted-dns.md). |
+| Complete encrypted setup example | An explicit dashboard action fills Cloudflare DoH2 endpoint, TLS identity and bootstrap addresses without changing active settings. A standalone configuration and Docker overlay choose this provider and leave Forward/Learn/Live editable. A fresh instance starts in Forward; saved mode choices remain effective. Client access still requires the documented listener and network permissions. See [the walkthrough](encrypted-dns.md#start-with-a-working-example). |
 | Answer cache | The forwarding cache is bounded, sharded and TTL-aware, and invalidated on feed or policy change. Live never returns an answer from that forwarding cache. |
 | Request collapsing | Identical concurrent questions share one upstream flight. |
 | ANY refusal (RFC 8482) | On by default; ANY is the classic amplification lever. |
@@ -63,7 +63,8 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Per-query logging with plain-English reasons | Non-blocking and batched; drops rather than delaying a lookup. |
 | Hourly and daily rollups | Survive query-log pruning, so reporting history outlives browsing history. Failed resolutions are counted in the same hourly rows as the queries they are a fraction of. |
 | Overview measurements | `GET /api/v1/overview` carries a `measured` block stating each count separately with its window and scope: configured, enabled, permitted and traffic-bearing networks; attributed clients in the window or the reason there is no count; feeds enabled, loaded, failing and never downloaded; blocking policies and whether any enabled network uses one; blocked queries split into security, precaution, preference, custom and unclassified; and an error rate derived from one window, or the reason it cannot be. No field combines two scopes and none is a verdict about protection. |
-| DNSSEC status per query | Records the original source: `upstream` for Off/Learn client answers, `native` for native Live, and `encrypted_forwarded` for locally validated encrypted Live. A blank legacy value means unknown. Native/encrypted Learn observations are separate from the already-decided client answer; changing today's transport never relabels stored evidence. |
+| Immediate DNS activity | Authenticated `GET /api/v1/activity/live` and `overview.live` count arrivals, completed answers, cache hits, blocks, failures, ACL refusals, rate limits and invalid messages reaching the DNS handler, including health probes. In-memory process totals, pending queries, last arrival/completion and a rolling 60-second window remain visible with query logging disabled. No names, client addresses, query-history reads or DNS probes are involved; normal API authentication still uses its store. Totals reset on restart; completed means the handler produced a response, not proof a remote client received it. |
+| DNSSEC status per query | Records the original source: `upstream` for Forward/Learn client answers, `native` for native Live, and `encrypted_forwarded` for locally validated encrypted Live. A blank legacy value means unknown. Native/encrypted Learn observations are separate from the already-decided client answer; changing today's transport never relabels stored evidence. |
 | Prometheus metrics | Hand-rolled, no client library. |
 | Markdown reports | A period summary written for someone who does not run the network. |
 | Complete query, decision and finding exports | Dedicated `/api/v1/{queries,decisions,findings}/export` endpoints return bounded NDJSON pages with a frozen time window, insertion high-water, continuation links and emitted/skipped counts. They report the final page explicitly. Retention can still remove rows during a walk, and review-state filters use the current review state; this is not an exactly-once change feed. See [exports.md](exports.md). |
@@ -77,7 +78,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 |---|---|
 | Embedded dashboard | No build step, no npm tree; served from the binary. |
 | Server address on Overview and Setup | Authenticated `GET /api/v1/server-addresses` returns at most 32 usable local IPv4/IPv6 entries with scope/interface labels and configured DNS ports. It prefers compatible private addresses. If interface enumeration is unavailable, the accepted connection's local socket IP can be returned with explicit incomplete provenance and unknown interface. Headers and client/peer IPs are never address sources; no external IP lookup occurs. Container/NAT mappings and reachability are not inferred. |
-| Runtime DNS transport selection | Authenticated, audited writes persist native/encrypted selection and operator-owned endpoints unless YAML pins the choice. Explicit tests send a root DNSKEY query with consent. Encrypted-profile DNS stays encrypted in Live, Learn and Off, including daemon background hostname lookups; only client Live receives independent local enforcement. See [encrypted-dns.md](encrypted-dns.md). |
+| Runtime DNS transport selection | Authenticated, audited writes persist native/encrypted selection and operator-owned endpoints unless YAML pins the choice. Explicit tests send a root DNSKEY query with consent. Encrypted-profile DNS stays encrypted in Forward, Learn and Live, including daemon background hostname lookups; only client Live receives independent local enforcement. See [encrypted-dns.md](encrypted-dns.md). |
 | REST API with OpenAPI 3.1 | Each build serves its own spec at `/openapi.yaml`. |
 | Session and bearer-token authentication | Bcrypt password, rate-limited login, same-origin checks on cookie-authenticated writes. |
 | Single static binary | `CGO_ENABLED=0`, pure-Go SQLite, cross-compiles from a laptop. |
@@ -91,7 +92,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Capability | Notes |
 |---|---|
 | `dnsdaddy doctor` | Reads configuration and the database, and sends real DNS queries at the configured listeners and through each upstream. Reports SYSTEM, DATABASE, DNS LISTENER, CLIENT ACCESS, UPSTREAM, WEB INTERFACE and THREAT INTELLIGENCE as PASS/WARN/FAIL with the evidence behind each verdict. Changes nothing — the database is opened read-only — and exits non-zero on failure. `--json` for machine consumption. |
-| Client-access cross-check | Reports a network configured in the dashboard whose addresses the **effective** client ACL does not permit — the bootstrap list from configuration unioned with the dashboard's own permissions, with both sources named separately. Surfaced at startup, at `GET /api/v1/diagnostics`, in `dnsdaddy doctor`, and on the dashboard. Coverage is decided by single-prefix containment, so two allowed prefixes that between them cover a network are reported as *partial* rather than *full* — it over-warns in a rare case rather than under-warning in a common one. |
+| Client-access cross-check | Reports a network configured in the dashboard whose addresses the **effective** client ACL does not permit — the currently active bootstrap ranges plus explicit Network grants, with both sources named separately and the ad-hoc access gate applied. Surfaced at startup, at `GET /api/v1/diagnostics`, in `dnsdaddy doctor`, and on the dashboard. Coverage is decided by single-prefix containment, so two allowed prefixes that between them cover a network are reported as *partial* rather than *full* — it over-warns in a rare case rather than under-warning in a common one. |
 | Dashboard-managed resolver access | A network can be permitted to query the resolver from the dashboard, in force on the next query with no restart. Enforced server-side: a default route is refused outright, and a publicly routable range needs an explicit acknowledgement recorded per range. See [docs/deploy.md](deploy.md#who-may-use-the-resolver) for the precedence rules and the properties that can surprise — an empty bootstrap ACL stays unrestricted, there are no deny rules, and permitting a catch-all you created grants nothing because it has no ranges of its own. The built-in **Default** row is the exception: its control is *Ad-hoc DNS access*, which decides whether unmatched clients already inside `dns.allowed_client_cidrs` are served. Off on a new installation, turned on once when upgrading an installation that was already serving them, and never able to widen that list. |
 | Public-exposure warning | Names each permitted range that is reachable from the internet, every time diagnostics run, from **both** sources — a range permitted through `DNSDADDY_ALLOWED_CLIENT_CIDRS` exposes a resolver exactly as much as one permitted in the dashboard. Each is labelled with the setting responsible. It never resolves itself and never claims a firewall state: DNS Daddy cannot see a cloud security group and does not change one. |
 | First-run guidance | The dashboard uses measured refusals and the effective ACL, including the Default network's ad-hoc access setting. Being inside a private address range does not by itself prove a client is admitted; inspect the effective permissions. |
@@ -102,7 +103,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 
 ### DNSSEC status has a source
 
-In Off/Learn mode, the client answer comes from the selected profile's
+In Forward/Learn mode, the client answer comes from the selected profile's
 configured upstreams: legacy forwarding URLs under native, approved encrypted
 endpoints under encrypted. DNS
 Daddy requests and records the upstream AD verdict ([RFC 6840] §5.7). An
@@ -139,15 +140,17 @@ separate from the incremental local traffic model described below.
 | --- | --- | --- |
 | **Live** (`enforce`) | Native authoritative recursion or approved encrypted recursive endpoints | Locally validates the exact returned records. With checking enabled, secure/proven-insecure answers can be served; bogus, indeterminate, timeout and bounded-work failures return SERVFAIL. No silent change of transport. |
 | **Learn** (`observe`) | The selected profile's forwarding path | Independently fetches and validates allowed names using that profile after the answer is decided. A Learn verdict cannot change that answer. |
-| **Off** (`off`) | The selected profile's forwarding path | No Daddybound observation, local validation or anchor refresh. Encrypted forwarding remains encrypted. Local policy, rate limiting and rebinding protection remain active. |
+| **Forward** (`off`) | The selected profile's forwarding path | Basic forwarding with no Daddybound observation, local validation or anchor refresh. Encrypted forwarding remains encrypted. Local policy, rate limiting and rebinding protection remain active. |
 
-**Fresh installations default to Live.** Upgrades retain an installation's
-recorded Off/Learn selection. An explicit YAML mode pins the choice; otherwise
+**Fresh installations default to Forward.** Upgrades retain an installation's
+recorded mode, including Live. An explicit YAML mode pins the choice; otherwise
 a persisted dashboard selection can be changed with acknowledgement of the
-selected transport and failure behavior. Transport is independently selected;
-native remains the default and no encrypted provider is installed automatically.
-A configuration default is a product decision,
-not evidence that the validator is mature.
+selected transport and failure behavior. The Overview and Daddybound pages expose
+the same mode control. Transport is independently selected; the standard profile
+uses configured upstreams for Forward/Learn and native recursion for Live.
+An old saved Live choice is changed by selecting Forward and applying it;
+updating the binary does not overwrite that choice. The API/config values
+remain `off`, `observe` and `enforce` for compatibility.
 
 Native resolution uses plaintext UDP/TCP port 53 with QNAME minimisation.
 The optional encrypted profile replaces native iteration with queries to

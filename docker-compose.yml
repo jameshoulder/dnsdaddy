@@ -91,14 +91,14 @@ services:
       # in-container doctor checks. Host probes through a published port may
       # arrive as the project gateway and need their own Network permission.
       #
-      # `dnsdaddy doctor` reports both sources and whether the networks in your
-      # dashboard can actually reach the resolver.
+      # `dnsdaddy doctor` reports both sources and their effective permissions.
+      # Test from the intended client to verify network reachability as well.
       DNSDADDY_ALLOWED_CLIENT_CIDRS: "${DNSDADDY_ALLOWED_CLIENT_CIDRS:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16,::1/128,fc00::/7,fe80::/10}"
 
       # Bare keys pass a value from .env or the shell only when one is set.
       # Do not replace these with empty strings or hardcoded defaults: modes
       # left unset are chosen by the installation and saved dashboard settings.
-      # See .env.example for a complete encrypted Daddybound Live example.
+      # See .env.example for an encrypted starter with selectable resolver modes.
       DNSDADDY_UPSTREAMS:
       DNSDADDY_UPSTREAM_MODE:
       DNSDADDY_RESOLUTION_TRANSPORT:

@@ -12,15 +12,17 @@ optional encrypted profile obtains answer data through operator-approved DoQ,
 HTTP/3 DoH or HTTP/2 DoH recursive endpoints and validates it locally. With
 checking enabled, Live serves Secure/proved Insecure answers and fails closed
 for Bogus, Indeterminate and operational failures. It never silently changes
-transports to obtain a different answer. Live
-(`dns.local_dnssec_validation: enforce`) is the default for a new installation;
-existing recorded Learn/off choices and explicit configuration are preserved.
-No new encrypted provider is selected automatically. Longer operational
+transports to obtain a different answer. A new installation starts in
+**Forward** (`dns.local_dnssec_validation: off`), using the configured upstreams
+without local DNSSEC enforcement. Existing recorded choices, including Live,
+and explicit configuration are preserved. Overview and Daddybound can select
+Forward, Learn or Live unless configuration pins the mode.
+No encrypted endpoint bundle is enabled automatically. Longer operational
 evaluation is still required before claiming production readiness.
 
 Learn (`observe`) validates independently after the forwarded answer is final,
-so its verdict cannot authenticate or change that answer. Off constructs no
-Daddybound validation runtime and stops its anchor refresh. Off/Learn client
+so its verdict cannot authenticate or change that answer. Forward constructs no
+Daddybound validation runtime and stops its anchor refresh. Forward/Learn client
 answers still use forwarding: legacy upstream URLs under the native profile,
 or approved encrypted endpoints under the encrypted profile. Native Live and
 native Learn use plaintext authoritative UDP/TCP 53 for their own lookups. The
@@ -145,7 +147,7 @@ being complete:
   endpoints for every name, not per-zone routing, and does not waive local
   trust requirements for a private answer. Split-DNS compatibility still
   depends on the chosen resolver, trust configuration and rebinding exceptions;
-  Off/Learn forwarding is a separate mode choice, not an automatic fallback.
+  Forward/Learn forwarding is a separate mode choice, not an automatic fallback.
 - **No production-readiness claim.** New deterministic client tests establish
   specific correctness properties. They do not replace target-device load
   testing, extended field use, independent review or real rollover evidence.
@@ -184,7 +186,7 @@ Recorded observation provenance remains immutable:
 | Native Learn | `native` | `upstream` for the separately forwarded client answer |
 | Encrypted Learn | `encrypted_forwarded` | `upstream` for the separately forwarded client answer |
 
-Off has no new local validation observation; forwarded client answers retain
+Forward has no new local validation observation; forwarded client answers retain
 `upstream` provenance. Blank legacy query sources mean unknown. Changing mode
 or transport never relabels historical evidence. The import-graph test permits
 only the narrow native and

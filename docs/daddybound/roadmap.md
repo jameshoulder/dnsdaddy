@@ -135,8 +135,8 @@ caps signature TTLs and returns explicit SERVFAIL for Bogus, Indeterminate and
 operational failures. It honors CD/DO/AD, keeps forwarding caches out of the
 native trust path and bounds concurrency, recursion and validation work.
 
-Fresh installations select Live. Existing recorded Learn/off and explicit
-configuration choices are preserved. Learn observations remain independent of
+Fresh installations select Forward (`off`). Existing recorded modes, including
+Live, and explicit configuration choices are preserved. Learn observations remain independent of
 forwarded answers; Live observations identify the native result actually used.
 
 ## Remaining: operational readiness and private-zone routing
@@ -154,5 +154,5 @@ properties; they do not supply those missing denominators.
 
 Native conditional forwarding and private trust-zone routing are also future
 work. Deployments relying on private split-DNS forwarders must currently use
-Learn or Off. Unsupported-policy cases deliberately fail closed and can have
+Forward or Learn. Unsupported-policy cases deliberately fail closed and can have
 different availability behavior from other validators; see standards.md §5.3.

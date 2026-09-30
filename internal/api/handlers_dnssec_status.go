@@ -348,14 +348,14 @@ func (a *API) dnssecResolutionStatus(states ...DNSSECRuntimeState) dnssecResolut
 			res.Note = "Learn observes independently through the same encrypted endpoints after the client answer is decided. Supporting DNSSEC queries and trust-anchor refresh remain encrypted. Observations cannot change the answer."
 		default:
 			res.Source = "none"
-			res.Note = "Daddybound validation and trust-anchor refresh are off. DNS answers and background hostname lookups still use the encrypted endpoints; local policy, rate limiting and rebinding protection remain active."
+			res.Note = "Forward mode answers through the approved encrypted endpoints. Daddybound validation and trust-anchor refresh are off; local policy, rate limiting and rebinding protection remain active. Background hostname lookups use the same encrypted endpoints."
 		}
 		return res
 	}
 	if state.Effective == config.LocalDNSSECOff {
 		res.Source = "none"
-		res.Transport = "none: Daddybound is off and sends no native DNS traffic"
-		res.Note = "Native recursion and trust-anchor refresh are stopped. Local policy, rate limiting and rebinding protection remain independent controls."
+		res.Transport = "configured forwarding upstreams; no direct queries to root or authoritative servers"
+		res.Note = "Forward mode answers through the configured upstreams and keeps caching, local policy, rate limiting and rebinding protection active. Daddybound does not perform local validation or trust-anchor refresh in this mode."
 		return res
 	}
 	res.Source = observe.ResolutionNative

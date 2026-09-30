@@ -2,6 +2,11 @@
 
 **Status:** implemented, experimental. Extends [ADR 0003](0003-daddybound-native-live.md).
 
+**Current naming and starter:** `off` is displayed as **Forward**. New data
+starts in Forward; existing choices survive. The complete Cloudflare example
+pins only transport and endpoints so Forward/Learn/Live remain selectable.
+See the [current setup guide](../encrypted-dns.md#start-with-a-working-example).
+
 ## Decision
 
 Transport and local validation are independent settings. Native remains the

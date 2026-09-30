@@ -12,16 +12,22 @@ recovery files can retain related information independently.
 
 ## Defaults and the effective configuration
 
-Fresh installations select Daddybound Live for native resolution and enable
-local statistical learning and decision recording. Existing installation
-choices and explicit mode pins are preserved. The dashboard reports the
+Fresh installations select Forward (`off`) and use Cloudflare DoH forwarding
+at `https://1.1.1.1/dns-query` and `https://1.0.0.1/dns-query`. Cloudflare
+receives forwarded client names; the literal addresses avoid a separate DNS
+bootstrap lookup. Local statistical learning and decision recording are
+enabled, subject to their query-logging and client-attribution controls.
+Existing installation choices and explicit mode pins are preserved. The
+dashboard reports the
 **effective** mode and which setting selected it; do not infer it from an old
 configuration example.
 
 Native is also the default transport profile. Optional encrypted forwarding
-requires operator-approved endpoints and acknowledgement; there is no automatic
-enrolment in an encrypted DNS provider. The selected transport remains active
-when Daddybound mode is Off. See [encrypted DNS](encrypted-dns.md).
+requires operator-approved endpoints and acknowledgement; changing the mode
+alone does not enable that endpoint bundle. The selected transport remains active
+in Forward mode. Native Learn/Live are deliberate choices that add direct
+authoritative DNS traffic; an encrypted profile uses its approved endpoints
+instead. See [encrypted DNS](encrypted-dns.md).
 
 External reputation, investigation enrichment and webhook delivery start off.
 Every installation supplies its own external accounts and credentials. A newly
@@ -33,8 +39,8 @@ local learner.
 
 | Path | What may be disclosed | Control |
 |---|---|---|
-| Native DNS resolution | Names needed to walk from root to authoritative servers, source IP and DNS protocol metadata. Native traffic uses plaintext UDP/TCP port 53. QNAME minimisation limits which labels each delegation sees; it does not encrypt them. | With the native profile, Live uses this for client answers and Learn performs independent native lookups after forwarded resolution. Off stops Daddybound validation and anchor refresh. The encrypted profile constructs no native recursive fallback. |
-| Legacy forwarded DNS | Requested names and DNS metadata go to the configured legacy upstream URLs, over UDP, TCP, DoT or DoH as configured. | Used for Off/Learn client answers with the native profile. Native Live does not silently fall back to this path. Encrypting a client connection does not encrypt native authoritative traffic. |
+| Native DNS resolution | Names needed to walk from root to authoritative servers, source IP and DNS protocol metadata. Native traffic uses plaintext UDP/TCP port 53. QNAME minimisation limits which labels each delegation sees; it does not encrypt them. | With the native profile, Live uses this for client answers and Learn performs independent native lookups after forwarded resolution. Forward stops Daddybound validation and anchor refresh. The encrypted profile constructs no native recursive fallback. |
+| Configured forwarded DNS | Requested names and DNS metadata go to the configured upstream URLs, over UDP, TCP, DoT or DoH as configured. The built-in defaults use Cloudflare DoH on TCP 443. | Used for Forward/Learn client answers with the native profile. Native Live does not silently fall back to this path. Encrypting a client connection does not encrypt native authoritative traffic. |
 | Optional encrypted forwarding | The approved recursive resolvers receive requested names, supporting DNSSEC questions, anchor refreshes and protocol/source-IP metadata over authenticated TLS 1.3 DoQ, HTTP/3 DoH or HTTP/2 DoH. Encryption protects this network leg, not secrecy from the approved recipient or its onward resolution. | The operator chooses endpoint identities and literal bootstrap IPs. All modes use those endpoints while the encrypted profile is selected; there is no automatic provider discovery, plaintext fallback or external IP-discovery request. Client Live validates returned records locally. An explicit endpoint test sends a root DNSKEY question, not retained browsing history. |
 | Daemon background hostname DNS | Feed, provider, webhook and other process-owned hostname lookups disclose those hostnames to the selected DNS recipient. They are separate from uploading client query logs. | Under the encrypted profile they use the same approved encrypted endpoints with no system-DNS fallback; under native they use system DNS. These background lookups do not receive Daddybound's independent client Live validation. |
 | Threat-feed downloads | The configured feed service sees the resolver host's connection, request URL, user agent and refresh cadence. A bulk download does not upload the query log or the list of matching clients. | Enabled feed URLs, scheduled/startup refresh settings and explicit refresh actions. Local file feeds avoid the corresponding HTTP download. The bundled Threat Observatory connector is retired. |
@@ -65,6 +71,15 @@ or login responses or persisted as a new address-history table. A proxy,
 tunnel, container or NAT can make it different from the address another device
 must use. Protect dashboard access because interface names and local IPs are
 deployment information.
+
+The authenticated live-activity endpoint reads in-memory resolver counters;
+it does not run a DNS probe or read query history. Its rolling 60-second
+window and process-lifetime totals contain no names or client IPs and reset
+when the process restarts. They continue to count requests when query logging
+is disabled. Internal health checks reaching the DNS handler are included;
+malformed wire messages and DoH authentication/parsing failures rejected
+before the handler are outside this measurement. The endpoint still uses
+the normal management authentication checks.
 
 Client-to-DNS-Daddy encryption is configured separately from outbound DNS.
 Choosing encrypted outbound forwarding does not turn plain client UDP/TCP

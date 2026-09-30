@@ -33,6 +33,7 @@ const {
   protectionState,
   feedHealth,
   statusHero,
+  validLiveActivity, liveActivityState, hasNewLiveActivity, liveActivityParts, resolverLiveCard, createLiveActivityPoller, readDashboardPanel,
   blockedSplit,
   measuredFacts,
   investigateFilters,
@@ -3379,7 +3380,7 @@ test('a missing or off runtime status is unavailable, never a healthy zero', () 
     stored: { windowHours: 168, total: 0, retainedRows: 0, retentionDays: 7 },
     populations: [],
   }));
-  assert.match(off, />Off</);
+  assert.match(off, />Forward</);
   assert.match(off, /no trust-anchor manager is running/);
   assert.match(off, /no observer is running/);
   assert.match(off, /no stored observations/);
@@ -3411,7 +3412,7 @@ test('a deployment-pinned native mode is rendered as locked with its reason', ()
   const out = nativeModeCard({ mode: { effective: 'off', locked: true, reason: 'Mode pinned by this deployment.', live: { available: true } } });
   assert.match(out, /fieldset class="mode-options" disabled/);
   assert.match(out, /Mode pinned by this deployment/);
-  assert.doesNotMatch(out, /Apply validation mode/);
+  assert.doesNotMatch(out, /Apply resolver mode/);
 });
 
 test('native counters are not invented when the native runtime is absent', () => {
@@ -3848,13 +3849,218 @@ test('zero transport timestamps cannot look like a measured successful connectio
   assert.doesNotMatch(out, /0001|d ago|Last success never/);
 });
 
-test('native transport copy describes the actual Off and Learn client paths', () => {
+test('standard transport copy describes the actual Forward and Learn client paths', () => {
   const off = dnsTransportCard({ transport: 'native', daddyboundMode: 'off', endpoints: [] });
-  assert.match(off, /clients use the legacy configured upstreams/);
+  assert.match(off, /Forward uses the configured upstreams/);
   assert.match(off, /Native recursion and trust-anchor refresh are stopped/);
+  assert.match(off, />Configured upstreams</);
+  assert.match(off, /Encrypted profile minimum TLS/);
+  assert.match(off, /Standard upstreams use their configured protocols/);
   const learn = dnsTransportCard({ transport: 'native', daddyboundMode: 'observe', endpoints: [] });
   assert.match(learn, /separate validation observations/);
-  assert.match(learn, /Client answers still use the legacy configured upstreams/);
+  assert.match(learn, /Client answers use the configured forwarding upstreams/);
+});
+
+test('Forward is the visible basic mode and keeps the compatible off API value', () => {
+  const status = { transport: 'native', mode: { effective: 'off', enforcing: false, live: { available: true } } };
+  const out = nativeModeCard(status, { compact: true });
+  assert.equal(nativeMode(status).label, 'Forward');
+  assert.match(out, /<h2>Resolver mode<\/h2>/);
+  assert.match(out, /name="mode" value="off" required checked/);
+  assert.match(out, /<strong>Forward<\/strong>/);
+  assert.match(out, /Answer through your configured upstreams/);
+  assert.match(out, /Forward answers\. Check a sample independently in the background/);
+  assert.ok(out.indexOf('value="off"') < out.indexOf('value="observe"'));
+  assert.ok(out.indexOf('value="observe"') < out.indexOf('value="enforce"'));
+  assert.match(out, /id="native-transport-consent" hidden/);
+  assert.match(out, /Apply resolver mode/);
+  assert.match(out, /DNS transport and details/);
+  assert.doesNotMatch(out, /<strong>Off<\/strong>|Turn off Daddybound/);
+});
+
+test('a missing or unknown mode cannot silently look like Forward', () => {
+  for (const status of [null, {}, { mode: { effective: 'future-mode' } }]) {
+    assert.equal(nativeMode(status).label, 'Unavailable');
+    assert.doesNotMatch(nativeModeCard(status), /name="mode"[^>]+checked/);
+  }
+});
+
+test('encrypted Forward clearly retains its endpoint path without claiming local enforcement', () => {
+  const out = nativeModeCard({ transport: 'encrypted', mode: { effective: 'off' } });
+  assert.match(out, /forwards through your chosen encrypted endpoints/);
+  assert.match(out, /local DNSSEC validation is off/);
+  assert.match(out, /id="native-transport-consent" hidden/);
+  assert.doesNotMatch(out, /is answering through its native resolver|Live · enforcing/);
+  assert.match(transportExampleCard(), /Choose <strong>Forward<\/strong> above for basic forwarding/);
+  assert.doesNotMatch(transportExampleCard(), /Keep or select <strong>Live/);
+});
+
+/* ---------- Live handler activity, separate from retained query history ---------- */
+
+function liveSnapshot(overrides = {}) {
+  const empty = { received: 0, completed: 0, answered: 0, blocked: 0, cached: 0, errors: 0, refused: 0, rateLimited: 0, invalid: 0 };
+  return { available: true, status: 'waiting', startedAt: '2026-09-30T09:00:00Z', measuredAt: '2026-09-30T09:01:00Z', lastQueryAt: null, lastResponseAt: null, lastRcode: '', lastOutcome: '', inflight: 0, ...overrides,
+    sinceStart: { ...empty, ...overrides.sinceStart }, recent: { ...empty, windowSeconds: 60, queriesPerSecond: 0, ...overrides.recent } };
+}
+
+function liveTimers() {
+  let sequence = 0;
+  const pending = new Map();
+  return { pending, setTimer: (fn, delay) => { const id = ++sequence; pending.set(id, { fn, delay }); return id; }, clearTimer: (id) => pending.delete(id) };
+}
+
+test('live activity distinguishes first use, idle, successful traffic and failed or refused requests', () => {
+  const expected = { waiting: 'Waiting for the first query', idle: 'Idle · no recent queries', active: 'Processing DNS queries', failing: 'Queries are failing', refused: 'Clients are being refused', degraded: 'Some queries are failing' };
+  for (const [status, label] of Object.entries(expected)) {
+    const sample = liveSnapshot({ status });
+    assert.equal(validLiveActivity(sample), true);
+    assert.equal(liveActivityState(sample).label, label);
+    assert.match(resolverLiveCard(sample), new RegExp(`data-live-state="${status}"`));
+  }
+  assert.match(resolverLiveCard(liveSnapshot({ status: 'refused' })), /Review Networks and allow the intended client range/);
+  assert.match(resolverLiveCard(liveSnapshot({ status: 'idle' })), /waiting for traffic/);
+});
+
+test('missing, failed and malformed live readings are unavailable, never invented zeroes', () => {
+  for (const sample of [null, {}, liveSnapshot({ available: false }), liveSnapshot({ status: 'constructor' }), liveSnapshot({ startedAt: 'unknown' }), liveSnapshot({ recent: { errors: null } }), liveSnapshot({ inflight: -1 })]) {
+    assert.equal(validLiveActivity(sample), false);
+    const out = resolverLiveCard(sample);
+    assert.match(out, /data-live-state="unavailable"/);
+    assert.match(out, /This is not a zero-traffic reading/);
+    assert.match(out, /data-live-count="received">—/);
+    assert.doesNotMatch(out, /data-live-count="[^"]+">0/);
+  }
+});
+
+test('live measurements state their windows and keep cache replies within the outcome counts', () => {
+  const sample = liveSnapshot({ status: 'degraded', inflight: 2, sinceStart: { received: 100002, completed: 100000 }, recent: { received: 61, completed: 60, answered: 53, blocked: 2, errors: 2, refused: 1, rateLimited: 1, invalid: 1, cached: 17, queriesPerSecond: 61 / 60 }, lastRcode: 'SERVFAIL', lastOutcome: 'error', lastQueryAt: '2026-09-30T09:00:59Z', lastResponseAt: '2026-09-30T09:00:59Z' });
+  const out = resolverLiveCard(sample);
+  assert.match(out, /data-live-count="received">100,002/);
+  assert.match(out, /data-live-count="completed">100,000/);
+  assert.match(out, /data-live-count="inflight">2/);
+  assert.match(out, /data-live-count="rate">1\.02/);
+  assert.match(out, /average over 60 seconds/);
+  assert.match(out, /Last 60 seconds/);
+  assert.match(out, /17 replies from cache \(included in outcomes\)/);
+  assert.match(out, /Anonymous totals include DNS health checks/);
+  assert.match(out, /does not confirm that a device received the reply/);
+  assert.match(out, /SERVFAIL/);
+  assert.doesNotMatch(out, /has-activity/);
+});
+
+test('paused and failed updates keep the measured sample visibly separate from current activity', () => {
+  const sample = liveSnapshot({ status: 'active', sinceStart: { received: 51 } });
+  const paused = resolverLiveCard(sample, { paused: true });
+  const stale = resolverLiveCard(sample, { unavailable: true });
+  for (const out of [paused, stale]) {
+    assert.match(out, /data-live-count="received">51/);
+    assert.match(out, /Last sample/);
+    assert.doesNotMatch(out, /Processing DNS queries|has-activity/);
+  }
+  assert.match(paused, /Resume updates/);
+  assert.match(stale, /current activity is unknown/);
+});
+
+test('live activity flashes only for measured new queries in the same process', () => {
+  const first = liveSnapshot({ sinceStart: { received: 10 } });
+  const next = liveSnapshot({ sinceStart: { received: 11 } });
+  assert.equal(hasNewLiveActivity(first, next), true);
+  assert.equal(hasNewLiveActivity(null, next), false);
+  assert.equal(hasNewLiveActivity(first, first), false);
+  assert.equal(hasNewLiveActivity(next, first), false);
+  assert.equal(hasNewLiveActivity(first, { ...next, startedAt: '2026-09-30T09:02:00Z' }), false);
+  assert.equal(hasNewLiveActivity(first, { ...next, available: false }), false);
+});
+
+test('live metadata is escaped and very low measured rates are not rounded to zero', () => {
+  const parts = liveActivityParts(liveSnapshot({ lastOutcome: '<img src=x>', lastRcode: '<script>', recent: { queriesPerSecond: 0.001 } }));
+  assert.match(parts.last, /&lt;img src=x&gt;/);
+  assert.match(parts.last, /&lt;script&gt;/);
+  assert.doesNotMatch(parts.last, /<img|<script/);
+  assert.match(parts.metrics, /&lt;0\.01/);
+});
+
+test('the live poller keeps the last sample on error and resumes without inventing an event', async () => {
+  const timers = liveTimers(); const updates = [];
+  let response = liveSnapshot({ sinceStart: { received: 2 } });
+  const poller = createLiveActivityPoller({ ...timers, initial: liveSnapshot({ sinceStart: { received: 1 } }), read: async () => { if (response instanceof Error) throw response; return response; }, onUpdate: (update) => updates.push(update) });
+  await poller.refresh();
+  assert.equal(updates.at(-1).changed, true);
+  response = new Error('unreachable'); await poller.refresh();
+  assert.equal(updates.at(-1).unavailable, true);
+  assert.equal(updates.at(-1).snapshot.sinceStart.received, 2);
+  response = liveSnapshot({ sinceStart: { received: 3 } }); await poller.refresh();
+  assert.equal(updates.at(-1).unavailable, false);
+  assert.equal(updates.at(-1).changed, false);
+  assert.equal(timers.pending.size, 1);
+  assert.equal([...timers.pending.values()][0].delay, 2000);
+  poller.stop(); assert.equal(timers.pending.size, 0);
+});
+
+test('live polling skips paused or hidden pages and discards a response that arrives after pausing', async () => {
+  const timers = liveTimers(); const updates = []; let allowed = false; let reads = 0; let finish;
+  const poller = createLiveActivityPoller({ ...timers, canRead: () => allowed, read: async () => { reads++; return new Promise((resolve) => { finish = resolve; }); }, onUpdate: (update) => updates.push(update) });
+  await poller.refresh(); assert.equal(reads, 0);
+  allowed = true; const pending = poller.refresh(); await Promise.resolve();
+  await poller.refresh(); assert.equal(reads, 1, 'one request at a time');
+  allowed = false; finish(liveSnapshot()); await pending;
+  assert.equal(updates.length, 0);
+  poller.stop();
+});
+
+test('route cancellation aborts the live request and prevents late UI updates or rescheduling', async () => {
+  const timers = liveTimers(); const updates = []; const route = new AbortController(); let requestSignal; let finish;
+  const poller = createLiveActivityPoller({ ...timers, signal: route.signal, read: async ({ signal }) => { requestSignal = signal; return new Promise((resolve) => { finish = resolve; }); }, onUpdate: (update) => updates.push(update) });
+  const pending = poller.refresh(); await Promise.resolve(); route.abort();
+  assert.equal(requestSignal.aborted, true);
+  finish(liveSnapshot()); await pending;
+  assert.equal(updates.length, 0);
+  assert.equal(timers.pending.size, 0);
+});
+
+test('a hung live request times out to unavailable and can be retried', async () => {
+  const timers = liveTimers(); const updates = [];
+  const poller = createLiveActivityPoller({ ...timers, read: ({ signal }) => new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new Error('timeout')), { once: true })), onUpdate: (update) => updates.push(update) });
+  const pending = poller.refresh();
+  [...timers.pending.values()].find((entry) => entry.delay === 8000).fn(); await pending;
+  assert.equal(updates.at(-1).unavailable, true);
+  assert.equal(updates.at(-1).snapshot, null);
+  assert.ok([...timers.pending.values()].some((entry) => entry.delay === 2000));
+  poller.stop();
+});
+
+test('the overview keeps live activity and direct mode choices when all history reads fail', async () => {
+  const previous = global.fetch;
+  global.fetch = async (url) => {
+    const replies = { '/api/v1/activity/live': liveSnapshot({ status: 'active', sinceStart: { received: 73, completed: 73 } }), '/api/v1/dnssec/status?hours=24': { transport: 'native', mode: { effective: 'off' } } };
+    const ok = Object.hasOwn(replies, url);
+    return { status: ok ? 200 : 503, ok, text: async () => JSON.stringify(ok ? replies[url] : { error: 'database unavailable' }) };
+  };
+  try {
+    const out = await pages.dashboard.render();
+    assert.match(out, /data-live-count="received">73/);
+    assert.match(out, /Processing DNS queries/);
+    assert.match(out, /Historical overview unavailable/);
+    assert.match(out, /id="daddybound-mode-form"/);
+    assert.match(out, /Apply resolver mode/);
+    assert.ok(out.indexOf('id="resolver-live"') < out.indexOf('id="daddybound-mode-form"'));
+    assert.ok(out.indexOf('id="daddybound-mode-form"') < out.indexOf('Query history'));
+  } finally { global.fetch = previous; }
+});
+
+test('a hung history panel becomes unavailable within a bounded initial read', async () => {
+  let aborted = false;
+  const result = await readDashboardPanel('/overview', { timeoutMs: 1, read: (path, { signal }) => new Promise((resolve, reject) => signal.addEventListener('abort', () => { aborted = true; reject(new DOMException('Timeout', 'AbortError')); }, { once: true })) });
+  assert.equal(result, null);
+  assert.equal(aborted, true);
+});
+
+test('initial panel reads propagate route cancellation and expired sessions', async () => {
+  const route = new AbortController();
+  const pending = readDashboardPanel('/overview', { signal: route.signal, read: (path, { signal }) => new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('Route changed', 'AbortError')), { once: true })) });
+  route.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+  await assert.rejects(readDashboardPanel('/overview', { read: async () => { throw new ApiError(401, 'Session expired'); } }), { status: 401 });
 });
 
 test('encrypted Live is local validation and does not ask for plaintext authoritative transport consent', () => {

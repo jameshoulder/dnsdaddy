@@ -1,9 +1,12 @@
 # DNSSEC in DNS Daddy
 
 DNS Daddy reports the source of its validation information and provides three
-native modes: **Live**, **Learn** and **Off**. Live is an implemented,
+resolver modes: **Forward**, **Learn** and **Live**. Live is an implemented,
 experimental client-serving resolver. Learn collects separate observations
-while clients continue using the forwarding resolver.
+while clients continue using the forwarding resolver. Forward starts no local
+validation runtime. This guide describes the native transport; the
+[encrypted transport](../encrypted-dns.md) applies the same modes to approved
+recursive endpoints.
 
 ## What DNSSEC establishes
 
@@ -23,23 +26,27 @@ The basic protocol is described in [RFC 4033], [RFC 4034] and [RFC 4035].
 
 | Selection | Client answer path | Validation behavior |
 | --- | --- | --- |
+| **Forward** (`off`) | Configured forwarding upstream | Native client resolution, background observation and managed-anchor refresh are stopped. Filtering and other local protections remain active. |
+| **Learn** (`observe`) | Configured forwarding upstream | Resolves sampled allowed questions independently after the client answer is decided, then records the local observation. That observation cannot change the client answer. |
 | **Live** (`enforce`) | Daddybound's native authoritative recursion | Validates the exact records returned to the client. Bogus, indeterminate and operational failures return SERVFAIL; there is no silent forwarding fallback. |
-| **Learn** (`observe`) | Configured forwarding upstream | Resolves allowed questions independently after the client answer is decided, then records the local observation. That observation cannot change the client answer. |
-| **Off** (`off`) | Configured forwarding upstream | Native client resolution, background observation and managed-anchor refresh are stopped. |
 
 ### Defaults and precedence
 
-Fresh installations default to **Live**. An upgrade preserves the
-installation's recorded Off/Learn choice. A recorded dashboard mode overrides
+Fresh installations default to **Forward** (`off`), with Cloudflare HTTPS
+forwarders on TCP 443. An upgrade preserves the installation's recorded
+choice, including Live. A recorded dashboard mode overrides
 the installation default when the mode is not pinned in configuration.
 Explicit `dns.local_dnssec_validation` in YAML or the corresponding environment
 configuration pins the choice; remove that explicit setting to manage it from
-the dashboard.
+the dashboard. **Overview** and **Daddybound** both expose the mode chooser
+and **Apply resolver mode**. The API values remain `off`, `observe` and
+`enforce` for compatibility; Forward is the clearer display name for `off`.
 
 For an intentionally fixed forwarding-with-observation setup:
 
 ```yaml
 dns:
+  resolution_transport: native
   local_dnssec_validation: observe
 ```
 
@@ -47,6 +54,7 @@ For an intentionally fixed native setup:
 
 ```yaml
 dns:
+  resolution_transport: native
   local_dnssec_validation: enforce
 ```
 
@@ -56,9 +64,11 @@ configuration lock and effective runtime are reported by
 `GET /api/v1/dnssec/status`. A failed change does not silently advertise a new
 working mode. The management change journal records its persisted outcome.
 
-The fresh-install default is an explicit product choice. It does **not** mean
-there is independent or long-running production evidence for this validator.
-Existing users are not silently switched from forwarding to Live on upgrade.
+Live remains experimental and is selected deliberately. If a previous Live
+installation cannot resolve ordinary names, switching to Forward is an
+explicit way to test its forwarding path while investigating validation.
+There is no automatic switch after a validation failure. Existing users are
+not silently switched between modes on upgrade.
 
 ## Live: validation governs the native answer
 
@@ -135,7 +145,7 @@ See [Daddybound](../daddybound/README.md),
 
 ## Forwarded DNSSEC telemetry
 
-In Off/Learn mode, DNS Daddy requests an upstream AD verdict when
+In Forward/Learn mode, DNS Daddy requests an upstream AD verdict when
 `dns.dnssec_telemetry` is enabled. AD in a query asks the upstream to report
 that verdict; it does not ask for the full DNSSEC records in the way DO does.
 See [RFC 6840] §5.7.

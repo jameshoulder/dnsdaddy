@@ -446,8 +446,8 @@ function firstClientCard(overview) {
         <p class="muted small">
           ${num(overview.refusedClients)} quer${overview.refusedClients === 1 ? 'y has' : 'ies have'}
           reached DNS Daddy and been answered <code>REFUSED</code>, because the
-          address they came from is not permitted to use this resolver. Nothing
-          is broken — DNS Daddy is declining on purpose.
+          address they came from is not permitted to use this resolver. Add the
+          intended client range to a permitted network, then test again.
         </p>
         <details class="first-client-guide"><summary>Connection steps</summary>
         <ol class="small first-client-steps">
@@ -1198,19 +1198,156 @@ function protectionBreakdown(rows) {
 
 /* ---------- pages ------------------------------------------------------- */
 
+const LIVE_ACTIVITY_COUNTERS = ['received', 'completed', 'answered', 'blocked', 'cached', 'errors', 'refused', 'rateLimited', 'invalid'];
+const LIVE_ACTIVITY_STATES = {
+  waiting: { label: 'Waiting for the first query', tone: '', detail: 'The resolver has not handled a DNS query yet. Point a permitted device at this server, then watch the counters change.' },
+  active: { label: 'Processing DNS queries', tone: 'ok', detail: 'Queries reached the resolver in the last minute. Received and completed counts show the work handled by this process.' },
+  idle: { label: 'Idle · no recent queries', tone: '', detail: 'This process has handled DNS queries, but none arrived in the last minute. An idle resolver is waiting for traffic.' },
+  failing: { label: 'Queries are failing', tone: 'bad', detail: 'Recent queries reached the resolver but did not complete successfully. Check the transport, upstream errors and Daddybound status.' },
+  refused: { label: 'Clients are being refused', tone: 'warn', detail: 'Recent requests reached DNS Daddy, but their client addresses are not permitted. Review Networks and allow the intended client range.' },
+  degraded: { label: 'Some queries are failing', tone: 'warn', detail: 'Recent traffic contains successful answers or policy blocks alongside failures. Check the outcome counts and the relevant configuration.' },
+};
+
+function validLiveActivity(snapshot) {
+  const count = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  return Boolean(snapshot && snapshot.available === true && Object.hasOwn(LIVE_ACTIVITY_STATES, snapshot.status) &&
+    typeof snapshot.startedAt === 'string' && Number.isFinite(Date.parse(snapshot.startedAt)) &&
+    typeof snapshot.measuredAt === 'string' && Number.isFinite(Date.parse(snapshot.measuredAt)) && count(snapshot.inflight) &&
+    [snapshot.sinceStart, snapshot.recent].every((counters) => counters && LIVE_ACTIVITY_COUNTERS.every((key) => count(counters[key]))) &&
+    count(snapshot.recent.queriesPerSecond) && count(snapshot.recent.windowSeconds) && snapshot.recent.windowSeconds > 0);
+}
+
+function liveActivityState(snapshot, { unavailable = false, paused = false } = {}) {
+  if (!validLiveActivity(snapshot)) return { status: 'unavailable', label: 'Live activity unavailable', tone: 'warn', detail: 'The server did not return live measurements. This is not a zero-traffic reading. Refresh or check the server connection.' };
+  if (paused) return { status: 'paused', label: 'Live updates paused', tone: '', detail: 'The last measured sample is shown below. Select Resume updates to see new DNS activity.' };
+  if (unavailable) return { status: 'unavailable', label: 'Live updates unavailable', tone: 'warn', detail: 'The latest measurement could not be read. These counters are from the last successful sample; current activity is unknown.' };
+  return { status: snapshot.status, ...LIVE_ACTIVITY_STATES[snapshot.status] };
+}
+
+function hasNewLiveActivity(previous, next) {
+  // Starting the page, restarting the server or resuming after an error is
+  // not a DNS event. Only a measured increase in one process can flash.
+  return validLiveActivity(previous) && validLiveActivity(next) && previous.startedAt === next.startedAt && next.sinceStart.received > previous.sinceStart.received;
+}
+
+function liveActivityParts(snapshot, options = {}) {
+  const valid = validLiveActivity(snapshot);
+  const state = liveActivityState(snapshot, options);
+  const counts = valid ? snapshot.sinceStart : {};
+  const recent = valid ? snapshot.recent : {};
+  const qps = valid ? recent.queriesPerSecond === 0 ? '0' : recent.queriesPerSecond < 0.01 ? '<0.01' : recent.queriesPerSecond.toLocaleString('en-GB', { maximumFractionDigits: 2 }) : '—';
+  const metric = (label, value, detail, key) => html`<div class="live-metric"><dt>${label}</dt><dd><strong data-live-count="${key}">${value}</strong><span class="small muted">${detail}</span></dd></div>`;
+  const outcome = (label, key, tone = '') => html`<span class="live-outcome ${tone}"><strong>${num(recent[key])}</strong> ${label}</span>`;
+  const time = (value) => value && Number.isFinite(Date.parse(value)) ? html`<time datetime="${value}" title="${new Date(value).toLocaleString('en-GB')}">${relTime(value)}</time>` : 'None yet';
+  return {
+    state,
+    summary: html`<strong>${state.label}</strong><p>${state.detail}</p>`,
+    metrics: html`<dl class="live-metrics">${raw(metric('Received', num(counts.received), 'since process start', 'received'))}${raw(metric('Completed', num(counts.completed), 'since process start', 'completed'))}${raw(metric('In flight', num(valid ? snapshot.inflight : null), 'queries being handled', 'inflight'))}${raw(metric('Queries / second', qps, valid ? `average over ${num(recent.windowSeconds)} seconds` : 'measurement unavailable', 'rate'))}</dl>
+      <div class="live-outcomes"><span class="small muted">${valid ? `Last ${num(recent.windowSeconds)} seconds` : 'Recent outcomes unavailable'}</span>${raw(outcome('answered', 'answered'))}${raw(outcome(recent.blocked === 1 ? 'policy block' : 'policy blocks', 'blocked'))}${raw(outcome(recent.errors === 1 ? 'error' : 'errors', 'errors', recent.errors ? 'bad' : ''))}${raw(outcome('refused', 'refused', recent.refused ? 'warn' : ''))}${raw(outcome('rate limited', 'rateLimited'))}${raw(outcome('invalid', 'invalid'))}
+        <span class="small muted">${num(recent.cached)} ${recent.cached === 1 ? 'reply' : 'replies'} from cache (included in outcomes)</span></div>`,
+    last: valid ? html`<span>Last query ${raw(time(snapshot.lastQueryAt))}</span><span>Last completion ${raw(time(snapshot.lastResponseAt))}${snapshot.lastRcode ? ` · ${snapshot.lastRcode}` : ''}${snapshot.lastOutcome ? ` · ${String(snapshot.lastOutcome).replaceAll('_', ' ')}` : ''}</span>` : 'No current measurements available.',
+    update: valid ? `${state.status === 'paused' || state.status === 'unavailable' ? 'Last sample' : 'Measured'} ${clockTime(snapshot.measuredAt)}` : 'Not measured',
+  };
+}
+
+function resolverLiveCard(snapshot, options = {}) {
+  const parts = liveActivityParts(snapshot, options);
+  return html`<section class="card section resolver-live" id="resolver-live" data-live-state="${parts.state.status}" aria-labelledby="resolver-live-title">
+    <div class="card-head"><div><div class="card-eyebrow">Live · independent of query logging</div><h2 id="resolver-live-title">Resolver activity</h2></div><span class="badge" data-live-update>${parts.update}</span></div>
+    <div class="live-summary"><span class="live-activity-dot" aria-hidden="true"></span><div data-live-summary role="status" aria-live="polite">${raw(parts.summary)}</div></div>
+    <div data-live-metrics>${raw(parts.metrics)}</div><div class="live-last small muted" data-live-last>${raw(parts.last)}</div>
+    <div class="live-footer"><p class="small muted">Anonymous totals include DNS health checks and reset when this process restarts. Completed means the handler finished; it does not confirm that a device received the reply.</p><div class="row"><a class="btn btn-ghost btn-sm" href="#/setup">Test a device</a><a class="btn btn-ghost btn-sm" href="#/networks">Client permissions</a></div></div>
+  </section>`;
+}
+
+function createLiveActivityPoller({ read, onUpdate, canRead = () => true, initial = null, signal, intervalMs = 2000, timeoutMs = 8000, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  let snapshot = initial; let unavailable = !validLiveActivity(initial); let stopped = false; let busy = false;
+  let timer = null; let controller = null; let deadline = null;
+  const schedule = () => { if (!stopped) timer = setTimer(refresh, intervalMs); };
+  const stop = () => {
+    stopped = true; clearTimer(timer); clearTimer(deadline);
+    if (controller) controller.abort();
+    if (signal) signal.removeEventListener('abort', stop);
+  };
+  async function refresh() {
+    if (stopped || busy) return;
+    clearTimer(timer); timer = null;
+    if (!canRead()) { schedule(); return; }
+    busy = true; controller = new AbortController();
+    deadline = setTimer(() => controller && controller.abort(), timeoutMs);
+    try {
+      const next = await read({ signal: controller.signal });
+      if (stopped || !canRead()) return;
+      if (!validLiveActivity(next)) throw new Error('Live activity measurements are unavailable.');
+      const changed = !unavailable && hasNewLiveActivity(snapshot, next);
+      snapshot = next; unavailable = false; onUpdate({ snapshot, unavailable, changed });
+    } catch {
+      if (!stopped && canRead()) { unavailable = true; onUpdate({ snapshot, unavailable, changed: false }); }
+    } finally {
+      clearTimer(deadline); deadline = null; controller = null; busy = false; schedule();
+    }
+  }
+  if (signal && signal.aborted) stop();
+  else { if (signal) signal.addEventListener('abort', stop, { once: true }); schedule(); }
+  return { refresh, stop };
+}
+
+async function readDashboardPanel(path, { signal, timeoutMs = 8000, read = apiGet } = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal && signal.aborted) controller.abort();
+  else if (signal) signal.addEventListener('abort', abort, { once: true });
+  const timeout = setTimeout(abort, timeoutMs);
+  try { return await read(path, { signal: controller.signal }); }
+  catch (error) {
+    // An unavailable/hung history panel must not hide the independent live
+    // measurement. Route changes and expired sessions still cancel the page.
+    if (error.status === 401 || signal && signal.aborted) throw error;
+    return null;
+  } finally { clearTimeout(timeout); if (signal) signal.removeEventListener('abort', abort); }
+}
+
+function mountLiveActivity(initial, context = {}) {
+  const host = $('#resolver-live');
+  if (!host) return;
+  const pause = $('#auto-refresh-btn');
+  const paused = () => Boolean(pause && pause.getAttribute('aria-pressed') === 'true');
+  const current = () => host.isConnected && (!context.isCurrent || context.isCurrent());
+  const canRead = () => current() && !paused() && !document.hidden && !$('#app').hidden;
+  let snapshot = initial; let unavailable = !validLiveActivity(initial); let pulseTimer;
+  const rendered = new Map();
+  const paint = ({ changed = false } = {}) => {
+    if (!current()) return;
+    const parts = liveActivityParts(snapshot, { unavailable, paused: paused() });
+    host.dataset.liveState = parts.state.status;
+    for (const [key, markup] of [['summary', parts.summary], ['metrics', parts.metrics], ['last', parts.last]]) {
+      const target = $(`[data-live-${key}]`, host);
+      if (rendered.get(key) !== markup) { target.innerHTML = sanitize(markup); rendered.set(key, markup); }
+    }
+    $('[data-live-update]', host).textContent = parts.update;
+    const dot = $('.live-activity-dot', host);
+    if (changed && canRead()) { dot.classList.add('has-activity'); clearTimeout(pulseTimer); pulseTimer = setTimeout(() => dot.classList.remove('has-activity'), 750); }
+    else if (paused() || unavailable) { clearTimeout(pulseTimer); dot.classList.remove('has-activity'); }
+  };
+  const poller = createLiveActivityPoller({ initial, signal: context.signal, canRead, read: (options) => apiGet('/activity/live', options), onUpdate: (update) => { snapshot = update.snapshot; unavailable = update.unavailable; paint(update); } });
+  const changed = () => { paint(); if (canRead()) poller.refresh(); };
+  if (pause) pause.addEventListener('click', changed);
+  document.addEventListener('visibilitychange', changed);
+  const stop = () => { poller.stop(); clearTimeout(pulseTimer); if (pause) pause.removeEventListener('click', changed); document.removeEventListener('visibilitychange', changed); };
+  if (context.signal) context.signal.addEventListener('abort', stop, { once: true });
+  paint();
+}
+
 const pages = {};
 
 pages.dashboard = {
   title: 'Overview',
   subtitle: 'Resolver activity, filtering configuration and the next thing to check.',
   async render(context = {}) {
-    const read = (path) => apiGet(path, { signal: context.signal });
-    const optional = (path) => read(path).catch((err) => {
-      if (err.status === 401 || err.name === 'AbortError') throw err;
-      return null;
-    });
-    const [overview, activity, categories, recent, feeds, diagnostics, detections, native, learning, addresses] = await Promise.all([
-      read('/overview'),
+    const optional = (path) => readDashboardPanel(path, { signal: context.signal });
+    const [overview, live, activity, categories, recent, feeds, diagnostics, detections, native, learning, addresses] = await Promise.all([
+      optional('/overview'),
+      optional('/activity/live'),
       optional('/activity/queries?hours=24'),
       optional('/threats/categories?hours=24'),
       optional('/queries?action=blocked&limit=8'),
@@ -1221,7 +1358,8 @@ pages.dashboard = {
       optional('/learning/status'),
       optional('/server-addresses'),
     ]);
-    if (!context.isCurrent || context.isCurrent()) this.feeds = feeds;
+    const liveSnapshot = live || overview && overview.live;
+    if (!context.isCurrent || context.isCurrent()) { this.feeds = feeds; this.liveSnapshot = liveSnapshot; }
 
     const catRows = categories ? (categories.categories || []).map((c) => ({
       label: c.label, count: c.count, category: c.category,
@@ -1229,6 +1367,7 @@ pages.dashboard = {
     const buckets = activity ? activity.buckets || [] : [];
     const hadTraffic = buckets.some((b) => b.total > 0);
     const unavailable = [
+      !overview && 'Historical overview unavailable',
       !activity && 'Query activity unavailable',
       !categories && 'Block categories unavailable',
       !recent && 'Recent blocks unavailable',
@@ -1237,13 +1376,14 @@ pages.dashboard = {
 
     return html`
       <div class="overview-workspace">
-        ${raw(statusHero(overview, feeds, detections))}
+        ${raw(resolverLiveCard(liveSnapshot))}
+        ${raw(nativeModeCard(native, { compact: true }))}
         ${raw(serverAddressesCard(addresses))}
-        ${raw(nativeOverview(native, learning))}
+        ${raw(overview ? statusHero(overview, feeds, detections) : unavailableState('Historical overview unavailable', 'The stored overview could not be retrieved. Live activity is measured separately above.'))}
         <div class="overview-primary">
           <section class="card overview-activity">
             <div class="card-head">
-              <div><h2>DNS activity</h2><p>Queries and blocks over the last 24 hours.</p></div>
+              <div><h2>Query history</h2><p>Recorded queries and blocks over the last 24 hours.</p></div>
               <div class="row-end"><a class="btn btn-observe btn-sm" href="#/queries?hours=24">Query log</a></div>
             </div>
             ${raw(!activity
@@ -1262,6 +1402,7 @@ pages.dashboard = {
         </div>
 
         ${raw(firstClientCard(overview))}
+        ${raw(nativeOverview(native, learning))}
 
         <div class="section grid grid-2">
           <div class="card">
@@ -1281,7 +1422,7 @@ pages.dashboard = {
 
         <div class="section grid grid-2">
           ${raw(threatIntelPanel(feeds))}
-          <div class="card">
+          ${raw(overview ? html`<div class="card">
             <div class="card-head"><div><h2>Resolver</h2><p>This instance, its configured scope and what was measured. Each figure names its own window.</p></div></div>
             <div class="grid grid-3">
               <div><div class="label muted small">Status</div><div>${raw(statusBadge(overview.resolverStatus))}</div></div>
@@ -1291,12 +1432,14 @@ pages.dashboard = {
               <div><div class="label muted small">Policies</div><div>${num(overview.activePolicies)}</div></div>
               <div><div class="label muted small">Version</div><div class="mono small">${overview.version}</div></div>
             </div>
-          </div>
+          </div>` : '')}
         </div>
       </div>
     `;
   },
-  async mounted() {
+  async mounted(context = {}) {
+    mountResolutionMode();
+    mountLiveActivity(this.liveSnapshot, context);
   },
 };
 
@@ -4123,7 +4266,7 @@ pages.setup = {
         ${raw(info.listenDot ? html`<p class="small muted note-loose">DNS-over-TLS: port ${port(info.listenDot)}. Clients must use a hostname that matches this server’s TLS certificate.</p>` : '')}
       </div>
 
-      <div class="card section integration-cta"><div><h2>Upstream transport</h2><p class="muted">Native Live needs outbound UDP and TCP 53 to authoritative servers. For encrypted forwarding, Daddybound offers a ready Cloudflare HTTPS example using TCP 443. This outbound connection is separate from how devices connect to DNS Daddy.</p></div><a class="btn btn-observe" href="#/daddybound">Configure DNS transport</a></div>
+      <div class="card section integration-cta"><div><h2>Upstream transport</h2><p class="muted">Choose Forward on Overview for basic forwarding through the upstreams listed below. Daddybound offers a ready Cloudflare HTTPS example using TCP 443 for its encrypted profile. Native Live needs outbound UDP and TCP 53 to authoritative servers. These outbound connections are separate from how devices connect to DNS Daddy.</p></div><a class="btn btn-observe" href="#/daddybound">Configure DNS transport</a></div>
 
       <div class="card section">
         <div class="card-head">
@@ -4640,7 +4783,7 @@ function transportExampleCard() {
       <a class="small" href="https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/" target="_blank" rel="noopener noreferrer">Provider privacy policy ↗</a></div>
     <ol class="compact-list"><li>Add the example or enter your provider’s details below. This only fills your draft.</li>
       <li>Review the provider and check the sharing agreement, then select <strong>Test endpoints</strong>.</li>
-      <li>After a successful test, select <strong>Apply DNS transport</strong>. Keep or select <strong>Live</strong> in Daddybound above for local DNSSEC validation.</li></ol>
+      <li>After a successful test, select <strong>Apply DNS transport</strong>. Choose <strong>Forward</strong> above for basic forwarding; <strong>Learn</strong> and <strong>Live</strong> add local validation checks.</li></ol>
     <p class="small muted">The test checks an encrypted exchange, not a complete Live lookup. Finish by testing a device in <a href="#/setup">Setup</a>. Adding an example preserves existing entries; it does not save, connect or change your Daddybound mode.</p>
   </div>`;
 }
@@ -4703,11 +4846,11 @@ function dnsTransportCard(data) {
   const encrypted = data.transport === 'encrypted';
   const endpoints = data.endpoints || [];
   return html`<section class="card section transport-card" id="dns-transport"><div class="card-head"><div><div class="card-eyebrow">Outbound DNS connection</div><h2>DNS transport</h2>
-    <p>Choose where DNS answers come from. Daddybound’s Off, Learn and Live settings control local DNSSEC validation separately.</p></div><span class="badge ${encrypted ? 'info' : ''}">${encrypted ? 'Encrypted forwarding' : 'Native iterative'}</span></div>
-    <p class="small muted">${encrypted ? 'The configured forwarders receive the queried names and supporting DNSSEC lookups. Daddybound can validate their returned data locally in Live mode.' : data.daddyboundMode === 'enforce' ? 'Live resolves directly through root and authoritative servers over unencrypted UDP/TCP port 53.' : data.daddyboundMode === 'observe' ? 'Learn uses native DNS for separate validation observations. Client answers still use the legacy configured upstreams.' : data.daddyboundMode === 'off' ? 'With validation Off, clients use the legacy configured upstreams. Native recursion and trust-anchor refresh are stopped.' : 'Live resolves directly through authoritative DNS. Learn and Off use the legacy configured upstreams for client answers.'}</p>
+    <p>Choose the outbound connection. Forward, Learn and Live above choose how queries are answered and checked.</p></div><span class="badge ${encrypted ? 'info' : ''}">${encrypted ? 'Encrypted forwarding' : data.daddyboundMode === 'enforce' ? 'Direct authoritative DNS' : 'Configured upstreams'}</span></div>
+    <p class="small muted">${encrypted ? 'The configured forwarders receive the queried names and supporting DNSSEC lookups. Forward uses their answers, Learn checks a sample in the background, and Live validates returned data locally before replying.' : data.daddyboundMode === 'enforce' ? 'Live resolves directly through root and authoritative servers over unencrypted UDP/TCP port 53.' : data.daddyboundMode === 'observe' ? 'Client answers use the configured forwarding upstreams. Learn also contacts authoritative DNS servers for separate validation observations.' : data.daddyboundMode === 'off' ? 'Forward uses the configured upstreams. Their addresses and protocols are listed in Setup. Native recursion and trust-anchor refresh are stopped.' : 'Forward and Learn use the configured upstreams for client answers. Live resolves directly through authoritative DNS.'}</p>
     <form id="dns-transport-form" data-current-transport="${data.transport}" autocomplete="off">
       <fieldset class="mode-options transport-mode-options" ${raw(data.locked ? 'disabled' : '')}><legend>Answer transport</legend>
-        <label class="mode-option"><input type="radio" name="transport" value="native" ${raw(encrypted ? '' : 'checked')}><span><strong>Native iterative</strong><span class="cat-desc">Live resolves through the DNS hierarchy on plaintext port 53. Learn and Off retain legacy forwarding for client answers.</span></span></label>
+        <label class="mode-option"><input type="radio" name="transport" value="native" ${raw(encrypted ? '' : 'checked')}><span><strong>Standard upstreams / native Live</strong><span class="cat-desc">Forward and Learn use the upstreams in your server configuration. Live queries authoritative DNS over unencrypted port 53.</span></span></label>
         <label class="mode-option"><input type="radio" name="transport" value="encrypted" ${raw(encrypted ? 'checked' : '')}><span><strong>Encrypted forwarding</strong><span class="cat-desc">Use your chosen DoQ or DoH endpoints, with authenticated TLS 1.3 and local DNSSEC validation available.</span></span></label>
       </fieldset>
       ${raw(data.locked ? html`<p class="notice-inline">${data.reason || 'The startup configuration pins this transport. Change that configuration to edit it here.'}</p>` : '')}
@@ -4722,7 +4865,7 @@ function dnsTransportCard(data) {
         <label class="checkline consent-line"><input type="checkbox" name="acknowledgeForwarding"><span>I agree to send DNS queries and supporting DNSSEC lookups to these forwarders, including the fixed test query if I select Test endpoints.</span></label>
         <p class="small muted note-tight">Test endpoints sends a DNSKEY query for the root zone using this draft. It changes no saved configuration. A response establishes connectivity, not provider accuracy or a full Daddybound Live validation.</p>
       </div>
-      <label class="checkline consent-line" id="transport-native-consent" hidden><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native Live and Learn use unencrypted authoritative DNS on port 53. Off and Learn restore legacy forwarding for client answers, and background lookups may use system DNS.</span></label>
+      <label class="checkline consent-line" id="transport-native-consent" hidden><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native Live and Learn use unencrypted authoritative DNS on port 53. Forward and Learn use the configured upstreams for client answers, and background lookups may use system DNS.</span></label>
       <div class="row note-loose transport-actions"><button type="button" class="btn btn-ghost" id="transport-test" ${raw(encrypted ? '' : 'hidden')}>Test endpoints</button>
         ${raw(!data.locked ? html`<button type="submit" class="btn btn-primary">Apply DNS transport</button>` : '')}</div>
       <p id="dns-transport-error" class="form-error" role="alert" hidden></p>
@@ -4730,8 +4873,8 @@ function dnsTransportCard(data) {
       <div id="dns-transport-test-result" class="note-tight" role="status" hidden></div>
     </form>
     <details class="chart-data transport-health"><summary>Transport activity and connection security</summary>
-      <dl class="claim-key note-tight"><div class="qfact"><dt>Configured minimum TLS</dt><dd>${data.tlsMinimum || 'Not reported'}</dd></div>
-        <div class="qfact"><dt>Plaintext fallback</dt><dd>${data.plaintextFallback === false ? 'Disabled' : 'Not confirmed disabled'}</dd></div>
+      <dl class="claim-key note-tight"><div class="qfact"><dt>${encrypted ? 'Configured minimum TLS' : 'Encrypted profile minimum TLS'}</dt><dd>${data.tlsMinimum || 'Not reported'}${raw(encrypted ? '' : html` <span class="muted small">Applies to the encrypted profile. Standard upstreams use their configured protocols.</span>`)}</dd></div>
+        <div class="qfact"><dt>${encrypted ? 'Plaintext fallback' : 'Encrypted profile plaintext fallback'}</dt><dd>${data.plaintextFallback === false ? 'Disabled' : 'Not confirmed disabled'}</dd></div>
         <div class="qfact"><dt>Endpoint address discovery</dt><dd>${data.bootstrap === 'configured_ips' ? 'Explicit bootstrap IPs; no system DNS lookup' : data.bootstrap === 'system' ? 'System resolver configuration' : 'Not reported'}</dd></div>
         ${raw(data.scope ? html`<div class="qfact"><dt>Connection scope</dt><dd>${data.scope}</dd></div>` : '')}</dl>
       ${raw(encryptedTransportStats(data.stats))}
@@ -4870,7 +5013,8 @@ function nativeMode(status) {
     ? { label: 'Live · enforcing', tone: 'ok', active: true, enforcing: true }
     : { label: 'Live · needs attention', tone: 'warn', active: false, enforcing: false };
   if (mode.effective === 'observe') return { label: 'Learn · observing', tone: 'info', active: true, enforcing: false };
-  return { label: 'Off', tone: '', active: false, enforcing: false };
+  if (mode.effective === 'off') return { label: 'Forward', tone: 'info', active: false, enforcing: false };
+  return { label: 'Unavailable', tone: 'warn', active: false, enforcing: false };
 }
 
 function daddyboundModes(status) {
@@ -4879,32 +5023,54 @@ function daddyboundModes(status) {
   const data = typeof status === 'boolean' ? { mode: { effective: status ? 'observe' : 'off', enforcing: false } } : status;
   const mode = nativeMode(data);
   return html`<dl class="claim-key"><div class="qfact"><dt>Effective mode</dt><dd><span class="badge ${mode.tone}">${mode.label}</span></dd></div>
-    <div class="qfact"><dt>DNSSEC decisions</dt><dd>${mode.enforcing ? 'Daddybound validates returned answers locally.' : mode.active ? 'Daddybound records a separate validation observation.' : 'Daddybound local DNSSEC validation is off.'}</dd></div></dl>
-    <p class="muted small note-tight">Live applies local DNSSEC checks before returning an answer. Learn records separate sampled validations. DNS transport and local traffic learning are configured separately.</p>`;
+    <div class="qfact"><dt>DNSSEC decisions</dt><dd>${mode.enforcing ? 'Daddybound validates returned answers locally.' : mode.active ? 'Daddybound records a separate validation observation.' : data && data.mode && data.mode.effective === 'off' ? 'Forward uses configured upstreams; Daddybound local DNSSEC validation is off.' : 'The effective validation state could not be confirmed.'}</dd></div></dl>
+    <p class="muted small note-tight">Forward answers through configured upstreams. Learn adds separate sampled validations. Live applies local DNSSEC checks before returning an answer. DNS transport and local traffic learning are configured separately.</p>`;
 }
 
-function nativeModeCard(status) {
-  if (!status) return html`<div class="card section">${raw(unavailableState('Daddybound status unavailable', 'The server did not return its effective resolution mode. No mode is assumed.'))}</div>`;
+function nativeModeCard(status, { compact = false } = {}) {
+  if (!status) return html`<div class="card section">${raw(unavailableState('Resolver mode unavailable', 'The server did not return its effective resolution mode. Open Daddybound or refresh to check it. No mode is assumed.'))}<a href="#/daddybound" class="btn btn-ghost btn-sm">Open Daddybound</a></div>`;
   const mode = status.mode || {};
   const state = nativeMode(status);
   const encrypted = status.transport === 'encrypted';
-  const labels = { enforce: ['Live', 'Validate DNSSEC locally before returning an answer.'], observe: ['Learn', 'Record sampled local validations separately from the client answer.'], off: ['Off', 'Turn off Daddybound local DNSSEC validation.'] };
-  return html`<div class="card section engine-mode-card"><div class="card-head"><div><div class="card-eyebrow">Local DNSSEC engine</div><h2>Daddybound</h2>
-      <p>Local DNSSEC validation, explicit trust checks and a view of changing traffic.</p></div><span class="badge ${state.tone}">${state.label}</span></div>
-    <p class="engine-mode-copy">${state.enforcing ? encrypted ? 'Daddybound validates returned data locally using your encrypted forwarders. Bogus or inconclusive validation fails the lookup; there is no plaintext fallback.' : 'Daddybound is answering through its native resolver and enforcing DNSSEC. Bogus or inconclusive validation fails the lookup; there is no forwarding fallback.' : mode.effective === 'enforce' ? 'Live is selected, but local validation is not enforcing. Review the operational status below before relying on it.' : state.active ? 'Daddybound records separate local validations. These observations do not change the answer returned to the client.' : 'Daddybound local DNSSEC validation is off. The selected DNS transport still applies.'}</p>
+  const labels = {
+    off: ['Forward', 'Answer through your configured upstreams. Local DNSSEC validation is off.'],
+    observe: ['Learn', 'Forward answers. Check a sample independently in the background.'],
+    enforce: ['Live', encrypted ? 'Validate encrypted upstream answers locally before replying.' : 'Resolve through authoritative DNS and validate locally before replying.'],
+  };
+  const copy = state.enforcing ? encrypted ? 'Daddybound validates returned data locally using your encrypted forwarders. Bogus or inconclusive validation fails the lookup; there is no plaintext fallback.' : 'Daddybound is answering through its native resolver and enforcing DNSSEC. Bogus or inconclusive validation fails the lookup; there is no forwarding fallback.' : mode.effective === 'enforce' ? 'Live is selected, but local validation is not enforcing. Review Daddybound operational status before relying on it.' : mode.effective === 'observe' ? `Client answers use ${encrypted ? 'your encrypted forwarders' : 'the configured upstreams'}. Daddybound runs separate sampled validations; their results do not change the client answer.` : mode.effective === 'off' ? `DNS Daddy forwards through ${encrypted ? 'your chosen encrypted endpoints' : 'the configured upstreams'} and applies your filtering policy. Daddybound local DNSSEC validation is off.` : 'The effective mode could not be confirmed. Choose a mode explicitly or check the server status.';
+  return html`<div class="card section engine-mode-card${compact ? ' engine-mode-compact' : ''}"><div class="card-head"><div><div class="card-eyebrow">Daddybound</div><h2>Resolver mode</h2>
+      <p>Choose how DNS queries are answered. Filtering and client permissions apply in every mode.</p></div><span class="badge ${state.tone}">${state.label}</span></div>
+    <p class="engine-mode-copy">${copy}</p>
     <form id="daddybound-mode-form" data-transport="${encrypted ? 'encrypted' : 'native'}">
-      <fieldset class="mode-options" ${raw(mode.locked ? 'disabled' : '')}><legend>Local DNSSEC mode</legend>
-        ${raw(['enforce', 'observe', 'off'].map((value) => html`<label class="mode-option"><input type="radio" name="mode" value="${value}" ${raw(mode.effective === value ? 'checked' : '')} ${raw(value === 'enforce' && mode.live && mode.live.available === false ? 'disabled' : '')}>
+      <fieldset class="mode-options" ${raw(mode.locked ? 'disabled' : '')}><legend>Answer mode</legend>
+        ${raw(['off', 'observe', 'enforce'].map((value) => html`<label class="mode-option"><input type="radio" name="mode" value="${value}" required ${raw(mode.effective === value ? 'checked' : '')} ${raw(value === 'enforce' && mode.live && mode.live.available === false ? 'disabled' : '')}>
           <span><strong>${labels[value][0]}</strong><span class="cat-desc">${labels[value][1]}</span></span></label>`).join(''))}
       </fieldset>
       ${raw(mode.locked ? html`<p class="notice-inline">${mode.reason || 'This deployment pins the resolution mode in its startup configuration.'}</p>` : html`
-        <label class="checkline consent-line" id="native-transport-consent" ${raw(encrypted ? 'hidden' : '')}><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native resolution contacts authoritative DNS servers over unencrypted UDP/TCP port 53.</span></label>
-        <div class="row note-tight"><button type="submit" class="btn btn-primary">Apply validation mode</button><span class="muted small">New queries use the changed mode.</span></div>`)}
+        <label class="checkline consent-line" id="native-transport-consent" ${raw(encrypted || mode.effective === 'off' ? 'hidden' : '')}><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native resolution contacts authoritative DNS servers over unencrypted UDP/TCP port 53.</span></label>
+        <div class="row note-tight"><button type="submit" class="btn btn-primary">Apply resolver mode</button><span class="muted small">Takes effect for new queries.</span>${raw(compact ? html`<a href="#/daddybound" class="btn btn-ghost btn-sm">DNS transport and details</a>` : '')}</div>`)}
       <p id="native-mode-error" class="form-error" role="alert" hidden></p>
     </form>
     ${raw(mode.live && mode.live.available === false && mode.live.reason ? html`<p class="rec-note is-warn">${mode.live.reason}</p>` : '')}
-    <p class="muted small note-tight">Experimental. DNSSEC enforcement and machine-learning findings have different responsibilities: an unusual traffic pattern alone never blocks a domain.</p>
+    ${raw(compact ? '' : html`<p class="muted small note-tight">Forward is basic forwarding (configuration value <code>off</code>). Learn (<code>observe</code>) and Live (<code>enforce</code>) add experimental local DNSSEC validation. Local traffic learning is configured separately below.</p>`)}
   </div>`;
+}
+
+function mountResolutionMode() {
+  const form = $('#daddybound-mode-form');
+  if (!form || !$('button[type="submit"]', form)) return;
+  const consent = $('#native-transport-consent', form);
+  const update = () => { if (consent) consent.hidden = form.elements.mode.value === 'off' || form.dataset.transport === 'encrypted'; $('#native-mode-error', form).hidden = true; };
+  $$('input[name="mode"]', form).forEach((radio) => radio.addEventListener('change', update)); update();
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault(); const mode = form.elements.mode.value; const error = $('#native-mode-error', form); error.hidden = true;
+    const acknowledgeNativeTransport = form.elements.acknowledgeNativeTransport.checked;
+    if (!['off', 'observe', 'enforce'].includes(mode)) { error.textContent = 'Choose Forward, Learn or Live.'; error.hidden = false; return; }
+    if (mode !== 'off' && form.dataset.transport !== 'encrypted' && !acknowledgeNativeTransport) { error.textContent = 'Confirm the native DNS transport before applying this mode.'; error.hidden = false; form.elements.acknowledgeNativeTransport.focus(); return; }
+    const button = $('button[type="submit"]', form); button.disabled = true;
+    try { await apiSend('PUT', '/dnssec/mode', { mode, acknowledgeNativeTransport }); if (form.isConnected) { toast('Resolver mode updated'); await router.reload(); } }
+    catch (err) { if (form.isConnected) { error.textContent = err.message; error.hidden = false; button.disabled = false; } }
+  });
 }
 
 function nativeEnforcementCard(status) {
@@ -4990,7 +5156,7 @@ function nativeOverview(status, learning) {
   const mode = nativeMode(status);
   const ready = learning && learning.clients;
   return html`<div class="card section native-overview"><div class="native-overview-item"><span class="label muted small">Daddybound</span><strong>${mode.label}</strong>
-      <span class="muted small">${mode.enforcing ? 'Local DNSSEC in the answer path' : mode.active ? 'Sampled DNSSEC observations' : status ? 'Local DNSSEC validation is off' : 'Runtime status could not be read'}</span></div>
+      <span class="muted small">${mode.enforcing ? 'Local DNSSEC in the answer path' : mode.active ? 'Forwarding with sampled DNSSEC observations' : status && status.mode && status.mode.effective === 'off' ? 'Forwarding · local DNSSEC validation off' : 'Runtime status could not be read'}</span></div>
     <div class="native-overview-item"><span class="label muted small">Local learning</span><strong>${learning ? learning.enabled && learning.running ? `${num(ready && ready.ready)} baselines ready` : learning.enabled ? 'Needs attention' : 'Off' : 'Unavailable'}</strong>
       <span class="muted small">${ready ? `${num(ready.warming)} clients warming up · findings only` : 'Local observations and model health'}</span></div>
     <a href="#/daddybound" class="btn btn-observe btn-sm">Open Daddybound</a></div>`;
@@ -4998,7 +5164,7 @@ function nativeOverview(status, learning) {
 
 pages.daddybound = {
   title: 'Daddybound',
-  subtitle: 'DNS transport, local validation and traffic learning.',
+  subtitle: 'Choose how queries are answered, then choose the upstream transport.',
   async render(context = {}) {
     const read = (path) => apiGet(path, { signal: context.signal }).catch((error) => {
       if (error.status === 401 || error.name === 'AbortError') throw error;
@@ -5013,19 +5179,7 @@ pages.daddybound = {
   },
   async mounted() {
     mountDNSTransport(this.transportSettings);
-    const form = $('#daddybound-mode-form');
-    if (!form || !$('button[type="submit"]', form)) return;
-    const consent = $('#native-transport-consent');
-    const update = () => { if (consent) consent.hidden = form.elements.mode.value === 'off' || form.dataset.transport === 'encrypted'; };
-    $$('input[name="mode"]', form).forEach((radio) => radio.addEventListener('change', update)); update();
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault(); const mode = form.elements.mode.value; const error = $('#native-mode-error'); error.hidden = true;
-      const acknowledgeNativeTransport = form.elements.acknowledgeNativeTransport.checked;
-      if (mode !== 'off' && form.dataset.transport !== 'encrypted' && !acknowledgeNativeTransport) { error.textContent = 'Confirm the native DNS transport before applying this mode.'; error.hidden = false; form.elements.acknowledgeNativeTransport.focus(); return; }
-      const button = $('button[type="submit"]', form); button.disabled = true;
-      try { await apiSend('PUT', '/dnssec/mode', { mode, acknowledgeNativeTransport }); toast('Validation mode updated'); await router.reload(); }
-      catch (err) { error.textContent = err.message; error.hidden = false; button.disabled = false; }
-    });
+    mountResolutionMode();
   },
 };
 
@@ -5988,6 +6142,13 @@ if (typeof module !== 'undefined' && module.exports) {
     createQueryLoader,
     createRenderGate,
     shouldAutoRefresh,
+    validLiveActivity,
+    liveActivityState,
+    hasNewLiveActivity,
+    liveActivityParts,
+    resolverLiveCard,
+    createLiveActivityPoller,
+    readDashboardPanel,
     shouldFocusSearch,
     sidebarStatus,
     areaChart,

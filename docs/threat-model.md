@@ -29,14 +29,14 @@ Ordered by what an attacker gains from each.
 | **Policy and network configuration** | Reveals the network's structure; altering it disables filtering. |
 | **The blocklist index** | Corrupting it disables protection without any visible error. |
 | **DoH network tokens** | Let an outsider obtain a specific network's policy, and identify roaming devices. |
-| **Upstream trust** | Whatever the upstream says becomes truth for the whole network. |
+| **Upstream trust** | Forwarded answers depend on the chosen resolver. Local Live validation can authenticate supported signed data, but cannot make unsigned data signed or guarantee availability. |
 
 ## Trust boundaries
 
 ```
   ┌─ Internet ──────────────────────────────────────────────────────────┐
   │                                                                     │
-  │   threat feeds (HTTPS)          upstream resolvers (DoT)            │
+  │   threat feeds (HTTPS)          upstream resolvers (DoH)            │
   └──────────┬──────────────────────────────┬───────────────────────────┘
              │  B4                          │  B3
   ═══════════╪══════════════════════════════╪═══════════════════════════
@@ -176,22 +176,24 @@ not excluded and will fire.
 *A short-TTL name that resolves externally then internally, to reach a private
 service from a browser.*
 
-**Mitigations.** Cache `min_ttl` raises very short TTLs, which incidentally
-slows the flip.
+**Mitigations.** The default rebinding protection checks response addresses,
+including aliases, additional records and SVCB/HTTPS hints, before serving
+forwarded, cached or native answers. Prohibited private/internal destinations
+are blocked unless covered by explicit domain/CIDR exceptions. See
+[protection.md](protection.md) for the checked address families and controls.
 
-**Residual risk. This is not mitigated.** DNS Daddy does **not** filter private
-addresses out of upstream answers, which is the actual control. If you need
-rebinding protection, it belongs on the browser and on the internal service's
-host header validation. This is an honest gap rather than a claimed feature,
-and it is on the roadmap.
+**Residual risk.** Legitimate split-DNS deployments need scoped exceptions;
+an overbroad exception weakens the control. This protects answers served by
+DNS Daddy, not traffic that bypasses it. Internal services still need their
+own authentication and host/origin checks.
 
 ### T9 — Cache poisoning
 
 *Forged answers accepted into the cache and served to everyone.*
 
-**Mitigations.** Upstream queries go over DNS-over-TLS by default with
-certificate verification, which removes off-path spoofing entirely — an
-attacker cannot inject into a TLS session. Message IDs are randomised per
+**Mitigations.** Forward mode uses Cloudflare DNS-over-HTTPS by default with
+certificate verification, protecting the exchange from spoofed DNS packets.
+Configured DoT remains supported. Message IDs are randomised per
 upstream query and the client's ID is never reused. Cache keys include the
 question and the DO bit, so a DNSSEC-aware and a plain query cannot collide.
 Only single-question messages are accepted, so a crafted second question cannot
@@ -200,55 +202,46 @@ question rather than trusted wholesale.
 
 **Residual risk.** With a plaintext upstream configured, off-path spoofing
 becomes possible again — the resolver warns loudly at startup when this is the
-case. A malicious or compromised upstream can poison at will; see T11.
+case. A malicious or compromised upstream remains a source of false answers
+without local enforcement; see T11. Native Live validates exact returned data
+and keeps the forwarding cache out of its trust path.
 
 ### T10 — DNSSEC validation failures
 
 *A domain fails validation, or an attacker strips signatures.*
 
-**Mitigations.** The AD bit is requested on every upstream query so the
-upstream's verdict is recorded per query. The `resolution_failure` detector
-reports domains persistently returning SERVFAIL. Optionally, **observe mode**
-runs DNS Daddy's own validator over the same names and records what it
-concludes independently.
+**Mitigations.** The default **Forward** mode records upstream AD telemetry
+when enabled, without treating it as independent proof. **Learn** performs
+sampled independent validation after forwarding. **Live** validates the exact
+returned data locally and returns SERVFAIL for Bogus, Indeterminate or
+operational failures. It does not automatically fall back to Forward.
 
-**Residual risk. DNS Daddy does not *enforce* DNSSEC.** Observe mode changes
-what is measured, not what is served: an answer that fails local validation is
-still returned to the client. So a stripped signature is now visible in the
-data — as a `bogus` local verdict against an upstream that said `validated` —
-but nothing acts on it.
-
-Without observe mode the older limits apply in full: a forwarder cannot
-distinguish "unsigned zone" from "upstream does not validate", both appearing
-as `unvalidated`, nor a bogus signature from an unreachable nameserver, which
-is why the finding is called `resolution_failure_burst` and carries no ATT&CK
-mapping. See [dns-security/dnssec.md](dns-security/dnssec.md).
+**Residual risk.** A Learn observation cannot authenticate an earlier,
+separately forwarded packet or change its answer. Forward and Learn do not
+enforce a local DNSSEC verdict. Live is experimental: unsupported proof,
+clock/trust-anchor problems and bounded-work limits can prevent an otherwise
+legitimate lookup from completing. Proved unsigned delegations remain distinct
+from authenticated signed data. Upstream `unvalidated` or SERVFAIL alone does
+not identify a cryptographic cause. See
+[dns-security/dnssec.md](dns-security/dnssec.md).
 
 ### T11 — Compromised upstream infrastructure
 
 *The upstream resolver is malicious, coerced, or hijacked.*
 
-**Mitigations.** DoT with certificate verification prevents impersonation.
-Multiple upstreams can be configured. `race` mode queries several at once.
+**Mitigations.** Certificate verification authenticates the encrypted
+endpoint. Live validates supported signed data locally against current trust
+anchors; an upstream AD bit is never that proof. Multiple configured
+forwarders can improve availability, but `race` selects the first acceptable
+reply, not a consensus. The two default Cloudflare addresses are one provider.
 
-**Residual risk. This is the weakest assumption in the model.** A genuinely
-malicious upstream can return whatever it likes, and DNS Daddy still serves
-whatever comes back. The AD bit is *self-reported by the upstream* and a lying
-upstream will happily set it.
-
-Observe mode narrows the *detection* gap without closing the enforcement one,
-and does so in a way worth being precise about. Its supporting queries carry
-CD, so the upstream's own validator is disabled for them and the signatures are
-checked locally against the root trust anchor — a lying upstream cannot forge
-those. So an upstream substituting data for a signed zone now shows up as a
-local `bogus` against an upstream `validated`, which is a cell an operator can
-alert on.
-
-It does not help for unsigned zones, which is most of the DNS, and it does not
-stop the substituted answer being served. The mitigation remains choosing an
-upstream you have reason to trust; observe mode makes it possible to check that
-choice rather than assume it. Enforcement is the real fix and is not
-implemented.
+**Residual risk.** Authentication does not make a provider honest. In Forward
+or Learn, an allowed, syntactically valid answer can still be false; the
+provider's AD flag is self-reported. Learn checks a separate sampled lookup
+and cannot establish the integrity of the earlier client packet. Live cannot
+give unsigned data a signature, hide names from the chosen endpoint, or force
+an unavailable provider to answer. Choose providers deliberately and review
+the [encrypted transport boundary](encrypted-dns.md#what-is-encrypted).
 
 ### T12 — DoH/DoT bypass
 
@@ -362,11 +355,14 @@ specifically so a client spraying unique names cannot make the resolver
 allocate per name — and the observation queue drops rather than making a lookup
 wait.
 
-**Residual risk.** No per-client query rate limiting. A single authorised
-client can saturate the resolver, and on a 1 GB box that is not a high bar.
-Detection eviction under load is a coverage gap, reported through
-`dnsdaddy_detection_dropped_total` rather than hidden. Rate limiting is on the
-roadmap.
+**Mitigations also include bounded per-client rate limiting**, with shared
+overflow capacity when client tracking is full. See
+[protection.md](protection.md#per-client-rate-limiting) for defaults and scope.
+
+**Residual risk.** Application rate limits cannot absorb an upstream
+volumetric attack or guarantee capacity for every permitted workload. NAT can
+make several clients share one attributed identity. Detection eviction under
+load is a coverage gap, reported through `dnsdaddy_detection_dropped_total`.
 
 ### T19 — Supply chain
 
@@ -420,14 +416,15 @@ against any of them, and no compliance claim should be built on it.
 
 The things most likely to matter, in order:
 
-1. **No local DNSSEC enforcement.** Observe mode can now check the upstream's
-   claims for signed zones and record where they disagree, but an answer that
-   fails validation is still served. For unsigned zones — most of the DNS —
-   upstream trust remains unverifiable either way.
+1. **Validation and upstream trust depend on the selected mode.** Forward and
+   Learn do not enforce local DNSSEC. Live enforces supported proofs but is
+   experimental and can fail closed on operational faults. Unsigned data and
+   availability still require trust beyond cryptographic validation.
 2. **Encrypted-DNS bypass cannot be prevented** by DNS Daddy alone.
 3. **Behavioural detection is experimental, alert-only, and unmeasured** against
    real traffic.
-4. **No per-client rate limiting.** One authorised client can saturate it.
+4. **Finite capacity.** Per-client application limits do not prevent upstream
+   volumetric attacks or establish production capacity for every workload.
 5. **Single admin credential.** No MFA, no RBAC, no token scoping.
 6. **No independent security review.** This is the one that qualifies all the
    others.

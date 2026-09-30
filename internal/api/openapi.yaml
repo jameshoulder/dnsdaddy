@@ -23,7 +23,7 @@ info:
     ## External sharing and live settings\n\nExternal APIs and webhooks are user-configured and disabled\
     \ by default. Read-only status, investigation and policy preview endpoints do not contact providers.\
     \ Explicit tests and investigation enrichment require consent:true. Saved sharing settings take effect\
-    \ without restarting. Daddybound transport is selected independently of Off/Learn/Live. Native iteration uses UDP/TCP\
+    \ without restarting. Daddybound transport is selected independently of Forward/Learn/Live. Native iteration uses UDP/TCP\
     \ port 53; encrypted forwarding uses approved DoQ, HTTP/3 or HTTP/2 endpoints with local Live validation.\n"
   license:
     name: Apache-2.0
@@ -110,7 +110,7 @@ paths:
       description: Configuration is validated and persisted before publication. Retired native and forwarding
         paths are cancelled/drained before success returns. TLS 1.3 certificate authentication, literal-IP
         bootstrap and encrypted-only failover are mandatory for the encrypted profile. Own endpoints and forwarding
-        disclosure acknowledgement are required. This preserves the current Off/Learn/Live mode and keeps local
+        disclosure acknowledgement are required. This preserves the current Forward/Learn/Live mode and keeps local
         policy/learning independent. YAML/env-pinned selections cannot be overwritten.
       requestBody:
         required: true
@@ -423,6 +423,33 @@ paths:
               schema:
                 $ref: '#/components/schemas/Diagnostics'
       operationId: getDiagnostics
+  /api/v1/activity/live:
+    get:
+      tags:
+      - Metrics
+      summary: Immediate anonymous DNS traffic
+      description: >-
+        Reads bounded in-memory DNS handler counters without query-history reads
+        or DNS probes. Normal session/token authentication still uses the store.
+        Includes malformed, ACL-refused and rate-limited messages reaching the
+        handler that never enter the query log; wire parsing and DoH authentication
+        rejections before the handler are outside this measurement. Counters work with logging
+        disabled and contain no query names or client addresses. Process totals
+        reset on restart; startedAt identifies the current counter lifetime.
+        The recent window contains the current second and previous 59 seconds.
+        Completed means the handler produced a response, not that a remote client
+        received it. Status describes observed traffic, not listener readiness or
+        an external connectivity test. Responses use Cache-Control: no-store.
+      responses:
+        '200':
+          description: Current handler activity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveActivity'
+        '503':
+          description: This process has no DNS handler to measure
+      operationId: getLiveActivity
   /api/v1/activity/queries:
     get:
       tags:
@@ -3411,10 +3438,11 @@ paths:
     put:
       tags:
       - Detections
-      summary: Select Daddybound Off, Learn or Live at runtime
+      summary: Select Forward, Learn or Live at runtime
       description: Persist and apply the local DNSSEC mode without restarting or changing the selected transport.
-        A YAML/environment-pinned mode returns 409. Fresh installations default to Live; saved existing
-        Off/Learn selections are preserved. Live validates the exact returned records and fails with SERVFAIL
+        A YAML/environment-pinned mode returns 409. Fresh installations default to Forward (off);
+        existing saved and configured selections are preserved. Forward uses the selected upstreams
+        with no Daddybound validation or anchor work. Live validates the exact returned records and fails with SERVFAIL
         on failed/indeterminate validation or operational failure, without a weaker fallback. A client CD flag
         bypasses DNSSEC checking only. Enabling Learn or Live while native transport is selected requires
         acknowledgeNativeTransport:true. An already-approved encrypted selection needs no native acknowledgement.
@@ -4241,7 +4269,7 @@ components:
           oneOf:
           - $ref: '#/components/schemas/EncryptedDNSStats'
           - type: 'null'
-      description: The effective DNS transport selection, independently of Daddybound Off/Learn/Live. Reads
+      description: The effective DNS transport selection, independently of Forward/Learn/Live. Reads
         cause no network work. Encrypted-only describes enforcement of transport policy, not endpoint availability.
     DNSTransportTestResult:
       type: object
@@ -4303,9 +4331,106 @@ components:
         action:
           type: string
           description: The next thing to do.
+    DNSActivityCounts:
+      type: object
+      description: >-
+        Arrival and completion counters for the stated scope. completed equals
+        answered + blocked + errors + refused + rateLimited + invalid.
+        cached is a subset of answered. Arrival and completion are counted
+        separately, so a query may cross the recent window boundary.
+      required: [received, completed, answered, blocked, cached, errors, refused, rateLimited, invalid]
+      properties:
+        received:
+          type: integer
+          minimum: 0
+        completed:
+          type: integer
+          minimum: 0
+        answered:
+          type: integer
+          minimum: 0
+          description: Successful NOERROR or NXDOMAIN responses, excluding policy blocks.
+        blocked:
+          type: integer
+          minimum: 0
+          description: Policy and local response-protection blocks.
+        cached:
+          type: integer
+          minimum: 0
+          description: Successful answers served from the selected resolver's cache.
+        errors:
+          type: integer
+          minimum: 0
+          description: Failed forwarding or local validation, including upstream error rcodes.
+        refused:
+          type: integer
+          minimum: 0
+          description: Queries refused by the client source ACL before resolution.
+        rateLimited:
+          type: integer
+          minimum: 0
+        invalid:
+          type: integer
+          minimum: 0
+          description: Malformed or unsupported DNS messages rejected by the handler.
+    LiveActivity:
+      type: object
+      required: [available, status, startedAt, measuredAt, lastQueryAt, lastResponseAt, lastOutcome, lastRcode, inflight, sinceStart, recent]
+      properties:
+        available:
+          type: boolean
+        status:
+          type: string
+          enum: [waiting, active, idle, degraded, refused, failing, unavailable]
+          description: >-
+            waiting means no arrivals since handler startup; idle means no recent
+            arrivals/completions or pending queries. active means observed traffic
+            without recent failures. degraded means mixed successful/blocked and
+            failed/refused responses. refused means recent failures are exclusively
+            client ACL refusals; failing means other failures without successes.
+        startedAt:
+          type: string
+          format: date-time
+          description: Handler startup time; use as the epoch when comparing counters.
+        measuredAt:
+          type: string
+          format: date-time
+        lastQueryAt:
+          type: [string, 'null']
+          format: date-time
+        lastResponseAt:
+          type: [string, 'null']
+          format: date-time
+        lastOutcome:
+          type: string
+          enum: ['', answered, blocked, error, refused, rate_limited, invalid]
+        lastRcode:
+          type: string
+          description: Last response's DNS rcode name (RCODE plus the number when unassigned), or empty before a response.
+        inflight:
+          type: integer
+          minimum: 0
+          description: Queries currently inside the DNS handler, across every transport and mode.
+        sinceStart:
+          $ref: '#/components/schemas/DNSActivityCounts'
+        recent:
+          allOf:
+          - $ref: '#/components/schemas/DNSActivityCounts'
+          - type: object
+            required: [windowSeconds, queriesPerSecond]
+            properties:
+              windowSeconds:
+                type: integer
+                const: 60
+              queriesPerSecond:
+                type: number
+                minimum: 0
+                description: Recent arrivals divided by 60, including on a newly started handler.
     Overview:
       type: object
       properties:
+        live:
+          $ref: '#/components/schemas/LiveActivity'
         protectionStatus:
           type: string
           enum:
