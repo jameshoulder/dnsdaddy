@@ -2049,6 +2049,9 @@ tbody td { padding: 13px 14px; }
 .server-address-details td { overflow-wrap: anywhere; }
 .transport-mode-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .transport-endpoint-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.transport-example { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.transport-example h3 { margin: 0 0 8px; font-size: 15px; }
+.transport-example > p:last-child { margin-bottom: 0; }
 .transport-endpoint { border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius); padding: 15px 17px 17px; margin: 20px 0; min-width: 0; }
 .transport-endpoint > legend { padding: 0 7px; font-size: 12px; font-weight: 650; color: var(--muted-foreground); }
 .transport-endpoint .field > .small { font-weight: 400; }

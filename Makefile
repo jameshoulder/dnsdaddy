@@ -42,6 +42,10 @@ run: ## Run locally on high ports with data in ./tmp (no root needed)
 test: ## Run the test suite
 	go test ./...
 
+.PHONY: run-encrypted
+run-encrypted: build ## Try Daddybound Live with the explicit Cloudflare HTTPS example (no root needed)
+	./bin/dnsdaddy -config ./dnsdaddy.encrypted.example.yaml
+
 .PHONY: test-race
 test-race: ## Run tests with the race detector
 	go test -race ./...

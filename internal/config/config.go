@@ -571,6 +571,9 @@ func applyEnv(cfg *Config) error {
 	envStr("DNSDADDY_UPSTREAM_MODE", &cfg.DNS.UpstreamMode)
 	envStr("DNSDADDY_LOCAL_DNSSEC_VALIDATION", &cfg.DNS.LocalDNSSECValidation)
 	envStr("DNSDADDY_RESOLUTION_TRANSPORT", &cfg.DNS.ResolutionTransport)
+	if err := applyEncryptedUpstreamsEnv(&cfg.DNS); err != nil {
+		return err
+	}
 	envStr("DNSDADDY_HTTP_LISTEN", &cfg.HTTP.Listen)
 	envStr("DNSDADDY_ADMIN_PASSWORD", &cfg.HTTP.AdminPassword)
 	envStr("DNSDADDY_BASE_URL", &cfg.HTTP.BaseURL)
@@ -701,11 +704,14 @@ func (c *Config) validate() error {
 	if c.DataDir == "" {
 		return fmt.Errorf("data_dir must not be empty")
 	}
-	if len(c.DNS.Upstreams) == 0 {
-		return fmt.Errorf("at least one upstream resolver is required")
-	}
 	if err := c.DNS.ValidateTransport(); err != nil {
 		return err
+	}
+	// An explicitly encrypted installation has its own complete set of
+	// approved endpoints. Requiring unused legacy forwarders prevented a
+	// minimal encrypted-only configuration from starting.
+	if len(c.DNS.Upstreams) == 0 && c.DNS.TransportMode() != ResolutionEncrypted {
+		return fmt.Errorf("at least one upstream resolver is required for native transport Off/Learn; encrypted transport uses dns.encrypted_upstreams")
 	}
 	switch c.DNS.UpstreamMode {
 	case "failover", "race":

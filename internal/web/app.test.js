@@ -84,8 +84,8 @@ const {
   recoveryCard, changeHistoryRows, protectionCard, webhookCard,
   investigationLearning, decisionEvidenceContent,
   exportCard, readCompleteExport,
-  copyPlainText, serverAddressRow, serverAddressesCard,
-  DNS_TRANSPORT_PROTOCOLS, transportConsentError, transportEndpointFields,
+  copyPlainText, serverAddressRow, serverAddressesCard, resolverConnectionGuide,
+  DNS_TRANSPORT_PROTOCOLS, transportExampleDraft, transportExampleCard, transportConsentError, transportEndpointFields,
   negotiatedTLS, encryptedTransportStats, transportTestResult, dnsTransportCard,
 } = require('./static/app.js');
 
@@ -451,7 +451,8 @@ function ready(overrides = {}) {
   };
 }
 
-// window is not defined under node --test; the card reads location.hostname.
+// window is not defined under node --test. A supplied hostname also checks
+// that onboarding does not infer a DNS endpoint from the dashboard location.
 function withHostname(host, fn) {
   const had = typeof global.window !== 'undefined';
   const previous = had ? global.window : undefined;
@@ -464,19 +465,19 @@ function withHostname(host, fn) {
   }
 }
 
-test('the card appears when no client has been seen, naming the dashboard host', () => {
+test('the first-client card appears with an explicit server and port to check in Setup', () => {
   const out = withHostname('192.168.1.75', () => firstClientCard(ready()));
 
   assert.match(out, /No devices have used this resolver yet/);
-  assert.match(out, /nslookup example\.com 192\.168\.1\.75/,
-    'the command must name the address the operator reached the dashboard on');
+  assert.match(out, /dig @&lt;your-server-ip&gt; -p &lt;host-dns-port&gt; example\.com A/);
+  assert.match(out, /href="#\/setup"/);
+  assert.doesNotMatch(out, /192\.168\.1\.75/, 'a dashboard address is not evidence of a reachable DNS listener');
   assert.match(out, /dnsdaddy doctor/, 'it must say what to do when nothing appears');
 });
 
-test('a stock LAN install is not told its clients will be refused', () => {
-  // The regression this replaced. No network carries a permission on a fresh
-  // install, and the shipped ACL serves every private range perfectly well.
-  // Branching on the permission count told that operator the opposite.
+test('an effective LAN grant is not misread from the number of explicitly permitted networks', () => {
+  // Ad-hoc access can admit configured private ranges even with zero named
+  // network grants. The measured ACL state, not the permission count, decides.
   const out = withHostname('192.168.1.75', () =>
     firstClientCard(ready({ permittedNetworks: 0 })));
 
@@ -576,6 +577,13 @@ test('no branch claims loopback is the DNS address over an SSH tunnel', () => {
 test('the card tolerates a missing overview', () => {
   assert.strictEqual(withHostname('192.168.1.75', () => firstClientCard(null)), '');
   assert.strictEqual(withHostname('192.168.1.75', () => firstClientCard(undefined)), '');
+});
+
+test('first-device instructions do not mistake a dashboard proxy for a DNS address or assume DNS port 53', () => {
+  const out = withHostname('admin.proxy.example', () => firstClientCard(ready({})));
+  assert.doesNotMatch(out, /admin\.proxy\.example|nslookup example\.com/);
+  assert.match(out, /host-dns-port/);
+  assert.match(out, /href="#\/setup"/);
 });
 
 // The Access column says what the resolver is doing, not what the row says.
@@ -3740,6 +3748,48 @@ test('encrypted forwarding consent is required for every save or test, and retur
   assert.equal(transportConsentError('native', 'native', false, false), '');
 });
 
+test('the explicit Cloudflare example fills all required fields and preserves a custom provider order', () => {
+  const example = transportExampleDraft([{}], 'cloudflare');
+  assert.deepEqual(example, [{ protocol: 'doh2', address: 'https://cloudflare-dns.com/dns-query', serverName: 'cloudflare-dns.com', bootstrapIPs: ['1.1.1.1', '1.0.0.1'] }]);
+  const custom = [{ protocol: 'doq', address: 'resolver.example:853', serverName: '', bootstrapIPs: ['203.0.113.53'] }];
+  const draft = transportExampleDraft(custom, 'cloudflare');
+  assert.deepEqual(draft[0], custom[0]);
+  assert.deepEqual(draft[1], example[0]);
+  draft[0].bootstrapIPs.push('203.0.113.54');
+  draft[1].bootstrapIPs.length = 0;
+  assert.deepEqual(custom[0].bootstrapIPs, ['203.0.113.53'], 'draft changes cannot mutate saved settings');
+  assert.equal(transportExampleDraft([], 'cloudflare')[0].bootstrapIPs.length, 2, 'examples cannot be mutated by earlier edits');
+  assert.equal(transportExampleDraft([{ address: 'partly-entered.example' }], 'cloudflare').length, 2, 'partly completed custom entries are preserved');
+  assert.throws(() => transportExampleDraft(Array.from({ length: 16 }, () => ({})), 'cloudflare'), /limit is 16/);
+  assert.throws(() => transportExampleDraft([], 'constructor'), /Unknown/);
+});
+
+test('example guidance separates a draft, a connectivity test, activation and local Live validation', () => {
+  const out = transportExampleCard();
+  assert.match(out, /type="button"[^>]+data-transport-example="cloudflare"/);
+  assert.match(out, /Cloudflare receives the DNS names/);
+  assert.match(out, /Test endpoints/);
+  assert.match(out, /Apply DNS transport/);
+  assert.match(out, /not a complete Live lookup/);
+  assert.match(out, /does not save, connect or change your Daddybound mode/);
+  assert.doesNotMatch(out, /checked|type="submit"/);
+});
+
+test('setup tests the actual UDP and TCP listener ports and explains Docker mappings and IP-only client settings', () => {
+  const out = resolverConnectionGuide({ listenUdp: '127.0.0.1:5353', listenTcp: '[::1]:5354' });
+  assert.match(out, /dig @&lt;server-ip&gt; -p 5353 example\.com A/);
+  assert.match(out, /dig @&lt;server-ip&gt; -p 5354 example\.com A \+tcp/);
+  assert.match(out, /Docker publishes different host ports/);
+  assert.match(out, /settings use port 53 and cannot specify another port/);
+  assert.match(out, /REFUSED/);
+  assert.match(out, /SERVFAIL/);
+  const tcpOnly = resolverConnectionGuide({ listenTcp: ':53' });
+  assert.equal((tcpOnly.match(/dig @/g) || []).length, 1, 'a disabled UDP listener must not get a suggested UDP test');
+  assert.match(tcpOnly, /-p 53 example\.com A \+tcp/);
+  assert.match(resolverConnectionGuide({}), /No ordinary DNS listener was reported/);
+  assert.doesNotMatch(resolverConnectionGuide({}), /dig @/);
+});
+
 test('transport setup provides no preselected provider and discloses bootstrap, trust and fallback constraints', () => {
   const out = dnsTransportCard({ transport: 'native', endpoints: [], tlsMinimum: '1.3', plaintextFallback: false, bootstrap: 'system' });
   assert.match(out, /Choose a protocol/);
@@ -3768,7 +3818,7 @@ test('locked transport shows the deployment reason and cannot apply an edited co
   const out = dnsTransportCard({ transport: 'encrypted', locked: true, reason: 'Pinned in deployment configuration', endpoints: [{ protocol: 'doq', address: 'resolver.example:853', serverName: 'resolver.example', bootstrapIPs: ['203.0.113.53'] }], tlsMinimum: '1.3', plaintextFallback: false });
   assert.match(out, /Pinned in deployment configuration/);
   assert.match(out, /transport-mode-options" disabled/);
-  assert.doesNotMatch(out, /Apply DNS transport|Add another endpoint/);
+  assert.doesNotMatch(out, /Apply DNS transport|Add another endpoint|data-transport-example/);
   assert.match(out, /Test endpoints/);
 });
 

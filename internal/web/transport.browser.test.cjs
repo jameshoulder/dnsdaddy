@@ -129,8 +129,17 @@ async function ask(port, name, id) {
     check('native is initially selected and forwarder fields are not interactive', await form.locator('[name=transport][value=native]').isChecked() && await form.locator('[name=address]').isDisabled());
     await form.locator('[name=transport][value=encrypted]').check();
     check('new encrypted setup does not choose a protocol or provider', await form.locator('[name=protocol]').inputValue() === '' && await form.locator('[name=address]').inputValue() === '');
+    await form.locator('[data-transport-example=cloudflare]').click();
+    check('explicit example fills a single complete DoH2 endpoint', await form.locator('[data-forwarder]').count() === 1 && await form.locator('[name=protocol]').inputValue() === 'doh2' && await form.locator('[name=address]').inputValue() === 'https://cloudflare-dns.com/dns-query' && await form.locator('[name=serverName]').inputValue() === 'cloudflare-dns.com' && await form.locator('[name=bootstrapIPs]').inputValue() === '1.1.1.1\n1.0.0.1');
+    check('adding an example does not consent, test, save or enable Live', requests.length === 0 && !(await form.locator('[name=acknowledgeForwarding]').isChecked()) && (await api('/dns/transport')).transport === 'native' && (await api('/dnssec/status')).mode.effective === 'off');
+    await form.locator('[name=address]').fill('https://custom.example/dns-query');
+    await form.locator('[name=acknowledgeForwarding]').check();
+    await form.locator('[data-transport-example=cloudflare]').click();
+    check('adding an example preserves custom entries and revokes old consent', await form.locator('[data-forwarder]').count() === 2 && await form.locator('[name=address]').first().inputValue() === 'https://custom.example/dns-query' && !(await form.locator('[name=acknowledgeForwarding]').isChecked()) && requests.length === 0);
+    for (let index = 0; index < 2; index++) await form.locator('[data-forwarder]').last().locator('[data-transport-action=remove]').click();
+    await form.locator('#transport-add-endpoint').click();
     for (let index = 1; index < 16; index++) await form.locator('#transport-add-endpoint').click();
-    check('the endpoint editor enforces the sixteen-endpoint bound', await form.locator('#transport-add-endpoint').isDisabled() && await form.locator('[data-forwarder]').count() === 16);
+    check('the endpoint editor enforces the sixteen-endpoint bound for examples and custom entries', await form.locator('#transport-add-endpoint').isDisabled() && await form.locator('[data-transport-example=cloudflare]').isDisabled() && await form.locator('[data-forwarder]').count() === 16);
     for (let index = 15; index > 0; index--) await form.locator('[data-forwarder]').last().locator('[data-transport-action=remove]').click();
     check('endpoint boundary controls stay correct after removals', await form.locator('[data-transport-action=up]').isDisabled() && await form.locator('[data-transport-action=down]').isDisabled());
     await form.locator('[name=protocol]').selectOption('doq'); await form.locator('[name=address]').fill(`127.0.0.1:${unusedPort}`);

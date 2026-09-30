@@ -239,9 +239,19 @@ Change the password from **Settings**, then remove the initial-password file whe
 
 ### Allow the clients that should use it
 
-DNS Daddy deliberately refuses DNS queries from source addresses it has not been told to serve. On a LAN, the shipped defaults cover private ranges. On a public VPS, add the authorised client or network in **Networks** and enable resolver access for it.
+DNS Daddy deliberately refuses DNS queries from source addresses it has not
+been told to serve. **On a new installation, add your authorised LAN, VPN or
+client IP in Networks and enable Allow this network to use DNS Daddy.**
+The Default network's ad-hoc access starts off; listing private ranges in
+`dns.allowed_client_cidrs` makes them eligible for that switch, rather than
+automatically granting every private client access. Configured loopback
+remains available for checks inside the server or container.
 
-The effective ACL is the configured allowed CIDRs plus networks explicitly permitted through the dashboard. See [docs/deploy.md](docs/deploy.md#who-may-use-the-resolver).
+Explicitly permitted networks work regardless of the Default ad-hoc switch.
+The **Setup** page and `dnsdaddy doctor` show the effective permissions. With
+Docker, a query sent to the host's `127.0.0.1:53` can reach the container from
+its bridge gateway and still need permission; use the internal doctor check
+first. See [docs/deploy.md](docs/deploy.md#who-may-use-the-resolver).
 
 The homepage and Setup page show addresses observed on this server and their
 compatible configured DNS ports. If hardened host permissions prevent interface
@@ -251,12 +261,37 @@ may make that address loopback. No external “what is my IP” service or reque
 header supplies the result; container/NAT mappings, firewall rules and client
 access still need checking.
 
-To use encrypted outbound DNS, choose your own endpoints and bootstrap IPs in
-**Daddybound → DNS transport**, review who receives the names, and explicitly
-activate the encrypted profile. Native remains the default and an upgrade does
-not silently opt an installation into a new provider. See
-[the encrypted DNS guide](docs/encrypted-dns.md) for supported transports,
-certificate checks, local validation and the scope of encryption.
+### Start with encrypted DNS and Daddybound Live
+
+In **Daddybound → DNS transport → Encrypted forwarding**, select **Add
+Cloudflare example**. This fills a complete HTTPS-over-HTTP/2 endpoint with
+the TLS name and bootstrap IPs; you do not need an API key or your own
+certificate. Review the provider, check the sharing agreement, select **Test
+endpoints**, then **Apply DNS transport** after a successful test. Keep or
+select **Live** in the Daddybound card for local DNSSEC validation. Adding
+the example only edits your draft and preserves your current resolution mode.
+
+The [encrypted DNS guide](docs/encrypted-dns.md#start-with-a-working-example)
+walks through the provider choice, client ports and the first real lookup.
+The example uses Cloudflare's [documented DoH service](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/)
+over outbound TCP 443. Native remains the default; existing installations
+are never silently switched to a provider. Native Live needs outbound UDP
+and TCP 53 to authoritative DNS servers.
+
+For a complete configuration example in Docker:
+
+```bash
+docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml up -d --build
+docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml exec dnsdaddy dnsdaddy doctor
+```
+
+This explicitly selects the provider in
+[dnsdaddy.encrypted.example.yaml](dnsdaddy.encrypted.example.yaml), pins
+encrypted transport and Live, and keeps the normal data volume. Repeat both
+`-f` arguments for updates. Existing environment overrides take precedence;
+review them first. If you prefer a standalone local trial, `make run-encrypted`
+uses the same example with DNS on `127.0.0.1:5353` and a
+separate data directory.
 
 ## Diagnose before rollout
 
@@ -266,14 +301,26 @@ Run `dnsdaddy doctor` **before** changing router or DHCP DNS settings:
 docker compose exec dnsdaddy dnsdaddy doctor
 ```
 
-Then test from another machine:
+Then test one permitted device using the server's reachable LAN or VPN IP:
 
 ```bash
-nslookup example.com <dnsdaddy-ip>
-dig @<dnsdaddy-ip> example.com
+nslookup -port=53 example.com <dnsdaddy-ip>
+dig @<dnsdaddy-ip> -p 53 example.com A
+dig @<dnsdaddy-ip> -p 53 example.com A +tcp
 ```
 
-Point **one device** at DNS Daddy first and watch the query log before rolling it out network-wide. A DHCP-level mistake can take DNS down for everyone at once.
+Docker's normal host DNS port is **53**; its internal listener is **5353**.
+The standalone encrypted example uses **5353** on the host, so use `-p 5353`
+or `-port=5353` for that trial. The dashboard port **8080** is separate.
+Most device and DHCP DNS settings take an IP address and use port 53.
+
+`NOERROR` with an answer shows that this lookup completed. `REFUSED` points
+to client permissions; `SERVFAIL` means the server could not complete the
+lookup, so inspect Daddybound and transport status; a timeout points to the
+address, listener, port mapping or firewall. A successful **Test endpoints**
+only checks the encrypted exchange; finish with these real client lookups.
+
+Point **one device** at DNS Daddy first and watch the query log before rolling it out network-wide.
 
 ## See it working without real traffic
 
