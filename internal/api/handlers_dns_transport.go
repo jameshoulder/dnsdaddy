@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -12,6 +13,12 @@ import (
 )
 
 const DNSTransportSetting = "dns.transport.v1"
+
+func sanitizeForLog(v string) string {
+	v = strings.ReplaceAll(v, "\n", "")
+	v = strings.ReplaceAll(v, "\r", "")
+	return v
+}
 
 var ErrDNSTransportLocked = errors.New("DNS transport is pinned by dns.resolution_transport; remove that setting to manage transport here")
 
@@ -101,7 +108,7 @@ func (a *API) handleDNSTransport(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
-		a.Log.Error("DNS transport activation failed", "error", err)
+		a.Log.Error("DNS transport activation failed", "error", sanitizeForLog(err.Error()))
 		writeError(w, http.StatusInternalServerError, "could not activate DNS transport; the previous selection remains active")
 		return
 	}
