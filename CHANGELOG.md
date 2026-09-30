@@ -22,6 +22,42 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Resolver reliability and a complete encrypted setup
+
+- Native recursion retains both IPv4 and IPv6 addresses for delegated
+  nameservers instead of replacing a working IPv4 entry during an AAAA
+  lookup. It resolves a delegated backup nameserver when the first one fails
+  and continues failover after a rejected QNAME-minimisation retry. Individual
+  authority attempts, including root priming, reserve time for failover inside
+  the overall deadline; cancelled UDP/TCP work is interrupted promptly.
+- Daddybound reuses successfully authenticated zone keys within one validation
+  operation. Ordinary signed alias chains no longer exhaust the unchanged
+  validation work budget by rechecking the same chain repeatedly. Every
+  returned record still needs validation; trust is never reused between
+  separate operations.
+- Forwarding reserves timeout budget for configured backup servers and
+  interrupts cancelled UDP/TCP exchanges. Cache and in-flight keys separate
+  DNSSEC checking-disabled requests and unknown numeric question types/classes.
+- An explicitly encrypted installation can start without unused legacy
+  forwarders. `DNSDADDY_ENCRYPTED_UPSTREAMS` accepts a bounded, strictly decoded
+  JSON endpoint array, and Compose passes explicitly configured settings
+  through instead of overriding or ignoring them.
+- The dashboard has an explicit **Add Cloudflare example** action that fills
+  the endpoint, certificate name and bootstrap addresses without testing,
+  saving or granting consent. `make run-encrypted` and the optional
+  `deploy/docker-compose.encrypted.yml` provide a complete configuration for
+  Daddybound Live over HTTP/2 with TLS 1.3. Native remains the default and
+  existing saved choices are preserved.
+- Setup instructions distinguish dashboard access, DNS listener ports, Docker
+  published ports and client permissions. Installer reruns rebuild changed
+  source, report failing doctor checks as failures, and identify the actual
+  Docker gateway for host reverse-proxy trust. Health checks verify both UDP
+  and TCP DNS and report missing evidence instead of claiming success.
+
+See [the working encrypted examples](docs/encrypted-dns.md) for setup and
+troubleshooting. These fixes retain experimental Live status and do not
+constitute independent security or production-performance assurance.
+
 ### Native protection and investigation workflows
 
 Daddybound Live is now implemented. A fresh installation selects the experimental

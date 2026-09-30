@@ -36,6 +36,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | DNS-over-HTTPS endpoint | RFC 8484, at `/dns-query/<token>`. |
 | Legacy encrypted upstream (DoT) | The default configured forwarding URLs use certificate verification. They apply to Off/Learn under the native profile; native Live instead contacts authoritative servers over plaintext UDP/TCP 53. |
 | Optional encrypted outbound profile | Operator-selected DoQ, HTTP/3 DoH and HTTP/2 DoH endpoints require authenticated TLS 1.3, literal bootstrap IPs for named endpoints and explicit acknowledgement. No automatic provider selection or plaintext fallback. Native remains the default. This adds outbound transports, not inbound DoQ/HTTP3 listeners. Local Live validation remains experimental; see [encrypted-dns.md](encrypted-dns.md). |
+| Complete encrypted setup example | An explicit dashboard action fills Cloudflare DoH2 endpoint, TLS identity and bootstrap addresses without changing active settings. A standalone configuration and Docker overlay combine this selected provider with Daddybound Live; client access still requires the documented listener and network permissions. See [the walkthrough](encrypted-dns.md#start-with-a-working-example). |
 | Answer cache | The forwarding cache is bounded, sharded and TTL-aware, and invalidated on feed or policy change. Live never returns an answer from that forwarding cache. |
 | Request collapsing | Identical concurrent questions share one upstream flight. |
 | ANY refusal (RFC 8482) | On by default; ANY is the classic amplification lever. |

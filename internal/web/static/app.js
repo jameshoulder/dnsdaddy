@@ -426,13 +426,9 @@ function firstClientCard(overview) {
   // about the privacy setting rather than about the network.
   if (!overview.clientAttribution) return '';
 
-  // The address the browser reached the dashboard on is almost always the
-  // right one to hand a test client — unless it is loopback, which means an
-  // SSH tunnel or a proxy, and the DNS address is something this page cannot
-  // know.
-  const host = window.location.hostname;
-  const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
-  const target = isLoopback ? '<your-server-ip>' : host;
+  // A dashboard hostname can point at a reverse proxy, not at the DNS
+  // listener. Its HTTP port also says nothing about a published DNS port.
+  const target = '<your-server-ip>';
 
   const footer = html`
     <p class="muted small">
@@ -495,8 +491,8 @@ function firstClientCard(overview) {
         <ol class="small first-client-steps">
           <li>Open <a href="#/networks">Networks</a> and add your client or network.</li>
           <li>Tick <strong>Allow this network to use DNS Daddy</strong>.</li>
-          <li>Point the device at <code>${target}</code> for DNS.</li>
-          <li>Test it: <code>nslookup example.com ${target}</code></li>
+          <li>Open <a href="#/setup">Setup</a> and check the server’s LAN address and published DNS port.</li>
+          <li>Test it: <code>dig @${target} -p &lt;host-dns-port&gt; example.com A</code></li>
         </ol>
         <p class="muted small">
           It takes effect immediately — there is nothing to restart and no file
@@ -511,16 +507,15 @@ function firstClientCard(overview) {
     <div class="card first-client">
       <div class="first-client-title">No devices have used this resolver yet</div>
       <p class="muted small">
-        DNS Daddy is running and nothing has sent it a query, which is expected
-        until you point something at it.
+        No device outside this server has been recorded using DNS Daddy yet.
+        Test one permitted device before changing your whole network.
       </p>
       <details class="first-client-guide"><summary>Connection steps</summary>
       <p class="small">Try this from a machine you expect it to serve:</p>
-      <pre class="first-client-cmd">nslookup example.com ${target}</pre>
+      <pre class="first-client-cmd">dig @${target} -p &lt;host-dns-port&gt; example.com A</pre>
       <p class="muted small">
-        ${raw(isLoopback
-          ? 'You are viewing this over loopback, so this page cannot tell which address your clients should use — substitute the server\'s LAN address.'
-          : 'Then reload this page: the query should appear in the Query log, attributed to that machine.')}
+        Use the server’s LAN or VPN address and published DNS port from <a href="#/setup">Setup</a>.
+        The dashboard address may be a proxy or SSH tunnel. Then look for the query in the Query log.
       </p>
       <p class="muted small">
         If it comes back <code>REFUSED</code>, that address is not permitted
@@ -4075,6 +4070,31 @@ async function mountWebhooks() {
 }
 
 
+function resolverConnectionGuide(info = {}) {
+  const listenerPort = (listen) => {
+    const match = typeof listen === 'string' && listen.match(/:(\d+)$/);
+    const port = match && Number(match[1]);
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+  };
+  const udpPort = listenerPort(info.listenUdp);
+  const tcpPort = listenerPort(info.listenTcp);
+  if (!udpPort && !tcpPort) return html`<p class="notice-inline">No ordinary DNS listener was reported. Check the listener configuration before pointing devices at this server.</p>`;
+  const commands = [];
+  if (udpPort) commands.push(`dig @<server-ip> -p ${udpPort} example.com A`);
+  if (tcpPort) commands.push(`dig @<server-ip> -p ${tcpPort} example.com A +tcp`);
+  return html`<div class="note-loose"><h3>Test one device before changing DHCP</h3>
+    <p class="small muted">Replace <code>&lt;server-ip&gt;</code> with this server’s reachable LAN or VPN IP. These commands use the reported listener ports; if Docker publishes different host ports, use those host ports instead.</p>
+    <pre class="first-client-cmd">${commands.join('\n')}</pre>
+    <p class="small muted">The dashboard port (usually 8080) is separate. Most device and DHCP DNS settings use port 53 and cannot specify another port. A listener or Docker host port of 5353 is useful for these tests; publish UDP and TCP 53 before using an IP-only DNS setting.</p>
+    <details class="chart-data"><summary>What should the result mean?</summary><div class="table-wrap"><table><thead><tr><th>Result</th><th>Next step</th></tr></thead><tbody>
+      <tr><td>NOERROR with an answer</td><td>Check the Query log and Daddybound validation result, then try one device’s normal traffic.</td></tr>
+      <tr><td>REFUSED</td><td>Permit this client’s actual source IP in Networks. A VPN or NAT can change the source seen by the server.</td></tr>
+      <tr><td>SERVFAIL</td><td>The server answered but could not complete the lookup. Check Daddybound status, transport errors and the server clock; run <code>dnsdaddy doctor</code>.</td></tr>
+      <tr><td>Timeout or connection refused</td><td>Check the address, DNS port, listener binding and firewall. Test UDP and TCP; both must reach the resolver.</td></tr>
+    </tbody></table></div></details>
+  </div>`;
+}
+
 pages.setup = {
   title: 'Setup',
   subtitle: 'Point your network here.',
@@ -4092,17 +4112,18 @@ pages.setup = {
           <div><h2>Client connection setup</h2>
           <p>Use a compatible server address above in your firewall, DHCP scope or router. Client permission is configured separately from the listener.</p></div>
         </div>
-        <p class="small muted">Plain DNS (UDP/TCP), port ${port(info.listenUdp)}</p>
+        <p class="small muted">Configured DNS listeners: ${info.listenUdp ? `UDP ${port(info.listenUdp)}` : 'UDP disabled'} · ${info.listenTcp ? `TCP ${port(info.listenTcp)}` : 'TCP disabled'}</p>
         ${raw(resolverAccessNote(networks.clientAccess))}
+        ${raw(resolverConnectionGuide(info))}
         <p class="muted small note-tight">
           On pfSense: <em>System → General Setup → DNS Servers</em>.
           On UniFi: <em>Settings → Networks → your LAN → DHCP Name Server</em>.
-          Then block outbound port 53 to everything else so devices cannot skip past it.
+          After testing, restrict clients’ DNS egress to DNS Daddy if required. Keep the DNS Daddy server’s own outbound transport reachable.
         </p>
         ${raw(info.listenDot ? html`<p class="small muted note-loose">DNS-over-TLS: port ${port(info.listenDot)}. Clients must use a hostname that matches this server’s TLS certificate.</p>` : '')}
       </div>
 
-      <div class="card section integration-cta"><div><h2>Upstream transport</h2><p class="muted">Choose native iterative resolution or your own encrypted DNS forwarders. This outbound connection is separate from how devices connect to DNS Daddy.</p></div><a class="btn btn-observe" href="#/daddybound">Configure DNS transport</a></div>
+      <div class="card section integration-cta"><div><h2>Upstream transport</h2><p class="muted">Native Live needs outbound UDP and TCP 53 to authoritative servers. For encrypted forwarding, Daddybound offers a ready Cloudflare HTTPS example using TCP 443. This outbound connection is separate from how devices connect to DNS Daddy.</p></div><a class="btn btn-observe" href="#/daddybound">Configure DNS transport</a></div>
 
       <div class="card section">
         <div class="card-head">
@@ -4587,10 +4608,42 @@ function daddyboundStatusCard(status) {
 /* ---------- Native resolution and local traffic learning ---------------- */
 
 const DNS_TRANSPORT_PROTOCOLS = {
-  doq: { label: 'DoQ · DNS over QUIC', placeholder: 'resolver.example:853', hint: 'A hostname or IP address, with an optional port. DoQ uses UDP port 853 by default.' },
-  doh3: { label: 'DoH · HTTP/3', placeholder: 'https://resolver.example/dns-query', hint: 'An HTTPS DNS endpoint. HTTP/3 is required; this endpoint does not fall back to HTTP/2 or HTTP/1.' },
-  doh2: { label: 'DoH · HTTP/2', placeholder: 'https://resolver.example/dns-query', hint: 'An HTTPS DNS endpoint. HTTP/2 is required; this endpoint does not fall back to HTTP/1.' },
+  doq: { label: 'DoQ · DNS over QUIC', placeholder: 'resolver.example:853', hint: 'DoQ uses UDP port 853 by default. Confirm that the provider supports DoQ; a DNS-over-TLS (DoT) server on TCP 853 is a different protocol.' },
+  doh3: { label: 'DoH · HTTP/3', placeholder: 'https://resolver.example/dns-query', hint: 'An HTTPS DNS endpoint over UDP 443 by default. HTTP/3 is required; this endpoint does not fall back to HTTP/2 or HTTP/1.' },
+  doh2: { label: 'DoH · HTTP/2', placeholder: 'https://resolver.example/dns-query', hint: 'An HTTPS DNS endpoint over TCP 443 by default. HTTP/2 is required; this endpoint does not fall back to HTTP/1.' },
 };
+
+// An example is an explicit local edit. Rendering it never selects a provider,
+// sends a DNS query, grants consent, or changes the saved transport/mode.
+// Provider values: https://developers.cloudflare.com/1.1.1.1/ip-addresses/
+// and https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/.
+const DNS_TRANSPORT_EXAMPLES = {
+  cloudflare: { protocol: 'doh2', address: 'https://cloudflare-dns.com/dns-query', serverName: 'cloudflare-dns.com', bootstrapIPs: ['1.1.1.1', '1.0.0.1'] },
+};
+
+function transportExampleDraft(endpoints, exampleID) {
+  const example = DNS_TRANSPORT_EXAMPLES[exampleID];
+  if (!example || !Object.hasOwn(DNS_TRANSPORT_EXAMPLES, exampleID)) throw new Error('Unknown encrypted DNS example.');
+  const draft = (endpoints || []).map((endpoint) => ({ ...endpoint, bootstrapIPs: [...(endpoint.bootstrapIPs || [])] }));
+  // Fill the initial empty editor; otherwise preserve every custom entry and
+  // append the example so the operator's failover order does not change.
+  if (draft.length === 1 && !draft[0].protocol && !draft[0].address && !draft[0].serverName && !draft[0].bootstrapIPs.length) draft.pop();
+  if (draft.length >= 16) throw new Error('Remove an endpoint before adding an example. The limit is 16.');
+  draft.push({ ...example, bootstrapIPs: [...example.bootstrapIPs] });
+  return draft;
+}
+
+function transportExampleCard() {
+  return html`<div class="transport-example note-loose"><h3>Start with a ready example</h3>
+    <p class="small">Cloudflare’s standard resolver over HTTPS (HTTP/2), using TCP 443. The example includes the endpoint, TLS name and both bootstrap IPs. Cloudflare receives the DNS names you send to it.</p>
+    <div class="row note-tight"><button type="button" class="btn btn-observe btn-sm" data-transport-example="cloudflare">Add Cloudflare example</button>
+      <a class="small" href="https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/" target="_blank" rel="noopener noreferrer">Provider privacy policy ↗</a></div>
+    <ol class="compact-list"><li>Add the example or enter your provider’s details below. This only fills your draft.</li>
+      <li>Review the provider and check the sharing agreement, then select <strong>Test endpoints</strong>.</li>
+      <li>After a successful test, select <strong>Apply DNS transport</strong>. Keep or select <strong>Live</strong> in Daddybound above for local DNSSEC validation.</li></ol>
+    <p class="small muted">The test checks an encrypted exchange, not a complete Live lookup. Finish by testing a device in <a href="#/setup">Setup</a>. Adding an example preserves existing entries; it does not save, connect or change your Daddybound mode.</p>
+  </div>`;
+}
 
 function transportConsentError(transport, currentTransport, acknowledgeForwarding, acknowledgeNativeTransport) {
   if (transport === 'encrypted' && !acknowledgeForwarding) return 'Agree to send DNS queries to your configured forwarders before saving or testing them.';
@@ -4661,16 +4714,17 @@ function dnsTransportCard(data) {
       <div id="encrypted-forwarder-options" ${raw(encrypted ? '' : 'hidden')}>
         <p class="muted small note-loose">Endpoints are tried in the order shown. Only the configured protocols are used. If they all fail, the lookup fails; there is no plaintext fallback.</p>
         <fieldset id="encrypted-endpoint-fields" class="transport-endpoint-fields" ${raw(!encrypted || data.locked ? 'disabled' : '')}><legend class="sr-only">Encrypted forwarding endpoints</legend>
+          ${raw(!data.locked ? transportExampleCard() : '')}
           <div id="transport-endpoints">${raw((endpoints.length ? endpoints : [{}]).map((endpoint, index) => transportEndpointFields(endpoint, index)).join(''))}</div>
           ${raw(!data.locked ? html`<button type="button" class="btn btn-ghost btn-sm" id="transport-add-endpoint">Add another endpoint</button>` : '')}
         </fieldset>
         <p class="small muted note-tight">Maximum 16 endpoints. HTTPS endpoints cannot contain credentials, query strings or fragments. Certificates use the operating system’s trusted roots; no certificate bypass is available.</p>
         <label class="checkline consent-line"><input type="checkbox" name="acknowledgeForwarding"><span>I agree to send DNS queries and supporting DNSSEC lookups to these forwarders, including the fixed test query if I select Test endpoints.</span></label>
-        <p class="small muted note-tight">Test endpoints sends a DNSKEY query for the root zone using this draft. It changes no saved configuration. A response establishes connectivity, not provider accuracy.</p>
+        <p class="small muted note-tight">Test endpoints sends a DNSKEY query for the root zone using this draft. It changes no saved configuration. A response establishes connectivity, not provider accuracy or a full Daddybound Live validation.</p>
       </div>
       <label class="checkline consent-line" id="transport-native-consent" hidden><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native Live and Learn use unencrypted authoritative DNS on port 53. Off and Learn restore legacy forwarding for client answers, and background lookups may use system DNS.</span></label>
-      <div class="row note-loose transport-actions">${raw(!data.locked ? html`<button type="submit" class="btn btn-primary">Apply DNS transport</button>` : '')}
-        <button type="button" class="btn btn-ghost" id="transport-test" ${raw(encrypted ? '' : 'hidden')}>Test endpoints</button></div>
+      <div class="row note-loose transport-actions"><button type="button" class="btn btn-ghost" id="transport-test" ${raw(encrypted ? '' : 'hidden')}>Test endpoints</button>
+        ${raw(!data.locked ? html`<button type="submit" class="btn btn-primary">Apply DNS transport</button>` : '')}</div>
       <p id="dns-transport-error" class="form-error" role="alert" hidden></p>
       <p id="dns-transport-progress" class="small muted" role="status"></p>
       <div id="dns-transport-test-result" class="note-tight" role="status" hidden></div>
@@ -4706,6 +4760,7 @@ function mountDNSTransport(settings) {
       }
     });
     if (add) add.disabled = entries.length >= 16;
+    $$('[data-transport-example]', form).forEach((button) => { button.disabled = Boolean(settings.locked) || entries.length >= 16; });
   };
   const updateMode = () => {
     const encrypted = form.elements.transport.value === 'encrypted';
@@ -4749,6 +4804,16 @@ function mountDNSTransport(settings) {
   const endpointsFromDraft = () => rows().map((row) => ({ protocol: $('[name="protocol"]', row).value,
     address: $('[name="address"]', row).value.trim(), serverName: $('[name="serverName"]', row).value.trim(),
     bootstrapIPs: $('[name="bootstrapIPs"]', row).value.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean) }));
+  $$('[data-transport-example]', form).forEach((button) => button.addEventListener('click', () => {
+    if (settings.locked) return;
+    try {
+      const draft = transportExampleDraft(endpointsFromDraft(), button.dataset.transportExample);
+      host.innerHTML = sanitize(draft.map(transportEndpointFields).join(''));
+      renumber(); changed(); error.hidden = true;
+      progress.textContent = 'Example added to your draft. Review it, agree to share queries, then test before applying.';
+      $('[name="address"]', rows().at(-1)).focus();
+    } catch (err) { showError(err.message); }
+  }));
   const consent = (transport) => {
     const message = transportConsentError(transport, settings.transport, form.elements.acknowledgeForwarding.checked, form.elements.acknowledgeNativeTransport.checked);
     if (!message) return true;
@@ -5984,7 +6049,10 @@ if (typeof module !== 'undefined' && module.exports) {
     copyPlainText,
     serverAddressRow,
     serverAddressesCard,
+    resolverConnectionGuide,
     DNS_TRANSPORT_PROTOCOLS,
+    transportExampleDraft,
+    transportExampleCard,
     transportConsentError,
     transportEndpointFields,
     negotiatedTLS,

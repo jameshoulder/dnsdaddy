@@ -1,8 +1,8 @@
 # DNS Daddy configuration.
 #
 # Copy to /etc/dnsdaddy/config.yaml and edit. Every value here is the default,
-# so an empty file works too. Any setting can also be given as an environment
-# variable (DNSDADDY_*), which takes precedence — handy in Docker.
+# so an empty file works too. Supported DNSDADDY_* environment variables take
+# precedence — see .env.example for the Docker settings.
 #
 # Defaults are tuned for a 1 GB / 1 vCPU VPS.
 
@@ -45,6 +45,10 @@ dns:
   # dashboard transport changes; DNSDADDY_RESOLUTION_TRANSPORT also pins it.
   resolution_transport: ""
   encrypted_upstreams: []
+  # For a complete working opt-in Cloudflare HTTPS + Daddybound Live setup,
+  # use dnsdaddy.encrypted.example.yaml or the dashboard's explicit example.
+  # Environment deployments may supply DNSDADDY_ENCRYPTED_UPSTREAMS as a JSON
+  # array using API field names: protocol, address, serverName, bootstrapIPs.
   # To pin encrypted forwarding, replace the two values above with your own
   # approved endpoints. This reserved example is a template, not a service:
   # resolution_transport: encrypted

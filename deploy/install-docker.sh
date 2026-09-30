@@ -1308,6 +1308,16 @@ configure_https() {
     return 0
   fi
 
+  if ! configure_proxy_trust; then
+    HTTPS_STATE="failed"
+    HTTPS_FAIL_REASON="Could not configure the Docker gateway as the HTTPS proxy."
+    fail "$HTTPS_FAIL_REASON"
+    note "No proxy address was guessed. Check the container network, or set"
+    note "DNSDADDY_TRUSTED_PROXY_CIDRS to the known proxy address in .env."
+    unwind_https_env
+    return 1
+  fi
+
   local caddyfile="${DNSDADDY_CADDYFILE:-/etc/caddy/Caddyfile}"
   if [[ $DRY_RUN -eq 1 ]]; then
     printf '  [dry-run] would write %s for %s (%s) and reload Caddy\n' \
@@ -2263,9 +2273,8 @@ reconcile_env() {
     fi
     env_set DNSDADDY_BASE_URL "$base"
     env_set DNSDADDY_SECURE_COOKIES "always"
-    # The container sees the Docker bridge gateway, not 127.0.0.1, so this is
-    # the narrow range that actually needs trusting — not a wildcard.
-    env_set DNSDADDY_TRUSTED_PROXY_CIDRS "$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo '172.17.0.0/16')"
+    # The project network may not exist yet. configure_proxy_trust resolves
+    # the actual gateway after startup, before publishing the HTTPS proxy.
     pass "Configured for HTTPS at ${base} (backend stays on loopback)"
   fi
 
@@ -2282,6 +2291,49 @@ reconcile_env() {
         "Your .env still publishes the dashboard, and starting now would put it back on that address after saying it had returned to loopback. Fix that file's permissions, or comment the line out by hand, then run this again."
       ;;
   esac
+}
+
+# Caddy on this host connects through the published loopback port. Docker
+# translates that peer to this container's bridge gateway. The global network
+# named "bridge" is a DIFFERENT network from Compose's project-default bridge;
+# trusting its subnet silently drops forwarded client addresses and TLS state.
+# Resolve the running container, trust only gateway host addresses, and never
+# replace an operator's explicit proxy list.
+configure_proxy_trust() {
+  if env_is_set DNSDADDY_TRUSTED_PROXY_CIDRS && ! env_is_managed DNSDADDY_TRUSTED_PROXY_CIDRS; then
+    pass "Keeping your explicitly configured trusted proxy CIDRs"
+    return 0
+  fi
+
+  local gateways gateway cidrs=""
+  gateways=$(docker inspect dnsdaddy --format '{{range .NetworkSettings.Networks}}{{println .Gateway}}{{println .IPv6Gateway}}{{end}}' 2>/dev/null) || return 1
+  while IFS= read -r gateway; do
+    [[ -n "$gateway" ]] || continue
+    if valid_ipv4 "$gateway" && [[ "$gateway" != "0.0.0.0" ]]; then
+      gateway="${gateway}/32"
+    elif valid_ipv6 "$gateway" && [[ "$gateway" != "::" ]]; then
+      gateway="${gateway}/128"
+    else
+      warn "Docker returned an invalid proxy gateway address"
+      return 1
+    fi
+    case ",${cidrs}," in
+      *",${gateway},"*) ;;
+      *) cidrs="${cidrs:+${cidrs},}${gateway}" ;;
+    esac
+  done <<<"$gateways"
+  [[ -n "$cidrs" ]] || return 1
+  if [[ "$(env_value DNSDADDY_TRUSTED_PROXY_CIDRS)" == "$cidrs" ]]; then
+    pass "Trusted proxy matches the container gateway: ${cidrs}"
+    return 0
+  fi
+
+  env_set DNSDADDY_TRUSTED_PROXY_CIDRS "$cidrs"
+  pass "Trusted proxy set to the container gateway: ${cidrs}"
+  # A startup environment change requires recreation. Wait for this process
+  # before probing Caddy or doctor so a restart is never diagnosed as an outage.
+  "${COMPOSE[@]}" up -d >/dev/null 2>&1 || return 1
+  wait_for_health
 }
 
 # revert_env_to_tunnel undoes the HTTPS-mode settings after a failed attempt.
@@ -2328,9 +2380,18 @@ https_env_was_working() {
 # the Secure flag from session cookies on a live public site and collapse every
 # client to the proxy's own address.
 restore_https_env() {
-  env_set DNSDADDY_BASE_URL "$HTTPS_ENV_BASE_URL_WAS"
-  [[ -n "$HTTPS_ENV_SECURE_COOKIES_WAS" ]] && env_set DNSDADDY_SECURE_COOKIES "$HTTPS_ENV_SECURE_COOKIES_WAS"
-  [[ -n "$HTTPS_ENV_TRUSTED_PROXY_WAS" ]] && env_set DNSDADDY_TRUSTED_PROXY_CIDRS "$HTTPS_ENV_TRUSTED_PROXY_WAS"
+  # Avoid re-stamping an untouched user-owned value as installer-managed.
+  # Otherwise a rollback makes the next run free to overwrite a proxy list
+  # that configure_proxy_trust deliberately preserved in this run.
+  if [[ "$(env_value DNSDADDY_BASE_URL)" != "$HTTPS_ENV_BASE_URL_WAS" ]]; then
+    env_set DNSDADDY_BASE_URL "$HTTPS_ENV_BASE_URL_WAS"
+  fi
+  if [[ -n "$HTTPS_ENV_SECURE_COOKIES_WAS" && "$(env_value DNSDADDY_SECURE_COOKIES)" != "$HTTPS_ENV_SECURE_COOKIES_WAS" ]]; then
+    env_set DNSDADDY_SECURE_COOKIES "$HTTPS_ENV_SECURE_COOKIES_WAS"
+  fi
+  if [[ -n "$HTTPS_ENV_TRUSTED_PROXY_WAS" && "$(env_value DNSDADDY_TRUSTED_PROXY_CIDRS)" != "$HTTPS_ENV_TRUSTED_PROXY_WAS" ]]; then
+    env_set DNSDADDY_TRUSTED_PROXY_CIDRS "$HTTPS_ENV_TRUSTED_PROXY_WAS"
+  fi
   pass "Restored the previous HTTPS settings; the working deployment is unchanged"
   if "${COMPOSE[@]}" up -d >/dev/null 2>&1; then
     pass "Restarted DNS Daddy with the settings it had before this run"
@@ -2355,6 +2416,11 @@ unwind_https_env() {
 revert_env_to_tunnel() {
   local changed=0 key
   for key in DNSDADDY_SECURE_COOKIES DNSDADDY_BASE_URL DNSDADDY_TRUSTED_PROXY_CIDRS; do
+    # A pre-existing custom proxy list was never changed by HTTPS setup, so
+    # returning to an SSH tunnel must not delete it either.
+    if [[ "$key" == "DNSDADDY_TRUSTED_PROXY_CIDRS" ]] && ! env_is_managed "$key"; then
+      continue
+    fi
     env_disable "$key"
     case $? in
       0) changed=1 ;;
@@ -2457,7 +2523,9 @@ run_doctor() {
   if [[ $DOCTOR_STATUS -eq 0 ]]; then
     pass "dnsdaddy doctor reports no failures"
   else
-    warn "dnsdaddy doctor reported a failure — see its output above"
+    fail "dnsdaddy doctor reported a failure — the resolver is not ready"
+    note "The dashboard can be available while DNS is failing. Follow the failed check above,"
+    note "then run: docker compose exec dnsdaddy dnsdaddy doctor"
   fi
 }
 
@@ -2606,17 +2674,14 @@ do_upgrade() {
 
   ${BOLD}The upgrade did not come up healthy.${OFF}
 
-  Your data is untouched — it lives in the named volume, and nothing in this
-  script deletes it. To go back to the image you were running:
-
-    docker compose down
-    docker run -d --name dnsdaddy-rollback ${PREVIOUS_IMAGE:-<previous image>}
-
-  More usefully, check out the commit you were on and rebuild:
+  Your data remains in the named volume. To rebuild the last known-working
+  source while retaining the same Compose ports, settings and data volume:
 
     git log --oneline -5
     git checkout <previous-commit>
     ./deploy/install-docker.sh --upgrade
+
+  Previous image retained on this host: ${PREVIOUS_IMAGE:-unknown}
 
   What went wrong:
     docker compose logs --tail=50 dnsdaddy
@@ -2629,6 +2694,7 @@ EOF
   run_doctor
   print_next_steps
   print_summary
+  [[ $FAILURES -gt 0 ]] && exit 1
   exit 0
 }
 
@@ -2654,7 +2720,11 @@ print_next_steps() {
   dashboard="http://127.0.0.1:8080  (over an SSH tunnel)"
   [[ -n "$DASHBOARD_BIND" ]] && dashboard="http://${DASHBOARD_BIND}:8080"
 
-  printf '\n%sDNS Daddy is ready.%s\n\n' "$BOLD" "$OFF"
+  if [[ ${DOCTOR_STATUS:-1} -eq 0 && $FAILURES -eq 0 ]]; then
+    printf '\n%sDNS Daddy passed its internal checks. Permit a client next.%s\n\n' "$BOLD" "$OFF"
+  else
+    printf '\n%sDNS Daddy started; the failed checks need attention.%s\n\n' "$BOLD" "$OFF"
+  fi
 
   printf '  %sDNS server%s\n' "$BOLD" "$OFF"
   if [[ -n "$HOST_IP" ]]; then
@@ -2748,50 +2818,38 @@ print_next_steps() {
     printf '    If you have lost it, see docs/deploy.md for how to reset it.\n'
   fi
 
-  # What to say next follows from the deployment, and is not guessed at.
-  #
-  # The shipped client ACL serves loopback and every private range, so on a LAN
-  # a test from another machine works right now. On a VPS it does not: clients
-  # arrive from public addresses, which that ACL does not cover, and printing a
-  # `nslookup` there would hand the operator a command guaranteed to answer
-  # REFUSED and no idea why. `dnsdaddy doctor` above has already reported which
-  # ranges are actually permitted; this section does not restate it as a
-  # measurement it has not made.
+  # The default ad-hoc gate is closed. Private bootstrap ranges alone do not
+  # grant a LAN client access; it needs an enabled, permitted Network. State
+  # that before giving a probe, for both LAN and public deployments.
   printf '\n  %sNext%s\n' "$BOLD" "$OFF"
   if [[ "$CHOICE" == "1" ]]; then
-    # "Your LAN is permitted" is only true of the shipped ACL. A deployment
-    # that sets DNSDADDY_ALLOWED_CLIENT_CIDRS is permitted whatever that lists,
-    # and this installer preserves an existing .env rather than overwriting it
-    # — so on an upgrade, or a fresh install onto an existing file, the
-    # deployment choice says nothing about what is actually admitted. doctor
-    # has just printed the real list; point at it rather than assert over it.
-    if env_is_set DNSDADDY_ALLOWED_CLIENT_CIDRS; then
-      printf '    This deployment sets DNSDADDY_ALLOWED_CLIENT_CIDRS, so what may resolve\n'
-      printf '    is whatever that lists — CLIENT ACCESS above shows it. If your LAN is\n'
-      printf '    in there, test from another machine on the same network:\n'
-    else
-      printf '    Your LAN is already permitted to use the resolver. Test it from\n'
-      printf '    another machine on the same network:\n'
-    fi
-    printf '      nslookup example.com %s\n' "${HOST_IP:-<this-server>}"
-    printf '      dig @%s example.com\n' "${HOST_IP:-<this-server>}"
+    printf '    LAN clients need an enabled Network with resolver access. Private\n'
+    printf '    addresses are not automatically admitted while ad-hoc access is off.\n'
   else
-    printf '    No external clients are permitted yet. The built-in list covers\n'
-    printf '    loopback and the private ranges only, so a test from another\n'
-    printf '    machine would be answered REFUSED — that is DNS Daddy working,\n'
-    printf '    not failing.\n\n'
-    printf '    Open the dashboard, go to Networks, and add the client or network\n'
-    printf '    that should use DNS Daddy. Tick:\n\n'
-    printf '      [x] Allow this network to use DNS Daddy\n\n'
-    printf '    It takes effect immediately — nothing to restart, no file to edit.\n'
-    if [[ -n "$client" ]]; then
-      printf '\n    You are connected from %s%s%s. That is where this SSH session\n' "$BOLD" "$client" "$OFF"
-      printf '    came from, as this machine sees it — if that is the network that\n'
-      printf '    should use DNS Daddy, that is the address to add.\n'
-    fi
-    printf '\n    Then test from it:\n'
-    printf '      nslookup example.com %s\n' "${HOST_IP:-<this-server>}"
+    printf '    Public client addresses need permission before they can use DNS.\n'
   fi
+
+  printf '    CLIENT ACCESS above shows the permits already configured. An\n'
+  printf '    unpermitted client gets REFUSED — that is DNS Daddy working as configured.\n\n'
+  printf '    Open the dashboard, go to Networks, and add the actual client source\n'
+  printf '    address or subnet. Enable the Network and tick:\n\n'
+  printf '      [x] Allow this network to use DNS Daddy\n\n'
+  printf '    It takes effect immediately — nothing to restart, no file to edit.\n'
+  if env_is_set DNSDADDY_ALLOWED_CLIENT_CIDRS; then
+    printf '    Your bootstrap CIDRs in .env remain configured; the ad-hoc access\n'
+    printf '    control determines whether unmatched clients can use that pool.\n'
+  fi
+  if [[ -n "$client" ]]; then
+    printf '\n    You are connected from %s%s%s. That is where this SSH session\n' "$BOLD" "$client" "$OFF"
+    printf '    came from, as this machine sees it — if that is the network that\n'
+    printf '    should use DNS Daddy, that is the address to add.\n'
+  fi
+  printf '\n    Then test from the permitted client:\n'
+  printf '      nslookup example.com %s\n' "${HOST_IP:-<this-server>}"
+  printf '      dig @%s example.com\n' "${HOST_IP:-<this-server>}"
+  printf '\n    A host-side dig @127.0.0.1 goes through Docker NAT and may arrive\n'
+  printf '    as the project gateway. Permit that exact /32 Network if you need\n'
+  printf '    host probes; the internal doctor check above runs inside the container.\n'
 
   printf '\n    Re-check anything at any time:\n'
   printf '      docker compose exec dnsdaddy dnsdaddy doctor\n\n'
@@ -2853,19 +2911,21 @@ head_ "Configuration"
 if [[ "$CHOICE" == "2" ]]; then
   cat <<'EOF'
 
-  On a public VPS the built-in client ACL covers loopback and the private
-  ranges, which does not include your clients — so nothing outside this
-  machine can use the resolver until you say so.
+  Permit each client source address or subnet under Networks, and enable
+  "Allow this network to use DNS Daddy". This applies to LAN clients too:
+  unmatched clients are refused while the default ad-hoc gate is closed.
 
   You do that in the dashboard, under Networks, with no restart and no file to
   edit.
 
-  DNSDADDY_ALLOWED_CLIENT_CIDRS is the other way in, and it is for automated
-  deployments: Ansible, a Compose file, an image build. The two combine as a
-  union, so know which one you are using and why — a range listed there is
-  permitted no matter what the dashboard says about it, and unticking "Allow
-  this network to use DNS Daddy" cannot withdraw it. To keep a permission you
-  can revoke from the dashboard, add it as a Network and leave it out of .env.
+  DNSDADDY_ALLOWED_CLIENT_CIDRS configures the bootstrap pool. Non-loopback
+  entries in that pool apply only when ad-hoc access is enabled; changing .env
+  alone does not bypass the gate. Named Network permissions take effect
+  immediately and are the normal setup path.
+
+  If you deliberately enable ad-hoc access, a bootstrap grant can outlive a
+  named Network's permission: unticking that Network cannot withdraw it.
+  For permission controlled by that Network, add it as a Network and leave it out of .env.
 EOF
 fi
 
@@ -2905,7 +2965,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   else
     printf '    (nothing — your .env already matches this deployment)\n'
   fi
-  printf '\n  Would then start the stack, wait for health and run dnsdaddy doctor.\n'
+  printf '\n  Would then rebuild and start the stack, wait for health and run dnsdaddy doctor.\n'
   printf '\n  Dry run complete. Nothing was changed.\n\n'
   exit 0
 fi
@@ -2914,7 +2974,9 @@ ensure_env_file
 reconcile_env
 
 head_ "Starting"
-compose_up
+# A re-run after git pull must use the source in this checkout. `up` without
+# --build otherwise reuses an existing image even when the resolver was fixed.
+compose_up --build
 
 if ! wait_for_health; then
   printf '\n  DNS Daddy started but did not become ready. Its log will say why:\n'

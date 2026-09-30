@@ -179,13 +179,5 @@ func exchangeSystemDNS(ctx context.Context, network, address string, query *dns.
 	// The address was checked before admission. The explicit connection lets
 	// route retirement interrupt a UDP read, not just wait for its deadline.
 	client := &dns.Client{Net: network, Timeout: timeout}
-	conn, err := client.DialContext(ctx, address)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	reply, _, err := client.ExchangeWithConnContext(ctx, query, conn)
-	return reply, err
+	return exchangeDNSContext(ctx, client, query, address)
 }

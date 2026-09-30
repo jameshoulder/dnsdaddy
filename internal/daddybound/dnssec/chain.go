@@ -115,11 +115,11 @@ type Limits struct {
 
 	// MaxAliasHops bounds how many CNAMEs one resolution may follow.
 	//
-	// A chain arrives from the network and each hop costs a full walk from
-	// the trust anchor. RFC 1034 sets no limit and real resolvers pick one;
-	// this is generous next to any legitimate chain and small enough that
-	// reaching it is cheap. Reaching it is Indeterminate, never Bogus: a
-	// deeply aliased zone is unusual, not forged.
+	// A chain arrives from the network and each hop must authenticate its
+	// own answer through the appropriate trust path. Zone keys already
+	// authenticated in this operation can be reused, but the alias and any
+	// newly crossed delegation still cost work. Reaching this limit is
+	// Indeterminate, never Bogus: a deeply aliased zone is not itself forged.
 	MaxAliasHops int
 
 	// MaxAnyRRsets bounds how many distinct types one QTYPE=* answer may
@@ -190,9 +190,9 @@ type Config struct {
 // Validator walks chains of trust and reports what it found.
 //
 // A Validator is immutable after construction and safe for concurrent use, so
-// long as its Source is. It holds no cache: v0.1 deliberately has no cache,
-// because a cache is a second place for a verdict to live and the first
-// version of this engine should have exactly one.
+// long as its Source is. It retains no cache between validation operations.
+// Each operation may reuse its authenticated zone keys within its fixed clock,
+// anchor set and work budgets; it never reuses a verdict from an earlier query.
 type Validator struct {
 	src Source
 	cfg Config
@@ -252,6 +252,14 @@ type walk struct {
 	now     time.Time
 	lookups int
 
+	// Reuse only zones whose keys and chain of trust were authenticated in
+	// this operation. Rebuilding that same chain for every CNAME and every
+	// returned RRset used to exhaust MaxLookups on ordinary alias chains.
+	// These maps never outlive the fixed clock, anchor set, or work budgets
+	// of this walk; unsigned delegations and failed validations are not stored.
+	anchorZones map[string]*zoneState
+	childZones  map[zoneLink]*zoneState
+
 	// hashes is the NSEC3 hash allowance for this whole validation.
 	//
 	// One per walk rather than one per response, and the difference is a
@@ -294,7 +302,9 @@ func (v *Validator) Validate(ctx context.Context, name string, rrtype uint16) Va
 func (v *Validator) newWalk(ctx context.Context, qname string, rrtype uint16, now time.Time) *walk {
 	return &walk{
 		v: v, ctx: ctx, rec: newRecorder(qname, rrtype, now), now: now,
-		hashes: &hashBudget{remaining: v.cfg.Limits.MaxNSEC3Hashes},
+		hashes:      &hashBudget{remaining: v.cfg.Limits.MaxNSEC3Hashes},
+		anchorZones: make(map[string]*zoneState),
+		childZones:  make(map[zoneLink]*zoneState),
 	}
 }
 
@@ -429,6 +439,11 @@ func (w *walk) resolveOnce(qname string, rrtype uint16) aliasOutcome {
 // establishAnchorZone authenticates a zone's apex DNSKEY RRset against
 // configured trust anchors.
 func (w *walk) establishAnchorZone(zoneName string, anchors []TrustAnchor) (*zoneState, ValidationResult, bool) {
+	if zone := w.anchorZones[zoneName]; zone != nil {
+		w.rec.ok(ValidationStep{Kind: StepTrustAnchor, Zone: zoneName,
+			Note: "anchor zone authenticated earlier in this operation"})
+		return zone, ValidationResult{}, true
+	}
 	resp, reason := w.lookup(zoneName, dns.TypeDNSKEY)
 	if reason != ReasonNone {
 		return nil, w.rec.indeterminate(w.rec.fail(
@@ -483,7 +498,11 @@ func (w *walk) establishAnchorZone(zoneName string, anchors []TrustAnchor) (*zon
 		)), false
 	}
 
-	return w.authenticateDNSKEYRRset(zoneName, records, keys, trusted)
+	zone, res, ok := w.authenticateDNSKEYRRset(zoneName, records, keys, trusted)
+	if ok {
+		w.anchorZones[zoneName] = zone
+	}
+	return zone, res, ok
 }
 
 // authenticateDNSKEYRRset checks that the apex DNSKEY RRset is signed by one
@@ -522,6 +541,12 @@ func (w *walk) authenticateDNSKEYRRset(zoneName string, records []dns.RR, all, t
 // It returns the new zone when a secure delegation was crossed, a terminal
 // result when the walk must stop, and done=true in that case.
 func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationResult, bool) {
+	link := zoneLink{parent: zone, child: child}
+	if next := w.childZones[link]; next != nil {
+		w.rec.ok(ValidationStep{Kind: StepDS, Zone: child,
+			Note: "delegation and child keys authenticated earlier in this operation"})
+		return next, ValidationResult{}, false
+	}
 	resp, reason := w.lookup(child, dns.TypeDS)
 	if reason != ReasonNone {
 		return nil, w.rec.indeterminate(w.rec.fail(
@@ -549,7 +574,11 @@ func (w *walk) descend(zone *zoneState, child string) (*zoneState, ValidationRes
 	}
 	w.rec.ok(ValidationStep{Kind: StepRRset, Zone: zone.name, Name: child, RRType: dns.TypeDS})
 
-	return w.crossDelegation(child, dsRecords)
+	next, res, done := w.crossDelegation(child, dsRecords)
+	if !done && next != nil {
+		w.childZones[link] = next
+	}
+	return next, res, done
 }
 
 // crossDelegation authenticates the child zone's apex DNSKEY RRset against an
@@ -782,6 +811,14 @@ func (w *walk) validateAnswer(zone *zoneState, qname string, rrtype uint16) alia
 type zoneState struct {
 	name string
 	keys []*dns.DNSKEY
+}
+
+// Key links by the authenticated parent state, not just its name. A zone
+// reached through an independently configured anchor is a different trust
+// path and must not inherit a child authenticated through another path.
+type zoneLink struct {
+	parent *zoneState
+	child  string
 }
 
 // lookup calls the Source, enforcing the lookup budget and the caller's

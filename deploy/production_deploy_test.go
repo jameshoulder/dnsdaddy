@@ -83,6 +83,7 @@ case "$1" in
     for a in "$@"; do
       case "$a" in
         *State.Status*) echo running; exit 0 ;;
+        *NetworkSettings.Networks*) printf '%s\n' "${STUB_PROXY_GATEWAY-172.19.0.1}"; exit 0 ;;
         *Mounts*)       echo "bind - $STUB_VOL"; exit 0 ;;
         *Config.Env*)   exit 0 ;;
       esac
@@ -172,6 +173,14 @@ func nonRootPrefix(t *testing.T, tree string) ([]string, bool) {
 	if err != nil {
 		return nil, false
 	}
+	prefix := []string{setpriv, "--reuid=65534", "--regid=65534", "--clear-groups"}
+	// A container may expose setpriv while its user namespace maps only UID 0.
+	// In that environment dropping privilege is unavailable, just as if the
+	// executable were absent; do not mistake its failure for installer output.
+	truePath, err := exec.LookPath("true")
+	if err != nil || exec.Command(prefix[0], append(prefix[1:], truePath)...).Run() != nil {
+		return nil, false
+	}
 	// TempDir hands back <parent>/001 with the parent at 0700, so that one is
 	// separate from the walk below.
 	must(t, os.Chmod(filepath.Dir(tree), 0o755))
@@ -187,7 +196,7 @@ func nonRootPrefix(t *testing.T, tree string) ([]string, bool) {
 		}
 		return os.Chmod(path, mode)
 	}))
-	return []string{setpriv, "--reuid=65534", "--regid=65534", "--clear-groups"}, true
+	return prefix, true
 }
 
 // lockDown denies the paths a test asked to be unreadable, last, so the

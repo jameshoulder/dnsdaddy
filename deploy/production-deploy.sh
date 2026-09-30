@@ -352,8 +352,25 @@ else
   warn "PUBLIC RESOLVER MODE — deploying open to the internet, as explicitly requested"
   warn "SEE THE REPORT AT THE END"
 fi
-BRIDGE=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "172.17.0.0/16")
-set_env DNSDADDY_TRUSTED_PROXY_CIDRS "$BRIDGE"
+if grep -q '^DNSDADDY_TRUSTED_PROXY_CIDRS=' .env 2>/dev/null; then
+  ok "existing trusted proxy list preserved"
+elif [[ -n "$HOSTNAME_FOUND" ]]; then
+  # Compose's project network differs from Docker's global bridge. Caddy on
+  # the host connects through the published IPv4 loopback port, so trust this
+  # container's actual IPv4 gateway only; never guess a subnet. Multiple
+  # networks require the operator to identify the intended proxy explicitly.
+  PROXY_GATEWAY=$(docker inspect "$CONTAINER" --format '{{range .NetworkSettings.Networks}}{{println .Gateway}}{{end}}' 2>/dev/null | sed '/^$/d' | sort -u) \
+    || die "could not read the container's proxy gateway; set DNSDADDY_TRUSTED_PROXY_CIDRS explicitly"
+  [[ "$PROXY_GATEWAY" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] \
+    || die "could not identify one IPv4 proxy gateway; set DNSDADDY_TRUSTED_PROXY_CIDRS explicitly"
+  IFS=. read -r -a PROXY_OCTETS <<<"$PROXY_GATEWAY"
+  for octet in "${PROXY_OCTETS[@]}"; do
+    [[ ! "$octet" =~ ^0[0-9] && "$octet" -le 255 ]] \
+      || die "invalid container proxy gateway; set DNSDADDY_TRUSTED_PROXY_CIDRS explicitly"
+  done
+  [[ "$PROXY_GATEWAY" != "0.0.0.0" ]] || die "container has no usable proxy gateway"
+  set_env DNSDADDY_TRUSTED_PROXY_CIDRS "${PROXY_GATEWAY}/32"
+fi
 if [[ -n "$HOSTNAME_FOUND" ]]; then
   set_env DNSDADDY_BASE_URL "https://$HOSTNAME_FOUND"
   set_env DNSDADDY_SECURE_COOKIES "always"
@@ -425,10 +442,10 @@ if [[ $DRY_RUN -eq 0 ]]; then
   SIZE=$(sed -n 's/.*"blocklistSize":\([0-9]*\).*/\1/p' <<<"$DETAIL")
   if [[ -z "$SIZE" ]]; then
     warn "could not read the blocklist size from inside the container; verify with: docker exec $CONTAINER dnsdaddy doctor"
-  elif (( SIZE > 2000000 )); then
-    ok "blocklist intact ($SIZE)"
+  elif (( SIZE > 0 )); then
+    ok "blocklist loaded ($SIZE domains)"
   else
-    warn "blocklist is $SIZE — expected ~2.87M; investigate before trusting this"
+    warn "blocklist is empty; refresh the configured feeds before relying on feed-based filtering"
   fi
 
   RC=$(dig @127.0.0.1 example.com +timeout=4 +tries=1 2>/dev/null | sed -n 's/.*status: \([A-Z]*\).*/\1/p' | head -1)

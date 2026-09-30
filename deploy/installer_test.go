@@ -35,8 +35,8 @@ type install struct {
 	// because on CI the test process is unprivileged and owns the fixture.
 	unreadable []string
 	unwritable []string
-	// Where caddyfileAt pointed the installer, so a test can read back what
-	// was actually written rather than asserting only on stdout.
+	// Every run uses this temporary Caddyfile, including tests that do not
+	// explicitly call caddyfileAt. No fixture may write the host's /etc/caddy.
 	caddyfile string
 }
 
@@ -63,7 +63,8 @@ func newInstall(t *testing.T) *install {
 	// dry-run snapshot below excludes it by name.
 	must(t, os.WriteFile(filepath.Join(root, "compose.log"), nil, 0o666))
 
-	in := &install{t: t, root: root, bin: filepath.Join(root, "stubbin")}
+	in := &install{t: t, root: root, bin: filepath.Join(root, "stubbin"),
+		caddyfile: filepath.Join(root, "caddy", "Caddyfile")}
 	must(t, os.MkdirAll(in.bin, 0o755))
 	in.writeDefaultStubs()
 	return in
@@ -116,6 +117,10 @@ if [[ "$1" == "port" ]]; then
   for p in ${STUB_DOCKER_PUBLISHED:-}; do
     printf '%s -> 0.0.0.0:%s\n' "${p%%:*}" "${p##*:}"
   done
+  exit 0
+fi
+if [[ "$1" == "inspect" && "$*" == *"NetworkSettings.Networks"* ]]; then
+  printf '%s\n' "${STUB_PROXY_GATEWAYS-172.19.0.1}"
   exit 0
 fi
 if [[ "$1" == "compose" ]]; then
@@ -390,6 +395,11 @@ func (in *install) runWith(prefix []string, args ...string) (string, int) {
 		// The real default is two minutes, which is right for a cold start on
 		// a single vCPU and wrong for a test asserting on the failure path.
 		"DNSDADDY_INSTALL_HEALTH_TIMEOUT=4",
+		// All HTTPS work is synthetic. Keep its timeout short and its writes
+		// inside the fixture even if a scenario omits caddyfileAt. Explicit
+		// per-scenario values in in.env below still override these defaults.
+		"DNSDADDY_HTTPS_TIMEOUT=1",
+		"DNSDADDY_CADDYFILE=" + in.caddyfile,
 	}, in.env...)
 
 	out, err := cmd.CombinedOutput()
@@ -710,6 +720,34 @@ func TestWaitsForHealthThenRunsDoctor(t *testing.T) {
 	}
 }
 
+// A responding HTTP endpoint does not rescue a failed DNS diagnosis. This
+// used to produce only a warning and exit successfully, including on upgrade.
+func TestDoctorFailureMakesInstallAndUpgradeFail(t *testing.T) {
+	for _, mode := range []string{"--vps", "--upgrade"} {
+		t.Run(mode, func(t *testing.T) {
+			in := newInstall(t)
+			in.setenv("STUB_DOCTOR_EXIT=1")
+			out, code := in.run(mode, "--yes")
+			if code == 0 {
+				t.Fatalf("claimed success despite a failed DNS diagnosis:\n%s", out)
+			}
+			contains(t, out, "the resolver is not ready")
+			notContains(t, out, "nothing failed")
+			contains(t, out, "docker compose exec dnsdaddy dnsdaddy doctor")
+		})
+	}
+}
+
+func TestRerunningInstallerBuildsTheCheckedOutFix(t *testing.T) {
+	in := newInstall(t)
+	in.setenv("STUB_STACK_RUNNING=1")
+	out, code := in.run("--vps", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, in.composeLog(), "compose up -d --build")
+}
+
 // "container started" and then exiting is the behaviour this replaces: a
 // container that starts and dies looks identical for the first few seconds.
 func TestFailedHealthCheckIsReportedAndExitsNonZero(t *testing.T) {
@@ -762,7 +800,7 @@ func TestVPSInstallGivesTheDashboardStepNotAFailingTest(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	contains(t, out, "No external clients are permitted yet")
+	contains(t, out, "Public client addresses need permission")
 	contains(t, out, "Allow this network to use DNS Daddy")
 	contains(t, out, "nothing to restart")
 	// And it must not present the refusal as a fault.
@@ -781,7 +819,7 @@ func TestLANInstallGivesTheExactTestCommand(t *testing.T) {
 	}
 	contains(t, out, "nslookup example.com 192.168.1.75")
 	contains(t, out, "dig @192.168.1.75 example.com")
-	notContains(t, out, "No external clients are permitted yet")
+	notContains(t, out, "Public client addresses need permission")
 }
 
 // Over SSH the kernel knows where the operator connected from, which is the
@@ -908,7 +946,12 @@ func TestFailedUpgradeReportsTheRecoveryPath(t *testing.T) {
 		t.Fatal("a failed upgrade exited 0")
 	}
 	contains(t, out, "did not come up healthy")
-	contains(t, out, "Your data is untouched")
+	contains(t, out, "Your data remains in the named volume")
+	contains(t, out, "git checkout <previous-commit>")
+	contains(t, out, "./deploy/install-docker.sh --upgrade")
+	// Recovery must retain the Compose port bindings and existing volume; the
+	// former bare docker run command created neither and was not a rollback.
+	notContains(t, out, "docker run -d")
 	contains(t, out, "deadbeef")
 	contains(t, in.readEnv(), "TZ=UTC")
 }
@@ -1265,7 +1308,7 @@ func TestLANInstallDoesNotClaimTheLANIsPermittedWhenTheACLIsSet(t *testing.T) {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
 	notContains(t, out, "Your LAN is already permitted")
-	contains(t, out, "CLIENT ACCESS above shows it")
+	contains(t, out, "CLIENT ACCESS above shows the permits")
 
 	// The test command is still given: the operator may well be in that list,
 	// and withholding it would trade one unmeasured claim for a dead end.
@@ -1462,6 +1505,9 @@ func TestHttpsModeNeverPublishesTheDashboardBackend(t *testing.T) {
 	if !in.envExists() {
 		t.Fatal(".env was never written, so this test would assert nothing")
 	}
+	// This plain fixture does not call caddyfileAt. Its generated proxy
+	// configuration must nevertheless be confined to the temporary root.
+	contains(t, in.readCaddyfile(), "dns.example.com")
 	env := in.readEnv()
 	for _, forbidden := range []string{
 		"DNSDADDY_DASHBOARD_BIND=0.0.0.0",
@@ -1693,13 +1739,91 @@ func (in *install) caddyfileAt() string {
 // leaves no configuration at all, and that is a legitimate outcome.
 func (in *install) readCaddyfile() string {
 	if in.caddyfile == "" {
-		in.t.Fatal("readCaddyfile without caddyfileAt")
+		in.t.Fatal("fixture has no temporary Caddyfile path")
 	}
 	b, err := os.ReadFile(in.caddyfile)
 	if err != nil {
 		return ""
 	}
 	return string(b)
+}
+
+func TestHttpsUsesTheContainerGatewayInsteadOfTheGlobalDockerBridge(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_PROXY_GATEWAYS=172.23.0.1\nfd42:1234::1", "STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, in.readEnv(), "DNSDADDY_TRUSTED_PROXY_CIDRS=172.23.0.1/32,fd42:1234::1/128")
+	notContains(t, in.readEnv(), "DNSDADDY_TRUSTED_PROXY_CIDRS=172.17.0.0/16")
+	contains(t, out, "Trusted proxy set to the container gateway")
+}
+
+func TestHttpsPreservesAnExplicitProxyList(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.writeEnv("DNSDADDY_TRUSTED_PROXY_CIDRS=10.9.0.2/32\n")
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	out, code := in.run("--https", "--yes")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	contains(t, in.readEnv(), "DNSDADDY_TRUSTED_PROXY_CIDRS=10.9.0.2/32")
+	contains(t, out, "Keeping your explicitly configured trusted proxy CIDRs")
+}
+
+func TestHttpsRollbackDoesNotTakeOwnershipOfACustomProxyList(t *testing.T) {
+	for _, existingHTTPS := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existingHTTPS=%v", existingHTTPS), func(t *testing.T) {
+			in := newInstall(t)
+			in.caddyfileAt()
+			prior := "DNSDADDY_TRUSTED_PROXY_CIDRS=10.9.0.2/32\n"
+			if existingHTTPS {
+				prior += "DNSDADDY_BASE_URL=https://admin.example.com\nDNSDADDY_SECURE_COOKIES=always\n"
+			}
+			in.writeEnv(prior)
+			in.setenv("DNSDADDY_HTTPS_HOSTNAME=admin.example.com", "DNSDADDY_HTTPS_TIMEOUT=1", "STUB_CADDY_VALIDATE_EXIT=1")
+			out, code := in.run("--https", "--yes")
+			if code != 0 {
+				t.Fatalf("failed HTTPS should retain usable local DNS: exit=%d\n%s", code, out)
+			}
+			contains(t, in.readEnv(), "DNSDADDY_TRUSTED_PROXY_CIDRS=10.9.0.2/32")
+			notContains(t, in.readEnv(), "# managed by install-docker.sh\nDNSDADDY_TRUSTED_PROXY_CIDRS=10.9.0.2/32")
+			// The next successful run must still see this as the operator's
+			// choice, not replace it with the automatically discovered gateway.
+			in.setenv("STUB_CADDY_VALIDATE_EXIT=0", "STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+			out, code = in.run("--https", "--yes")
+			if code != 0 {
+				t.Fatalf("retry exit=%d\n%s", code, out)
+			}
+			contains(t, in.readEnv(), "DNSDADDY_TRUSTED_PROXY_CIDRS=10.9.0.2/32")
+			contains(t, out, "Keeping your explicitly configured trusted proxy CIDRs")
+		})
+	}
+}
+
+func TestHttpsDoesNotGuessAProxyGateway(t *testing.T) {
+	in := newInstall(t)
+	in.caddyfileAt()
+	in.setenv("DNSDADDY_HTTPS_HOSTNAME=dns.example.com", "DNSDADDY_HTTPS_TIMEOUT=1")
+	in.setenv("STUB_PROXY_GATEWAYS=", "STUB_CURL_STRICT_EXIT=0", "STUB_CURL_LAX_EXIT=0")
+	out, code := in.run("--https", "--yes")
+	if code == 0 {
+		t.Fatalf("unknown gateway was reported ready:\n%s", out)
+	}
+	contains(t, out, "No proxy address was guessed")
+	for _, line := range strings.Split(in.readEnv(), "\n") {
+		if strings.HasPrefix(line, "DNSDADDY_TRUSTED_PROXY_CIDRS=") {
+			t.Fatalf("guessed a trusted proxy despite having no gateway: %s", line)
+		}
+	}
+	if in.readCaddyfile() != "" {
+		t.Error("published a new proxy configuration without resolving its trust boundary")
+	}
 }
 
 func TestHttpsFailureLeavesTheDashboardOnLoopback(t *testing.T) {
@@ -2898,8 +3022,9 @@ func TestAnIncompleteRollbackIsSaidPlainly(t *testing.T) {
 	in.setenv("STUB_CADDY_JOURNAL=" + `
 Jan 01 12:00:01 vps caddy[900]: {"level":"error","msg":"challenge failed","error":"HTTP 400 urn:ietf:params:acme:error:connection - dns.example.com: Connection refused"}
 `)
-	// Healthy for the install, dead for the rollback restart.
-	in.setenv("STUB_HEALTH_FAIL_AFTER=1")
+	// Healthy for the install and discovered-gateway configuration, dead for
+	// the rollback restart.
+	in.setenv("STUB_HEALTH_FAIL_AFTER=2")
 	in.caddyfileAt()
 
 	out, _ := in.run("--https", "--yes")

@@ -96,7 +96,7 @@ func New(cfg config.DNS, cacheCfg config.Cache, log *slog.Logger) (*Resolver, er
 		}
 		r.upstreams = append(r.upstreams, u)
 	}
-	if len(r.upstreams) == 0 {
+	if len(r.upstreams) == 0 && cfg.ResolutionTransport != config.ResolutionEncrypted {
 		return nil, errors.New("no upstream resolvers configured")
 	}
 	return r, nil
@@ -153,6 +153,10 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, generation uint64)
 	defer done()
 	q := req.Question[0]
 	key := Key(q, dnssecRequested(req))
+	// CD changes what a validating forwarder may return: an unchecked answer
+	// must never satisfy another client's query that requires validation.
+	// The same key partitions both cached answers and in-flight work.
+	key += ";cd=" + strconv.FormatBool(req.CheckingDisabled)
 	if route != nil {
 		key += ";route=" + strconv.FormatUint(route.Generation(), 10)
 	}
@@ -273,6 +277,9 @@ func (r *Resolver) forward(ctx context.Context, req *dns.Msg, route *ForwardRout
 	if route != nil && route.Encrypted() != nil {
 		return route.exchangeEncrypted(ctx, out)
 	}
+	if len(r.upstreams) == 0 {
+		return nil, "", errors.New("no legacy upstream resolvers configured; an approved encrypted transport must be selected")
+	}
 
 	if r.mode == "race" {
 		return r.race(ctx, out, route)
@@ -307,11 +314,15 @@ func (r *Resolver) releaseSlot() {
 
 func (r *Resolver) failover(ctx context.Context, m *dns.Msg, route *ForwardRoute) (*dns.Msg, string, error) {
 	var lastErr error
-	for _, u := range r.upstreams {
+	for i, u := range r.upstreams {
 		if ctx.Err() != nil {
 			break
 		}
-		resp, err := exchangeForwardUpstream(ctx, route, u, m)
+		// An unresponsive primary must leave some of the total query budget
+		// for its configured backups, just as encrypted routes already do.
+		attemptCtx, cancel := encryptedAttemptContext(ctx, len(r.upstreams)-i)
+		resp, err := exchangeForwardUpstream(attemptCtx, route, u, m)
+		cancel()
 		if err == nil && resp != nil {
 			return resp, u.Spec, nil
 		}
@@ -386,6 +397,7 @@ func reattach(msg *dns.Msg, req *dns.Msg) *dns.Msg {
 	out.Question = req.Question
 	out.Response = true
 	out.RecursionDesired = req.RecursionDesired
+	out.CheckingDisabled = req.CheckingDisabled
 	out.RecursionAvailable = true
 
 	// RFC 4035 §3.2.3: do not set AD unless the client asked for it, by

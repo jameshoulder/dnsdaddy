@@ -118,7 +118,7 @@ func (r *Resolver) prime(ctx context.Context) ([]netip.AddrPort, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		msg, err := r.ex.Exchange(ctx, server, query(".", dns.TypeNS, r.cfg.UDPSize))
+		msg, err := r.exchange(ctx, server, query(".", dns.TypeNS, r.cfg.UDPSize))
 		if err != nil {
 			lastErr = err
 			continue

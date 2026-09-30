@@ -520,11 +520,11 @@ func (rs *resolution) startingPoint(qname string, rrtype uint16) (string, []neti
 
 // askZone puts one question to the servers for a zone, trying them in turn.
 //
-// Servers are tried in a rotated order so that one unlucky first choice is not
-// permanently the first choice, and a server that fails is not retried within
-// the same resolution.
+// Known addresses are tried first. Only if they fail are other delegated
+// nameservers resolved, keeping the common path cheap while retaining the
+// redundancy the zone's operator published.
 func (rs *resolution) askZone(zone string, servers []netip.AddrPort, qname string, rrtype uint16) (*dns.Msg, error) {
-	return rs.ask(zone, servers, qname, rrtype, *rs.r.cfg.QnameMinimisation)
+	return rs.askWithBackups(zone, servers, qname, rrtype, *rs.r.cfg.QnameMinimisation)
 }
 
 // askZoneDirect puts the caller's exact question to a zone's servers, without
@@ -535,7 +535,52 @@ func (rs *resolution) askZone(zone string, servers []netip.AddrPort, qname strin
 // only zone that holds the answer and probing for the next label down would
 // walk past it.
 func (rs *resolution) askZoneDirect(zone string, servers []netip.AddrPort, qname string, rrtype uint16) (*dns.Msg, error) {
-	return rs.ask(zone, servers, qname, rrtype, false)
+	return rs.askWithBackups(zone, servers, qname, rrtype, false)
+}
+
+func (rs *resolution) askWithBackups(zone string, servers []netip.AddrPort, qname string, rrtype uint16, minimise bool) (*dns.Msg, error) {
+	msg, lastErr := rs.ask(zone, servers, qname, rrtype, minimise)
+	if lastErr == nil || stopNameserverRetry(rs.ctx, lastErr) {
+		return msg, lastErr
+	}
+	names, glue := rs.r.cache.delegation(zone)
+	tried := make(map[netip.AddrPort]bool, len(servers))
+	for _, server := range servers {
+		tried[server] = true
+	}
+	for _, name := range names {
+		if err := rs.ctx.Err(); err != nil {
+			return nil, err
+		}
+		candidates, err := rs.serversFor(zone, []string{name}, glue, rs.nsDepth)
+		if err != nil {
+			if stopNameserverRetry(rs.ctx, err) {
+				return nil, err
+			}
+			lastErr = err
+			continue
+		}
+		untried := candidates[:0]
+		for _, server := range candidates {
+			if !tried[server] {
+				tried[server] = true
+				untried = append(untried, server)
+			}
+		}
+		if len(untried) == 0 {
+			continue
+		}
+		msg, lastErr = rs.ask(zone, untried, qname, rrtype, minimise)
+		if lastErr == nil || stopNameserverRetry(rs.ctx, lastErr) {
+			return msg, lastErr
+		}
+	}
+	return nil, lastErr
+}
+
+func stopNameserverRetry(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, ErrLimit) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, rrtype uint16, minimise bool) (*dns.Msg, error) {
@@ -564,7 +609,7 @@ func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, r
 		started := rs.r.now()
 		rs.queries++
 		rs.r.stats.queries.Add(1)
-		msg, err := rs.r.ex.Exchange(rs.ctx, server, query(askName, askType, rs.r.cfg.UDPSize))
+		msg, err := rs.r.exchange(rs.ctx, server, query(askName, askType, rs.r.cfg.UDPSize))
 		elapsed := rs.r.now().Sub(started)
 		if msg != nil {
 			// Before anything reads it. Every later step — referral
@@ -584,17 +629,6 @@ func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, r
 			continue
 		}
 
-		// A server that answers SERVFAIL or REFUSED for a zone it was
-		// delegated is lame. Try the next one rather than reporting the
-		// zone broken on one server's word.
-		if msg.Rcode == dns.RcodeServerFailure || msg.Rcode == dns.RcodeRefused {
-			lastErr = fmt.Errorf("%w: %s answered %s for %s",
-				ErrLame, server, dns.RcodeToString[msg.Rcode], zone)
-			rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
-				Kind: "error", Detail: dns.RcodeToString[msg.Rcode], Elapsed: elapsed})
-			continue
-		}
-
 		// Under QNAME minimisation an empty NOERROR for an intermediate
 		// name means "this name exists and has no records of that type",
 		// which is not an answer to the client's question — it means keep
@@ -608,13 +642,25 @@ func (rs *resolution) ask(zone string, servers []netip.AddrPort, qname string, r
 				Kind: "nodata", Detail: "minimised probe: descending", Elapsed: elapsed})
 			rs.queries++
 			rs.r.stats.queries.Add(1)
-			full, ferr := rs.r.ex.Exchange(rs.ctx, server, query(qname, rrtype, rs.r.cfg.UDPSize))
+			full, ferr := rs.r.exchange(rs.ctx, server, query(qname, rrtype, rs.r.cfg.UDPSize))
 			if ferr != nil {
 				lastErr = ferr
 				continue
 			}
 			full, _ = rs.scrub(zone, server, full)
 			msg = full
+		}
+
+		// Apply the failure check after any full-question retry too. A
+		// successful minimised NODATA is not evidence that the same server
+		// can answer the actual question; a failed retry must try another
+		// authority rather than ending the whole resolution.
+		if msg.Rcode == dns.RcodeServerFailure || msg.Rcode == dns.RcodeRefused {
+			lastErr = fmt.Errorf("%w: %s answered %s for %s",
+				ErrLame, server, dns.RcodeToString[msg.Rcode], zone)
+			rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
+				Kind: "error", Detail: dns.RcodeToString[msg.Rcode], Elapsed: elapsed})
+			continue
 		}
 
 		rs.step(Step{Zone: zone, Server: server.String(), QName: askName, QType: askType,
@@ -739,6 +785,8 @@ func (rs *resolution) serversFor(zone string, ns []string, glue map[string][]net
 			add(addrs)
 			continue
 		}
+		var nameserverAddrs []netip.Addr
+		addressTTL := ^uint32(0)
 		for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
 			if rs.queries >= rs.r.cfg.Limits.MaxQueries {
 				break
@@ -757,10 +805,19 @@ func (rs *resolution) serversFor(zone string, ns []string, glue map[string][]net
 				}
 			}
 			if len(addrs) > 0 {
-				rs.r.cache.PutAddrs(name, addrs, msgTTL(msg))
+				nameserverAddrs = append(nameserverAddrs, addrs...)
+				if ttl := msgTTL(msg); ttl < addressTTL {
+					addressTTL = ttl
+				}
 				add(addrs)
 			}
 		}
+		// Cache the two families together. Writing one entry per lookup made
+		// the later AAAA response replace every IPv4 address, so a warm cache
+		// could break working resolution on an IPv4-only installation. The
+		// shorter lifetime bounds the combined entry; neither family outlives
+		// the evidence that supplied it.
+		rs.r.cache.PutAddrs(name, nameserverAddrs, addressTTL)
 		if len(out) > 0 {
 			break
 		}

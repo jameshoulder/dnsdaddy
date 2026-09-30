@@ -1,6 +1,12 @@
 package config
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
 
 const (
 	ResolutionNative    = "native"
@@ -26,6 +32,34 @@ func (d DNS) TransportMode() string {
 }
 
 func (d DNS) TransportConfigured() bool { return d.ResolutionTransport != "" }
+
+// Environment deployments need both the transport selection and its endpoint
+// bundle. Accept the same JSON field names as the dashboard API, with strict
+// decoding so a misspelled bootstrap field cannot silently change DNS setup.
+func applyEncryptedUpstreamsEnv(d *DNS) error {
+	const key = "DNSDADDY_ENCRYPTED_UPSTREAMS"
+	raw, present := os.LookupEnv(key)
+	if !present {
+		return nil
+	}
+	if len(raw) > 64<<10 {
+		return fmt.Errorf("%s exceeds its 64 KiB limit", key)
+	}
+	var endpoints []EncryptedUpstream
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&endpoints); err != nil {
+		return fmt.Errorf("%s must be a JSON array of encrypted endpoints: %w", key, err)
+	}
+	if endpoints == nil {
+		return fmt.Errorf("%s must be a JSON array; use [] to clear it", key)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return fmt.Errorf("%s must contain exactly one JSON array", key)
+	}
+	d.EncryptedUpstreams = endpoints
+	return nil
+}
 
 // ValidateTransport checks selection shape without starting any network work.
 // The transport constructor also validates every endpoint before activation.

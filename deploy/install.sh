@@ -138,8 +138,9 @@ http:
   listen: "${HTTP_LISTEN}"
 EOF
   fi
-  # The example config ships with ":8080"; rewrite it to whatever was chosen.
-  sed -i -E "s|^(\s*)listen: \"?:?8080\"?|\1listen: \"${HTTP_LISTEN}\"|" "${CONFIG_DIR}/config.yaml" 2>/dev/null || true
+  # The example now uses loopback explicitly. Rewrite its HTTP listen field,
+  # not just the old ":8080" spelling, so an explicit LAN address takes effect.
+  sed -i -E "s|^([[:space:]]*)listen:[[:space:]]*.*$|\1listen: \"${HTTP_LISTEN}\"|" "${CONFIG_DIR}/config.yaml"
   log "Wrote ${CONFIG_DIR}/config.yaml (dashboard: ${HTTP_LISTEN})"
 else
   log "Keeping existing ${CONFIG_DIR}/config.yaml"
@@ -148,7 +149,7 @@ else
   # assignment would kill the installer here — on an upgrade, after the new
   # binary is already in place and before the service is restarted.
   HTTP_LISTEN=$(grep -oP '^\s*listen:\s*"?\K[^"\s]+' "${CONFIG_DIR}/config.yaml" 2>/dev/null | tail -1 || true)
-  [[ -n "$HTTP_LISTEN" ]] || HTTP_LISTEN=":8080"
+  [[ -n "$HTTP_LISTEN" ]] || HTTP_LISTEN="127.0.0.1:8080"
 fi
 
 # --- 6. systemd unit ---------------------------------------------------------
@@ -211,8 +212,11 @@ cat <<EOF
 
   Next steps
     1. Open the dashboard and go to Threat feeds → Refresh now.
-    2. Point one test device at ${IP} and confirm queries appear.
-    3. Only then change your DHCP scope or firewall for everyone else.
+    2. Run: sudo ${BIN_PATH} doctor -config ${CONFIG_DIR}/config.yaml
+    3. In Networks, add the test client's actual source IP/subnet, enable the
+       Network and tick "Allow this network to use DNS Daddy".
+    4. Point that test device at ${IP} and confirm queries appear.
+    5. Only then change your DHCP scope or firewall for everyone else.
 
   Logs        journalctl -u dnsdaddy -f
   Restart     systemctl restart dnsdaddy
@@ -224,9 +228,10 @@ cat <<EOF
 
       ssh -L 8080:127.0.0.1:8080 ${USER:-you}@${IP}
 
-    On a LAN machine with no public address, publish it on your network:
+    On a LAN machine with no public address, set a specific private LAN IP
+    in http.listen (replace 192.168.1.50 with this machine's LAN address):
 
-      sudo sed -i 's|listen: "127.0.0.1:8080"|listen: ":8080"|' ${CONFIG_DIR}/config.yaml
+      sudo sed -i 's|listen: "127.0.0.1:8080"|listen: "192.168.1.50:8080"|' ${CONFIG_DIR}/config.yaml
       sudo systemctl restart dnsdaddy
 
     Do NOT do that on a cloud VPS. Most providers give the instance a private

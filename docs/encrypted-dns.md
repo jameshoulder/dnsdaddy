@@ -11,6 +11,160 @@ Daddybound Live. No public resolver is silently chosen for encrypted transport.
 Read [ADR 0004](decisions/0004-encrypted-forwarding.md) for the architecture and
 [privacy.md](privacy.md) for the full data-flow inventory.
 
+## Start with a working example
+
+For a first encrypted setup, DNS Daddy includes a complete **Cloudflare DoH
+over HTTP/2 + Daddybound Live** example. It uses outbound TCP 443, so it does
+not require QUIC or direct access to authoritative servers on port 53. No API
+key, account, domain name or server certificate is needed for this outbound
+connection. You are explicitly choosing Cloudflare to receive the queries.
+
+| Setting | Example value | What it does |
+| --- | --- | --- |
+| Transport | `encrypted` | Uses only the configured encrypted forwarders. |
+| Protocol | `doh2` | HTTPS over HTTP/2 on TCP 443, with authenticated TLS 1.3. |
+| Endpoint | `https://cloudflare-dns.com/dns-query` | Cloudflare's standard public resolver. |
+| TLS server name | `cloudflare-dns.com` | The identity the certificate must authenticate. |
+| Bootstrap IPs | `1.1.1.1`, `1.0.0.1` | Finds the endpoint without first needing a working DNS resolver. Both IPs belong to the same provider. |
+| Daddybound | `Live` / `enforce` | Validates the returned DNS data locally before answering. |
+
+Cloudflare documents its [resolver addresses](https://developers.cloudflare.com/1.1.1.1/ip-addresses/),
+[DoH protocols](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/),
+[endpoint and DNS wire format](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-wireformat/),
+and [privacy policy](https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/).
+The example uses the standard resolver so DNS Daddy remains responsible for
+its local filtering policy. The example does not select Cloudflare's Families
+filtering service. IPv6-only hosts can replace the bootstrap list with
+`2606:4700:4700::1111` and `2606:4700:4700::1001`.
+
+### Already running DNS Daddy
+
+Use **Daddybound → DNS transport → Encrypted forwarding → Add Cloudflare
+example**. Review the filled fields, check the sharing agreement, select
+**Test endpoints**, then **Apply DNS transport** after a successful test.
+Select or keep **Live** in the Daddybound card above it. The example button
+only edits the draft; it preserves existing endpoints and does not test,
+save, grant consent or change your current Off/Learn/Live setting.
+
+Finish with the client tests below. **Test endpoints checks a root DNSKEY
+exchange, not a complete locally validated Live lookup.**
+
+### Try the standalone binary
+
+From the repository root, after installing the build prerequisites:
+
+```bash
+make run-encrypted
+```
+
+This builds and runs the [complete example configuration](../dnsdaddy.encrypted.example.yaml).
+It uses a separate `./tmp/encrypted-example` data directory, loopback DNS on
+port **5353**, and the dashboard at `http://127.0.0.1:8080`. It can run without
+root. The first-run password is in
+`./tmp/encrypted-example/initial-password.txt`.
+
+In a second terminal on the same machine:
+
+```bash
+./bin/dnsdaddy doctor -config ./dnsdaddy.encrypted.example.yaml
+dig @127.0.0.1 -p 5353 example.com A
+dig @127.0.0.1 -p 5353 example.com A +tcp
+```
+
+The loopback example is for testing on that machine. To serve a LAN, bind a
+reachable LAN address, use or publish UDP **and** TCP port 53, and permit that
+LAN's client range. The Docker option below already publishes port 53.
+
+### Run the encrypted example in Docker
+
+From the repository root, with Docker Engine and Compose installed:
+
+```bash
+docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml up -d --build
+docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml exec dnsdaddy dnsdaddy doctor
+docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml exec dnsdaddy cat /var/lib/dnsdaddy/initial-password.txt
+```
+
+The [encrypted overlay](../deploy/docker-compose.encrypted.yml) mounts the
+working example. It keeps the normal data volume and dashboard binding, and
+publishes host UDP/TCP **53** to the container's **5353**. The doctor command
+above checks DNS from inside the container and is the first readiness check.
+
+Open `http://127.0.0.1:8080` on that host, or use the
+[documented SSH tunnel](deploy.md) for a VPS. Grant the intended client
+networks as described below before testing the published DNS port. Even a query from the Docker
+host to `127.0.0.1:53` can reach the container with the **bridge gateway** as
+its source, so host loopback does not automatically mean container loopback.
+To identify that gateway:
+
+```bash
+docker inspect dnsdaddy --format '{{range .NetworkSettings.Networks}}{{println .Gateway}}{{end}}'
+```
+
+If you want host-originated tests, add the actual gateway as a permitted
+network using its IPv4 `/32` or IPv6 `/128` prefix. This represents traffic
+sharing that Docker gateway, not a separate identity for every source behind
+NAT. Then test on the Docker host:
+
+```bash
+dig @127.0.0.1 -p 53 example.com A
+dig @127.0.0.1 -p 53 example.com A +tcp
+```
+
+Use both `-f` arguments for subsequent updates and diagnostics. This
+configuration pins transport and
+Live in the dashboard. Environment overrides still take precedence: review
+any existing `DNSDADDY_RESOLUTION_TRANSPORT`, `DNSDADDY_ENCRYPTED_UPSTREAMS`
+or `DNSDADDY_LOCAL_DNSSEC_VALIDATION` settings before using the example.
+Removing the overlay returns to the normal configuration and any previously
+saved choices; it does not save the example as a dashboard choice.
+
+### Connect one device
+
+1. Open **Setup** and identify the server address and host DNS port. A
+   dashboard reached through a reverse proxy or SSH tunnel does not identify
+   the DNS address. Container addresses and listener ports can differ from
+   the host address and published port.
+2. Open **Networks**, add the authorised LAN, VPN range or client IP, and
+   enable **Allow this network to use DNS Daddy**. New installations leave
+   Default ad-hoc access off, so private addresses are not automatically
+   permitted merely because they occur in the configured bootstrap pool.
+   A policy name alone does not grant access. Use the client's source as the
+   server sees it, which may be a NAT or Docker gateway address.
+3. From that device, run the following with the actual server IP. These
+   commands assume standard host port 53; change `-p 53` when testing a
+   different published port.
+
+```bash
+dig @<server-ip> -p 53 example.com A
+dig @<server-ip> -p 53 example.com A +tcp
+# Windows alternative:
+nslookup -port=53 example.com <server-ip>
+```
+
+Look for `NOERROR` with an answer, and confirm the query and local DNSSEC
+result in the dashboard. In Live, both secure signed answers and proven
+unsigned answers can be valid; an unsigned domain does not acquire a DNSSEC
+signature because the transport is encrypted. Then configure one device's
+normal DNS setting and watch its traffic before changing DHCP for everyone.
+Most IP-only device and DHCP DNS settings require port 53.
+
+### If the first lookup fails
+
+| Symptom | Check or correction |
+| --- | --- |
+| The dashboard opens, but `dig` times out | The web and DNS listeners are separate. Check the host IP, UDP/TCP DNS ports, Docker mappings, firewall and any existing service already using port 53. |
+| `REFUSED` | Permit the client's actual source IP or network under **Networks**. New installations keep Default ad-hoc access off. For host-to-Docker tests, the source may be the Docker gateway even when the command targets `127.0.0.1`. |
+| The endpoint test fails | Check outbound TCP 443, the system clock and CA certificates. Confirm that the protocol, TLS name and bootstrap IPs match the chosen provider. The Cloudflare example is DoH2, not DoQ. |
+| Endpoint test passes, but Live returns `SERVFAIL` | Inspect **Daddybound → Trust anchors, observation health and evidence**, transport errors and the Query log's local DNSSEC reason. The endpoint test did not prove a complete validation chain. A bogus answer is supposed to fail; repeated failures for normal names require investigation. |
+| Local tests work but another device fails | Check that the listener binds a reachable interface, that both UDP and TCP reach it, and that the client is permitted. The standalone example deliberately binds loopback. |
+| Tests on 5353 work but setting the device's DNS IP does not | Most device settings use port 53. Publish or listen on host UDP/TCP 53, or use a client that supports an explicit port. |
+| Native Live times out on a network that permits only web traffic | Native recursion requires direct UDP/TCP 53 access. Deliberately choose and test the encrypted profile using TCP 443 instead. |
+
+Use `dnsdaddy doctor` with the same configuration and environment as the
+running service. Repair the reported fault; switching off certificate checks
+or adding a plaintext fallback is not part of this setup.
+
 ## What is encrypted
 
 | Connection | Effect of selecting encrypted transport |
@@ -49,8 +203,10 @@ discovery to reach a different service. Zero-RTT queries are disabled.
 ## Configure it in the dashboard
 
 1. Open **Daddybound → DNS transport** and select **Encrypted forwarding**.
-2. Add the resolver's supported protocol and address. DoQ takes a host or
+2. Select **Add Cloudflare example** to fill a working DoH2 draft, or add
+   your resolver's supported protocol and address. DoQ takes a host or
    `host:port`; DoH takes its complete `https://host/path` endpoint URL.
+   A DoT endpoint on TCP 853 is not a DoQ endpoint on UDP 853.
 3. Provide literal bootstrap IPs for a named endpoint. Obtain them from the
    resolver operator or your own deployment configuration. The client never
    asks ordinary DNS how to find its encrypted resolver.
@@ -59,13 +215,16 @@ discovery to reach a different service. Zero-RTT queries are disabled.
    can use the resolver's certificate hostname in **TLS server name**.
 5. Add and order any approved fallback entries. Check the disclosure
    acknowledgement after completing the endpoint draft.
-6. Optionally select **Test endpoints**. This sends a fixed root (`.`) DNSKEY
-   question through the draft endpoints. It changes no settings or trust
+6. Select **Test endpoints** before applying a new provider. This sends a
+   fixed root (`.`) DNSKEY question through the draft endpoints. It changes no settings or trust
    anchors. An entry that was not attempted has not been tested; ordered
    failover stops after an accepted response. This checks the exchange and
    response, not the provider's accuracy or a local DNSSEC proof.
-7. Select **Apply DNS transport**. The current Off/Learn/Live choice remains
-   selected. Live continues to validate locally over the new record source.
+7. After a successful test, select **Apply DNS transport**. The current
+   Off/Learn/Live choice remains selected. Select **Live** separately if it was
+   Off or Learn and you want enforcement. Live continues to validate locally
+   over the new record source. The API does not require a prior test; testing
+   is the recommended setup sequence.
 
 Reading status, loading the page and editing a draft never run a connectivity
 test. Applying a valid profile permits ordinary resolution and, when the mode
@@ -92,24 +251,18 @@ overrides YAML. A nonempty `encrypted_upstreams` list in YAML requires an
 explicit transport value. Omitting the transport and list lets the dashboard
 manage the selection.
 
-The following is a **template with reserved documentation names and IPs**.
-Replace all endpoints and bootstrap addresses with your actual resolver's
-values. These addresses are not a working public service.
+The [complete runnable example](../dnsdaddy.encrypted.example.yaml) includes
+the listeners and data directory. To incorporate its outbound settings into
+an existing configuration, explicitly select the provider as follows:
 
 ```yaml
 dns:
   resolution_transport: encrypted
   encrypted_upstreams:
-    - protocol: doq
-      address: dns.example.net:853
-      server_name: dns.example.net
-      bootstrap_ips: [203.0.113.53, "2001:db8::53"]
-    - protocol: doh3
-      address: https://dns.example.net/dns-query
-      bootstrap_ips: [203.0.113.53, "2001:db8::53"]
     - protocol: doh2
-      address: https://dns.example.net/dns-query
-      bootstrap_ips: [203.0.113.53, "2001:db8::53"]
+      address: https://cloudflare-dns.com/dns-query
+      server_name: cloudflare-dns.com
+      bootstrap_ips: ["1.1.1.1", "1.0.0.1"]
   local_dnssec_validation: enforce
   timeout: 4s
 ```

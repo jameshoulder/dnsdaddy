@@ -70,13 +70,15 @@ Check it came up:
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/health
-# {"status":"degraded",...,"blocklistSize":0}
+# {"status":"ok"} — process liveness only
+docker compose exec dnsdaddy dnsdaddy doctor
 ```
 
-`degraded` with `blocklistSize: 0` is expected on a brand-new install — the
-resolver is answering but has no blocklist yet. That is exactly what the next
-step fixes, and why the health endpoint says so rather than reporting a
-cheerful green.
+For a native installation, use `sudo dnsdaddy doctor` instead of the Compose
+command. A cold installation can have an empty blocklist until its first feed
+refresh finishes. Doctor checks DNS separately and reports feed readiness;
+`status=ok` alone does not establish that queries work or filtering is loaded.
+After the internal checks pass, permit and test one client as described below.
 
 ## 4. Never run an open resolver
 
@@ -264,8 +266,12 @@ Mode 3 automates what the rest of this section describes by hand. It writes
 Caddy, and then requires a **publicly trusted** certificate before reporting
 success — the check is `curl` without `-k`, so a certificate this machine does
 not trust counts as a failure. It sets `DNSDADDY_BASE_URL`, forces
-`DNSDADDY_SECURE_COOKIES=always` and narrows `DNSDADDY_TRUSTED_PROXY_CIDRS` to
-the Docker bridge subnet. It does **not** set `DNSDADDY_DASHBOARD_BIND`, so the
+`DNSDADDY_SECURE_COOKIES=always` and sets `DNSDADDY_TRUSTED_PROXY_CIDRS` to
+the running container's actual project-network gateway addresses, as `/32`
+or `/128` hosts. It preserves an explicit custom proxy list. Docker's global
+network named `bridge` usually differs from Compose's project network and
+must not be used to guess the proxy address. If discovery fails, HTTPS setup
+stops rather than inventing a trusted range. It does **not** set `DNSDADDY_DASHBOARD_BIND`, so the
 container stays on loopback and Caddy is the only process listening publicly.
 
 If it cannot get a certificate it puts all of that back — the previous
@@ -432,6 +438,18 @@ http:
   trusted_proxy_cidrs: ["127.0.0.1/32"]
   secure_cookies: always
 ```
+
+The YAML above is for a native process. Under Docker, the host's connection
+to the published loopback port reaches the container from its project gateway.
+Find that gateway after startup:
+
+```bash
+docker inspect dnsdaddy --format '{{range .NetworkSettings.Networks}}{{println .Gateway}}{{end}}'
+```
+
+For example, if Docker reports `172.18.0.1`, set
+`DNSDADDY_TRUSTED_PROXY_CIDRS=172.18.0.1/32` in `.env` and recreate the service
+with `docker compose up -d`. Trust the actual address, not the example value.
 
 > `trusted_proxy_cidrs` lists the peers whose `X-Forwarded-For`,
 > `X-Real-IP`, and `X-Forwarded-Proto` headers DNS Daddy believes. List your
@@ -629,8 +647,10 @@ monitor at:
 {"status": "ok", "version": "v1.0.0", "uptimeSeconds": 84210, "blocklistSize": 412887}
 ```
 
-`status` is `degraded` when no blocklist is loaded — the resolver answers but
-filters nothing. Alert on that, not just on the process being up.
+The public health response's `status=ok` reports process liveness. Its private
+`protecting` and `blocklistSize` fields are available to an authenticated caller
+or a loopback peer and show whether a threat index is loaded. A non-empty index
+does not prove that every client's policy enforces it.
 
 **HTTP 200 is not proof the service is working.** The dashboard can be perfectly
 healthy while DNS answers `REFUSED` to every real client, because the client ACL
@@ -641,10 +661,19 @@ layers together:
 ./deploy/healthcheck.sh
 ```
 
-It verifies the container is running and not crash-looping, that the API reports
-`status=ok` with a non-empty blocklist, that a real DNS query is answered (and
-tells you specifically if the answer is `REFUSED`), and that the public HTTPS
-dashboard responds. Exit codes: `0` healthy, `1` degraded, `2` down.
+It verifies the container is running, reports restart warnings, checks the
+private blocklist state, queries DNS over both UDP and TCP, and checks the
+public HTTPS dashboard when configured. Exit codes: `0` verified readiness,
+`1` degraded or incomplete checks, `2` a failed service or DNS check. Missing
+`dig` or inaccessible private health fields cannot produce a success result.
+
+For the first Docker check, run `docker compose exec dnsdaddy dnsdaddy doctor`
+inside the container. A host-side `dig @127.0.0.1` passes through Docker NAT and
+can arrive as the project gateway, which needs an enabled, permitted Network
+when ad-hoc access is off. Permit the exact gateway `/32` if you need host
+health checks; a successful in-container check does not prove the host port or
+a remote client's firewall path. Test from the permitted client before changing
+the DNS server for a whole network.
 
 Run it from cron and be told only when something breaks:
 
@@ -730,11 +759,13 @@ dns:
     - "203.0.113.42/32"    # your sites — the same IPs as your ufw rules
 ```
 
-Under Docker you can set `DNSDADDY_ALLOWED_CLIENT_CIDRS` in `.env`, or — from
-v0.3.0 — simply tick **Allow this network to use DNS Daddy** on the network in
-the dashboard, which needs no restart. Confirm either way with
-`./deploy/healthcheck.sh` or `dnsdaddy doctor`, both of which name this failure
-explicitly.
+The normal fix is an enabled Network with **Allow this network to use DNS
+Daddy** selected in the dashboard; that needs no restart. The YAML above (or
+`DNSDADDY_ALLOWED_CLIENT_CIDRS` in `.env`) changes the bootstrap pool. Its
+non-loopback entries apply only when ad-hoc access is enabled, so changing the
+pool alone does not grant access on a new installation. Confirm the effective
+grants with `docker compose exec dnsdaddy dnsdaddy doctor`, then query from the
+permitted client. See [Who may use the resolver](#who-may-use-the-resolver).
 
 ### Performing the upgrade
 
@@ -920,11 +951,12 @@ routing and port conflicts in one step.
 to use DNS Daddy** on it. It takes effect on the next query — no restart, no
 file to edit.
 
-For a headless deployment, add the range to `DNSDADDY_ALLOWED_CLIENT_CIDRS`
-instead and restart. Note that setting that variable **replaces** the built-in
-list rather than adding to it — the built-in list already covers loopback,
-every RFC 1918 range, carrier-grade NAT, link-local, the IPv6 equivalents and
-the Docker bridge, so on a LAN you should usually not set it at all.
+`DNSDADDY_ALLOWED_CLIENT_CIDRS` configures the bootstrap pool and **replaces**
+the built-in pool. Its non-loopback ranges are used only when ad-hoc access is
+enabled; the default ad-hoc gate is off. Adding a range to `.env` alone does
+not bypass that control, even on a LAN. Named, enabled, permitted Networks
+grant access independently and are the normal setup path. `doctor` shows the
+bootstrap pool, ad-hoc state and actual effective grants separately.
 
 ### Other symptoms
 

@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"hash/maphash"
+	"strconv"
 	"sync"
 	"time"
 
@@ -123,7 +124,10 @@ func Key(q dns.Question, dnssecOK bool) string {
 	if dnssecOK {
 		suffix = ";1"
 	}
-	return q.Name + ";" + dns.TypeToString[q.Qtype] + ";" + dns.ClassToString[q.Qclass] + suffix
+	// Numeric values preserve unknown and newly assigned types/classes. Map
+	// lookups return an empty string for those values and would let different
+	// questions share the same answer (and in-flight upstream request).
+	return dns.CanonicalName(q.Name) + ";" + strconv.Itoa(int(q.Qtype)) + ";" + strconv.Itoa(int(q.Qclass)) + suffix
 }
 
 func (c *Cache) shardFor(key string) *shard {

@@ -1,0 +1,28 @@
+# Optional complete encrypted Daddybound Live configuration.
+# From the repository root:
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml up -d --build
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml exec dnsdaddy dnsdaddy doctor
+#
+# This explicitly selects the provider in dnsdaddy.encrypted.example.yaml and
+# pins the transport and Daddybound mode. Edit that file for another provider,
+# or use the dashboard preset instead for settings you can change in the UI.
+# Existing .env values still take precedence over YAML; remove conflicting
+# transport/upstream overrides before choosing this example.
+#
+# Use BOTH -f arguments for future updates. The base Compose file supplies
+# the protected dashboard binding, client ACL and existing named data volume.
+services:
+  dnsdaddy:
+    command: ["-config", "/etc/dnsdaddy/config.yaml"]
+    environment:
+      # The standalone sample uses loopback and a scratch data directory.
+      # Container listeners must match the base file's 53:5353 mappings, and
+      # database/keys must stay in the existing persistent volume.
+      DNSDADDY_DNS_LISTEN_UDP: ":5353"
+      DNSDADDY_DNS_LISTEN_TCP: ":5353"
+      DNSDADDY_HTTP_LISTEN: ":8080"
+      DNSDADDY_ALLOW_PUBLIC_BIND: "true"
+      DNSDADDY_DATA_DIR: "/var/lib/dnsdaddy"
+    volumes:
+      # Paths are relative to the FIRST Compose file (the repository root).
+      - ./dnsdaddy.encrypted.example.yaml:/etc/dnsdaddy/config.yaml:ro
