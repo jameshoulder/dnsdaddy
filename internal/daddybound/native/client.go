@@ -13,9 +13,9 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/recursive"
 )
 
-// ClientEngine is the native answer path, never a forwarded answer followed
-// by a separate validation. Engine implements it; the seam also permits
-// deterministic tests of timeouts, overload and protocol flags.
+// ClientEngine binds local validation to the exact answer returned. Engine
+// acquires records through native iteration; ForwardEngine acquires them from
+// approved encrypted resolvers. The seam also permits deterministic tests.
 type ClientEngine interface {
 	Resolve(context.Context, string, uint16) (*Answer, error)
 	ResolveUnchecked(context.Context, string, uint16) (*Answer, error)
@@ -30,6 +30,9 @@ type ClientOptions struct {
 // operational inability to resolve. Msg is always the complete response to
 // send, including SERVFAIL and an Extended DNS Error for EDNS clients.
 type ClientResult struct {
+	// ResolutionSource is filled by the runtime that captured this query.
+	// It keeps transport provenance accurate across concurrent mode changes.
+	ResolutionSource string
 	Msg              *dns.Msg
 	Validation       dnssec.ValidationResult
 	ValidationStatus string
@@ -96,7 +99,7 @@ func (c *Client) ResolveClient(ctx context.Context, req *dns.Msg) (result Client
 		if recover() != nil {
 			c.panics.Add(1)
 			c.failures.Add(1)
-			result = clientFailure(req, "internal_error", "native_internal_error", "Native resolver failed internally", dns.ExtendedErrorCodeOther)
+			result = clientFailure(req, "internal_error", "native_internal_error", "Daddybound failed internally", dns.ExtendedErrorCodeOther)
 		}
 	}()
 	if req == nil || len(req.Question) != 1 || req.Response {
@@ -104,7 +107,7 @@ func (c *Client) ResolveClient(ctx context.Context, req *dns.Msg) (result Client
 	}
 	q := req.Question[0]
 	if req.Opcode != dns.OpcodeQuery || q.Qclass != dns.ClassINET {
-		return protocolFailure(req, dns.RcodeNotImplemented, "unsupported_question", "Native resolution supports standard IN questions")
+		return protocolFailure(req, dns.RcodeNotImplemented, "unsupported_question", "Daddybound supports standard IN questions")
 	}
 	if _, valid := dns.IsDomainName(q.Name); !valid {
 		return protocolFailure(req, dns.RcodeFormatError, "invalid_name", "The question name is invalid")
@@ -113,14 +116,14 @@ func (c *Client) ResolveClient(ctx context.Context, req *dns.Msg) (result Client
 		return protocolFailure(req, dns.RcodeBadVers, "unsupported_edns_version", "Only EDNS version 0 is supported")
 	}
 	if !req.RecursionDesired {
-		return protocolFailure(req, dns.RcodeRefused, "recursion_required", "Set RD to request native recursion")
+		return protocolFailure(req, dns.RcodeRefused, "recursion_required", "Set RD to request recursive resolution")
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	select {
 	case <-ctx.Done():
 		c.failures.Add(1)
-		return clientFailure(req, "timeout", "native_deadline", "Native resolution deadline expired", dns.ExtendedErrorCodeNetworkError)
+		return clientFailure(req, "timeout", "native_deadline", "Daddybound resolution deadline expired", dns.ExtendedErrorCodeNetworkError)
 	case c.sem <- struct{}{}:
 		current := c.inflight.Add(1)
 		for peak := c.peak.Load(); current > peak; peak = c.peak.Load() {
@@ -131,7 +134,7 @@ func (c *Client) ResolveClient(ctx context.Context, req *dns.Msg) (result Client
 		defer func() { c.inflight.Add(-1); <-c.sem }()
 	default:
 		c.limitRejected.Add(1)
-		return clientFailure(req, "resource_limit", "native_capacity", "Native resolver is at its in-flight limit", dns.ExtendedErrorCodeNotReady)
+		return clientFailure(req, "resource_limit", "native_capacity", "Daddybound is at its in-flight limit", dns.ExtendedErrorCodeNotReady)
 	}
 	var answer *Answer
 	var err error
@@ -144,21 +147,21 @@ func (c *Client) ResolveClient(ctx context.Context, req *dns.Msg) (result Client
 		c.failures.Add(1)
 		switch {
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			return clientFailure(req, "timeout", "native_deadline", "Native resolution deadline expired", dns.ExtendedErrorCodeNetworkError)
+			return clientFailure(req, "timeout", "native_deadline", "Daddybound resolution deadline expired", dns.ExtendedErrorCodeNetworkError)
 		case errors.Is(err, recursive.ErrLimit):
 			c.limitRejected.Add(1)
-			return clientFailure(req, "resource_limit", "native_work_limit", "Native resolution reached its work limit", dns.ExtendedErrorCodeNotReady)
+			return clientFailure(req, "resource_limit", "native_work_limit", "Daddybound resolution reached its work limit", dns.ExtendedErrorCodeNotReady)
 		default:
-			return clientFailure(req, "unreachable", "native_resolution_failed", "No complete authoritative answer was obtained", dns.ExtendedErrorCodeNoReachableAuthority)
+			return clientFailure(req, "unreachable", "native_resolution_failed", "No complete DNS answer was obtained", dns.ExtendedErrorCodeNoReachableAuthority)
 		}
 	}
 	if answer == nil || answer.Msg == nil || answer.Msg.Truncated {
 		c.failures.Add(1)
-		return clientFailure(req, "internal_error", "native_incomplete_answer", "Native resolution returned no complete answer", dns.ExtendedErrorCodeOther)
+		return clientFailure(req, "internal_error", "native_incomplete_answer", "Daddybound returned no complete answer", dns.ExtendedErrorCodeOther)
 	}
 	if ctx.Err() != nil {
 		c.failures.Add(1)
-		return clientFailure(req, "timeout", "native_deadline", "Native resolution deadline expired", dns.ExtendedErrorCodeNetworkError)
+		return clientFailure(req, "timeout", "native_deadline", "Daddybound resolution deadline expired", dns.ExtendedErrorCodeNetworkError)
 	}
 	result = ClientResult{
 		Validation:       answer.Validation,
@@ -173,15 +176,15 @@ func (c *Client) ResolveClient(ctx context.Context, req *dns.Msg) (result Client
 		c.checkingDisabled.Add(1)
 		result.ValidationStatus = "checking_disabled"
 		result.ReasonCode = "client_checking_disabled"
-		result.Reason = "The client disabled DNSSEC checking; native answer is not authenticated"
+		result.Reason = "The client disabled DNSSEC checking; this answer is not authenticated"
 	} else {
 		switch answer.Validation.Status {
 		case dnssec.StatusSecure:
 			c.secure.Add(1)
-			result.Reason = "Native answer authenticated with DNSSEC"
+			result.Reason = "Returned answer authenticated locally with DNSSEC"
 		case dnssec.StatusInsecure:
 			c.insecure.Add(1)
-			result.Reason = "An unsigned delegation was proved; this native answer is not authenticated"
+			result.Reason = "An unsigned delegation was proved; this answer is not authenticated"
 		case dnssec.StatusBogus:
 			c.bogus.Add(1)
 			failure := clientFailure(req, "bogus", result.ReasonCode, "DNSSEC validation failed: "+result.Reason, dns.ExtendedErrorCodeDNSBogus)

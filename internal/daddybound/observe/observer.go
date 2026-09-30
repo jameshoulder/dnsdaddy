@@ -197,6 +197,9 @@ type Observer struct {
 	r    Resolver
 	sink Sink
 	opts Options
+	// resolution is fixed at construction, so retained observations keep the
+	// transport provenance even after the operator selects another profile.
+	resolution string
 
 	queue chan Request
 	// admission serialises the constant-work send with shutdown. The queue
@@ -246,6 +249,15 @@ func NewNative(r Resolver, sink Sink, o Options) *Observer {
 	return newObserver(nil, r, sink, o)
 }
 
+// NewEncrypted records local validation over an explicitly selected encrypted
+// forwarder. It runs the same answer engine used by encrypted Live, without
+// claiming to have traversed authoritative referrals or sent plaintext DNS.
+func NewEncrypted(r Resolver, sink Sink, o Options) *Observer {
+	obs := newObserver(nil, r, sink, o)
+	obs.resolution = ResolutionEncrypted
+	return obs
+}
+
 func newObserver(v Validator, r Resolver, sink Sink, o Options) *Observer {
 	o = o.withDefaults()
 	return &Observer{
@@ -262,6 +274,9 @@ func newObserver(v Validator, r Resolver, sink Sink, o Options) *Observer {
 
 // Resolution reports how this observer obtains the records it validates.
 func (o *Observer) Resolution() string {
+	if o.resolution != "" {
+		return o.resolution
+	}
 	if o.r != nil {
 		return ResolutionNative
 	}

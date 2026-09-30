@@ -84,6 +84,9 @@ const {
   recoveryCard, changeHistoryRows, protectionCard, webhookCard,
   investigationLearning, decisionEvidenceContent,
   exportCard, readCompleteExport,
+  copyPlainText, serverAddressRow, serverAddressesCard,
+  DNS_TRANSPORT_PROTOCOLS, transportConsentError, transportEndpointFields,
+  negotiatedTLS, encryptedTransportStats, transportTestResult, dnsTransportCard,
 } = require('./static/app.js');
 
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
@@ -2437,7 +2440,7 @@ test('Learn is explicitly an observation rather than enforcement', () => {
   const out = daddyboundModes(true);
   assert.match(out, /Learn · observing/);
   assert.doesNotMatch(out, /Live · enforcing/);
-  assert.match(out, /Upstream answers/);
+  assert.match(out, /separate validation observation/);
 });
 
 test('a boolean Learn status cannot claim current Live enforcement', () => {
@@ -3400,7 +3403,7 @@ test('a deployment-pinned native mode is rendered as locked with its reason', ()
   const out = nativeModeCard({ mode: { effective: 'off', locked: true, reason: 'Mode pinned by this deployment.', live: { available: true } } });
   assert.match(out, /fieldset class="mode-options" disabled/);
   assert.match(out, /Mode pinned by this deployment/);
-  assert.doesNotMatch(out, /Apply resolution mode/);
+  assert.doesNotMatch(out, /Apply validation mode/);
 });
 
 test('native counters are not invented when the native runtime is absent', () => {
@@ -3594,6 +3597,40 @@ test('native Live records are never relabelled as Learn or compared with an abse
   assert.doesNotMatch(out, /enforces nothing|Learn mode, nothing blocked/);
 });
 
+test('encrypted Live provenance stays local and cannot acquire an upstream comparison', () => {
+  const value = { resolution: 'encrypted_live', status: 'bogus', qtype: 'A', upstream: 'validated', disagreement: 'untrusted comparison', reason: 'Local signature check rejected the answer' };
+  const badge = localDnssecBadge(value);
+  assert.match(badge, /Encrypted Live validation/);
+  assert.match(badge, /Daddybound local DNSSEC validation rejected/);
+  assert.doesNotMatch(badge, /nothing blocked|Learn mode|differs from upstream/);
+  const out = observationsSection({ available: true, items: [value] });
+  assert.match(out, /Encrypted Live/);
+  assert.match(out, /Not applicable/);
+  assert.doesNotMatch(out, /untrusted comparison|The upstream resolver reported|Native Live/);
+});
+
+test('encrypted Learn provenance remains sampled observation and never claims answer enforcement', () => {
+  const value = { resolution: 'encrypted_forwarded', status: 'bogus', qtype: 'A', upstream: 'validated', disagreement: 'local_bogus_upstream_validated' };
+  const out = observationsSection({ available: true, items: [value] });
+  assert.match(out, /Encrypted Learn observation, nothing blocked/);
+  assert.match(out, /The upstream resolver reported a DNSSEC-validated answer/);
+  assert.match(out, /differs from upstream/);
+  assert.doesNotMatch(out, /Live validation|Not applicable/);
+});
+
+test('query details attribute encrypted local validation from the recorded source only', () => {
+  const { queryTable } = require('./static/app.js');
+  const out = queryTable([{ id: 1, time: '2026-09-29T20:00:00Z', domain: 'example.test', action: 'allowed', dnssec: 'validated', dnssecSource: 'encrypted_forwarded', dnssecValidation: { resolution: 'encrypted_live', status: 'secure' } }]);
+  assert.match(out, /DNSSEC \(encrypted forwarding — Daddybound\)/);
+  assert.match(out, /Daddybound over encrypted forwarding reported a DNSSEC-validated answer/);
+  assert.match(out, /Encrypted validation outcome/);
+  assert.doesNotMatch(out, /The upstream resolver reported|Native Live|source unrecorded/);
+  const legacy = queryTable([{ id: 2, time: '2026-09-29T20:00:00Z', domain: 'example.test', action: 'allowed', dnssec: 'validated' }]);
+  assert.match(legacy, /source unrecorded/);
+  assert.match(legacy, /AD reported/);
+  assert.doesNotMatch(legacy, /encrypted forwarding|Native Live/);
+});
+
 test('a failed optional learner shows its failure without fabricated zero counters', () => {
   const out = localLearningCard({ enabled: true, available: false, running: false, error: 'Saved model could not be loaded.', limitations: ['The resolver is still available.'] });
   assert.match(out, /The learning model is unavailable/);
@@ -3603,4 +3640,178 @@ test('a failed optional learner shows its failure without fabricated zero counte
   const investigation = investigationLearning({ enabled: true, available: false, found: null, note: 'The saved model could not be loaded.' });
   assert.match(investigation, /baseline result is unavailable/);
   assert.doesNotMatch(investigation, /No retained baseline|benign verdict/);
+});
+
+test('server IP copy controls use compatible local targets with their actual listener ports', () => {
+  const out = serverAddressesCard({ source: 'local_interfaces', preferredAddress: '192.168.40.10', addresses: [
+    { address: '192.168.40.10', family: 'ipv4', type: 'private', interface: 'eth0', dns: [{ transport: 'udp', port: 5353, endpoint: '192.168.40.10:5353' }] },
+    { address: '2001:db8::10', family: 'ipv6', type: 'public', interface: 'eth0', dns: [{ transport: 'tcp', port: 53, endpoint: '[2001:db8::10]:53' }] },
+  ], listeners: [{ transport: 'udp', listen: ':5353', enabled: true, port: 5353, binding: 'all' }], notes: [] });
+  assert.match(out, /data-copy="192\.168\.40\.10"/);
+  assert.match(out, /data-copy="2001:db8::10"/);
+  assert.doesNotMatch(out, /data-copy="192\.168\.40\.10:5353"/);
+  assert.match(out, /UDP 5353/);
+  assert.match(out, /configure the displayed port separately/);
+  assert.match(out, /reachability has not been tested/);
+  assert.match(out, /Containers, NAT and port mappings/);
+});
+
+test('loopback, link-local and unmatched interfaces are never promoted to a preferred client address', () => {
+  const out = serverAddressesCard({ preferredAddress: '127.0.0.1', addresses: [
+    { address: '127.0.0.1', family: 'ipv4', type: 'loopback', dns: [{ transport: 'udp', port: 53, endpoint: '127.0.0.1:53' }] },
+    { address: 'fe80::10', family: 'ipv6', type: 'link_local', interface: 'eth0', dns: [] },
+    { address: '192.168.5.8', family: 'ipv4', type: 'private', dns: [] },
+  ], partial: true, truncated: true, limit: 32 });
+  assert.match(out, /No LAN or public address matching a DNS listener/);
+  assert.match(out, /Other devices cannot use this loopback address/);
+  assert.match(out, /client’s network-interface scope/);
+  assert.doesNotMatch(out, /data-copy="fe80::10"|data-copy="192\.168\.5\.8"/);
+  assert.match(out, /Some interfaces could not be read/);
+  assert.match(out, /limited to 32 entries/);
+});
+
+test('failed server-address reads do not substitute the browser host or invent an IP', () => {
+  const out = serverAddressesCard(null);
+  assert.match(out, /Server addresses unavailable/);
+  assert.match(out, /No address is inferred from this browser/);
+  assert.doesNotMatch(out, /data-copy=/);
+});
+
+test('socket-local address fallback is visibly incomplete and never described as interface enumeration', () => {
+  const out = serverAddressesCard({ source: 'connection_local_address', partial: true, preferredAddress: '192.168.10.2', addresses: [{ address: '192.168.10.2', family: 'ipv4', type: 'private', dns: [{ transport: 'udp', port: 53 }] }] });
+  assert.match(out, /connection’s local socket/);
+  assert.match(out, /other interfaces could not be enumerated/);
+  assert.match(out, /This list may be incomplete/);
+  assert.match(out, /data-copy="192\.168\.10\.2"/);
+  assert.doesNotMatch(out, /Detected on this server’s interfaces/);
+});
+
+test('a non-preferred host-only address and its copy action remain visible on the homepage', () => {
+  const data = { source: 'connection_local_address', partial: true, preferredAddress: null, addresses: [{ address: '127.0.0.1', family: 'ipv4', type: 'loopback', dns: [{ transport: 'udp', port: 5353 }] }] };
+  const out = serverAddressesCard(data);
+  const visible = out.split('<details')[0];
+  assert.match(visible, /Host-only IP/);
+  assert.match(visible, /127\.0\.0\.1/);
+  assert.match(visible, /data-copy="127\.0\.0\.1"/);
+  assert.match(visible, /Other devices cannot use this loopback address/);
+  assert.match(visible, /No LAN or public address matching a DNS listener/);
+  assert.match(visible, /configure the displayed port separately/);
+  assert.equal(data.preferredAddress, null);
+  assert.doesNotMatch(out, /No local interface address was returned/);
+});
+
+test('a socket-local address without a compatible DNS listener is visible without a usable-client recommendation', () => {
+  const out = serverAddressesCard({ source: 'connection_local_address', preferredAddress: null, addresses: [{ address: '192.168.20.1', family: 'ipv4', type: 'private', dns: [] }] });
+  const visible = out.split('<details')[0];
+  assert.match(visible, /Local connection IP/);
+  assert.match(visible, /192\.168\.20\.1/);
+  assert.match(visible, /No configured DNS listener matches/);
+  assert.doesNotMatch(out, /data-copy=/);
+});
+
+test('interface names, listener descriptions and address notes are escaped', () => {
+  const out = serverAddressesCard({ addresses: [{ address: '<img src=x>', family: 'ipv4', type: 'private', interface: '<script>x</script>', dns: [] }], listeners: [{ transport: 'udp', listen: '<svg>', enabled: true, binding: '<b>' }], notes: ['<script>bad()</script>'] });
+  assert.match(out, /&lt;img src=x&gt;/);
+  assert.match(out, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+  assert.doesNotMatch(out, /<script>|<img|<svg>/);
+});
+
+test('copying an IPv6 address preserves its literal value', async () => {
+  const copied = [];
+  await copyPlainText('2001:db8::53', { secure: true, clipboard: { writeText: async (value) => copied.push(value) } });
+  assert.deepEqual(copied, ['2001:db8::53']);
+});
+
+test('a refused LAN clipboard fallback fails and restores focus instead of claiming success', async () => {
+  let removed = false; let restored = false; let selected = false;
+  const field = { setAttribute() {}, select() { selected = true; }, remove() { removed = true; } };
+  const doc = { activeElement: { focus() { restored = true; } }, createElement() { return field; }, body: { append() {} }, execCommand() { return false; } };
+  await assert.rejects(copyPlainText('192.168.10.2', { secure: false, clipboard: null, document: doc }), /Clipboard access was refused/);
+  assert.equal(field.value, '192.168.10.2');
+  assert.ok(selected && removed && restored);
+});
+
+test('encrypted forwarding consent is required for every save or test, and returning to native is explicit', () => {
+  assert.match(transportConsentError('encrypted', 'native', false, false), /Agree to send DNS queries/);
+  assert.match(transportConsentError('encrypted', 'encrypted', false, false), /before saving or testing/);
+  assert.equal(transportConsentError('encrypted', 'native', true, false), '');
+  assert.match(transportConsentError('native', 'encrypted', false, false), /unencrypted authoritative DNS transport/);
+  assert.equal(transportConsentError('native', 'encrypted', false, true), '');
+  assert.equal(transportConsentError('native', 'native', false, false), '');
+});
+
+test('transport setup provides no preselected provider and discloses bootstrap, trust and fallback constraints', () => {
+  const out = dnsTransportCard({ transport: 'native', endpoints: [], tlsMinimum: '1.3', plaintextFallback: false, bootstrap: 'system' });
+  assert.match(out, /Choose a protocol/);
+  assert.match(out, /name="address" value=""/);
+  assert.match(out, /No public provider is preselected/);
+  assert.match(out, /1–8 literal IPs/);
+  assert.match(out, /operating system’s trusted roots/);
+  assert.match(out, /no plaintext fallback/);
+  assert.match(out, /fixed test query/);
+  assert.doesNotMatch(out, /name="acknowledgeForwarding"[^>]*checked|skip.?verify/i);
+  assert.doesNotMatch(out, /value="https:\/\/[^\"]+"/);
+  assert.deepEqual(Object.keys(DNS_TRANSPORT_PROTOCOLS), ['doq', 'doh3', 'doh2']);
+});
+
+test('transport protocol and endpoint fields preserve explicit configuration and escape provider-controlled text', () => {
+  const out = transportEndpointFields({ protocol: 'doh3', address: 'https://resolver.example/dns-query', serverName: '<img src=x>', bootstrapIPs: ['203.0.113.53', '2001:db8::53'] }, 2);
+  assert.match(out, /value="doh3" selected/);
+  assert.match(out, /HTTP\/3 is required/);
+  assert.match(out, /203\.0\.113\.53\n2001:db8::53/);
+  assert.match(out, /&lt;img src=x&gt;/);
+  assert.match(out, /Remove forwarder 3/);
+  assert.doesNotMatch(out, /<img/);
+});
+
+test('locked transport shows the deployment reason and cannot apply an edited configuration', () => {
+  const out = dnsTransportCard({ transport: 'encrypted', locked: true, reason: 'Pinned in deployment configuration', endpoints: [{ protocol: 'doq', address: 'resolver.example:853', serverName: 'resolver.example', bootstrapIPs: ['203.0.113.53'] }], tlsMinimum: '1.3', plaintextFallback: false });
+  assert.match(out, /Pinned in deployment configuration/);
+  assert.match(out, /transport-mode-options" disabled/);
+  assert.doesNotMatch(out, /Apply DNS transport|Add another endpoint/);
+  assert.match(out, /Test endpoints/);
+});
+
+test('a successful failover test does not claim every endpoint was attempted or prove encryption from configuration', () => {
+  const out = transportTestResult({ ok: true, rcode: 'NOERROR', stats: { queries: 1, successes: 1, failures: 0, failovers: 1, endpoints: [
+    { protocol: 'doq', address: 'one.example:853', attempts: 1, successes: 0, failures: 1, dialFailures: 1, lastError: '<bad certificate>' },
+    { protocol: 'doh2', address: 'https://two.example/dns-query', attempts: 1, successes: 1, failures: 0, tlsVersion: '1.3' },
+    { protocol: 'doh3', address: 'https://three.example/dns-query', attempts: 0, successes: 0, failures: 0 },
+  ] } });
+  assert.match(out, /Test query answered/);
+  assert.match(out, /Not attempted/);
+  assert.match(out, /An endpoint with no attempts has not been tested/);
+  assert.match(out, /Not observed/);
+  assert.match(out, /TLS 1\.3/);
+  assert.match(out, /last authenticated connection, not a current availability check/);
+  assert.match(out, /&lt;bad certificate&gt;/);
+  assert.doesNotMatch(out, /All endpoints passed|<bad certificate>/);
+  assert.equal(negotiatedTLS(0), 'Not observed');
+  assert.equal(negotiatedTLS(772), 'TLS 1.3');
+  assert.match(encryptedTransportStats(null), /No encrypted transport counters/);
+});
+
+test('zero transport timestamps cannot look like a measured successful connection', () => {
+  const out = encryptedTransportStats({ endpoints: [{ protocol: 'doh2', address: 'https://resolver.example/dns-query', attempts: 0, successes: 0, lastSuccess: '0001-01-01T00:00:00Z', lastFailure: '0001-01-01T00:00:00Z' }] });
+  assert.match(out, /No successful request time recorded/);
+  assert.match(out, /Not observed/);
+  assert.doesNotMatch(out, /0001|d ago|Last success never/);
+});
+
+test('native transport copy describes the actual Off and Learn client paths', () => {
+  const off = dnsTransportCard({ transport: 'native', daddyboundMode: 'off', endpoints: [] });
+  assert.match(off, /clients use the legacy configured upstreams/);
+  assert.match(off, /Native recursion and trust-anchor refresh are stopped/);
+  const learn = dnsTransportCard({ transport: 'native', daddyboundMode: 'observe', endpoints: [] });
+  assert.match(learn, /separate validation observations/);
+  assert.match(learn, /Client answers still use the legacy configured upstreams/);
+});
+
+test('encrypted Live is local validation and does not ask for plaintext authoritative transport consent', () => {
+  const out = nativeModeCard({ transport: 'encrypted', mode: { effective: 'enforce', enforcing: true, live: { available: true } } });
+  assert.match(out, /Live · enforcing/);
+  assert.match(out, /validates returned data locally using your encrypted forwarders/);
+  assert.match(out, /data-transport="encrypted"/);
+  assert.match(out, /id="native-transport-consent" hidden/);
+  assert.doesNotMatch(out, /is answering through its native resolver/);
 });

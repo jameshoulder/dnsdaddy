@@ -7,6 +7,19 @@ import (
 	"github.com/miekg/dns"
 )
 
+// PrepareAliasResponse projects one alias step and recomputes a DNAME's
+// unsigned CNAME. Forwarded local validation shares these rules with iterative
+// resolution so a transport choice cannot change the alias being authenticated.
+func PrepareAliasResponse(msg *dns.Msg, qname string, rrtype uint16) (*dns.Msg, string, error) {
+	return prepareAlias(msg, qname, rrtype)
+}
+
+// FirstAliasRecords returns only the alias step being followed, including its
+// signatures. Bundled target data is obtained and pinned separately.
+func FirstAliasRecords(msg *dns.Msg, qname string) []dns.RR {
+	return firstAlias(msg, qname)
+}
+
 // prepareAlias chooses the next link and repairs a DNAME's unsigned CNAME
 // from the DNAME itself. A server-supplied CNAME must never redirect the
 // native resolver somewhere different from the redirection the validator

@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"encoding/base64"
 	"fmt"
@@ -83,15 +84,27 @@ func encodeRSAWithExponent(k *rsa.PublicKey, exponent []byte) (string, error) {
 // encodeECDSA implements RFC 6605 §4: the uncompressed point with the leading
 // 0x04 octet removed, so X and Y each padded to the curve's field size.
 //
-// The padding is the part worth being careful about. big.Int.Bytes drops
-// leading zeros, so a coordinate that happens to start with a zero octet
-// would produce a key one octet short — which happens for roughly one key in
-// 256 and would otherwise be a test that fails rarely and for no visible
-// reason.
+// PublicKey.Bytes validates the point and preserves the fixed-width padding
+// of both coordinates, including leading zero octets.
 func encodeECDSA(k *ecdsa.PublicKey) (string, error) {
-	size := (k.Curve.Params().BitSize + 7) / 8
-	out := make([]byte, 2*size)
-	k.X.FillBytes(out[:size])
-	k.Y.FillBytes(out[size:])
-	return base64.StdEncoding.EncodeToString(out), nil
+	if k == nil {
+		return "", fmt.Errorf("ECDSA public key is nil")
+	}
+	var size int
+	switch k.Curve {
+	case elliptic.P256():
+		size = 32
+	case elliptic.P384():
+		size = 48
+	default:
+		return "", fmt.Errorf("ECDSA DNSKEY encoding supports only P-256 and P-384")
+	}
+	point, err := k.Bytes()
+	if err != nil {
+		return "", fmt.Errorf("encode ECDSA public key: %w", err)
+	}
+	if len(point) != 1+2*size || point[0] != 0x04 {
+		return "", fmt.Errorf("ECDSA public key has an invalid uncompressed encoding")
+	}
+	return base64.StdEncoding.EncodeToString(point[1:]), nil
 }

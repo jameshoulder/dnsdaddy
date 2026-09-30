@@ -18,6 +18,7 @@ var ErrDNSSECModeLocked = errors.New("daddybound mode is pinned by dns.local_dns
 // concurrency-safe runtime counters; none starts a lookup when read.
 type DNSSECRuntimeState struct {
 	Configured, Effective, ChosenBy string
+	Transport                       string
 	Locked                          bool
 	Reason                          string
 	NativeAvailable                 bool
@@ -46,7 +47,7 @@ func (a *API) dnssecState() DNSSECRuntimeState {
 	if source == "" {
 		source = "config"
 	}
-	return DNSSECRuntimeState{Configured: configured, Effective: a.Config.DNS.LocalDNSSECMode(), ChosenBy: source,
+	return DNSSECRuntimeState{Configured: configured, Effective: a.Config.DNS.LocalDNSSECMode(), ChosenBy: source, Transport: a.Config.DNS.TransportMode(),
 		Observer: a.DNSSEC, ObserverActive: a.Config.DNS.LocalDNSSECMode() == config.LocalDNSSECObserve && a.DNSSEC != nil,
 		Writer: a.DNSSECWriter, Anchors: a.Anchors}
 }
@@ -66,7 +67,7 @@ func (a *API) handleDNSSECMode(w http.ResponseWriter, r *http.Request) {
 	switch body.Mode {
 	case config.LocalDNSSECOff:
 	case config.LocalDNSSECObserve, config.LocalDNSSECEnforce:
-		if !body.AcknowledgeNativeTransport {
+		if a.dnssecState().Transport != config.ResolutionEncrypted && !body.AcknowledgeNativeTransport {
 			writeError(w, http.StatusBadRequest, "acknowledge native UDP/TCP port 53 traffic to root and authoritative servers before enabling Daddybound")
 			return
 		}

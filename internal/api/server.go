@@ -126,8 +126,12 @@ type API struct {
 	// invariant needs no case analysis over which columns decide admission.
 	// The remaining writer is the seed, which runs once at startup before
 	// anything is served.
-	networkWrites sync.Mutex
-	configWrites  sync.Mutex
+	networkWrites  sync.Mutex
+	configWrites   sync.Mutex
+	transportTests chan struct{}
+	// serverInterfaces is a test seam. Nil uses the operating system's local
+	// interfaces; request headers are never an address-discovery source.
+	serverInterfaces func() (serverInterfaceSnapshot, error)
 }
 
 // New returns an API bound to deps.
@@ -135,7 +139,7 @@ func New(d Deps) *API {
 	if d.TrustedProxies == nil {
 		d.TrustedProxies = &httpx.TrustedProxies{}
 	}
-	return &API{Deps: d}
+	return &API{Deps: d, transportTests: make(chan struct{}, 1)}
 }
 
 // Handler builds the HTTP router.
@@ -161,6 +165,7 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/auth/password", a.handleChangePassword)
 
 	api.HandleFunc("GET /api/v1/overview", a.handleOverview)
+	api.HandleFunc("GET /api/v1/server-addresses", a.handleServerAddresses)
 
 	// Why DNS is not working. Reads configuration and live counters and says
 	// so in plain English; `dnsdaddy doctor` renders the same checks.
@@ -202,6 +207,9 @@ func (a *API) Handler() http.Handler {
 	// it resolves nothing and mutates no trust state.
 	api.HandleFunc("GET /api/v1/dnssec/status", a.handleDNSSECStatus)
 	api.HandleFunc("PUT /api/v1/dnssec/mode", a.handleDNSSECMode)
+	api.HandleFunc("GET /api/v1/dns/transport", a.handleDNSTransport)
+	api.HandleFunc("PUT /api/v1/dns/transport", a.handleDNSTransport)
+	api.HandleFunc("POST /api/v1/dns/transport/test", a.handleTestDNSTransport)
 
 	api.HandleFunc("GET /api/v1/networks", a.handleListNetworks)
 	api.HandleFunc("POST /api/v1/networks", a.handleCreateNetwork)

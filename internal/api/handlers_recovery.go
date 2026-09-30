@@ -207,6 +207,13 @@ func auditedManagementRoute(r *http.Request) (auditedRoute, bool) {
 		kind = "settings"
 		id = "dnssec.mode"
 		target = "settings/dnssec.mode"
+	case "dns":
+		if len(parts) != 2 || parts[1] != "transport" || r.Method != http.MethodPut {
+			return auditedRoute{}, false
+		}
+		kind = "settings"
+		id = DNSTransportSetting
+		target = "settings/dns.transport"
 	default:
 		return auditedRoute{}, false
 	}

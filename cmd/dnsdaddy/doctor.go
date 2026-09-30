@@ -45,13 +45,40 @@ func runDoctor(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *timeout <= 0 || *timeout > 30*time.Second {
+		return errors.New("doctor timeout must be greater than zero and at most 30 seconds")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	checks := collectDoctorChecks(ctx, *configPath, *timeout)
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(map[string]any{
+			"version": version.String(), "status": diag.Worst(checks), "checks": checks,
+		}); err != nil {
+			return err
+		}
+	} else {
+		renderDoctor(os.Stdout, checks)
+	}
+	if diag.Worst(checks) == diag.StatusFail {
+		return errors.New("one or more checks failed")
+	}
+	return nil
+}
 
+// collectDoctorChecks establishes the effective saved transport before any
+// network probe. An unreadable selection must not cause diagnostics to send
+// plaintext queries through guessed defaults.
+func collectDoctorChecks(ctx context.Context, configPath string, timeout time.Duration) []diag.Check {
 	var checks []diag.Check
-	cfg, cfgChecks := doctorConfig(*configPath)
+	cfg, cfgChecks := doctorConfig(configPath)
 	checks = append(checks, cfgChecks...)
+	if diag.Worst(cfgChecks) == diag.StatusFail {
+		return append(checks, doctorNetworkSkipped("The configuration is invalid."))
+	}
 	checks = append(checks, doctorDataDir(cfg))
 
 	// One read-only handle, shared by every check that needs it. See
@@ -69,33 +96,28 @@ func runDoctor(args []string) error {
 	// section cannot disagree with each other or with the running resolver.
 	acl := doctorACL(ctx, st, cfg)
 
-	// Resolve local DNSSEC the way the daemon does, against the installation
-	// record, so this command reports the mode that would actually run. A
-	// doctor that said "off (the default)" about a fresh install destined for
-	// Learn would be disagreeing with the daemon about the one thing it is
-	// here to report. Read-only: the record is written by the daemon's seed,
-	// never here.
-	if !cfg.DNS.LocalDNSSECConfigured() && st != nil {
-		if v, err := st.GetSetting(ctx, store.SettingLocalDNSSECDefault); err == nil {
-			cfg.ResolveLocalDNSSEC(v)
-		}
-	}
-	checks = append(checks, doctorLocalDNSSEC(ctx, cfg))
+	transport, effective, transportCheck := prepareDoctorTransport(ctx, st, cfg)
+	checks = append(checks, transportCheck)
+	var webChecks []diag.Check
+	var aclStale *bool
+	if transport == nil {
+		checks = append(checks, doctorNetworkSkipped("The effective DNS transport or Daddybound mode could not be established."))
+	} else {
+		cfg = effective
+		previous := net.DefaultResolver
+		net.DefaultResolver = resolver.NewSystemResolver(func() *resolver.ForwardRoute { return transport.selection.route }, timeout)
+		defer func() { transport.Close(); net.DefaultResolver = previous }()
+		checks = append(checks, doctorLocalDNSSEC(ctx, cfg))
 
-	// Asked first, rendered last. The dashboard is the only place a failed
-	// client-access reload is visible — it lives in the running daemon's
-	// memory, and this process rebuilds the ACL from configuration and the
-	// database, which is what *should* be enforced rather than what is.
-	//
-	// A nil answer means the API did not respond, and stays nil: reporting
-	// "not stale" for something that could not be checked is the misleading
-	// green this command exists to remove.
-	webChecks, aclStale := doctorWeb(ctx, st, cfg, *timeout)
+		// Asked first, rendered last. Runtime ACL staleness lives only in the
+		// daemon, so an unavailable dashboard leaves this explicitly unknown.
+		webChecks, aclStale = doctorWeb(ctx, st, cfg, timeout)
+		checks = append(checks, doctorListeners(ctx, cfg, acl, timeout)...)
+		checks = append(checks, doctorUpstreams(ctx, cfg, timeout)...)
+	}
 
 	checks = append(checks, dbCheck)
-	checks = append(checks, doctorListeners(ctx, cfg, acl, *timeout)...)
 	checks = append(checks, doctorClientAccess(ctx, st, cfg, acl, aclStale)...)
-	checks = append(checks, doctorUpstreams(cfg, *timeout)...)
 	checks = append(checks, webChecks...)
 	// What kind of deployment this is, and whether the dashboard is where that
 	// kind should put it. Derived from configuration, so it answers even when
@@ -116,28 +138,11 @@ func runDoctor(args []string) error {
 		Runtime:           diag.DetectRuntime(),
 	})...)
 
-	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(map[string]any{
-			"version": version.String(),
-			"status":  diag.Worst(checks),
-			"checks":  checks,
-		}); err != nil {
-			return err
-		}
-	} else {
-		renderDoctor(os.Stdout, checks)
-	}
-
-	if diag.Worst(checks) == diag.StatusFail {
-		return errors.New("one or more checks failed")
-	}
-	return nil
+	return checks
 }
 
-// doctorConfig loads configuration, reporting rather than aborting when it
-// cannot: every later check is still worth running against the defaults.
+// doctorConfig loads configuration. A failed result is reported and prevents
+// later network probes; defaults are not evidence of permission to send DNS.
 func doctorConfig(path string) (config.Config, []diag.Check) {
 	c := diag.Check{Section: diag.SectionSystem, Name: "Configuration"}
 
@@ -148,7 +153,7 @@ func doctorConfig(path string) (config.Config, []diag.Check) {
 		c.Evidence = []string{"config: " + path, "error: " + err.Error()}
 		c.Action = "Correct the error above. A missing file is not a problem — defaults and " +
 			"DNSDADDY_* environment variables are used — but a malformed one is."
-		return config.Default(), []diag.Check{c}
+		return config.Config{}, []diag.Check{c}
 	}
 
 	c.Status = diag.StatusPass
@@ -258,14 +263,21 @@ func doctorListeners(ctx context.Context, cfg config.Config, acl *clientacl.Set,
 		if l.addr == "" {
 			continue
 		}
-		target := probeTarget(l.addr)
+		target, err := doctorLocalProbeTarget(l.addr)
+		if err != nil {
+			checks = append(checks, diag.Check{Section: diag.SectionListener, Name: "Local DNS listener " + l.proto,
+				Status: diag.StatusWarn, Summary: "The listener was not probed because its local address could not be verified.",
+				Evidence: []string{"listen: " + l.addr, "error: " + err.Error()},
+				Action:   "Run doctor in the DNS Daddy host or container, and configure a literal local listen address."})
+			continue
+		}
 		probe := queryResolver(ctx, l.proto, target, timeout)
 		c := diag.ResolverReachability(probe, acl.Effective())
 
 		// Nothing answered. Distinguish "not running" from "something else has
 		// the port", which are different problems with different remedies.
 		if c.Status == diag.StatusFail && probe.Err != nil {
-			bindable := portBindable(l.proto, l.addr)
+			bindable := portBindable(l.proto, target)
 			owners := listenersOn(l.proto, target)
 			checks = append(checks, diag.PortConflict(l.proto, l.addr, bindable, owners))
 			continue
@@ -327,7 +339,15 @@ func doctorACL(ctx context.Context, st *store.Store, cfg config.Config) *clienta
 }
 
 // doctorUpstreams tests each configured forwarder.
-func doctorUpstreams(cfg config.Config, timeout time.Duration) []diag.Check {
+func doctorUpstreams(ctx context.Context, cfg config.Config, timeout time.Duration) []diag.Check {
+	if cfg.DNS.TransportMode() == config.ResolutionEncrypted {
+		return doctorEncryptedUpstreams(ctx, cfg, timeout)
+	}
+	if cfg.DNS.LocalDNSSECMode() == config.LocalDNSSECEnforce {
+		return []diag.Check{{Section: diag.SectionUpstream, Name: "Native authoritative resolution", Status: diag.StatusPass,
+			Summary:  "Native Live uses authoritative DNS directly; inactive forwarding upstreams were not probed.",
+			Evidence: []string{"The local listener checks exercise the running daemon's answer path.", "Native authoritative transport is UDP/TCP port 53."}}}
+	}
 	probes := make([]diag.UpstreamProbe, 0, len(cfg.DNS.Upstreams))
 	for _, spec := range cfg.DNS.Upstreams {
 		probes = append(probes, probeUpstream(spec, timeout))
@@ -344,10 +364,16 @@ func doctorUpstreams(cfg config.Config, timeout time.Duration) []diag.Check {
 // reports is derived from configuration and the database, which is the
 // *desired* state; these two are the enforced one.
 func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration) ([]diag.Check, *bool) {
-	target := probeTarget(cfg.HTTP.Listen)
-	url := "http://" + target + "/api/v1/health"
-
 	c := diag.Check{Section: diag.SectionWeb, Name: "Dashboard responding"}
+	target, err := doctorLocalProbeTarget(cfg.HTTP.Listen)
+	if err != nil {
+		c.Status = diag.StatusWarn
+		c.Summary = "The dashboard was not probed because its local address could not be verified."
+		c.Evidence = []string{"listen: " + cfg.HTTP.Listen, "error: " + err.Error()}
+		c.Action = "Run doctor in the DNS Daddy host or container, and configure a literal local management listen address."
+		return []diag.Check{c, intelUnknown()}, nil
+	}
+	url := "http://" + target + "/api/v1/health"
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -360,7 +386,11 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		return []diag.Check{c, intelUnknown()}, nil
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: timeout}).DialContext}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
 	if err != nil {
 		c.Status = diag.StatusFail
 		c.Summary = "The dashboard did not respond."
@@ -659,58 +689,47 @@ func wrap(s string, width int) []string {
 	return lines
 }
 
-// doctorLocalDNSSEC reports the local DNSSEC validation mode and whether it
-// can start.
-//
-// Deliberately never fails. A validator that cannot observe is not a resolver
-// that cannot answer, and conflating the two would have an operator paging
-// someone at 3am because an experimental, non-enforcing feature is unhappy.
-// The worst this reports is a warning, and the summary always says what the
-// mode does rather than only naming it.
+// doctorLocalDNSSEC reports the effective mode and checks its configured
+// trust material without starting a validator or refreshing anything.
 func doctorLocalDNSSEC(ctx context.Context, cfg config.Config) diag.Check {
 	c := diag.Check{Section: "DNS", Name: "Local DNSSEC validation"}
+	c.Status = diag.StatusPass
+	c.Evidence = []string{"dns.local_dnssec_validation: " + cfg.DNS.LocalDNSSECMode(),
+		"resolution transport: " + cfg.DNS.TransportMode()}
 
 	switch cfg.DNS.LocalDNSSECMode() {
 	case config.LocalDNSSECOff:
-		c.Status = diag.StatusPass
-		c.Summary = "Off. DNS Daddy records what the upstream concluded and does not validate locally."
-		c.Evidence = []string{
-			"dns.local_dnssec_validation: off",
-			"Set it to \"observe\" to have Daddybound validate alongside resolution. " +
-				"The dashboard calls that Learn mode; it records verdicts and never " +
-				"changes a DNS answer.",
-		}
+		c.Summary = "Off. DNS Daddy forwards answers through the selected transport and records the upstream's DNSSEC conclusion."
+		c.Evidence = append(c.Evidence, "Daddybound does not perform independent local validation in Off mode.")
 		return c
 	case config.LocalDNSSECObserve:
+		c.Summary = "Learn. Daddybound records sampled local DNSSEC checks while forwarding answers; those checks do not change the answer."
+		c.Evidence = append(c.Evidence, fmt.Sprintf("workers %d, queue %d, per-observation timeout %s",
+			cfg.DNS.LocalDNSSECWorkers, cfg.DNS.LocalDNSSECQueue, cfg.DNS.LocalDNSSECTimeout.D()))
+	case config.LocalDNSSECEnforce:
+		c.Summary = "Live. Daddybound independently validates the returned answer; bogus or inconclusive validation fails the lookup."
+		c.Evidence = append(c.Evidence, "An upstream's AD bit is not accepted as a substitute for local validation.")
 	default:
-		// validate() refuses to start on anything else, so reaching here means
-		// the config was not loaded through the normal path.
-		c.Status = diag.StatusWarn
+		c.Status = diag.StatusFail
 		c.Summary = "Unrecognised mode " + cfg.DNS.LocalDNSSECMode() + "."
 		return c
 	}
-
-	c.Status = diag.StatusPass
-	c.Summary = "Learn mode. Daddybound validates alongside resolution and records what it concludes; " +
-		"DNS answers are unaffected."
-	c.Evidence = []string{
-		fmt.Sprintf("workers %d, queue %d, per-observation timeout %s",
-			cfg.DNS.LocalDNSSECWorkers, cfg.DNS.LocalDNSSECQueue, cfg.DNS.LocalDNSSECTimeout.D()),
-		"Enforcement is not implemented. A bogus verdict is recorded, not acted on.",
+	if cfg.DNS.TransportMode() == config.ResolutionEncrypted {
+		c.Evidence = append(c.Evidence, "Answers and supporting validation/anchor lookups use the approved authenticated encrypted resolvers.")
+	} else {
+		c.Evidence = append(c.Evidence, "Native validation contacts authoritative servers over unencrypted UDP/TCP port 53.")
 	}
 
 	anchors, err := loadTrustAnchors(cfg.DNS.LocalDNSSECTrustAnchorFile)
 	switch {
 	case err != nil:
-		// The daemon refuses to start in this state, so a warning here is the
-		// diagnosis for a start-up failure rather than a live problem.
-		c.Status = diag.StatusWarn
-		c.Summary = "Observe mode is configured but the trust anchors cannot be loaded, so the daemon will not start."
+		c.Status = diag.StatusFail
+		c.Summary = "Daddybound is enabled but its configured trust anchors cannot be loaded."
 		c.Evidence = append(c.Evidence, err.Error())
 		c.Action = "Fix or remove dns.local_dnssec_trust_anchor_file."
 	case anchors.Empty():
-		c.Status = diag.StatusWarn
-		c.Summary = "Observe mode is configured but no trust anchors are available."
+		c.Status = diag.StatusFail
+		c.Summary = "Daddybound is enabled but no configured trust anchors are available."
 		c.Action = "Remove dns.local_dnssec_trust_anchor_file to use the built-in IANA root anchors."
 	case cfg.DNS.LocalDNSSECTrustAnchorFile != "":
 		c.Evidence = append(c.Evidence,

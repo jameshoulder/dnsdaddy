@@ -10,7 +10,7 @@ Block malicious domains at the resolver. See which device asked for what, why it
 
 **Free & Open Source · No Account · No Trial · No Subscription**
 
-[![Go](https://img.shields.io/badge/Go-1.25.13+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26.8+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-Apache--2.0-205AC9)](LICENSE)
 [![CI](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml)
 [![Security](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml)
@@ -31,10 +31,33 @@ Block malicious domains at the resolver. See which device asked for what, why it
 Actual application screenshots from the current light interface, using synthetic lab data. [Capture details and source revision](docs/images/SCREENSHOTS.md).
 
 <p align="center">
-  <img src="docs/images/dashboard.png" alt="DNS Daddy overview showing synthetic query activity, blocks, findings and resolver setup" width="100%">
+  <img src="docs/images/dashboard.png" alt="DNS Daddy overview showing query activity and a visible server IP with Copy IP and connection-scope labels" width="100%">
 </p>
 
-The overview brings together **query activity, blocks, findings and resolver setup**. It also makes loopback-only resolver access explicit, so you can see when access still needs configuring for other devices.
+The overview brings together **query activity, blocks, findings and resolver setup**, including a suggested server IP and configured DNS ports when a compatible local address is known. It identifies loopback-only access and incomplete address discovery, so you can see when another device still needs configuration.
+
+<details>
+<summary>Encrypted DNS controls and server connection details</summary>
+
+Choose your own DoQ, HTTP/3 DoH and HTTP/2 DoH endpoints independently of
+Daddybound's local validation mode. The image shows a deliberately failed
+loopback test, so its TLS status correctly stays unobserved.
+
+<p align="center">
+  <img src="docs/images/features-daddybound.png" alt="Daddybound transport editor with ordered encrypted endpoints, explicit consent and an actual failed loopback connection test" width="100%">
+</p>
+
+The Setup card identifies the server IP source, configured listener ports and
+where an address can be used. This isolated capture reports its actual
+host-only address; no reachable LAN address is invented.
+
+<p align="center">
+  <img src="docs/images/features-server-addresses.png" alt="Server address details with copy controls, listener ports and honest loopback and incomplete-inventory labels" width="100%">
+</p>
+
+[Encrypted transport setup and scope](docs/encrypted-dns.md).
+
+</details>
 
 ### Understand a blocked query
 
@@ -119,8 +142,9 @@ Public resolvers like Quad9 and Cloudflare can block known-bad domains. What the
 | **Per-network policies** | Match clients by CIDR, including different sites and VLANs. |
 | **Instant allow-listing** | Clear a false positive from the dashboard and purge the cached answer. |
 | **Daddybound Live** | Fresh installations use the experimental native recursive resolver and DNSSEC validation. Existing Off/Learn selections are preserved on upgrade. |
-| **Forwarding modes** | Learn and Off use configured upstreams, with DNS-over-TLS configured by default. Native Live uses plaintext authoritative UDP/TCP 53. |
+| **Choose the DNS transport** | Native remains the default. An optional encrypted profile uses your approved DoQ, HTTP/3 DoH or HTTP/2 DoH endpoints with authenticated TLS 1.3 and no plaintext fallback. Live validates the returned records locally with either profile. |
 | **DoH and DoT** | Serves DNS-over-HTTPS and DNS-over-TLS as well as plain DNS. |
+| **Server address on the homepage** | Copy a compatible local server IP with its configured DNS ports. Address discovery is authenticated and labels interface, loopback, container/NAT and accepted-socket fallback limitations. |
 | **Behavioural detection** | Six experimental heuristics plus a local learned baseline, with explainable measurements and no automatic heuristic blocking. |
 | **Self-diagnosis** | `dnsdaddy doctor` explains configuration, listener, ACL, upstream and threat-intelligence problems. |
 | **Investigation and policy preview** | Domain/client history, original decisions, current evidence, findings and native observations in one workflow. Policy preview is read-only and does not silently contact external providers. |
@@ -135,7 +159,7 @@ Public resolvers like Quad9 and Cloudflare can block known-bad domains. What the
 
 **DNS Daddy is not a Pi-hole replacement.** Pi-hole is excellent at blocking ads and trackers. DNS Daddy focuses on protective DNS, threat intelligence, explainable security decisions and visibility into what devices are resolving.
 
-The two can run together. In **Learn or Off mode**, DNS Daddy can sit in front with Pi-hole as its configured upstream, retaining per-client identity while Pi-hole handles ad/tracker blocking. Live performs native recursion and does not forward client questions through Pi-hole.
+The two can run together. With the **native transport profile in Learn or Off mode**, DNS Daddy can sit in front with Pi-hole as its configured upstream, retaining per-client identity while Pi-hole handles ad/tracker blocking. Native Live bypasses that forwarding path. The optional encrypted profile sends all client DNS through its approved encrypted endpoints; it does not inherit the legacy Pi-hole upstream setting.
 
 See **[docs/pi-hole.md](docs/pi-hole.md)** for the topology options, trade-offs and current evidence level.
 
@@ -148,6 +172,9 @@ The Docker quick start expects:
 - Git
 - Docker Engine
 - Docker Compose v2 (`docker compose`)
+
+Source builds require Go 1.26.8 or newer; CI and container builds use Go 1.27.1.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup.
 
 Check them first:
 
@@ -215,6 +242,21 @@ Change the password from **Settings**, then remove the initial-password file whe
 DNS Daddy deliberately refuses DNS queries from source addresses it has not been told to serve. On a LAN, the shipped defaults cover private ranges. On a public VPS, add the authorised client or network in **Networks** and enable resolver access for it.
 
 The effective ACL is the configured allowed CIDRs plus networks explicitly permitted through the dashboard. See [docs/deploy.md](docs/deploy.md#who-may-use-the-resolver).
+
+The homepage and Setup page show addresses observed on this server and their
+compatible configured DNS ports. If hardened host permissions prevent interface
+enumeration, they can show only the local IP of the accepted dashboard
+connection, explicitly labelled as incomplete. A reverse proxy or SSH tunnel
+may make that address loopback. No external “what is my IP” service or request
+header supplies the result; container/NAT mappings, firewall rules and client
+access still need checking.
+
+To use encrypted outbound DNS, choose your own endpoints and bootstrap IPs in
+**Daddybound → DNS transport**, review who receives the names, and explicitly
+activate the encrypted profile. Native remains the default and an upgrade does
+not silently opt an installation into a new provider. See
+[the encrypted DNS guide](docs/encrypted-dns.md) for supported transports,
+certificate checks, local validation and the scope of encryption.
 
 ## Diagnose before rollout
 
@@ -287,8 +329,9 @@ Worth knowing before you rely on DNS Daddy:
 
 - **No independent professional security review.** Automated testing and implementation evidence are not an independent audit.
 - **Native Live is experimental.** It is the fresh-install default, but production reliability, constrained-hardware performance and long-running key-rollover behavior are not established. Existing Off/Learn selections survive upgrades.
-- **Native traffic is plaintext authoritative DNS.** Live sends UDP/TCP 53 traffic to authoritative servers; the encrypted forwarding upstream does not protect this path. Learn adds independent native observation traffic alongside forwarded answers.
-- **Live does not silently fall back.** Bogus, indeterminate, timeout and bounded-work failures return SERVFAIL. Review the mode and network egress requirements before activation.
+- **Native authoritative traffic is plaintext.** With the native profile, Live uses UDP/TCP 53 and Learn adds independent native observation traffic. The optional encrypted profile instead forwards to explicitly approved recursive resolvers; it does not make native authoritative recursion encrypted.
+- **Encryption has boundaries.** An approved encrypted resolver receives the DNS names. Client-to-DNS-Daddy traffic and the provider's onward resolution are separate connections. Daemon background hostname lookups use the encrypted profile when selected, but do not receive Daddybound's independent Live validation.
+- **Live does not silently fall back.** With checking enabled, bogus, indeterminate, timeout and bounded-work failures return SERVFAIL. A client's explicit CD bit skips DNSSEC checking without skipping policy or rebinding checks. Encrypted endpoint failures never select plaintext DNS automatically.
 - **Learning and behavioural findings are alert-only.** A learned anomaly is not a maliciousness probability. The checked-in evaluation is synthetic and contains false alerts and misses; there is no measured production false-positive rate.
 - **Rebinding exceptions require deployment knowledge.** Legitimate split-DNS/private answers need explicit exceptions; exceptions are not learned automatically from traffic.
 - **Recovery has explicit boundaries.** Backups capture consistent SQLite data and committed auxiliary files, not every in-flight observation. Restore is offline into a new directory; service/firewall/reverse-proxy configuration is not recreated.
@@ -297,24 +340,34 @@ Worth knowing before you rely on DNS Daddy:
 
 **[docs/capabilities.md](docs/capabilities.md)** is the authoritative capability map: available, experimental and planned.
 
-### Daddybound: native DNS plus local learning
+### Daddybound: local DNSSEC validation plus local learning
 
-Daddybound now has two distinct responsibilities: native DNS resolution and
+Daddybound has two distinct responsibilities: DNS resolution with local
 DNSSEC validation, and a local incremental model of client DNS behaviour.
 Cryptographic validation and statistical anomaly detection make different
 claims and remain visible as separate evidence.
 
-| Native mode | Client answer path | Behavior |
+| Mode | Client answer path | Behavior |
 | --- | --- | --- |
-| **Live** (`enforce`) | Daddybound authoritative recursion | Returns secure or proven-insecure answers; bogus, indeterminate and operational failures return SERVFAIL. Validation is bound to the records actually returned. |
-| **Learn** (`observe`) | Configured forwarding upstream | Resolves allowed names independently after their answers are decided and records native observations without changing those answers. |
-| **Off** (`off`) | Configured forwarding upstream | Stops native resolution and anchor refresh. Local policy, rate limiting and rebinding protection remain active. |
+| **Live** (`enforce`) | Native authoritative recursion, or approved encrypted recursive endpoints | Locally validates the records actually returned. With checking enabled, secure or proven-insecure answers can be served; bogus, indeterminate and operational failures return SERVFAIL. |
+| **Learn** (`observe`) | Legacy configured upstreams with the native profile; approved encrypted endpoints with the encrypted profile | Independently validates allowed names after their answers are decided. Observations cannot change those answers. Supporting lookups and anchor refresh use the selected profile. |
+| **Off** (`off`) | The profile's forwarding path | Stops Daddybound validation, observations and anchor refresh. An encrypted selection continues to encrypt forwarding. Local policy, rate limiting and rebinding protection remain active. |
 
 **Fresh installations default to Live.** Upgrades preserve recorded Off/Learn
 choices. Explicit YAML mode settings pin the choice; otherwise the dashboard
-can save an acknowledged mode change. Native authoritative traffic uses
-plaintext UDP/TCP port 53 with QNAME minimisation. A client DNSSEC CD request
-skips cryptographic checking only; policy and rebinding checks still apply.
+can save an acknowledged mode change. Transport is a separate persisted choice:
+native remains the default, while encrypted forwarding requires the operator's
+endpoints and acknowledgement. Native authoritative traffic uses plaintext
+UDP/TCP port 53 with QNAME minimisation. The encrypted profile supports outbound
+DoQ, HTTP/3 DoH and HTTP/2 DoH with TLS 1.3; these are not new inbound listeners.
+A client DNSSEC CD request skips cryptographic checking only; policy and
+rebinding checks still apply.
+
+Recorded provenance distinguishes `native_live` and `encrypted_live`
+observations, and `native` and `encrypted_forwarded` local query validation
+sources. Off/Learn client answers retain their upstream source. Changing the
+current profile never relabels older evidence. See
+[encrypted DNS](docs/encrypted-dns.md).
 
 The native engine implements DNS/DNSSEC protocol and trust logic in Go,
 using established cryptographic primitives and the DNS wire library. It
@@ -350,10 +403,16 @@ The 1 GB / 1 vCPU figure is a design target, not a fresh benchmark of native Liv
 
 Configuration is YAML with `DNSDADDY_*` environment variables taking precedence. Every option is documented in **[`dnsdaddy.example.yaml`](dnsdaddy.example.yaml)**.
 
-The example below explicitly selects Learn mode so these encrypted upstreams answer client queries. Omit the explicit mode only when the installation default or saved dashboard selection is intended.
+This example pins the native profile and Learn mode: the legacy DoT upstreams
+answer client queries, while Daddybound's independent observations use native
+plaintext authoritative DNS. It does not enable the encrypted profile for
+validation. Omit explicit mode/transport settings only when the installation
+default or saved dashboard selection is intended. See
+[encrypted-dns.md](docs/encrypted-dns.md) for the optional encrypted profile.
 
 ```yaml
 dns:
+  resolution_transport: native
   local_dnssec_validation: observe
   upstreams:
     - "tls://9.9.9.9:853#dns.quad9.net"
@@ -399,6 +458,7 @@ See:
 | [docs/detection/](docs/detection/) | Detection engineering and finding schema |
 | [docs/learning.md](docs/learning.md) | Local fitted baselines, privacy, warm-up and limitations |
 | [docs/external-apis.md](docs/external-apis.md) | Provider credentials, consent, modes and testing |
+| [docs/encrypted-dns.md](docs/encrypted-dns.md) | Optional encrypted outbound DNS, local Live validation and transport boundaries |
 | [docs/recovery.md](docs/recovery.md) | Configuration history and encrypted backup/restore |
 | [docs/exports.md](docs/exports.md) | Complete paginated exports and retention limits |
 | [docs/webhooks.md](docs/webhooks.md) | Signed asynchronous event delivery |

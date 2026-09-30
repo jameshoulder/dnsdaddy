@@ -37,6 +37,7 @@ type DNSSECAnchors interface {
 
 // dnssecStatus is the response.
 type dnssecStatus struct {
+	Transport    string                 `json:"transport"`
 	Mode         dnssecModeStatus       `json:"mode"`
 	Resolution   dnssecResolutionStatus `json:"resolution"`
 	Anchors      dnssecAnchorStatus     `json:"anchors"`
@@ -248,13 +249,17 @@ func (a *API) handleDNSSECStatus(w http.ResponseWriter, r *http.Request) {
 
 	out := dnssecStatus{Experimental: true, Enforcing: false, MeasuredAt: now}
 	state := a.dnssecState()
+	out.Transport = state.Transport
+	if out.Transport == "" {
+		out.Transport = config.ResolutionNative
+	}
 	out.Mode = a.dnssecModeStatus(state)
 	out.Enforcing = out.Mode.Enforcing
 	out.Resolution = a.dnssecResolutionStatus(state)
 	out.Anchors = a.dnssecAnchorStatus(state)
 	out.Runtime = a.dnssecRuntimeStatus(now, state)
 	out.Native = dnssecNativeStatus{ClientStats: state.Native, Available: state.NativeAvailable,
-		Enforcing: out.Enforcing, Peak: state.Native.InflightPeak, CounterScope: "native counters since activation; stored/lost/write counters since process start",
+		Enforcing: out.Enforcing, Peak: state.Native.InflightPeak, CounterScope: "local validation counters since activation; stored/lost/write counters since process start",
 		Stored: state.NativeWriter.Written, Unrecorded: state.NativeWriter.Dropped, WriteErrors: state.NativeWriter.Errors}
 
 	summary, err := a.Store.DNSSECObservationSummarySince(ctx, since)
@@ -319,6 +324,9 @@ func (a *API) dnssecModeStatus(states ...DNSSECRuntimeState) dnssecModeStatus {
 	m.Live.Enforcing = m.Enforcing
 	if m.Live.Available {
 		m.Live.Reason = "Daddybound resolves and validates the exact answer natively. Live rejects failed validation and never falls back to an upstream. Native UDP/TCP 53 is plaintext; field reliability remains under evaluation."
+		if state.Transport == config.ResolutionEncrypted {
+			m.Live.Reason = "Daddybound validates the exact answer obtained from approved encrypted resolvers. Live rejects failed validation; DNS traffic uses authenticated TLS 1.3 with no plaintext fallback. Field reliability remains under evaluation."
+		}
 	} else {
 		m.Live.Reason = "Native runtime control is unavailable in this process."
 	}
@@ -328,6 +336,22 @@ func (a *API) dnssecModeStatus(states ...DNSSECRuntimeState) dnssecModeStatus {
 func (a *API) dnssecResolutionStatus(states ...DNSSECRuntimeState) dnssecResolutionStatus {
 	state := a.selectedDNSSECState(states)
 	res := dnssecResolutionStatus{ClientPath: "clients are answered by the forwarding resolver through the configured upstreams (" + a.Config.DNS.UpstreamMode + ")"}
+	if state.Transport == config.ResolutionEncrypted {
+		res.Source = "encrypted_forwarded"
+		res.Transport = "authenticated TLS 1.3 via approved DoQ, DoH over HTTP/3 or DoH over HTTP/2 endpoints; literal-IP bootstrap; no plaintext fallback"
+		res.ClientPath = "approved encrypted resolvers with ordered encrypted-only failover"
+		switch state.Effective {
+		case config.LocalDNSSECEnforce:
+			res.ClientPath = "Daddybound locally validates the exact answer received through approved encrypted resolvers"
+			res.Note = "Live accepts locally authenticated secure or proven insecure answers. Bogus, indeterminate and operational failures return SERVFAIL. CD disables DNSSEC checking only; local policy and rebinding protection still apply. The resolver provider can see forwarded names."
+		case config.LocalDNSSECObserve:
+			res.Note = "Learn observes independently through the same encrypted endpoints after the client answer is decided. Supporting DNSSEC queries and trust-anchor refresh remain encrypted. Observations cannot change the answer."
+		default:
+			res.Source = "none"
+			res.Note = "Daddybound validation and trust-anchor refresh are off. DNS answers and background hostname lookups still use the encrypted endpoints; local policy, rate limiting and rebinding protection remain active."
+		}
+		return res
+	}
 	if state.Effective == config.LocalDNSSECOff {
 		res.Source = "none"
 		res.Transport = "none: Daddybound is off and sends no native DNS traffic"
@@ -523,6 +547,8 @@ func dnssecPopulations(cells []store.DNSSECPopulationCell) []dnssecPopulation {
 	out := make([]dnssecPopulation, 0, len(groups))
 	for _, g := range groups {
 		switch {
+		case g.Resolution == "native_live" || g.Resolution == "encrypted_live":
+			g.Note = "the local validation result for the exact answer used by the serving path; there is no independent upstream comparison"
 		case !g.Comparable:
 			g.Note = "not comparable: an operational outcome, or an upstream that asserted nothing; " +
 				"these rows cannot disagree with anything and are never counted as one"

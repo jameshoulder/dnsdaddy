@@ -475,6 +475,7 @@ func (a *API) handleCategories(w http.ResponseWriter, r *http.Request) {
 
 // ResolverInfo tells an operator exactly what to type into their firewall.
 type ResolverInfo struct {
+	Transport string            `json:"transport"`
 	ListenUDP string            `json:"listenUdp"`
 	ListenTCP string            `json:"listenTcp"`
 	ListenDoT string            `json:"listenDot"`
@@ -513,6 +514,7 @@ func (a *API) handleResolvers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := ResolverInfo{
+		Transport: a.transportState().Transport,
 		ListenUDP: a.Config.DNS.ListenUDP,
 		ListenTCP: a.Config.DNS.ListenTCP,
 		ListenDoT: a.Config.DNS.ListenDoT,
@@ -529,6 +531,17 @@ func (a *API) handleResolvers(w http.ResponseWriter, r *http.Request) {
 			Errors:       e,
 			AvgLatencyMS: round2(avg),
 		})
+	}
+	if transport := a.transportState(); transport.EncryptedOnly {
+		info.Upstreams = nil
+		if transport.Stats != nil {
+			for _, e := range transport.Stats.Endpoints {
+				info.Upstreams = append(info.Upstreams, UpstreamStatus{
+					Spec: e.Address, Protocol: e.Protocol, Address: e.Address,
+					Queries: e.Attempts, Errors: e.Failures,
+				})
+			}
+		}
 	}
 
 	networks, err := a.Store.ListNetworks(r.Context())
@@ -559,16 +572,17 @@ func (a *API) handleResolvers(w http.ResponseWriter, r *http.Request) {
 // read-only: configuration lives in the YAML file and environment so that a
 // deployment is reproducible from its config, not from database state.
 type Settings struct {
-	Version         string  `json:"version"`
-	DataDir         string  `json:"dataDir"`
-	QueryLog        bool    `json:"queryLog"`
-	LogClientIP     bool    `json:"logClientIp"`
-	RetentionDays   int     `json:"retentionDays"`
-	RollupDays      int     `json:"rollupDays"`
-	CacheEnabled    bool    `json:"cacheEnabled"`
-	CacheMaxEntries int     `json:"cacheMaxEntries"`
-	CacheEntries    int     `json:"cacheEntries"`
-	CacheHitRate    float64 `json:"cacheHitRate"`
+	ResolutionTransport string  `json:"resolutionTransport"`
+	Version             string  `json:"version"`
+	DataDir             string  `json:"dataDir"`
+	QueryLog            bool    `json:"queryLog"`
+	LogClientIP         bool    `json:"logClientIp"`
+	RetentionDays       int     `json:"retentionDays"`
+	RollupDays          int     `json:"rollupDays"`
+	CacheEnabled        bool    `json:"cacheEnabled"`
+	CacheMaxEntries     int     `json:"cacheMaxEntries"`
+	CacheEntries        int     `json:"cacheEntries"`
+	CacheHitRate        float64 `json:"cacheHitRate"`
 	// Lookups is what makes CacheHitRate readable. A rate of 0 means one of
 	// two very different things — the cache answered none of the lookups it
 	// saw, or it has not seen any — and without the denominator the dashboard
@@ -600,23 +614,24 @@ func (a *API) handleSettings(w http.ResponseWriter, r *http.Request) {
 	runtime.ReadMemStats(&ms)
 
 	writeJSON(w, http.StatusOK, Settings{
-		Version:         version.String(),
-		DataDir:         a.Config.DataDir,
-		QueryLog:        a.Config.Log.QueryLog,
-		LogClientIP:     a.Config.Log.LogClientIP,
-		RetentionDays:   a.Config.Log.RetentionDays,
-		RollupDays:      a.Config.Log.RollupDays,
-		CacheEnabled:    a.Config.Cache.Enabled,
-		CacheMaxEntries: a.Config.Cache.MaxEntries,
-		CacheEntries:    size,
-		CacheHitRate:    round2(hitRate),
-		CacheLookups:    hits + misses,
-		FeedRefresh:     a.Config.Feeds.RefreshInterval.String(),
-		UpstreamMode:    a.Config.DNS.UpstreamMode,
-		QueryLogRows:    rows,
-		MemoryMB:        round2(float64(ms.Sys) / (1 << 20)),
-		Goroutines:      runtime.NumGoroutine(),
-		UptimeSeconds:   int64(time.Since(a.StartedAt).Seconds()),
+		ResolutionTransport: a.transportState().Transport,
+		Version:             version.String(),
+		DataDir:             a.Config.DataDir,
+		QueryLog:            a.Config.Log.QueryLog,
+		LogClientIP:         a.Config.Log.LogClientIP,
+		RetentionDays:       a.Config.Log.RetentionDays,
+		RollupDays:          a.Config.Log.RollupDays,
+		CacheEnabled:        a.Config.Cache.Enabled,
+		CacheMaxEntries:     a.Config.Cache.MaxEntries,
+		CacheEntries:        size,
+		CacheHitRate:        round2(hitRate),
+		CacheLookups:        hits + misses,
+		FeedRefresh:         a.Config.Feeds.RefreshInterval.String(),
+		UpstreamMode:        a.Config.DNS.UpstreamMode,
+		QueryLogRows:        rows,
+		MemoryMB:            round2(float64(ms.Sys) / (1 << 20)),
+		Goroutines:          runtime.NumGoroutine(),
+		UptimeSeconds:       int64(time.Since(a.StartedAt).Seconds()),
 	})
 }
 

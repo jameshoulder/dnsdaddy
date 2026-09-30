@@ -568,6 +568,51 @@ function copyBlock(text) {
   `;
 }
 
+function serverAddressRow(address, { featured = false, label = '' } = {}) {
+  const labels = { private: 'Private network', public: 'Public address', loopback: 'This machine only', link_local: 'Link-local' };
+  const endpoints = Array.isArray(address.dns) ? address.dns : [];
+  const portable = endpoints.length > 0 && address.type !== 'link_local';
+  const ports = endpoints.map((endpoint) => `${String(endpoint.transport || '').toUpperCase()} ${endpoint.port}`).join(' · ');
+  return html`<div class="server-address ${featured ? 'server-address-featured' : ''}">
+    <div class="server-address-main">${raw(label ? html`<p class="small muted">${label}</p>` : '')}<div class="server-address-value"><span class="mono">${address.address}</span>
+      <span class="badge">${address.family === 'ipv6' ? 'IPv6' : address.family === 'ipv4' ? 'IPv4' : 'IP'}</span></div>
+      <p class="small muted">${labels[address.type] || 'Unknown address scope'}${address.interface ? ` · ${address.interface}` : ''}${ports ? ` · ${ports}` : ''}</p>
+      ${raw(address.type === 'loopback' ? html`<p class="small rec-note is-warn">Other devices cannot use this loopback address.</p>` : '')}
+      ${raw(!portable ? html`<p class="small muted">${address.type === 'link_local' ? 'A link-local address needs the client’s network-interface scope. No portable endpoint is offered.' : 'No configured DNS listener matches this address.'}</p>` : '')}
+    </div>
+    ${raw(portable ? html`<button type="button" class="btn ${featured ? 'btn-primary' : 'btn-ghost'} btn-sm" data-copy="${address.address}" aria-label="Copy IP address ${address.address}">Copy IP</button>` : '')}
+  </div>`;
+}
+
+function serverAddressesCard(data) {
+  if (!data) return html`<section class="card section server-address-card" aria-labelledby="server-address-title"><div class="card-head"><div><h2 id="server-address-title">Server IP addresses</h2><p>Addresses for configuring your DNS clients.</p></div><a class="btn btn-ghost btn-sm" href="#/setup">Connection setup</a></div>
+    ${raw(unavailableState('Server addresses unavailable', 'The server could not report its local interface addresses. No address is inferred from this browser’s location.'))}</section>`;
+  const addresses = Array.isArray(data.addresses) ? data.addresses : [];
+  const preferred = addresses.find((address) => address.address === data.preferredAddress && ['private', 'public'].includes(address.type) && (address.dns || []).length);
+  // Show a known local address even when none can be recommended to another
+  // device. Visibility must not promote loopback or an unmatched interface
+  // into a preferred LAN destination.
+  const displayed = preferred || addresses.find((address) => address.type !== 'link_local' && (address.dns || []).length) || addresses[0];
+  const displayedLabel = preferred ? '' : displayed && displayed.type === 'loopback' ? 'Host-only IP' : data.source === 'connection_local_address' ? 'Local connection IP' : 'Detected IP';
+  const others = addresses.filter((address) => address !== displayed);
+  const listeners = Array.isArray(data.listeners) ? data.listeners : [];
+  const hasNonstandardDNSPort = displayed && (displayed.dns || []).some((endpoint) => ['udp', 'tcp'].includes(endpoint.transport) && endpoint.port !== 53);
+  return html`<section class="card section server-address-card" aria-labelledby="server-address-title"><div class="card-head"><div><div class="card-eyebrow">Connect your devices</div><h2 id="server-address-title">Server IP addresses</h2></div><a class="btn btn-ghost btn-sm" href="#/setup">Connection setup</a></div>
+    ${raw(displayed ? serverAddressRow(displayed, { featured: true, label: displayedLabel }) : '')}
+    ${raw(!preferred ? html`<p class="notice-inline">No LAN or public address matching a DNS listener was identified. Review the available interfaces and configured listeners below.</p>` : '')}
+    <p class="small muted server-address-note">${data.source === 'connection_local_address' ? 'Reported by this dashboard connection’s local socket; other interfaces could not be enumerated.' : 'Detected on this server’s interfaces; reachability has not been tested.'} Containers, NAT and port mappings may require a different host address.</p>
+    ${raw(hasNonstandardDNSPort ? html`<p class="small rec-note is-warn">DNS is using a non-standard port. Copy IP copies the address only; configure the displayed port separately on clients that support it.</p>` : '')}
+    ${raw(data.partial || data.truncated ? html`<p class="small rec-note is-warn">${data.partial ? 'Some interfaces could not be read. ' : ''}${data.truncated ? `The address list is limited to ${data.limit || 32} entries. ` : ''}This list may be incomplete.</p>` : '')}
+    <details class="server-address-details"><summary>All addresses, listeners and connection notes</summary>
+      ${raw(others.length ? html`<div class="server-address-list">${raw(others.map((address) => serverAddressRow(address)).join(''))}</div>` : !displayed ? html`<p class="small muted">No local interface address was returned.</p>` : '')}
+      ${raw(listeners.length ? html`<div class="table-wrap note-tight"><table><thead><tr><th>Client transport</th><th>Configured listener</th><th>Binding</th></tr></thead><tbody>${raw(listeners.map((listener) => html`<tr>
+        <td>${listener.transport === 'dot' ? 'DNS-over-TLS' : String(listener.transport || '').toUpperCase()}</td><td class="mono small">${listener.listen || 'Not configured'}</td><td>${listener.enabled ? listener.binding : 'Disabled'}</td></tr>`).join(''))}</tbody></table></div>` : '')}
+      ${(data.notes || []).length ? raw(html`<ul class="compact-list">${raw(data.notes.map((note) => html`<li>${note}</li>`).join(''))}</ul>`) : ''}
+      <p class="small muted">These are listener-compatible candidates, not reachability probes. Client permission, firewall rules and TLS hostname checks still apply.</p>
+    </details>
+  </section>`;
+}
+
 /* ---------- Feed refresh and health ------------------------------------- */
 
 /**
@@ -1169,7 +1214,7 @@ pages.dashboard = {
       if (err.status === 401 || err.name === 'AbortError') throw err;
       return null;
     });
-    const [overview, activity, categories, recent, feeds, diagnostics, detections, native, learning] = await Promise.all([
+    const [overview, activity, categories, recent, feeds, diagnostics, detections, native, learning, addresses] = await Promise.all([
       read('/overview'),
       optional('/activity/queries?hours=24'),
       optional('/threats/categories?hours=24'),
@@ -1179,6 +1224,7 @@ pages.dashboard = {
       optional('/findings/summary?days=1'),
       optional('/dnssec/status?hours=24'),
       optional('/learning/status'),
+      optional('/server-addresses'),
     ]);
     if (!context.isCurrent || context.isCurrent()) this.feeds = feeds;
 
@@ -1197,6 +1243,7 @@ pages.dashboard = {
     return html`
       <div class="overview-workspace">
         ${raw(statusHero(overview, feeds, detections))}
+        ${raw(serverAddressesCard(addresses))}
         ${raw(nativeOverview(native, learning))}
         <div class="overview-primary">
           <section class="card overview-activity">
@@ -1440,18 +1487,16 @@ pages.threats = {
 };
 
 /*
- * DNSSEC status as reported by the upstream resolver.
- *
- * Deliberately cautious wording. DNS Daddy forwards rather than validating
- * locally, so "validated" means the upstream said so, and "unvalidated" covers
- * both an unsigned zone and an upstream that does not validate — a forwarder
- * cannot tell those apart. See docs/dnssec.md.
+ * The answer's recorded authenticated-data status and validation source.
+ * Historical records must never inherit the currently selected transport.
+ * Legacy records without a source can report AD, but cannot attribute it.
  */
 function dnssecBadge(status, source = 'unknown') {
-  const origin = source === 'native' ? 'Daddybound' : source === 'upstream' ? 'The upstream resolver' : 'The recorded answer';
+  const locallyValidated = source === 'native' || source === 'encrypted_forwarded';
+  const origin = source === 'native' ? 'Daddybound' : source === 'encrypted_forwarded' ? 'Daddybound over encrypted forwarding' : source === 'upstream' ? 'The upstream resolver' : 'The recorded answer';
   const map = {
     validated: [source === 'unknown' ? 'info' : 'ok', source === 'unknown' ? 'AD reported' : 'validated', source === 'unknown' ? 'The answer carried an authenticated-data flag, but its validation source was not recorded.' : `${origin} reported a DNSSEC-validated answer.`],
-    unvalidated: ['', 'unvalidated', source === 'native' ? 'No authenticated-data flag: the answer may be unsigned, or the client may have requested checking disabled.' : source === 'upstream' ? 'No AD bit came back: either the zone is unsigned or the upstream did not validate.' : 'No authenticated-data flag was recorded. The validation source is unknown.'],
+    unvalidated: ['', 'unvalidated', locallyValidated ? 'No authenticated-data flag: the answer may be unsigned, or the client may have requested checking disabled.' : source === 'upstream' ? 'No AD bit came back: either the zone is unsigned or the upstream did not validate.' : 'No authenticated-data flag was recorded. The validation source is unknown.'],
     servfail: ['bad', 'servfail', `${origin} could not answer. Check the recorded reason: failed or inconclusive validation is one possible cause.`],
   };
   const entry = map[status];
@@ -1460,24 +1505,16 @@ function dnssecBadge(status, source = 'unknown') {
 }
 
 /*
- * What DNS Daddy's own validator concluded, as distinct from what the upstream
- * asserted.
- *
- * Kept visually and verbally separate from dnssecBadge on purpose. They are
- * different measurements — one is "the upstream said so", the other is "we
- * checked" — and merging them into a single "DNSSEC: secure" would claim an
- * assurance neither alone supports.
- *
- * Every label carries "observe", because that is the load-bearing fact. A
- * reader who sees "bogus" and does not also see that nothing was blocked has
- * been misled by the interface.
+ * Daddybound's recorded verdict. Only explicit Live provenance establishes
+ * answer-path validation; sampled Learn records never claim enforcement.
  */
 function localDnssecBadge(v) {
-  const live = v.resolution === 'native_live';
+  const live = v.resolution === 'native_live' || v.resolution === 'encrypted_live';
+  const pathLabel = v.resolution === 'encrypted_live' ? 'Encrypted Live validation' : v.resolution === 'native_live' ? 'Native Live validation' : v.resolution === 'encrypted_forwarded' ? 'Encrypted Learn observation, nothing blocked' : 'Learn mode, nothing blocked';
   const map = {
     secure: ['ok', 'secure', 'Daddybound authenticated this answer against the DNSSEC chain of trust.'],
     insecure: ['', 'insecure', 'Daddybound proved this name lies in an unsigned part of the DNS.'],
-    bogus: ['bad', 'bogus', live ? 'Native DNSSEC validation rejected this answer.' : 'Daddybound could not authenticate this answer. Nothing was blocked: Learn mode records verdicts only.'],
+    bogus: ['bad', 'bogus', live ? 'Daddybound local DNSSEC validation rejected this answer.' : 'Daddybound could not authenticate this answer. Nothing was blocked: Learn mode records verdicts only.'],
     indeterminate: ['', 'indeterminate', 'Daddybound could not decide.'],
     timeout: ['', 'timeout', 'Validation ran out of time. This says nothing about the answer.'],
     resource_limit: ['', 'limit reached', 'Validation hit an internal bound. This says nothing about the answer.'],
@@ -1488,7 +1525,7 @@ function localDnssecBadge(v) {
   if (!entry) return html`<span class="muted">—</span>`;
   const [cls, text, title] = entry;
 
-  const note = v.disagreement
+  const note = !live && v.disagreement
     ? html` <span class="badge warn" title="The local verdict and the upstream's assertion differ. Recorded, not acted on.">differs from upstream</span>`
     : '';
   const stale = v.cached
@@ -1500,7 +1537,7 @@ function localDnssecBadge(v) {
   // reader who takes it as evidence the answer was refused has been misled
   // about what their resolver did.
   return html`<span class="badge ${cls}" title="${title}">${text}</span>`
-    + html`<span class="muted"> · ${live ? 'Native Live validation' : 'Learn mode, nothing blocked'}</span>`
+    + html`<span class="muted"> · ${pathLabel}</span>`
     + note + stale;
 }
 
@@ -1560,8 +1597,8 @@ function queryRow(q, filters = {}) {
     ['Reason', q.reason ? html`${q.reason}` : ''],
     ['Category', q.category ? categoryBadge(q.category) : ''],
     ['Source', q.source ? html`${q.source}` : ''],
-    [q.dnssecSource === 'native' ? 'DNSSEC (native — Daddybound)' : q.dnssecSource === 'upstream' ? 'DNSSEC (upstream)' : 'DNSSEC (source unrecorded)', q.dnssec ? dnssecBadge(q.dnssec, q.dnssecSource || 'unknown') : ''],
-    [q.dnssecValidation && q.dnssecValidation.resolution === 'native_live' ? 'Native validation outcome' : 'DNSSEC (local — Daddybound)', q.dnssecValidation ? localDnssecBadge(q.dnssecValidation) : ''],
+    [q.dnssecSource === 'native' ? 'DNSSEC (native — Daddybound)' : q.dnssecSource === 'encrypted_forwarded' ? 'DNSSEC (encrypted forwarding — Daddybound)' : q.dnssecSource === 'upstream' ? 'DNSSEC (upstream)' : 'DNSSEC (source unrecorded)', q.dnssec ? dnssecBadge(q.dnssec, q.dnssecSource || 'unknown') : ''],
+    [q.dnssecValidation && q.dnssecValidation.resolution === 'native_live' ? 'Native validation outcome' : q.dnssecValidation && q.dnssecValidation.resolution === 'encrypted_live' ? 'Encrypted validation outcome' : 'DNSSEC (local — Daddybound)', q.dnssecValidation ? localDnssecBadge(q.dnssecValidation) : ''],
     ['Cache hit', typeof q.cached === 'boolean' ? (q.cached ? 'Yes' : 'No') : ''],
     ['Took', typeof q.elapsedMs === 'number' ? html`${q.elapsedMs} ms` : ''],
     ['Time', q.time ? html`${new Date(q.time).toLocaleString('en-GB')}` : ''],
@@ -2619,10 +2656,10 @@ function observationsSection(ob) {
               <tbody>${raw(items.map((o) => html`<tr>
                 <td class="muted">${relTime(o.time)}${o.cached ? ' (cached answer)' : ''}</td>
                 <td class="mono">${o.qtype}</td>
-                <td>${o.resolution === 'native_live' ? 'Native Live' : 'Learn observation'}</td>
-                <td>${raw(o.resolution === 'native_live' ? 'Not applicable' : o.upstream ? dnssecBadge(o.upstream, 'upstream') : '—')}</td>
+                <td>${o.resolution === 'native_live' ? 'Native Live' : o.resolution === 'encrypted_live' ? 'Encrypted Live' : o.resolution === 'encrypted_forwarded' ? 'Encrypted Learn observation' : 'Learn observation'}</td>
+                <td>${raw(o.resolution === 'native_live' || o.resolution === 'encrypted_live' ? 'Not applicable' : o.upstream ? dnssecBadge(o.upstream, 'upstream') : '—')}</td>
                 <td>${raw(localDnssecBadge(o))}</td>
-                <td>${o.disagreement || '—'}</td>
+                <td>${o.resolution === 'native_live' || o.resolution === 'encrypted_live' ? 'Not applicable' : o.disagreement || '—'}</td>
                 <td class="muted small">${o.reason || ''}</td></tr>`).join(''))}
               </tbody></table></div>${raw(ob.truncated ? html`<p class="muted small">Only the newest observations are shown.</p>` : '')}`
           : emptyState('No observation for this name', 'No retained local validation record matches this name and window. Missing records do not establish a validation result.', { icon: '○' }))}
@@ -4041,26 +4078,31 @@ async function mountWebhooks() {
 pages.setup = {
   title: 'Setup',
   subtitle: 'Point your network here.',
-  async render() {
-    const [info, networks] = await Promise.all([apiGet('/resolvers'), apiGet('/networks')]);
+  async render(context = {}) {
+    const [info, networks, addresses] = await Promise.all([apiGet('/resolvers'), apiGet('/networks'), apiGet('/server-addresses', { signal: context.signal }).catch((error) => {
+      if (error.status === 401 || error.name === 'AbortError') throw error;
+      return null;
+    })]);
     const port = (listen) => (listen || '').split(':').pop() || '53';
 
     return html`
+      ${raw(serverAddressesCard(addresses))}
       <div class="card section">
         <div class="card-head">
-          <div><h2>Resolver addresses</h2>
-          <p>Set these as the DNS servers on your firewall, DHCP scope, or router.
-             Replace the host with this server's LAN or public IP.</p></div>
+          <div><h2>Client connection setup</h2>
+          <p>Use a compatible server address above in your firewall, DHCP scope or router. Client permission is configured separately from the listener.</p></div>
         </div>
-        ${raw(copyBlock(`Plain DNS (UDP/TCP), port ${port(info.listenUdp)}`))}
+        <p class="small muted">Plain DNS (UDP/TCP), port ${port(info.listenUdp)}</p>
         ${raw(resolverAccessNote(networks.clientAccess))}
         <p class="muted small note-tight">
           On pfSense: <em>System → General Setup → DNS Servers</em>.
           On UniFi: <em>Settings → Networks → your LAN → DHCP Name Server</em>.
           Then block outbound port 53 to everything else so devices cannot skip past it.
         </p>
-        ${raw(info.listenDot ? html`<div class="note-loose">${raw(copyBlock(`DNS-over-TLS: port ${port(info.listenDot)}`))}</div>` : '')}
+        ${raw(info.listenDot ? html`<p class="small muted note-loose">DNS-over-TLS: port ${port(info.listenDot)}. Clients must use a hostname that matches this server’s TLS certificate.</p>` : '')}
       </div>
+
+      <div class="card section integration-cta"><div><h2>Upstream transport</h2><p class="muted">Choose native iterative resolution or your own encrypted DNS forwarders. This outbound connection is separate from how devices connect to DNS Daddy.</p></div><a class="btn btn-observe" href="#/daddybound">Configure DNS transport</a></div>
 
       <div class="card section">
         <div class="card-head">
@@ -4090,7 +4132,7 @@ pages.setup = {
       </div>
 
       <div class="card">
-        <div class="card-head"><div><h2>Upstream resolvers</h2><p>Where DNS Daddy forwards what it does not block.</p></div></div>
+        <div class="card-head"><div><h2>${info.transport === 'encrypted' ? 'Encrypted forwarding endpoints' : 'Configured forwarding upstreams'}</h2><p>${info.transport === 'encrypted' ? 'The configured encrypted path. Daddybound reports local DNSSEC validation separately.' : 'Forwarding configuration and its recorded activity. Native iterative resolution uses its own authoritative path.'}</p></div></div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Upstream</th><th>Protocol</th><th class="num">Queries</th>
@@ -4101,7 +4143,7 @@ pages.setup = {
                   .map(
                     (u) => html`<tr>
                       <td class="mono">${u.spec}</td>
-                      <td>${raw(u.protocol === 'tls' || u.protocol === 'https'
+                      <td>${raw(['tls', 'https', 'doq', 'doh3', 'doh2'].includes(u.protocol)
                         ? html`<span class="badge ok">${u.protocol} · encrypted</span>`
                         : html`<span class="badge warn">${u.protocol} · plaintext</span>`)}</td>
                       <td class="num">${num(u.queries)}</td>
@@ -4109,7 +4151,7 @@ pages.setup = {
                       <!-- No queries means no samples, and no samples is not
                            zero milliseconds. An em dash says nothing was
                            measured; "0 ms" claims an impossibly fast upstream. -->
-                      <td class="num">${raw(u.queries ? html`${u.avgLatencyMs} ms` : html`<span class="muted">&mdash;</span>`)}</td>
+                      <td class="num">${raw(u.queries && u.avgLatencyMs > 0 ? html`${u.avgLatencyMs} ms` : html`<span class="muted" title="Latency not measured">&mdash;</span>`)}</td>
                     </tr>`
                   )
                   .join('')
@@ -4475,7 +4517,7 @@ function daddyboundStatusCard(status) {
   return html`
     <div class="card section" id="daddybound-status">
       <div class="card-head"><div>
-        <div class="card-eyebrow">Experimental · ${mode.enforcing ? 'native enforcement' : mode.effective === 'observe' ? 'observation only' : 'native validation off'}</div>
+        <div class="card-eyebrow">Experimental · ${mode.enforcing ? 'local DNSSEC enforcement' : mode.effective === 'observe' ? 'observation only' : 'local validation off'}</div>
         <h2>Daddybound runtime ${raw(claimChip('experimental'))}</h2>
         <p>What the process holds about local validation, with each figure's scope named. Reading this page resolves nothing and changes no trust state.</p>
       </div></div>
@@ -4505,7 +4547,7 @@ function daddyboundStatusCard(status) {
             ${raw(stat(learnActive ? 'Health' : 'Last recorded health', html`<span class="badge ${rt.health === 'ok' ? 'ok' : rt.health === 'degraded' ? 'warn' : ''}">${rt.health}</span>`, rt.healthNote || ''))}
             ${raw(stat('Observed', html`<span class="mono">${n(rt.observed)}</span>`, `${n(rt.dropped)} not observed (queue saturation, stopped submissions or shutdown discards) · ${n(rt.unrecorded)} lost before storage · ${n(rt.writeErrors)} write errors`))}
             ${raw(stat('Could not conclude', html`<span class="mono">${n(rt.timeouts)} timeout · ${n(rt.resourceLimit)} limit · ${n(rt.unreachable)} unreachable</span>`, 'operational outcomes, not DNSSEC states'))}
-            ${raw(stat('Native work', html`<span class="mono">${n(rt.queries)}</span> queries to authoritative servers`, `${n(rt.delegations)} zone cuts crossed`))}
+            ${raw(stat('Validation work', html`<span class="mono">${n(rt.queries)}</span> DNS queries`, `${n(rt.delegations)} zone cuts crossed`))}
             ${raw(rt.panics ? stat('Observer defects', html`<span class="badge bad">${n(rt.panics)} contained panics</span>`, 'within this Learn activation; a validator defect to report') : '')}
             ${raw(rt.seamPanics ? stat('Observation dispatch defects', html`<span class="badge bad">${n(rt.seamPanics)} contained panics</span>`, 'since this process started; a resolver defect to report') : '')}
           </dl>`)}
@@ -4544,6 +4586,218 @@ function daddyboundStatusCard(status) {
 
 /* ---------- Native resolution and local traffic learning ---------------- */
 
+const DNS_TRANSPORT_PROTOCOLS = {
+  doq: { label: 'DoQ · DNS over QUIC', placeholder: 'resolver.example:853', hint: 'A hostname or IP address, with an optional port. DoQ uses UDP port 853 by default.' },
+  doh3: { label: 'DoH · HTTP/3', placeholder: 'https://resolver.example/dns-query', hint: 'An HTTPS DNS endpoint. HTTP/3 is required; this endpoint does not fall back to HTTP/2 or HTTP/1.' },
+  doh2: { label: 'DoH · HTTP/2', placeholder: 'https://resolver.example/dns-query', hint: 'An HTTPS DNS endpoint. HTTP/2 is required; this endpoint does not fall back to HTTP/1.' },
+};
+
+function transportConsentError(transport, currentTransport, acknowledgeForwarding, acknowledgeNativeTransport) {
+  if (transport === 'encrypted' && !acknowledgeForwarding) return 'Agree to send DNS queries to your configured forwarders before saving or testing them.';
+  if (transport === 'native' && currentTransport === 'encrypted' && !acknowledgeNativeTransport) return 'Acknowledge the unencrypted authoritative DNS transport before switching to native resolution.';
+  return '';
+}
+
+function transportEndpointFields(endpoint = {}, index = 0) {
+  const protocol = DNS_TRANSPORT_PROTOCOLS[endpoint.protocol];
+  return html`<fieldset class="transport-endpoint" data-forwarder><legend>Forwarder <span data-forwarder-number>${index + 1}</span></legend>
+    <div class="grid grid-2"><label class="field"><span>Protocol</span><select name="protocol" required data-endpoint-protocol>
+      <option value="" disabled ${raw(protocol ? '' : 'selected')}>Choose a protocol</option>
+      ${raw(Object.entries(DNS_TRANSPORT_PROTOCOLS).map(([value, option]) => html`<option value="${value}" ${raw(endpoint.protocol === value ? 'selected' : '')}>${option.label}</option>`).join(''))}</select></label>
+      <label class="field"><span>Endpoint address</span><input name="address" value="${endpoint.address || ''}" placeholder="${protocol ? protocol.placeholder : 'Choose the protocol first'}" autocomplete="off" spellcheck="false" required maxlength="2048">
+        <span class="small muted" data-endpoint-hint>${protocol ? protocol.hint : 'Enter an endpoint you have chosen. No public provider is preselected.'}</span></label>
+      <label class="field"><span>TLS server name <span class="muted">(optional)</span></span><input name="serverName" value="${endpoint.serverName || ''}" placeholder="resolver.example" autocomplete="off" spellcheck="false" maxlength="253">
+        <span class="small muted">Defaults to the address host. The certificate name and trust chain must verify.</span></label>
+      <label class="field"><span>Bootstrap IP addresses</span><textarea name="bootstrapIPs" rows="2" placeholder="203.0.113.53&#10;2001:db8::53" spellcheck="false">${(endpoint.bootstrapIPs || []).join('\n')}</textarea>
+        <span class="small muted">For a hostname, provide 1–8 literal IPs, one per line. This avoids a plaintext DNS lookup to find the forwarder. A literal-IP endpoint can dial itself.</span></label>
+    </div>
+    <div class="row transport-endpoint-actions"><button type="button" class="btn btn-ghost btn-sm" data-transport-action="up" aria-label="Move forwarder ${index + 1} earlier">Move up</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-transport-action="down" aria-label="Move forwarder ${index + 1} later">Move down</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-transport-action="remove" aria-label="Remove forwarder ${index + 1}">Remove</button></div>
+  </fieldset>`;
+}
+
+function negotiatedTLS(version) {
+  if (version === undefined || version === null || version === '' || version === 0) return 'Not observed';
+  return version === 772 || version === '1.3' ? 'TLS 1.3' : String(version);
+}
+
+function encryptedTransportStats(stats, { test = false } = {}) {
+  if (!stats) return html`<p class="small muted">No encrypted transport counters are available for this runtime.</p>`;
+  const endpoints = stats.endpoints || [];
+  return html`<div class="encrypted-transport-stats"><div class="rec-meta"><span>${num(stats.queries)} ${stats.queries === 1 ? 'request' : 'requests'}</span><span>${num(stats.successes)} successful</span><span>${num(stats.failures)} failed</span>
+    <span>${num(stats.rejected)} rejected</span><span>${num(stats.failovers)} failovers</span><span>${num(stats.inFlight)} in flight</span></div>
+    ${raw(endpoints.length ? html`<div class="table-wrap note-tight"><table><thead><tr><th>Endpoint</th><th>Attempts / successes</th><th>Failures</th><th>Last observed TLS</th><th>Last result</th></tr></thead><tbody>${raw(endpoints.map((endpoint) => html`<tr>
+      <td><strong>${(DNS_TRANSPORT_PROTOCOLS[endpoint.protocol] || {}).label || endpoint.protocol}</strong><div class="mono small">${endpoint.address}</div><div class="small muted">TLS name: ${endpoint.serverName || 'Address host'}</div></td>
+      <td>${num(endpoint.attempts)} / ${num(endpoint.successes)}${raw(!endpoint.attempts ? html`<div class="small muted">Not attempted</div>` : '')}</td><td>${num(endpoint.failures)}<div class="small muted">${num(endpoint.dialFailures)} connection failures</div></td>
+      <td>${negotiatedTLS(endpoint.tlsVersion)}${raw(endpoint.remoteAddress ? html`<div class="mono small">${endpoint.remoteAddress}</div>` : '')}</td>
+      <td>${raw(endpoint.lastError ? html`<span class="rec-note is-warn">${endpoint.lastError}</span>` : html`<span class="small muted">${endpoint.successes && endpoint.lastSuccess && !String(endpoint.lastSuccess).startsWith('0001-01-01') ? `Last success ${relTime(endpoint.lastSuccess)}` : 'No successful request time recorded'}</span>`)}</td>
+    </tr>`).join(''))}</tbody></table></div>` : '')}
+    <p class="small muted">TLS and remote address describe the last authenticated connection, not a current availability check.</p>
+    ${raw(test ? html`<p class="small muted">Ordered failover stops at a working endpoint. An endpoint with no attempts has not been tested.</p>` : '')}
+  </div>`;
+}
+
+function transportTestResult(result) {
+  return html`<div class="transport-test-summary notice-inline ${result.ok ? 'transport-test-ok' : ''}"><strong>${result.ok ? 'Test query answered' : 'Test query failed'}</strong>
+    <span>${result.error || (result.rcode ? `DNS response: ${result.rcode}.` : 'No DNS response code was reported.')}</span></div>
+    ${raw(encryptedTransportStats(result.stats, { test: true }))}`;
+}
+
+function dnsTransportCard(data) {
+  if (!data || !['native', 'encrypted'].includes(data.transport)) return html`<section class="card section" id="dns-transport"><div class="card-head"><div><h2>DNS transport</h2><p>How DNS Daddy obtains answers and supporting DNSSEC records.</p></div></div>
+    ${raw(unavailableState('Transport settings unavailable', 'The effective DNS transport could not be read. No transport or provider is assumed.'))}</section>`;
+  const encrypted = data.transport === 'encrypted';
+  const endpoints = data.endpoints || [];
+  return html`<section class="card section transport-card" id="dns-transport"><div class="card-head"><div><div class="card-eyebrow">Outbound DNS connection</div><h2>DNS transport</h2>
+    <p>Choose where DNS answers come from. Daddybound’s Off, Learn and Live settings control local DNSSEC validation separately.</p></div><span class="badge ${encrypted ? 'info' : ''}">${encrypted ? 'Encrypted forwarding' : 'Native iterative'}</span></div>
+    <p class="small muted">${encrypted ? 'The configured forwarders receive the queried names and supporting DNSSEC lookups. Daddybound can validate their returned data locally in Live mode.' : data.daddyboundMode === 'enforce' ? 'Live resolves directly through root and authoritative servers over unencrypted UDP/TCP port 53.' : data.daddyboundMode === 'observe' ? 'Learn uses native DNS for separate validation observations. Client answers still use the legacy configured upstreams.' : data.daddyboundMode === 'off' ? 'With validation Off, clients use the legacy configured upstreams. Native recursion and trust-anchor refresh are stopped.' : 'Live resolves directly through authoritative DNS. Learn and Off use the legacy configured upstreams for client answers.'}</p>
+    <form id="dns-transport-form" data-current-transport="${data.transport}" autocomplete="off">
+      <fieldset class="mode-options transport-mode-options" ${raw(data.locked ? 'disabled' : '')}><legend>Answer transport</legend>
+        <label class="mode-option"><input type="radio" name="transport" value="native" ${raw(encrypted ? '' : 'checked')}><span><strong>Native iterative</strong><span class="cat-desc">Live resolves through the DNS hierarchy on plaintext port 53. Learn and Off retain legacy forwarding for client answers.</span></span></label>
+        <label class="mode-option"><input type="radio" name="transport" value="encrypted" ${raw(encrypted ? 'checked' : '')}><span><strong>Encrypted forwarding</strong><span class="cat-desc">Use your chosen DoQ or DoH endpoints, with authenticated TLS 1.3 and local DNSSEC validation available.</span></span></label>
+      </fieldset>
+      ${raw(data.locked ? html`<p class="notice-inline">${data.reason || 'The startup configuration pins this transport. Change that configuration to edit it here.'}</p>` : '')}
+      <div id="encrypted-forwarder-options" ${raw(encrypted ? '' : 'hidden')}>
+        <p class="muted small note-loose">Endpoints are tried in the order shown. Only the configured protocols are used. If they all fail, the lookup fails; there is no plaintext fallback.</p>
+        <fieldset id="encrypted-endpoint-fields" class="transport-endpoint-fields" ${raw(!encrypted || data.locked ? 'disabled' : '')}><legend class="sr-only">Encrypted forwarding endpoints</legend>
+          <div id="transport-endpoints">${raw((endpoints.length ? endpoints : [{}]).map((endpoint, index) => transportEndpointFields(endpoint, index)).join(''))}</div>
+          ${raw(!data.locked ? html`<button type="button" class="btn btn-ghost btn-sm" id="transport-add-endpoint">Add another endpoint</button>` : '')}
+        </fieldset>
+        <p class="small muted note-tight">Maximum 16 endpoints. HTTPS endpoints cannot contain credentials, query strings or fragments. Certificates use the operating system’s trusted roots; no certificate bypass is available.</p>
+        <label class="checkline consent-line"><input type="checkbox" name="acknowledgeForwarding"><span>I agree to send DNS queries and supporting DNSSEC lookups to these forwarders, including the fixed test query if I select Test endpoints.</span></label>
+        <p class="small muted note-tight">Test endpoints sends a DNSKEY query for the root zone using this draft. It changes no saved configuration. A response establishes connectivity, not provider accuracy.</p>
+      </div>
+      <label class="checkline consent-line" id="transport-native-consent" hidden><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native Live and Learn use unencrypted authoritative DNS on port 53. Off and Learn restore legacy forwarding for client answers, and background lookups may use system DNS.</span></label>
+      <div class="row note-loose transport-actions">${raw(!data.locked ? html`<button type="submit" class="btn btn-primary">Apply DNS transport</button>` : '')}
+        <button type="button" class="btn btn-ghost" id="transport-test" ${raw(encrypted ? '' : 'hidden')}>Test endpoints</button></div>
+      <p id="dns-transport-error" class="form-error" role="alert" hidden></p>
+      <p id="dns-transport-progress" class="small muted" role="status"></p>
+      <div id="dns-transport-test-result" class="note-tight" role="status" hidden></div>
+    </form>
+    <details class="chart-data transport-health"><summary>Transport activity and connection security</summary>
+      <dl class="claim-key note-tight"><div class="qfact"><dt>Configured minimum TLS</dt><dd>${data.tlsMinimum || 'Not reported'}</dd></div>
+        <div class="qfact"><dt>Plaintext fallback</dt><dd>${data.plaintextFallback === false ? 'Disabled' : 'Not confirmed disabled'}</dd></div>
+        <div class="qfact"><dt>Endpoint address discovery</dt><dd>${data.bootstrap === 'configured_ips' ? 'Explicit bootstrap IPs; no system DNS lookup' : data.bootstrap === 'system' ? 'System resolver configuration' : 'Not reported'}</dd></div>
+        ${raw(data.scope ? html`<div class="qfact"><dt>Connection scope</dt><dd>${data.scope}</dd></div>` : '')}</dl>
+      ${raw(encryptedTransportStats(data.stats))}
+    </details>
+  </section>`;
+}
+
+function mountDNSTransport(settings) {
+  const form = $('#dns-transport-form');
+  if (!form || !settings) return;
+  const host = $('#transport-endpoints', form);
+  const error = $('#dns-transport-error', form);
+  const progress = $('#dns-transport-progress', form);
+  const testResult = $('#dns-transport-test-result', form);
+  const add = $('#transport-add-endpoint', form);
+  const showError = (message) => { error.textContent = message; error.hidden = false; };
+  const rows = () => $$('[data-forwarder]', host);
+  const renumber = () => {
+    const entries = rows();
+    entries.forEach((row, index) => {
+      $('[data-forwarder-number]', row).textContent = String(index + 1);
+      for (const [action, label] of [['up', 'Move earlier'], ['down', 'Move later'], ['remove', 'Remove']]) {
+        const button = $(`[data-transport-action="${action}"]`, row);
+        button.setAttribute('aria-label', `${label}: forwarder ${index + 1}`);
+        button.disabled = Boolean(settings.locked || action === 'up' && index === 0 || action === 'down' && index === entries.length - 1);
+      }
+    });
+    if (add) add.disabled = entries.length >= 16;
+  };
+  const updateMode = () => {
+    const encrypted = form.elements.transport.value === 'encrypted';
+    $('#encrypted-forwarder-options', form).hidden = !encrypted;
+    $('#encrypted-endpoint-fields', form).disabled = !encrypted || Boolean(settings.locked);
+    $('#transport-native-consent', form).hidden = encrypted || settings.transport !== 'encrypted' || settings.locked;
+    $('#transport-test', form).hidden = !encrypted;
+    form.elements.acknowledgeForwarding.checked = false;
+    form.elements.acknowledgeNativeTransport.checked = false;
+    testResult.hidden = true;
+    error.hidden = true;
+  };
+  $$('input[name="transport"]', form).forEach((radio) => radio.addEventListener('change', updateMode));
+  const changed = () => { testResult.hidden = true; form.elements.acknowledgeForwarding.checked = false; progress.textContent = ''; };
+  host.addEventListener('input', changed);
+  host.addEventListener('change', (event) => {
+    changed();
+    if (!event.target.matches('[data-endpoint-protocol]')) return;
+    const row = event.target.closest('[data-forwarder]');
+    const protocol = DNS_TRANSPORT_PROTOCOLS[event.target.value];
+    $('[name="address"]', row).placeholder = protocol ? protocol.placeholder : '';
+    $('[data-endpoint-hint]', row).textContent = protocol ? protocol.hint : 'Choose a protocol.';
+  });
+  if (add) add.addEventListener('click', () => {
+    if (rows().length >= 16) return;
+    host.insertAdjacentHTML('beforeend', sanitize(transportEndpointFields({}, rows().length)));
+    renumber(); changed(); $('[name="protocol"]', rows().at(-1)).focus();
+  });
+  host.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-transport-action]');
+    if (!button || settings.locked) return;
+    const row = button.closest('[data-forwarder]');
+    const action = button.dataset.transportAction;
+    let focusTarget = row;
+    if (action === 'up' && row.previousElementSibling) host.insertBefore(row, row.previousElementSibling);
+    if (action === 'down' && row.nextElementSibling) host.insertBefore(row.nextElementSibling, row);
+    if (action === 'remove') { focusTarget = row.nextElementSibling || row.previousElementSibling; row.remove(); }
+    renumber(); changed();
+    if (focusTarget) $('[name="protocol"]', focusTarget).focus(); else if (add) add.focus();
+  });
+  const endpointsFromDraft = () => rows().map((row) => ({ protocol: $('[name="protocol"]', row).value,
+    address: $('[name="address"]', row).value.trim(), serverName: $('[name="serverName"]', row).value.trim(),
+    bootstrapIPs: $('[name="bootstrapIPs"]', row).value.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean) }));
+  const consent = (transport) => {
+    const message = transportConsentError(transport, settings.transport, form.elements.acknowledgeForwarding.checked, form.elements.acknowledgeNativeTransport.checked);
+    if (!message) return true;
+    showError(message);
+    form.elements[transport === 'encrypted' ? 'acknowledgeForwarding' : 'acknowledgeNativeTransport'].focus();
+    return false;
+  };
+  const validEndpoints = (endpoints) => {
+    if (!endpoints.length) { showError('Add at least one encrypted DNS endpoint.'); if (add) add.focus(); return false; }
+    if (endpoints.length > 16 || endpoints.some((endpoint) => endpoint.bootstrapIPs.length > 8)) { showError('Use at most 16 endpoints and 8 bootstrap IPs per endpoint.'); return false; }
+    return true;
+  };
+  const busy = (value) => {
+    $$('button', form).forEach((button) => { button.disabled = value; });
+    $('.transport-mode-options', form).disabled = value || Boolean(settings.locked);
+    $('#encrypted-endpoint-fields', form).disabled = value || Boolean(settings.locked) || form.elements.transport.value !== 'encrypted';
+    form.elements.acknowledgeForwarding.disabled = value;
+    form.elements.acknowledgeNativeTransport.disabled = value;
+    if (!value) renumber();
+  };
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault(); if (settings.locked) return;
+    error.hidden = true;
+    const transport = form.elements.transport.value;
+    if (!consent(transport)) return;
+    const endpoints = transport === 'encrypted' ? endpointsFromDraft() : settings.endpoints || [];
+    if (transport === 'encrypted' && !validEndpoints(endpoints)) return;
+    busy(true); progress.textContent = 'Applying DNS transport…'; testResult.hidden = true;
+    try {
+      await apiSend('PUT', '/dns/transport', { transport, endpoints, acknowledgeForwarding: form.elements.acknowledgeForwarding.checked, acknowledgeNativeTransport: form.elements.acknowledgeNativeTransport.checked });
+      toast('DNS transport updated'); if (form.isConnected) await router.reload();
+    } catch (err) { showError(err.message); progress.textContent = 'Your draft is still shown. Review the error before trying again.'; busy(false); }
+  });
+  $('#transport-test', form).addEventListener('click', async () => {
+    error.hidden = true;
+    if (!form.reportValidity() || !consent('encrypted')) return;
+    const endpoints = endpointsFromDraft(); if (!validEndpoints(endpoints)) return;
+    busy(true); testResult.hidden = true; progress.textContent = 'Sending the fixed root DNSKEY test query…';
+    try {
+      const result = await apiSend('POST', '/dns/transport/test', { endpoints, acknowledgeForwarding: true });
+      if (!testResult.isConnected) return;
+      testResult.innerHTML = sanitize(transportTestResult(result)); testResult.hidden = false;
+      progress.textContent = 'Test finished. The saved transport is unchanged.';
+    } catch (err) { if (error.isConnected) { showError(err.message); progress.textContent = 'Test could not complete. The saved transport is unchanged.'; } }
+    finally { if (form.isConnected) busy(false); }
+  });
+  renumber(); updateMode();
+}
+
 function nativeMode(status) {
   const mode = (status && status.mode) || {};
   if (!status) return { label: 'Unavailable', tone: 'warn', active: false, enforcing: false };
@@ -4560,30 +4814,31 @@ function daddyboundModes(status) {
   const data = typeof status === 'boolean' ? { mode: { effective: status ? 'observe' : 'off', enforcing: false } } : status;
   const mode = nativeMode(data);
   return html`<dl class="claim-key"><div class="qfact"><dt>Effective mode</dt><dd><span class="badge ${mode.tone}">${mode.label}</span></dd></div>
-    <div class="qfact"><dt>DNSSEC decisions</dt><dd>${mode.enforcing ? 'Daddybound validates the native answer path.' : mode.active ? 'Upstream answers; Daddybound records a separate observation.' : 'The configured forwarding resolver answers.'}</dd></div></dl>
-    <p class="muted small note-tight">Live resolves natively and applies DNSSEC checks before returning an answer. Learn records separate sampled validations. Local traffic learning is shown separately below.</p>`;
+    <div class="qfact"><dt>DNSSEC decisions</dt><dd>${mode.enforcing ? 'Daddybound validates returned answers locally.' : mode.active ? 'Daddybound records a separate validation observation.' : 'Daddybound local DNSSEC validation is off.'}</dd></div></dl>
+    <p class="muted small note-tight">Live applies local DNSSEC checks before returning an answer. Learn records separate sampled validations. DNS transport and local traffic learning are configured separately.</p>`;
 }
 
 function nativeModeCard(status) {
   if (!status) return html`<div class="card section">${raw(unavailableState('Daddybound status unavailable', 'The server did not return its effective resolution mode. No mode is assumed.'))}</div>`;
   const mode = status.mode || {};
   const state = nativeMode(status);
-  const labels = { enforce: ['Live', 'Resolve natively and enforce DNSSEC validation in the answer path.'], observe: ['Learn', 'Keep forwarding answers and record sampled native validations separately.'], off: ['Off', 'Use the forwarding resolver without separate native validation.'] };
-  return html`<div class="card section engine-mode-card"><div class="card-head"><div><div class="card-eyebrow">Native DNS engine</div><h2>Daddybound</h2>
-      <p>Native resolution, explicit trust checks and a local view of changing traffic.</p></div><span class="badge ${state.tone}">${state.label}</span></div>
-    <p class="engine-mode-copy">${state.enforcing ? 'Daddybound is answering through its native resolver and enforcing DNSSEC. Bogus or inconclusive validation fails the lookup; there is no forwarding fallback.' : mode.effective === 'enforce' ? 'Live is selected, but the native answer path is not enforcing. Review the operational status below before relying on native validation.' : state.active ? 'Daddybound is observing separate native validations. These observations do not change the answer returned by your forwarding resolver.' : 'Native validation is off. DNS answers use your configured forwarding resolver.'}</p>
-    <form id="daddybound-mode-form">
-      <fieldset class="mode-options" ${raw(mode.locked ? 'disabled' : '')}><legend>Resolution mode</legend>
+  const encrypted = status.transport === 'encrypted';
+  const labels = { enforce: ['Live', 'Validate DNSSEC locally before returning an answer.'], observe: ['Learn', 'Record sampled local validations separately from the client answer.'], off: ['Off', 'Turn off Daddybound local DNSSEC validation.'] };
+  return html`<div class="card section engine-mode-card"><div class="card-head"><div><div class="card-eyebrow">Local DNSSEC engine</div><h2>Daddybound</h2>
+      <p>Local DNSSEC validation, explicit trust checks and a view of changing traffic.</p></div><span class="badge ${state.tone}">${state.label}</span></div>
+    <p class="engine-mode-copy">${state.enforcing ? encrypted ? 'Daddybound validates returned data locally using your encrypted forwarders. Bogus or inconclusive validation fails the lookup; there is no plaintext fallback.' : 'Daddybound is answering through its native resolver and enforcing DNSSEC. Bogus or inconclusive validation fails the lookup; there is no forwarding fallback.' : mode.effective === 'enforce' ? 'Live is selected, but local validation is not enforcing. Review the operational status below before relying on it.' : state.active ? 'Daddybound records separate local validations. These observations do not change the answer returned to the client.' : 'Daddybound local DNSSEC validation is off. The selected DNS transport still applies.'}</p>
+    <form id="daddybound-mode-form" data-transport="${encrypted ? 'encrypted' : 'native'}">
+      <fieldset class="mode-options" ${raw(mode.locked ? 'disabled' : '')}><legend>Local DNSSEC mode</legend>
         ${raw(['enforce', 'observe', 'off'].map((value) => html`<label class="mode-option"><input type="radio" name="mode" value="${value}" ${raw(mode.effective === value ? 'checked' : '')} ${raw(value === 'enforce' && mode.live && mode.live.available === false ? 'disabled' : '')}>
           <span><strong>${labels[value][0]}</strong><span class="cat-desc">${labels[value][1]}</span></span></label>`).join(''))}
       </fieldset>
       ${raw(mode.locked ? html`<p class="notice-inline">${mode.reason || 'This deployment pins the resolution mode in its startup configuration.'}</p>` : html`
-        <label class="checkline consent-line" id="native-transport-consent"><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native resolution contacts authoritative DNS servers over unencrypted UDP/TCP port 53.</span></label>
-        <div class="row note-tight"><button type="submit" class="btn btn-primary">Apply resolution mode</button><span class="muted small">New queries use the changed mode.</span></div>`)}
+        <label class="checkline consent-line" id="native-transport-consent" ${raw(encrypted ? 'hidden' : '')}><input type="checkbox" name="acknowledgeNativeTransport"><span>I understand that native resolution contacts authoritative DNS servers over unencrypted UDP/TCP port 53.</span></label>
+        <div class="row note-tight"><button type="submit" class="btn btn-primary">Apply validation mode</button><span class="muted small">New queries use the changed mode.</span></div>`)}
       <p id="native-mode-error" class="form-error" role="alert" hidden></p>
     </form>
     ${raw(mode.live && mode.live.available === false && mode.live.reason ? html`<p class="rec-note is-warn">${mode.live.reason}</p>` : '')}
-    <p class="muted small note-tight">Experimental. Native enforcement and machine-learning findings have different responsibilities: an unusual traffic pattern alone never blocks a domain.</p>
+    <p class="muted small note-tight">Experimental. DNSSEC enforcement and machine-learning findings have different responsibilities: an unusual traffic pattern alone never blocks a domain.</p>
   </div>`;
 }
 
@@ -4591,7 +4846,7 @@ function nativeEnforcementCard(status) {
   const data = status && status.native;
   if (!data || !data.available) return '';
   const metric = (label, value, sub) => metricCard({ label, value: num(value), sub });
-  return html`<div class="card section"><div class="card-head"><div><h2>Native answer path</h2><p>Answer counters since native activation. Signed, unsigned and failed validation are reported separately.</p></div></div>
+  return html`<div class="card section"><div class="card-head"><div><h2>Daddybound answer path</h2><p>Answer counters since this validation runtime was activated. Signed, unsigned and failed validation are reported separately.</p></div></div>
     <div class="grid grid-4 native-metrics">${raw(metric('Secure', data.secure, 'Validated signed answers'))}${raw(metric('Insecure', data.insecure, 'Proven unsigned answers'))}
       ${raw(metric('Bogus', data.bogus, 'Failed DNSSEC checks'))}${raw(metric('Indeterminate', data.indeterminate, 'Could not establish trust'))}</div>
     <dl class="claim-key note-loose"><div class="qfact"><dt>Other outcomes</dt><dd>${num(data.resolutionFailures)} resolution failures · ${num(data.limitRejected)} rejected at the concurrency limit</dd></div>
@@ -4670,7 +4925,7 @@ function nativeOverview(status, learning) {
   const mode = nativeMode(status);
   const ready = learning && learning.clients;
   return html`<div class="card section native-overview"><div class="native-overview-item"><span class="label muted small">Daddybound</span><strong>${mode.label}</strong>
-      <span class="muted small">${mode.enforcing ? 'Native DNSSEC in the answer path' : mode.active ? 'Sampled DNSSEC observations' : status ? 'Forwarding resolver selected' : 'Runtime status could not be read'}</span></div>
+      <span class="muted small">${mode.enforcing ? 'Local DNSSEC in the answer path' : mode.active ? 'Sampled DNSSEC observations' : status ? 'Local DNSSEC validation is off' : 'Runtime status could not be read'}</span></div>
     <div class="native-overview-item"><span class="label muted small">Local learning</span><strong>${learning ? learning.enabled && learning.running ? `${num(ready && ready.ready)} baselines ready` : learning.enabled ? 'Needs attention' : 'Off' : 'Unavailable'}</strong>
       <span class="muted small">${ready ? `${num(ready.warming)} clients warming up · findings only` : 'Local observations and model health'}</span></div>
     <a href="#/daddybound" class="btn btn-observe btn-sm">Open Daddybound</a></div>`;
@@ -4678,30 +4933,32 @@ function nativeOverview(status, learning) {
 
 pages.daddybound = {
   title: 'Daddybound',
-  subtitle: 'Native resolution, local learning and the evidence behind each.',
+  subtitle: 'DNS transport, local validation and traffic learning.',
   async render(context = {}) {
     const read = (path) => apiGet(path, { signal: context.signal }).catch((error) => {
       if (error.status === 401 || error.name === 'AbortError') throw error;
       return null;
     });
-    const [runtime, learning] = await Promise.all([read('/dnssec/status?hours=168'), read('/learning/status')]);
-    return html`${raw(nativeModeCard(runtime))}${raw(nativeEnforcementCard(runtime))}${raw(localLearningCard(learning))}
+    const [runtime, learning, transport] = await Promise.all([read('/dnssec/status?hours=168'), read('/learning/status'), read('/dns/transport')]);
+    if (!context.isCurrent || context.isCurrent()) this.transportSettings = transport;
+    return html`${raw(nativeModeCard(runtime))}${raw(dnsTransportCard(transport))}${raw(nativeEnforcementCard(runtime))}${raw(localLearningCard(learning))}
       <details class="card section engine-details"><summary><h2>Trust anchors, observation health and evidence limits</h2></summary>
         <div class="note-loose">${raw(daddyboundStatusCard(runtime))}</div>
       </details>`;
   },
   async mounted() {
+    mountDNSTransport(this.transportSettings);
     const form = $('#daddybound-mode-form');
     if (!form || !$('button[type="submit"]', form)) return;
     const consent = $('#native-transport-consent');
-    const update = () => { if (consent) consent.hidden = form.elements.mode.value === 'off'; };
+    const update = () => { if (consent) consent.hidden = form.elements.mode.value === 'off' || form.dataset.transport === 'encrypted'; };
     $$('input[name="mode"]', form).forEach((radio) => radio.addEventListener('change', update)); update();
     form.addEventListener('submit', async (event) => {
       event.preventDefault(); const mode = form.elements.mode.value; const error = $('#native-mode-error'); error.hidden = true;
       const acknowledgeNativeTransport = form.elements.acknowledgeNativeTransport.checked;
-      if (mode !== 'off' && !acknowledgeNativeTransport) { error.textContent = 'Confirm the native DNS transport before applying this mode.'; error.hidden = false; form.elements.acknowledgeNativeTransport.focus(); return; }
+      if (mode !== 'off' && form.dataset.transport !== 'encrypted' && !acknowledgeNativeTransport) { error.textContent = 'Confirm the native DNS transport before applying this mode.'; error.hidden = false; form.elements.acknowledgeNativeTransport.focus(); return; }
       const button = $('button[type="submit"]', form); button.disabled = true;
-      try { await apiSend('PUT', '/dnssec/mode', { mode, acknowledgeNativeTransport }); toast('Resolution mode updated'); await router.reload(); }
+      try { await apiSend('PUT', '/dnssec/mode', { mode, acknowledgeNativeTransport }); toast('Validation mode updated'); await router.reload(); }
       catch (err) { error.textContent = err.message; error.hidden = false; button.disabled = false; }
     });
   },
@@ -5081,6 +5338,7 @@ pages.settings = {
               <tr><td>Answer cache</td><td>${settings.cacheEnabled ? `Enabled, max ${num(settings.cacheMaxEntries)} entries` : 'Disabled'}</td></tr>
               <tr><td>Feed refresh interval</td><td>${goDuration(settings.feedRefreshInterval)}</td></tr>
               <tr><td>Upstream mode</td><td>${settings.upstreamMode}</td></tr>
+              <tr><td>DNS transport</td><td>${settings.resolutionTransport === 'encrypted' ? 'Encrypted forwarding' : settings.resolutionTransport === 'native' ? 'Native iterative' : 'Not reported'} · <a href="#/daddybound">Manage transport</a></td></tr>
             </tbody>
           </table>
         </div>
@@ -5240,31 +5498,52 @@ function paintDynamic(root = document) {
 
 /* ---------- copy buttons ------------------------------------------------ */
 
+async function copyPlainText(text, environment = {}) {
+  const clipboard = environment.clipboard === undefined ? navigator.clipboard : environment.clipboard;
+  const secure = environment.secure === undefined ? window.isSecureContext : environment.secure;
+  if (secure && clipboard && typeof clipboard.writeText === 'function') {
+    await clipboard.writeText(String(text));
+    return;
+  }
+  const doc = environment.document || document;
+  const previous = doc.activeElement;
+  const field = doc.createElement('textarea');
+  field.value = String(text);
+  field.className = 'clipboard-buffer';
+  field.setAttribute('readonly', '');
+  field.setAttribute('aria-hidden', 'true');
+  field.setAttribute('tabindex', '-1');
+  doc.body.append(field);
+  try {
+    field.select();
+    // A LAN dashboard may be an insecure context. A refused legacy copy must
+    // not produce the same success message as a completed clipboard write.
+    if (!doc.execCommand('copy')) throw new Error('Clipboard access was refused.');
+  } finally {
+    field.remove();
+    if (previous && typeof previous.focus === 'function') previous.focus({ preventScroll: true });
+  }
+}
+
 function bindCopyButtons() {
   $$('[data-copy]').forEach((btn) => {
     if (btn.dataset.bound) return;
     btn.dataset.bound = '1';
     btn.addEventListener('click', async () => {
+      if (btn.dataset.copying === '1') return;
       const text = btn.dataset.copy;
+      const label = btn.textContent;
+      btn.dataset.copying = '1';
+      btn.setAttribute('aria-busy', 'true');
       try {
-        // The clipboard API needs a secure context; fall back to a hidden
-        // textarea so copy still works over plain HTTP on a LAN.
-        if (navigator.clipboard && window.isSecureContext) {
-          await navigator.clipboard.writeText(text);
-        } else {
-          const ta = document.createElement('textarea');
-          ta.value = text;
-          ta.style.position = 'fixed';
-          ta.style.opacity = '0';
-          document.body.append(ta);
-          ta.select();
-          document.execCommand('copy');
-          ta.remove();
-        }
+        await copyPlainText(text);
         btn.textContent = 'Copied';
-        setTimeout(() => (btn.textContent = 'Copy'), 1500);
+        setTimeout(() => { btn.textContent = label; delete btn.dataset.copying; }, 1500);
       } catch {
+        delete btn.dataset.copying;
         toast('Could not copy — select the text manually', 'error');
+      } finally {
+        btn.removeAttribute('aria-busy');
       }
     });
   });
@@ -5702,6 +5981,16 @@ if (typeof module !== 'undefined' && module.exports) {
     nativeModeCard,
     nativeEnforcementCard,
     nativeOverview,
+    copyPlainText,
+    serverAddressRow,
+    serverAddressesCard,
+    DNS_TRANSPORT_PROTOCOLS,
+    transportConsentError,
+    transportEndpointFields,
+    negotiatedTLS,
+    encryptedTransportStats,
+    transportTestResult,
+    dnsTransportCard,
     localLearningCard,
     learningWindows,
     findingConfidence,

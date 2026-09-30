@@ -134,7 +134,7 @@ type Observation struct {
 	Lookups int
 
 	// Resolution says how the records behind this verdict were obtained:
-	// ResolutionNative or ResolutionForwarded.
+	// ResolutionNative, ResolutionForwarded or ResolutionEncrypted.
 	//
 	// Recorded on every row because a Secure reached through somebody else's
 	// recursive resolver and a Secure reached by asking the authoritative
@@ -143,8 +143,8 @@ type Observation struct {
 	// readiness for Live needs to know that the evidence came from the code
 	// path Live would run.
 	Resolution string
-	// Queries is how many questions native resolution sent to authoritative
-	// servers. Zero when the records were forwarded.
+	// Queries is how many wire questions this operation sent through its
+	// selected transport. Legacy validator-only observations report zero.
 	Queries int
 	// Delegations is how many zone cuts native resolution crossed reaching
 	// the answer. Zero when the records were forwarded.
@@ -160,6 +160,10 @@ const (
 	// upstream resolvers. Daddybound checked the signatures on records
 	// somebody else chose to hand over.
 	ResolutionForwarded = "forwarded"
+	// ResolutionEncrypted: answer data and supporting validation material were
+	// obtained through the same operator-selected encrypted exchange. The
+	// verdict is local; no authoritative delegation walk is claimed.
+	ResolutionEncrypted = "encrypted_forwarded"
 )
 
 // maxReasonLen bounds the stored sentence.

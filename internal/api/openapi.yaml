@@ -23,8 +23,8 @@ info:
     ## External sharing and live settings\n\nExternal APIs and webhooks are user-configured and disabled\
     \ by default. Read-only status, investigation and policy preview endpoints do not contact providers.\
     \ Explicit tests and investigation enrichment require consent:true. Saved sharing settings take effect\
-    \ without restarting. Native Daddybound transport is separate: enabled Learn/Live uses plaintext UDP/TCP\
-    \ port 53 to DNS authorities.\n"
+    \ without restarting. Daddybound transport is selected independently of Off/Learn/Live. Native iteration uses UDP/TCP\
+    \ port 53; encrypted forwarding uses approved DoQ, HTTP/3 or HTTP/2 endpoints with local Live validation.\n"
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -47,6 +47,166 @@ tags:
 - name: Investigations
 - name: Decisions
 paths:
+  /api/v1/server-addresses:
+    get:
+      operationId: getServerAddresses
+      tags:
+      - Administration
+      summary: Local server IPs and configured DNS endpoint candidates
+      description: Authenticated read-only enumeration of up network interfaces visible to this process. No
+        external IP-discovery request, hostname lookup or reachability probe occurs. Request Host, Forwarded
+        and X-Forwarded-* headers are not address sources. Address lists are read for at most 256 up interfaces
+        and at most 128 addresses per interface are retained for candidate processing; at most 32 usable entries
+        are returned in deterministic order. Private LAN addresses with compatible listeners are preferred,
+        followed by private/shared overlays and public addresses. Loopback and link-local addresses are never
+        preferred. Container/NAT/public host addresses and externally mapped ports cannot be inferred. Listener
+        entries describe configuration, not verified socket state or remote reachability. This information
+        is not added to public health, login or session responses. If interface enumeration is unavailable,
+        the server may return only the literal IP from the accepted connection's http.LocalAddrContextKey with
+        source connection_local_address, partial true and unknown empty interface name. The peer/client address
+        and HTTP headers are never a fallback source. An absent or unusable local socket address returns 503.
+      responses:
+        '200':
+          description: Local interface or accepted local socket evidence with explicit limitations
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerAddressesResponse'
+        '401':
+          description: Authentication required
+        '503':
+          description: Local interface enumeration failed and no usable accepted local socket address was available
+  /api/v1/dns/transport:
+    get:
+      operationId: getDnsTransport
+      tags:
+      - Administration
+      summary: Effective outbound DNS transport and bounded operational counters
+      description: Read-only. Does not probe endpoints, resolve names, refresh anchors or change settings.
+        Endpoint details require management authentication.
+      responses:
+        '200':
+          description: Effective transport selection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSTransportState'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags:
+      - Administration
+      operationId: putDnsTransport
+      summary: Select native or authenticated encrypted DNS transport
+      description: Configuration is validated and persisted before publication. Retired native and forwarding
+        paths are cancelled/drained before success returns. TLS 1.3 certificate authentication, literal-IP
+        bootstrap and encrypted-only failover are mandatory for the encrypted profile. Own endpoints and forwarding
+        disclosure acknowledgement are required. This preserves the current Off/Learn/Live mode and keeps local
+        policy/learning independent. YAML/env-pinned selections cannot be overwritten.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DNSTransportSelection'
+      responses:
+        '200':
+          description: Selected transport, after retiring the previous path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSTransportState'
+        '400':
+          description: Invalid input or missing disclosure acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Same-origin protection rejected this cookie-authenticated write
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Selection is pinned by configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Activation failed; inspect error and configuration history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Runtime control unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/dns/transport/test:
+    post:
+      operationId: postDnsTransportTest
+      tags:
+      - Administration
+      summary: Explicitly test approved encrypted endpoints without saving
+      description: Sends a fixed root DNSKEY question through the supplied ordered endpoint list. It never
+        probes plaintext DNS or chooses a provider. Global API admission permits one test at a time; the test
+        is bounded to eight seconds, with two-second exchange budget.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DNSTransportTestRequest'
+      responses:
+        '200':
+          description: Transport test outcome, including failures
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DNSTransportTestResult'
+        '400':
+          description: Invalid input or missing disclosure acknowledgement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Same-origin protection rejected this cookie-authenticated write
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Another bounded endpoint test is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/v1/health:
     get:
       tags:
@@ -2478,7 +2638,7 @@ paths:
       tags:
       - Detections
       summary: What local DNSSEC validation concluded about real traffic
-      description: Stored Daddybound observations across modes. native_live is a same-answer native Live
+      description: Stored Daddybound observations across modes. native_live and encrypted_live are same-answer Live
         validation; native is an independent Learn lookup that could not change the forwarded answer.
         A historical row keeps its provenance even after the current mode changes. The response enforcing
         field describes current runtime capability, not every historical row. secure/insecure/bogus/indeterminate
@@ -2636,7 +2796,7 @@ paths:
       tags:
       - Detections
       summary: The Daddybound runtime as a bounded snapshot
-      description: A read-only bounded snapshot of native DNSSEC mode, transport, trust anchors, operational
+      description: A read-only bounded snapshot of local DNSSEC mode, transport, trust anchors, operational
         counters and stored observations. No lookup or anchor refresh is triggered. Native Live enforcement
         and experimental evidence/readiness are separate facts. Includes native live counters, independent
         Learn counters, refresh/persistence failures, observation loss and sample limitations. experimental
@@ -3252,11 +3412,12 @@ paths:
       tags:
       - Detections
       summary: Select Daddybound Off, Learn or Live at runtime
-      description: Persist and apply the native DNSSEC mode without restarting. A YAML/environment-pinned
-        mode returns 409. Fresh installations default to Live; saved existing Off/Learn selections are
-        preserved. Live fails with SERVFAIL on failed/indeterminate validation or operational failure
-        and does not fall back to an upstream. A client CD flag bypasses DNSSEC checking only. Enabling
-        Learn or Live requires acknowledgeNativeTransport:true.
+      description: Persist and apply the local DNSSEC mode without restarting or changing the selected transport.
+        A YAML/environment-pinned mode returns 409. Fresh installations default to Live; saved existing
+        Off/Learn selections are preserved. Live validates the exact returned records and fails with SERVFAIL
+        on failed/indeterminate validation or operational failure, without a weaker fallback. A client CD flag
+        bypasses DNSSEC checking only. Enabling Learn or Live while native transport is selected requires
+        acknowledgeNativeTransport:true. An already-approved encrypted selection needs no native acknowledgement.
       responses:
         '200':
           description: Current result
@@ -3694,6 +3855,408 @@ components:
                   example: 203.0.113.25/32
                 description: The ranges that need acknowledging.
   schemas:
+    ServerAddressesResponse:
+      type: object
+      required:
+      - source
+      - preferredAddress
+      - addresses
+      - listeners
+      - limit
+      - truncated
+      - partial
+      - notes
+      properties:
+        source:
+          type: string
+          enum:
+          - local_interfaces
+          - connection_local_address
+          description: local_interfaces is operating-system interface enumeration. connection_local_address
+            is only the server-side local IP of the accepted management connection when enumeration was unavailable;
+            it always has partial true and an empty interface name.
+        preferredAddress:
+          type:
+          - string
+          - 'null'
+          description: First non-loopback, non-link-local address with at least one compatible configured DNS
+            listener. This is a local suggestion, not a guarantee of remote reachability. Null when none qualifies.
+        addresses:
+          type: array
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/ServerAddress'
+        listeners:
+          type: array
+          minItems: 3
+          maxItems: 3
+          description: UDP, TCP and DNS-over-TLS configuration, including disabled listeners
+          items:
+            $ref: '#/components/schemas/ServerDNSListener'
+        limit:
+          type: integer
+          const: 32
+        truncated:
+          type: boolean
+          description: An interface, per-interface address or returned-list bound was reached
+        partial:
+          type: boolean
+          description: At least one interface could not be read or represented safely, or only the accepted
+            local socket address is available
+        notes:
+          type: array
+          items:
+            type: string
+          description: Container/NAT, listener, TLS and incompleteness explanations
+    ServerAddress:
+      type: object
+      required:
+      - address
+      - family
+      - type
+      - interface
+      - dns
+      properties:
+        address:
+          type: string
+          description: Canonical literal IP without brackets, prefix length or interface zone
+        family:
+          type: string
+          enum:
+          - ipv4
+          - ipv6
+        type:
+          type: string
+          enum:
+          - private
+          - public
+          - loopback
+          - link_local
+          description: Address scope rather than a reachability test. Private includes RFC 1918, IPv6 ULA and
+            shared CGNAT/overlay addresses. Loopback is usable only on the resolver host. Link-local has no
+            portable endpoint suggestion and IPv6 requires a client-side scope.
+        interface:
+          type: string
+          maxLength: 128
+          description: Local operating-system interface name; empty when unknown for the accepted local socket
+            fallback
+        dns:
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/ServerDNSEndpoint'
+          description: Listener-compatible candidates only. Empty for an unmatched address or link-local scope.
+            An IPv6 wildcard is conservatively matched to IPv6 only; dual-stack behavior is not inferred.
+    ServerDNSEndpoint:
+      type: object
+      required:
+      - transport
+      - port
+      - endpoint
+      properties:
+        transport:
+          type: string
+          enum:
+          - udp
+          - tcp
+          - dot
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        endpoint:
+          type: string
+          description: Literal IP and configured port, with brackets around IPv6. DNS-over-TLS also requires
+            the appropriate certificate-matching server name and any configured network-token hostname.
+    ServerDNSListener:
+      type: object
+      required:
+      - transport
+      - listen
+      - enabled
+      - port
+      - binding
+      properties:
+        transport:
+          type: string
+          enum:
+          - udp
+          - tcp
+          - dot
+        listen:
+          type: string
+          description: Configured bind expression; a wildcard is not a client target
+        enabled:
+          type: boolean
+          description: Whether this transport has a nonempty configured bind expression
+        port:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          maximum: 65535
+          description: Numeric configured port; null if disabled or not determinable
+        binding:
+          type: string
+          enum:
+          - all
+          - ipv4
+          - ipv6
+          - address
+          - hostname
+          - disabled
+          - invalid
+          description: Configured applicability. Hostname binds are reported without resolving them, and produce
+            no inferred client endpoints. Invalid includes bind expressions without a fixed supported numeric
+            port, such as runtime-assigned port zero.
+    EncryptedDNSEndpoint:
+      type: object
+      additionalProperties: false
+      required:
+      - protocol
+      - address
+      properties:
+        protocol:
+          type: string
+          enum: &id001
+          - doq
+          - doh3
+          - doh2
+        address:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: DoQ host[:port] (853 default, port 53 forbidden) or an absolute HTTPS DoH URL with path.
+            No URL user information, query or fragment.
+        serverName:
+          type: string
+          maxLength: 253
+          description: Certificate identity; defaults to the endpoint host. A named DoH URL must authenticate
+            that same name.
+        bootstrapIPs:
+          type: array
+          maxItems: 8
+          items:
+            type: string
+          description: Literal IPv4/IPv6 dial targets without ports or zones; required for named endpoints.
+            IP-literal endpoints can bootstrap themselves. Each connection still verifies its configured certificate
+            identity.
+    DNSTransportSelection:
+      type: object
+      additionalProperties: false
+      required:
+      - transport
+      properties:
+        transport:
+          type: string
+          enum:
+          - native
+          - encrypted
+        endpoints:
+          type: array
+          maxItems: 16
+          items:
+            $ref: '#/components/schemas/EncryptedDNSEndpoint'
+          description: Approved ordered encrypted-only failover list. At least one endpoint is required for
+            encrypted mode.
+        acknowledgeForwarding:
+          type: boolean
+          description: Must be true to activate encrypted forwarding; names and supporting/background DNS questions
+            are disclosed to these approved resolvers.
+        acknowledgeNativeTransport:
+          type: boolean
+          description: Must be true when switching from encrypted forwarding to native iteration/legacy forwarding.
+    DNSTransportTestRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - endpoints
+      - acknowledgeForwarding
+      properties:
+        endpoints:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            $ref: '#/components/schemas/EncryptedDNSEndpoint'
+        acknowledgeForwarding:
+          type: boolean
+          const: true
+    EncryptedDNSEndpointStats:
+      type: object
+      required:
+      - protocol
+      - address
+      - serverName
+      - attempts
+      - successes
+      - failures
+      - dialFailures
+      - connectionsOpened
+      - inFlight
+      - maxConcurrent
+      properties:
+        protocol:
+          type: string
+          enum: *id001
+        address:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: DoQ host[:port] (853 default, port 53 forbidden) or an absolute HTTPS DoH URL with path.
+            No URL user information, query or fragment.
+        serverName:
+          type: string
+          maxLength: 253
+          description: Certificate identity; defaults to the endpoint host. A named DoH URL must authenticate
+            that same name.
+        attempts:
+          type: integer
+          minimum: 0
+        successes:
+          type: integer
+          minimum: 0
+        failures:
+          type: integer
+          minimum: 0
+        dialFailures:
+          type: integer
+          minimum: 0
+        connectionsOpened:
+          type: integer
+          minimum: 0
+        inFlight:
+          type: integer
+          minimum: 0
+        maxConcurrent:
+          type: integer
+          minimum: 0
+        lastSuccess:
+          type: string
+          format: date-time
+          description: Last completed measurement; omitted until measured.
+        lastFailure:
+          type: string
+          format: date-time
+          description: Last completed measurement; omitted until measured.
+        lastError:
+          type: string
+          description: Redacted bounded failure category, never a DNS query or credential.
+        tlsVersion:
+          type: string
+          description: TLS version of the last authenticated connection; not a liveness assertion.
+        remoteAddress:
+          type: string
+          description: Dial target of the last authenticated connection; not a liveness assertion.
+    EncryptedDNSStats:
+      type: object
+      required:
+      - queries
+      - successes
+      - failures
+      - rejected
+      - failovers
+      - inFlight
+      - maxConcurrent
+      - endpoints
+      properties:
+        queries:
+          type: integer
+          minimum: 0
+        successes:
+          type: integer
+          minimum: 0
+        failures:
+          type: integer
+          minimum: 0
+        rejected:
+          type: integer
+          minimum: 0
+        failovers:
+          type: integer
+          minimum: 0
+        inFlight:
+          type: integer
+          minimum: 0
+        maxConcurrent:
+          type: integer
+          minimum: 0
+        endpoints:
+          type: array
+          maxItems: 16
+          items:
+            $ref: '#/components/schemas/EncryptedDNSEndpointStats'
+      description: Bounded transport counters since activation. Authentication of the connection is separate
+        from DNSSEC validation of answer data.
+    DNSTransportState:
+      type: object
+      required:
+      - transport
+      - locked
+      - chosenBy
+      - endpoints
+      - tlsMinimum
+      - encryptedOnly
+      - plaintextFallback
+      - bootstrap
+      - scope
+      - daddyboundMode
+      - stats
+      properties:
+        transport:
+          type: string
+          enum:
+          - native
+          - encrypted
+        locked: &id003
+          type: boolean
+        chosenBy: &id002
+          type: string
+        reason: *id002
+        endpoints:
+          type: array
+          maxItems: 16
+          items:
+            $ref: '#/components/schemas/EncryptedDNSEndpoint'
+        tlsMinimum:
+          type: string
+          const: '1.3'
+        encryptedOnly: *id003
+        plaintextFallback:
+          type: boolean
+          const: false
+        bootstrap:
+          type: string
+          enum:
+          - configured_ips
+          - system
+        scope: *id002
+        daddyboundMode:
+          type: string
+          enum:
+          - 'off'
+          - observe
+          - enforce
+        stats:
+          oneOf:
+          - $ref: '#/components/schemas/EncryptedDNSStats'
+          - type: 'null'
+      description: The effective DNS transport selection, independently of Daddybound Off/Learn/Live. Reads
+        cause no network work. Encrypted-only describes enforcement of transport policy, not endpoint availability.
+    DNSTransportTestResult:
+      type: object
+      required:
+      - ok
+      - rcode
+      - stats
+      properties:
+        ok: *id003
+        rcode: *id002
+        error: *id002
+        stats:
+          $ref: '#/components/schemas/EncryptedDNSStats'
+      description: An explicit fixed root DNSKEY connectivity test. It does not save endpoints, activate a
+        profile or install trust anchors; successful transport is not independent DNSSEC validation.
     Error:
       type: object
       properties:
@@ -4242,19 +4805,20 @@ components:
           - validated
           - unvalidated
           - servfail
-          description: Serving-path status recorded with dnssecSource. For native, validated means local
-            DNSSEC validation was Secure; the reply AD bit also follows client flags. For upstream, validated
-            means the upstream asserted AD. Unvalidated means this path did not establish authentication;
-            it does not alone prove an unsigned delegation. Servfail means resolution failed; consult
-            reason for its cause. Legacy rows with no source do not establish whose validation was recorded.
+          description: Serving-path status recorded with dnssecSource. For native, validated means local DNSSEC
+            validation was Secure; the reply AD bit also follows client flags. For upstream, validated means
+            the upstream asserted AD. Unvalidated means this path did not establish authentication; it does
+            not alone prove an unsigned delegation. Servfail means resolution failed; consult reason for its
+            cause. Legacy rows with no source do not establish whose validation was recorded.
         dnssecSource:
           type: string
           enum:
           - ''
           - native
           - upstream
-          description: Origin captured when this response was served. Empty is legacy/unknown; never inferred
-            from current mode.
+          - encrypted_forwarded
+          description: 'Recorded provenance: native or encrypted_forwarded for locally checked Live answers,
+            upstream for forwarding assertions, empty for unknown legacy rows.'
     Category:
       type: object
       properties:
@@ -4685,6 +5249,11 @@ components:
                 type: string
               dohUrl:
                 type: string
+        transport:
+          type: string
+          enum:
+          - native
+          - encrypted
     Settings:
       type: object
       properties:
@@ -4712,10 +5281,9 @@ components:
         cacheLookups:
           type: integer
           format: int64
-          description: 'Hits plus misses since start. The denominator behind cacheHitRate: a rate of 0
-            means either that the cache answered none of the lookups it saw or that it has not seen any,
-            and only this field separates the two. A client showing the rate should show nothing when
-            this is zero.'
+          description: 'Hits plus misses since start. The denominator behind cacheHitRate: a rate of 0 means
+            either that the cache answered none of the lookups it saw or that it has not seen any, and only
+            this field separates the two. A client showing the rate should show nothing when this is zero.'
         feedRefreshInterval:
           type: string
         upstreamMode:
@@ -4734,6 +5302,11 @@ components:
         uptimeSeconds:
           type: integer
           format: int64
+        resolutionTransport:
+          type: string
+          enum:
+          - native
+          - encrypted
     ReportSummary:
       type: object
       properties:
@@ -6138,8 +6711,8 @@ components:
           $ref: '#/components/schemas/DNSSECAnchorStatus'
         enforcing:
           type: boolean
-          description: True only while enforce mode and the native runtime are available. Behavioural
-            learning is a separate non-enforcing component.
+          description: True while Live and a local validation runtime are available. Supports native iteration
+            and encrypted forwarding; behavioral learning remains non-enforcing.
         evidence:
           $ref: '#/components/schemas/DNSSECEvidenceStatus'
         experimental:
@@ -6164,6 +6737,11 @@ components:
           $ref: '#/components/schemas/DNSSECRuntimeStatus'
         stored:
           $ref: '#/components/schemas/DNSSECStoredStatus'
+        transport:
+          type: string
+          enum:
+          - native
+          - encrypted
       required:
       - mode
       - resolution
@@ -6176,15 +6754,14 @@ components:
       - enforcing
       - measuredAt
       - native
+      - transport
       type: object
-      description: A read-only bounded snapshot of native DNSSEC mode, transport, trust anchors, operational
-        counters and stored observations. No lookup or anchor refresh is triggered. Native Live enforcement
-        and experimental evidence/readiness are separate facts.
+      description: Read-only bounded snapshot of local DNSSEC mode, selected transport, anchor state and operational
+        evidence. Polling sends no queries or anchor refreshes.
     DNSSECObservation:
       type: object
-      description: A stored local DNSSEC result with preserved source provenance. native_live binds to
-        returned native records; native/forwarded observation mode describes an independent lookup. Current
-        mode cannot retroactively change what a row means.
+      description: Stored local DNSSEC result with immutable source provenance. Live records bind to the serving
+        answer; Learn records describe independent observations.
       properties:
         id:
           type: string
@@ -6198,8 +6775,8 @@ components:
           type: string
         cached:
           type: boolean
-          description: Whether the associated client answer came from DNS Daddy cache. Learn mode performs
-            an independent validation and can observe different records; native_live uses returned records.
+          description: Whether the associated client answer came from cache. Learn can observe different data;
+            native_live and encrypted_live use the actual serving result.
         upstream:
           type: string
           description: 'What the upstream resolver asserted. A separate fact from status,
@@ -6248,14 +6825,17 @@ components:
           enum:
           - native
           - native_live
+          - encrypted_forwarded
+          - encrypted_live
           - forwarded
           - ''
-          description: Same-answer native Live, independent native Learn, or forwarded supporting lookups;
-            preserved with the original row.
+          description: native_live and encrypted_live record local validation of the exact serving result;
+            native and encrypted_forwarded record independent Learn observations; forwarded is legacy supporting
+            lookup provenance. Historical records keep their source.
         queries:
           type: integer
           minimum: 0
-          description: Questions sent during native resolution; omitted at zero.
+          description: DNS questions used for native or encrypted material acquisition; omitted at zero.
         delegations:
           type: integer
           minimum: 0
@@ -6708,12 +7288,12 @@ components:
         checkingDisabled:
           minimum: 0
           type: integer
-          description: Client queries whose CD flag bypassed DNSSEC checking; policy and rebinding checks
-            still run.
+          description: Client queries whose CD flag bypassed DNSSEC checking; policy and rebinding checks still
+            run.
         counterScope:
           type: string
-          description: Native counters since activation; stored/lost/write counters since process start.
-            Counters are not a complete traffic or efficacy denominator.
+          description: Native counters since activation; stored/lost/write counters since process start. Counters
+            are not a complete traffic or efficacy denominator.
         enforcing:
           type: boolean
         indeterminate:
@@ -6778,6 +7358,8 @@ components:
       - unrecorded
       - writeErrors
       type: object
+      description: Compatibility-named local validation client counters for either native iteration or encrypted
+        forwarding. Counter scope is activation; use the top-level transport to identify acquisition.
     DNSSECPopulation:
       properties:
         cached:
@@ -6797,10 +7379,13 @@ components:
           enum:
           - native
           - native_live
+          - encrypted_forwarded
+          - encrypted_live
           - forwarded
           - ''
-          description: native_live binds validation to the actual native answer; native denotes an independent
-            Learn lookup; forwarded denotes supporting lookups through configured upstreams.
+          description: native_live and encrypted_live record local validation of the exact serving result;
+            native and encrypted_forwarded record independent Learn observations; forwarded is legacy supporting
+            lookup provenance. Historical records keep their source.
         total:
           type: integer
       required:
@@ -6815,9 +7400,9 @@ components:
       properties:
         clientPath:
           type: string
-          description: Describes the actual answer path. In Live this is native recursion with validation
-            bound to returned records and no upstream fallback; Learn validates an independent lookup
-            after the forwarded answer is decided.
+          description: Describes the actual answer path. Live validates the exact returned records acquired by
+            native iteration or approved encrypted forwarding, with no weaker fallback. Learn validates an
+            independent lookup after the forwarded client answer is decided.
         note:
           type: string
         source:
@@ -6826,10 +7411,14 @@ components:
           - none
           - native
           - forwarded
+          - encrypted_forwarded
+          description: Current record acquisition path; encrypted_forwarded performs local validation over
+            records fetched from approved encrypted resolvers.
         transport:
           type: string
-          description: Enabled native modes send plaintext UDP/TCP port 53 to root and authoritative servers.
-            Configured encrypted forwarders do not encrypt this native traffic.
+          description: Describes the selected acquisition transport. Native Live/Learn iteration sends UDP/TCP
+            port 53 to authoritative servers; encrypted forwarding uses approved DoQ, HTTP/3 or HTTP/2 endpoints
+            with authenticated TLS 1.3. Legacy forwarder settings do not encrypt native iteration.
       required:
       - source
       - transport
@@ -6844,8 +7433,7 @@ components:
             after it stops.
         available:
           type: boolean
-          description: Whether current or retained Learn counters can be reported. Does not imply active
-            collection.
+          description: Whether current or retained Learn counters can be reported. Does not imply active collection.
         byStatus:
           additionalProperties:
             minimum: 0
@@ -6868,8 +7456,8 @@ components:
         dropped:
           minimum: 0
           type: integer
-          description: Observations not processed because the bounded queue was full, the observer was
-            stopped, or shutdown abandoned queued work.
+          description: Observations not processed because the bounded queue was full, the observer was stopped,
+            or shutdown abandoned queued work.
         health:
           type: string
           description: 'From observer counters: any drop, loss, write error or panic is degraded. A stopped

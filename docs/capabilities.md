@@ -31,10 +31,11 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 
 | Capability | Notes |
 |---|---|
-| Forwarding resolver over UDP and TCP | Used when Daddybound is Off or in Learn mode. Live uses native recursion and validation instead; see Experimental below. |
+| Forwarding resolver over UDP and TCP | Off/Learn use the selected profile's forwarding path. Live uses local validation with native recursion or approved encrypted forwarding; see Experimental below. |
 | DNS-over-TLS listener | Requires a certificate; off unless configured. |
 | DNS-over-HTTPS endpoint | RFC 8484, at `/dns-query/<token>`. |
-| Encrypted upstream (DoT) | The default configured forwarding transport, with certificate verification. It applies to Off/Learn client answers; native Live contacts authoritative servers over plaintext UDP/TCP 53. |
+| Legacy encrypted upstream (DoT) | The default configured forwarding URLs use certificate verification. They apply to Off/Learn under the native profile; native Live instead contacts authoritative servers over plaintext UDP/TCP 53. |
+| Optional encrypted outbound profile | Operator-selected DoQ, HTTP/3 DoH and HTTP/2 DoH endpoints require authenticated TLS 1.3, literal bootstrap IPs for named endpoints and explicit acknowledgement. No automatic provider selection or plaintext fallback. Native remains the default. This adds outbound transports, not inbound DoQ/HTTP3 listeners. Local Live validation remains experimental; see [encrypted-dns.md](encrypted-dns.md). |
 | Answer cache | The forwarding cache is bounded, sharded and TTL-aware, and invalidated on feed or policy change. Live never returns an answer from that forwarding cache. |
 | Request collapsing | Identical concurrent questions share one upstream flight. |
 | ANY refusal (RFC 8482) | On by default; ANY is the classic amplification lever. |
@@ -61,11 +62,11 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Per-query logging with plain-English reasons | Non-blocking and batched; drops rather than delaying a lookup. |
 | Hourly and daily rollups | Survive query-log pruning, so reporting history outlives browsing history. Failed resolutions are counted in the same hourly rows as the queries they are a fraction of. |
 | Overview measurements | `GET /api/v1/overview` carries a `measured` block stating each count separately with its window and scope: configured, enabled, permitted and traffic-bearing networks; attributed clients in the window or the reason there is no count; feeds enabled, loaded, failing and never downloaded; blocking policies and whether any enabled network uses one; blocked queries split into security, precaution, preference, custom and unclassified; and an error rate derived from one window, or the reason it cannot be. No field combines two scopes and none is a verdict about protection. |
-| DNSSEC status per query | Records validation status together with its source: upstream for forwarded answers, native for Live answers. Learn observations remain separate from the already-decided forwarded response. See below and [dns-security/dnssec.md](dns-security/dnssec.md). |
+| DNSSEC status per query | Records the original source: `upstream` for Off/Learn client answers, `native` for native Live, and `encrypted_forwarded` for locally validated encrypted Live. A blank legacy value means unknown. Native/encrypted Learn observations are separate from the already-decided client answer; changing today's transport never relabels stored evidence. |
 | Prometheus metrics | Hand-rolled, no client library. |
 | Markdown reports | A period summary written for someone who does not run the network. |
 | Complete query, decision and finding exports | Dedicated `/api/v1/{queries,decisions,findings}/export` endpoints return bounded NDJSON pages with a frozen time window, insertion high-water, continuation links and emitted/skipped counts. They report the final page explicitly. Retention can still remove rows during a walk, and review-state filters use the current review state; this is not an exactly-once change feed. See [exports.md](exports.md). |
-| Daddybound status | `GET /api/v1/dnssec/status` reports configured/effective mode and its source, actual client answer path, plaintext native transport, anchor lifecycle and refresh/persistence health, bounded work and observation counters, and sample limitations. Live is an available experimental mode, with its actual enforcement and errors reported; a readiness label is not a claim of production reliability. Polling status resolves nothing or edits trust state. |
+| Daddybound status | `GET /api/v1/dnssec/status` reports configured/effective mode and its source, actual native or encrypted answer path, anchor lifecycle and refresh/persistence health, bounded work and observation counters, and sample limitations. `GET /api/v1/dns/transport` reports the selected endpoints and transport counters. Polling either starts no lookup or trust edit. Live is experimental; readiness is not a production-reliability claim. |
 | Finding review | Each finding carries a review record beside it: `new`, `acknowledged`, `resolved` or `false_positive`, with a bounded plain-text note, a version for optimistic concurrency, the authenticated actor as the API knows it (`session:admin` or `token:<name>`) and a change history. The finding's own measurements are never modified, and a review changes nothing about enforcement: a false positive disables no detector, relaxes no policy, deletes no evidence and allows no domain. See [detection/README.md](detection/README.md#reviewing-findings). |
 | Domain and client investigation | `GET /api/v1/investigate/domain/{domain}` and `/client/{ip}`, and the dashboard's Investigate page: what the query log recorded for one exact name or address, the decisions stored at the time, a read-only preview of what the current configuration would decide now, what is on file and whether any of it ever decided a query, and related experimental findings and Daddybound observations — each in its own section. Nothing is written and no external provider is contacted; a name an external provider would be asked about is reported as *not evaluated*, never guessed allowed. Enrichment is a separate POST that uses the configured providers within their existing mode and budget. Exact name match only: it is not a substring search, a passive-DNS history, an IP-reputation source or a device discovery tool. |
 
@@ -74,6 +75,8 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Capability | Notes |
 |---|---|
 | Embedded dashboard | No build step, no npm tree; served from the binary. |
+| Server address on Overview and Setup | Authenticated `GET /api/v1/server-addresses` returns at most 32 usable local IPv4/IPv6 entries with scope/interface labels and configured DNS ports. It prefers compatible private addresses. If interface enumeration is unavailable, the accepted connection's local socket IP can be returned with explicit incomplete provenance and unknown interface. Headers and client/peer IPs are never address sources; no external IP lookup occurs. Container/NAT mappings and reachability are not inferred. |
+| Runtime DNS transport selection | Authenticated, audited writes persist native/encrypted selection and operator-owned endpoints unless YAML pins the choice. Explicit tests send a root DNSKEY query with consent. Encrypted-profile DNS stays encrypted in Live, Learn and Off, including daemon background hostname lookups; only client Live receives independent local enforcement. See [encrypted-dns.md](encrypted-dns.md). |
 | REST API with OpenAPI 3.1 | Each build serves its own spec at `/openapi.yaml`. |
 | Session and bearer-token authentication | Bcrypt password, rate-limited login, same-origin checks on cookie-authenticated writes. |
 | Single static binary | `CGO_ENABLED=0`, pure-Go SQLite, cross-compiles from a laptop. |
@@ -98,18 +101,26 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 
 ### DNSSEC status has a source
 
-In Off/Learn mode, the client answer comes from a configured upstream. DNS
+In Off/Learn mode, the client answer comes from the selected profile's
+configured upstreams: legacy forwarding URLs under native, approved encrypted
+endpoints under encrypted. DNS
 Daddy requests and records the upstream AD verdict ([RFC 6840] §5.7). An
 upstream `unvalidated` response does not distinguish an unsigned zone from an
-upstream that did not validate. A Learn observation is independent native work
-after that answer is decided and cannot change it.
+upstream that did not validate. A Learn observation independently fetches and
+validates records using the selected profile after that answer is decided; it
+cannot authenticate or change the already-returned answer.
 
 In Live mode, Daddybound resolves and validates the records it actually returns
 to the client. Secure answers and proven insecure delegations can be served;
 bogus, indeterminate and operational failures return SERVFAIL. A client that
 sets CD requests DNSSEC checking to be skipped, while policy and rebinding
 checks still apply. Native status is explicitly distinguished from upstream
-status. This client-serving validator is experimental; implementation and
+status, including `encrypted_forwarded` for local Live validation of records
+obtained through the encrypted profile. Observation rows distinguish native
+Learn (`native`), encrypted Learn (`encrypted_forwarded`), native Live
+(`native_live`) and encrypted Live (`encrypted_live`); stored provenance never
+changes merely because current settings change. This client-serving validator
+is experimental; implementation and
 default selection do not establish production reliability. See
 [dns-security/dnssec.md](dns-security/dnssec.md).
 
@@ -117,7 +128,7 @@ default selection do not establish production reliability. See
 
 ## Experimental
 
-### Daddybound — native resolution and DNSSEC validation
+### Daddybound — resolution and local DNSSEC validation
 
 Daddybound implements DNS resolution and the DNSSEC chain of trust in Go,
 using established cryptographic primitives and the DNS wire library. It is
@@ -125,22 +136,32 @@ separate from the incremental local traffic model described below.
 
 | Mode | Client answer | Daddybound's effect |
 | --- | --- | --- |
-| **Live** (`enforce`) | Native authoritative recursion | Resolves the exact returned records and validates them. Secure/proven-insecure answers can be served; bogus, indeterminate, timeout and bounded-work failures return SERVFAIL. No silent upstream fallback. |
-| **Learn** (`observe`) | Configured forwarding upstream | Independently resolves allowed queries after the answer is decided and records observations. A Learn verdict cannot change that answer. |
-| **Off** (`off`) | Configured forwarding upstream | No native observer, trust-anchor refresh or native client-serving work. Local policy, rate limiting and rebinding protection remain active. |
+| **Live** (`enforce`) | Native authoritative recursion or approved encrypted recursive endpoints | Locally validates the exact returned records. With checking enabled, secure/proven-insecure answers can be served; bogus, indeterminate, timeout and bounded-work failures return SERVFAIL. No silent change of transport. |
+| **Learn** (`observe`) | The selected profile's forwarding path | Independently fetches and validates allowed names using that profile after the answer is decided. A Learn verdict cannot change that answer. |
+| **Off** (`off`) | The selected profile's forwarding path | No Daddybound observation, local validation or anchor refresh. Encrypted forwarding remains encrypted. Local policy, rate limiting and rebinding protection remain active. |
 
 **Fresh installations default to Live.** Upgrades retain an installation's
 recorded Off/Learn selection. An explicit YAML mode pins the choice; otherwise
-a persisted dashboard selection can be changed with acknowledgement of native
-transport and failure behavior. A configuration default is a product decision,
+a persisted dashboard selection can be changed with acknowledgement of the
+selected transport and failure behavior. Transport is independently selected;
+native remains the default and no encrypted provider is installed automatically.
+A configuration default is a product decision,
 not evidence that the validator is mature.
 
 Native resolution uses plaintext UDP/TCP port 53 with QNAME minimisation.
-Configured encrypted forwarding upstreams do not encrypt native traffic.
-Live does not use the forwarding answer cache or silently fall back to an
-upstream when validation cannot complete. This changes the deployment's egress
-requirements, latency and failure behavior. A DNSSEC CD request skips
-cryptographic checks only, not the other DNS Daddy controls.
+The optional encrypted profile replaces native iteration with queries to
+operator-approved recursive endpoints, using the same endpoints for answer
+data, validation material and managed-key refresh. It does not establish that
+the provider's onward resolution is encrypted. Daemon background hostname
+lookups also use that transport but do not pass through local Live validation.
+Client-to-server encryption remains a separate configuration.
+
+Live does not use the forwarding answer cache or silently change transports
+when validation cannot complete. Encrypted failover is limited to the approved
+encrypted endpoints; there is no fallback to native recursion, legacy upstreams
+or system DNS. A DNSSEC CD request skips cryptographic checks only, not the
+other DNS Daddy controls. Read [encrypted-dns.md](encrypted-dns.md) for transport
+scope, migration and operational limitations.
 
 Implemented protocol work includes the chain walk, authenticated NSEC/NSEC3
 denial, CNAME/DNAME processing, native authoritative resolution, and managed
@@ -210,7 +231,8 @@ unfinished feature.** They observe, score, explain and alert. A false positive
 turned into a block is a working service silently broken by a heuristic, and no
 confidence number makes that a good trade. Heuristic scores do not enter
 blocking policy. Explicit rules and enabled intelligence sources make policy
-decisions; native Live separately enforces DNSSEC validation of its answers.
+decisions; Live separately enforces local DNSSEC validation of its answers
+under the selected transport, except when the client explicitly requests CD.
 
 Every detector reports its own maturity through `/api/v1/detectors`, so the
 running software states this rather than relying on this page being current.

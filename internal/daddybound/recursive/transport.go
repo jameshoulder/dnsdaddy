@@ -53,12 +53,10 @@ var ErrMismatchedReply = errors.New("reply does not match the question sent")
 
 // netExchanger talks to authoritative servers over ordinary port 53 DNS.
 //
-// Plain DNS is not an oversight. Native recursion to authoritative servers is
-// UDP and TCP on port 53; there is no DoT or DoH to an authoritative server to
-// speak, and pretending otherwise would be a marketing claim rather than a
-// transport. Confidentiality on this path comes from QNAME minimisation
-// (qmin.go), which reduces what each level is told rather than encrypting what
-// it is told.
+// This implementation does not negotiate encrypted authoritative transport.
+// QNAME minimisation (qmin.go) reduces what each level is told, but provides no
+// encryption. The separate encrypted-forwarding profile acquires records from
+// approved recursive resolvers and does not call this exchanger.
 type netExchanger struct {
 	udpTimeout time.Duration
 	tcpTimeout time.Duration

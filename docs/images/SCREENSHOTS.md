@@ -1,32 +1,108 @@
 # UI screenshot provenance
 
-The six canonical README screenshots and the seven `features-*.png` views below were captured directly from the running DNS Daddy application on **29 September 2026**, between **2026-09-29T21:11:53.053Z** and **2026-09-29T21:11:56.855Z**.
+The repository contains **two identified capture groups from 29 September 2026**.
+The Overview, Daddybound and server-address images were refreshed for encrypted
+transport. Other feature images retain their earlier capture and scope. All
+images are unedited captures of the running application over synthetic lab
+traffic; no API response or DOM content was substituted. They illustrate
+implemented controls, not production detection accuracy or field reliability.
 
-They show the current light interface and implemented native-resolution, local-learning, external-API, protection, recovery and export controls. The binary was built from the working tree based on `59cc816`, including the feature changes in this branch. Served asset hashes below identify the exact frontend captured; the build label reads `dev`.
+## Encrypted transport and server addresses: 23:52 UTC
 
-Every visible counter, decision, finding, status and form is real application output over synthetic laboratory data. No API responses or DOM contents were replaced, and the PNGs were not recoloured, composited or otherwise edited. Captures used ordinary navigation, disclosure controls and a scroll to the top. They demonstrate the interface and the lab's behaviour, without establishing production detection accuracy.
-
-## Image inventory
+These five images were captured from **2026-09-29T23:52:05.284Z** through
+**2026-09-29T23:52:19.557Z**, from the working tree based on `dc2989bd`. The
+binary label is `dev+dc2989b`; its exact hash and the served frontend hashes
+are recorded in [transport-capture-manifest.json](transport-capture-manifest.json).
+The browser renders its local clock, while manifest timestamps are UTC.
 
 | File | Output size | Capture | Route | Visible state |
-|---|---:|---|---|---|
-| [sign-in.png](sign-in.png) | 1440 × 1000 | Viewport | `/` | Signed out; password input empty. |
-| [dashboard.png](dashboard.png) | 1440 × 1000 | Viewport | `#/dashboard` | Synthetic loopback traffic. Native mode explicitly Off in this lab; local learning is enabled. |
-| [queries.png](queries.png) | 1440 × 1000 | Viewport | `#/queries?action=blocked` | Actual blocked synthetic query expanded. |
-| [detections.png](detections.png) | 1440 × 1200 | Viewport | `#/detections` | Actual synthetic detector finding expanded. |
-| [assurance.png](assurance.png) | 1440 × 2339 | Full page | `#/assurance` | Assurance and route to Daddybound operations. |
-| [features-daddybound.png](features-daddybound.png) | 1440 × 1217 | Full page | `#/daddybound` | Native mode Off for the isolated lab; default-on local model reports its actual maturity. |
-| [features-external-apis.png](features-external-apis.png) | 1440 × 2278 | Full page | `#/integrations` | A synthetic provider and signed webhook are saved disabled. Credentials are empty and write-only. |
-| [features-protection.png](features-protection.png) | 1440 × 2061 | Full page | `#/settings` | Rate limiting, rebinding exceptions and actual protection counters. |
-| [features-recovery.png](features-recovery.png) | 1440 × 4556 | Full page | `#/recovery` | Encrypted backup form, offline restore guidance and real configuration history. |
-| [features-exports.png](features-exports.png) | 1440 × 1000 | Full page | `#/reports` | Complete NDJSON export controls. |
-| [features-investigate.png](features-investigate.png) | 1440 × 6751 | Full page | `#/investigate?domain=malware.lab.example&client=127.0.0.21` | Recorded synthetic queries and decisions with a current read-only policy preview. |
-| [mobile.png](mobile.png) | 390 × 844 | Viewport | `#/dashboard` | 390px overview; mobile navigation closed. |
-| [features-daddybound-mobile.png](features-daddybound-mobile.png) | 390 × 2022 | Full page | `#/daddybound` | Native mode and actual local learning state at phone width. |
+| --- | ---: | --- | --- | --- |
+| [dashboard.png](dashboard.png) | 1440 × 1000 | Viewport | `#/dashboard` | 30 synthetic queries, six security blocks; inline Host-only IP and real accepted-socket fallback. |
+| [features-daddybound.png](features-daddybound.png) | 1440 × 2619 | Full page | `#/daddybound` | Saved encrypted profile, validation pinned Off, deliberate loopback endpoint-test failure and unobserved TLS. |
+| [features-daddybound-mobile.png](features-daddybound-mobile.png) | 390 × 4377 | Full page | `#/daddybound` | Same encrypted transport controls and actual failure at phone width. |
+| [features-server-addresses.png](features-server-addresses.png) | 1158 × 966 | Address card | `#/setup` | Setup address card only; credential-bearing per-network DoH URLs excluded. |
+| [mobile.png](mobile.png) | 390 × 844 | Viewport | `#/dashboard` | 390px overview with mobile navigation closed. |
 
-The first five desktop files and `mobile.png` are the canonical README captures. The additional feature views document the implemented controls. Older `neo-aqua-*.png` and `increment-*.png` files are historical previews of earlier revisions; their previous capture notes remain in Git history. Banner and icon artwork have separate brand provenance.
+The real loopback-only lab loaded one local hosts-format threat feed through
+the normal management API, with external catalog feeds disabled. It sent
+30 queries, recorded six security blocks, and forwarded 24 queries to its
+local UDP fixture. The local model had one warming client and zero mature
+baselines. Validation was deliberately pinned Off to keep UI capture isolated;
+that is a lab setting, not the fresh-install default.
 
-## Isolated lab
+The OS denied interface enumeration, exercising the real accepted local socket
+fallback. The API returned `127.0.0.1`, `preferredAddress: null`,
+`source: connection_local_address` and `partial: true`. The homepage displays
+that known address as **Host-only IP**, with Copy IP and the actual configured
+DNS ports, while explaining that another device cannot use loopback. No LAN
+IP, public IP or reachability was fabricated for the screenshot.
+
+The encrypted endpoint used an unused loopback port. Its explicit test failed
+and the UI shows the failure, with no observed TLS connection. Backend local
+TLS fixtures establish successful protocol negotiation and rejection behavior;
+these browser images do not establish a successful encrypted handshake.
+The saved encrypted profile did not change the pinned Off mode.
+
+**30 real-browser checks passed**, including inline fallback IP/copy, actual
+API state, no automatic endpoint test, explicit consent, endpoint ordering and
+bounds, retained failed drafts, saved transport, native-return acknowledgement,
+390px layout and source/served-asset agreement. There were no browser JavaScript
+errors or page-level horizontal overflows. The accompanying JavaScript unit
+suite passed **266 tests**. The optional reproducible runner is
+[transport.browser.test.cjs](../../internal/web/transport.browser.test.cjs);
+its header describes the binary, browser and Playwright environment variables.
+
+| Runtime | Value |
+| --- | --- |
+| Go | 1.27.1, Linux/amd64 |
+| Browser | Chrome for Testing Headless Shell 131.0.6778.204 |
+| Isolation | Loopback listeners, temporary database, synthetic local file feed |
+| Capture | Original browser PNGs; no recolouring, compositing or image editing |
+| CSP | Production application CSP |
+
+### Current transport asset SHA-256
+
+```text
+4ee778fd9976b5839aef71833ee70215880d59c499b042ebabdf330478641091  app.js
+aaa130bb1bd1ba14c9c84edf2999bc1318943da68fb993bc2bff7ac074285b59  app.css
+2a27f8afa2f8628654b7279b57710cfb3edc6911dae70b624894f98be5aca6a8  index.html
+```
+
+### Current transport PNG SHA-256
+
+```text
+de1ee304c7c066dcb166237e97ff6ed10153721d6dc5a3a73a74800d9c335916  dashboard.png
+bee6c51986ebe611e701da6dcfa1d92b94607829f3979ee08407be0e2ed06103  features-daddybound.png
+31d88c45b56c35e35a1d7823c5d46069faee6dc37e2515fe4d8c57739008eeaa  features-daddybound-mobile.png
+1065b8ce30ccf3c56c248e62d82cd5ecbfddbe8cbad7eeaeb54b5f1024e49a51  features-server-addresses.png
+25c1d61b438b3c7b3b9bfd714f52a97b1fcbd83873ab4eb2f11b93ec9abeae8a  mobile.png
+```
+
+## Retained earlier feature images: 21:11 UTC
+
+The following files retain their original **2026-09-29T21:11:53.053Z–21:11:56.855Z**
+capture from the working tree based on `59cc816`. They cover the preceding
+feature increment, using the earlier lab described below. They do not show the
+new transport form or server-address card. The earlier manifest and hashes
+below are historical for any filenames replaced by the 23:52 capture group.
+
+| File | Output size | Route | Visible state |
+| --- | ---: | --- | --- |
+| [sign-in.png](sign-in.png) | 1440 × 1000 | `/` | Signed out; empty password input. |
+| [queries.png](queries.png) | 1440 × 1000 | `#/queries?action=blocked` | Recorded blocked synthetic query and explanation. |
+| [detections.png](detections.png) | 1440 × 1200 | `#/detections` | Synthetic detector finding and actual measurements. |
+| [assurance.png](assurance.png) | 1440 × 2339 | `#/assurance` | Earlier assurance statements and limitations. |
+| [features-external-apis.png](features-external-apis.png) | 1440 × 2278 | `#/integrations` | Disabled synthetic provider and webhook; write-only credentials. |
+| [features-protection.png](features-protection.png) | 1440 × 2061 | `#/settings` | Rate limiting, rebinding exceptions and counters. |
+| [features-recovery.png](features-recovery.png) | 1440 × 4556 | `#/recovery` | Encrypted backup and real configuration history. |
+| [features-exports.png](features-exports.png) | 1440 × 1000 | `#/reports` | Complete NDJSON export controls. |
+| [features-investigate.png](features-investigate.png) | 1440 × 6751 | `#/investigate?domain=malware.lab.example&client=127.0.0.21` | Recorded evidence and current read-only policy preview. |
+
+Older `neo-aqua-*.png` and `increment-*.png` files are historical previews;
+their original capture notes remain in Git history. Banner and icon artwork
+have separate [brand provenance](../brand/README.md).
+
+## Earlier feature lab: 21:11 UTC
 
 All DNS clients and services ran in one isolated network namespace. The management listener used `127.0.0.1:28080`; UDP/TCP DNS used `127.0.0.1:25353`; the only forwarding upstream was a local UDP responder on `127.0.0.1:25300`. No production database, client, credential or threat infrastructure was used.
 
@@ -48,7 +124,7 @@ The built-in `dns-tunnelling` and `suspicious-txt` scenarios ran with seed 1 and
 
 A synthetic Custom HTTP provider and webhook were saved with throwaway fixture credentials and HTTPS `.invalid` destinations. Both were switched off in the final capture; automatic reputation checks and on-demand enrichment were off. No live provider or webhook test was sent. The UI and management responses returned only write-only credential state. The sign-in screenshot was taken before the lab password was entered, and every screenshot was checked for empty password inputs.
 
-## Runtime and verification
+### Earlier runtime and verification
 
 | Setting | Value |
 |---|---|
@@ -65,7 +141,7 @@ The interactive browser run passed **79 checks** against the real app. It covere
 
 The final capture pass verified that all five served frontend assets matched this checkout byte-for-byte. It reported zero JavaScript exceptions, console/CSP errors, failed HTTP requests or external browser-resource requests. The UI unit suite passed **246 tests**, including inactive Learn-counter scope, unavailable model handling, explicit sharing boundaries and complete-export failure cases. Native internet resolution, provider accuracy and long-term learning efficacy are not established by these UI checks; those need their own evaluation.
 
-### Frontend asset SHA-256
+### Earlier frontend asset SHA-256
 
 ```text
 2a27f8afa2f8628654b7279b57710cfb3edc6911dae70b624894f98be5aca6a8  index.html
@@ -75,7 +151,7 @@ The final capture pass verified that all five served frontend assets matched thi
 4a7e84aa5b5a6716efd60774e381da069a27acfe394cf049a3a7c7234e804f39  favicon.svg
 ```
 
-### PNG SHA-256
+### Earlier PNG SHA-256 (historical where files were replaced)
 
 ```text
 e94e2bcff7fb5a2ef40fa3f5cfe8b9d4cee709d65c1f48d95a21be017288018c  sign-in.png

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -248,13 +249,6 @@ func run() error {
 	}
 	defer res.Close()
 
-	for _, u := range res.Upstreams() {
-		if u.Protocol == "udp" || u.Protocol == "tcp" {
-			log.Warn("upstream uses unencrypted DNS; anyone on the path can see and alter your lookups",
-				"upstream", u.Spec)
-		}
-	}
-
 	// --- query log ----------------------------------------------------------
 	qlog := querylog.New(st, querylog.Options{
 		BufferSize:      cfg.Log.BufferSize,
@@ -359,6 +353,19 @@ func run() error {
 		return err
 	}
 	defer dnssecController.Close()
+	res.SetRouteProvider(dnssecController.ForwardRoute)
+	// Install once before any network workers/listeners start. All hostname
+	// lookups share the selected transport, including feeds and integrations;
+	// endpoint bootstrapping itself uses only configured literal addresses.
+	net.DefaultResolver = resolver.NewSystemResolver(dnssecController.ForwardRoute, cfg.DNS.Timeout.D())
+	if dnssecController.TransportState().Transport == config.ResolutionNative {
+		for _, u := range res.Upstreams() {
+			if u.Protocol == "udp" || u.Protocol == "tcp" {
+				log.Warn("upstream uses unencrypted DNS; anyone on the path can see and alter your lookups",
+					"upstream", u.Spec)
+			}
+		}
+	}
 
 	// Construct the inert provider engine before listeners open. Providers
 	// remain disabled until the operator adds credentials and gives consent.

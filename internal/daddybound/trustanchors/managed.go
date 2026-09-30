@@ -194,6 +194,18 @@ func (m *Manager) Health() Health {
 	return m.health
 }
 
+// SetSource changes only how future refresh evidence is obtained. It preserves
+// the complete trust point, including hold-down progress and revocations. The
+// lock is the same one Refresh holds through fetch, authentication and persist,
+// so a transport handoff cannot interleave two writes from stale managers.
+// Callers retire and drain the old refresh loop before starting its replacement.
+// A nil source disables fetching; it never disables validation or creates trust.
+func (m *Manager) SetSource(source KeySource) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg.Source = source
+}
+
 // NewManager loads the stored trust point, or seeds one from the configured
 // anchors.
 //

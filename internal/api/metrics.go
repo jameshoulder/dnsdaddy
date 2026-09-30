@@ -332,6 +332,7 @@ func (a *API) dnssecMetricLines() []string {
 		a.writeObserverMetrics(&b, state.Observer, state.Writer)
 	}
 	a.writeAnchorMetrics(&b, state.Anchors)
+	a.writeTransportMetrics(&b)
 	if state.NativeAvailable {
 		a.writeNativeMetrics(&b, state)
 	}

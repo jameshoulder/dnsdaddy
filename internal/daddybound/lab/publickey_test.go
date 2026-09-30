@@ -1,11 +1,66 @@
 package lab
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"encoding/base64"
 	"math/big"
 	"testing"
 )
+
+func TestECDSAPublicKeyEncodingPreservesCoordinatePadding(t *testing.T) {
+	// These fixed scalar multiples have a leading zero octet in Y. Their
+	// expected RFC 6605 DNSKEY values include that octet but no SEC 1 prefix.
+	for _, tc := range []struct {
+		curve  elliptic.Curve
+		size   int
+		scalar byte
+		want   string
+	}{
+		{elliptic.P256(), 32, 43, "mGriUG8f8QTQQjCGHY9LSY9LxMbQCbMPdUTcEpuC0o0APMzApkYOCuMopNl9PHth2G/GKJwYnyUlEQxEG7B+lw=="},
+		{elliptic.P384(), 48, 176, "0DqnSPX0jrPgxUtoPyXS4tfX4yASgqlbV6Wf+4+Uz0xDsRB8qUS5IRw1ERLeFu0YAAoIxgLcXgAx2tCIwZMF9rJSorw/JF96W4C0hMe5n2mBwyN0xxSnaDJV9TMfZrsG"},
+	} {
+		t.Run(tc.curve.Params().Name, func(t *testing.T) {
+			raw := make([]byte, tc.size)
+			raw[len(raw)-1] = tc.scalar
+			key, err := ecdsa.ParseRawPrivateKey(tc.curve, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := encodePublicKey(key.Public())
+			if err != nil || got != tc.want {
+				t.Fatalf("DNSKEY = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestECDSAPublicKeyEncodingRejectsInvalidOrUnsupportedKeys(t *testing.T) {
+	raw := make([]byte, 32)
+	raw[len(raw)-1] = 1
+	key, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := key.Public().(*ecdsa.PublicKey)
+	invalid.Curve = elliptic.P384() // The P-256 generator is not on P-384.
+	for _, tc := range []struct {
+		name string
+		key  *ecdsa.PublicKey
+	}{
+		{"nil", nil},
+		{"missing curve", &ecdsa.PublicKey{}},
+		{"unsupported curve", &ecdsa.PublicKey{Curve: elliptic.P521()}},
+		{"invalid point", invalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if encoded, err := encodeECDSA(tc.key); err == nil || encoded != "" {
+				t.Fatalf("invalid key produced DNSKEY %q, %v", encoded, err)
+			}
+		})
+	}
+}
 
 // RFC 3110 §2 gives the DNSKEY RSA exponent either a one-octet length or a
 // zero octet followed by two more. The boundary between the two forms is at

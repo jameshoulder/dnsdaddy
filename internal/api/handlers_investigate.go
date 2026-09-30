@@ -793,7 +793,7 @@ func (a *API) observationsFor(ctx context.Context, domain, client string, since,
 		Experimental: true,
 		Items:        []store.DNSSECObservation{},
 		Note: "retained local DNSSEC verdicts; current mode does not describe historical rows. " +
-			"Learn observations changed nothing a client received; native_live rows come from the serving path. " +
+			"Learn observations changed nothing a client received; native_live and encrypted_live rows come from the serving path. " +
 			"Use recorded query source and original decisions for the client outcome. Client-scoped rows require retained query-log correlation",
 	}
 	rows, err := a.Store.ListDNSSECObservations(ctx, store.DNSSECObservationFilter{

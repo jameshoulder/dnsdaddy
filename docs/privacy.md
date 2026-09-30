@@ -18,6 +18,11 @@ choices and explicit mode pins are preserved. The dashboard reports the
 **effective** mode and which setting selected it; do not infer it from an old
 configuration example.
 
+Native is also the default transport profile. Optional encrypted forwarding
+requires operator-approved endpoints and acknowledgement; there is no automatic
+enrolment in an encrypted DNS provider. The selected transport remains active
+when Daddybound mode is Off. See [encrypted DNS](encrypted-dns.md).
+
 External reputation, investigation enrichment and webhook delivery start off.
 Every installation supplies its own external accounts and credentials. A newly
 saved provider is disabled unless deliberately enabled. There is no shared
@@ -28,8 +33,10 @@ local learner.
 
 | Path | What may be disclosed | Control |
 |---|---|---|
-| Native DNS resolution | Names needed to walk from root to authoritative servers, source IP and DNS protocol metadata. Native traffic uses plaintext UDP/TCP port 53. QNAME minimisation limits which labels each delegation sees; it does not encrypt them. | Daddybound Live uses this for client answers. Learn also performs independent native lookups after forwarded resolution. Off stops this native runtime and its trust-anchor refreshes. |
-| Forwarded DNS | Requested names and DNS metadata go to the configured upstreams. The transport follows their configured UDP, TCP, DoT or DoH URLs. | Used in Learn and Off. Live does not silently fall back to forwarding after a native failure. Encrypting client-to-resolver traffic does not encrypt native authoritative traffic. |
+| Native DNS resolution | Names needed to walk from root to authoritative servers, source IP and DNS protocol metadata. Native traffic uses plaintext UDP/TCP port 53. QNAME minimisation limits which labels each delegation sees; it does not encrypt them. | With the native profile, Live uses this for client answers and Learn performs independent native lookups after forwarded resolution. Off stops Daddybound validation and anchor refresh. The encrypted profile constructs no native recursive fallback. |
+| Legacy forwarded DNS | Requested names and DNS metadata go to the configured legacy upstream URLs, over UDP, TCP, DoT or DoH as configured. | Used for Off/Learn client answers with the native profile. Native Live does not silently fall back to this path. Encrypting a client connection does not encrypt native authoritative traffic. |
+| Optional encrypted forwarding | The approved recursive resolvers receive requested names, supporting DNSSEC questions, anchor refreshes and protocol/source-IP metadata over authenticated TLS 1.3 DoQ, HTTP/3 DoH or HTTP/2 DoH. Encryption protects this network leg, not secrecy from the approved recipient or its onward resolution. | The operator chooses endpoint identities and literal bootstrap IPs. All modes use those endpoints while the encrypted profile is selected; there is no automatic provider discovery, plaintext fallback or external IP-discovery request. Client Live validates returned records locally. An explicit endpoint test sends a root DNSKEY question, not retained browsing history. |
+| Daemon background hostname DNS | Feed, provider, webhook and other process-owned hostname lookups disclose those hostnames to the selected DNS recipient. They are separate from uploading client query logs. | Under the encrypted profile they use the same approved encrypted endpoints with no system-DNS fallback; under native they use system DNS. These background lookups do not receive Daddybound's independent client Live validation. |
 | Threat-feed downloads | The configured feed service sees the resolver host's connection, request URL, user agent and refresh cadence. A bulk download does not upload the query log or the list of matching clients. | Enabled feed URLs, scheduled/startup refresh settings and explicit refresh actions. Local file feeds avoid the corresponding HTTP download. The bundled Threat Observatory connector is retired. |
 | External API providers | The requested domain and protocol/account metadata required by the selected adapter. Providers can retain these requests or charge for them. The provider API is separate from ordinary DNS resolution. | Own credentials, provider enablement, policy scopes and global reputation/enrichment settings. Tests and manual enrichment require explicit consent. |
 | Webhooks | Selected finding summaries can contain domains, client IPs and network IDs. Selected review events contain operator notes and actor labels. | Own receiver and signing secret, selected event types and explicit sharing consent. Receiver tests send a synthetic event without real query/finding data. |
@@ -47,6 +54,21 @@ name, contact providers or train a model. Domain enrichment is a separate
 consented POST. Provider workers recheck enablement before starting queued
 work; a request already transmitted cannot be recalled. See
 [external APIs](external-apis.md) and [webhooks](webhooks.md).
+
+The authenticated server-address endpoint reads local interfaces only. When
+host hardening prevents enumeration, it may report the server-side local IP of
+the accepted management connection instead, with
+`source: connection_local_address`, `partial: true` and an empty interface name. This
+does not use Host/forwarding headers or the client/peer address, and never calls
+an external “what is my IP” service. The result is not added to public health
+or login responses or persisted as a new address-history table. A proxy,
+tunnel, container or NAT can make it different from the address another device
+must use. Protect dashboard access because interface names and local IPs are
+deployment information.
+
+Client-to-DNS-Daddy encryption is configured separately from outbound DNS.
+Choosing encrypted outbound forwarding does not turn plain client UDP/TCP
+queries into encrypted requests or control the provider's onward transport.
 
 Turning off query logging controls **retention and local analysis admission**.
 It does not stop the DNS exchange needed to answer a query, withdraw consent
@@ -90,14 +112,14 @@ account. Credentials have separate field encryption, described below.
 
 | Retained data | Contents and default lifetime |
 |---|---|
-| `query_log` | Requested name/type, time, outcome/reason, policy network, optional client address/name, protocol, elapsed time and cache status. `dnssecSource` records native/upstream provenance; an empty legacy value means unknown. Default 7 days via `log.retention_days`. |
+| `query_log` | Requested name/type, time, outcome/reason, policy network, optional client address/name, protocol, elapsed time and cache status. `dnssecSource` records `native`, `encrypted_forwarded` or `upstream` validation provenance; an empty legacy value means unknown. Current settings do not relabel earlier rows. Default 7 days via `log.retention_days`. |
 | `client_hourly` | Client address and the hour it was seen, only for privacy-permitted attributed query rows. Uses the same 7-day query retention. |
-| `dnssec_observations` | Domain, local verdict/reason, native/forwarded provenance and timing/work measurements. Historical Learn rows and `native_live` rows remain distinguishable. Uses query-log retention. It is written asynchronously; missing correlation is not evidence of a successful validation. |
+| `dnssec_observations` | Domain, local verdict/reason, recorded provenance and timing/work measurements. Native Learn (`native`), encrypted Learn (`encrypted_forwarded`), native Live (`native_live`) and encrypted Live (`encrypted_live`) remain distinguishable after mode/profile changes. Uses query-log retention. It is written asynchronously; missing correlation is not evidence of a successful validation. |
 | `stats_hourly` and `blocked_domain_stats` | Per-network/category counts and blocked-domain counts. No client-IP column, but blocked names and network identifiers remain sensitive context. Default 90 days via `log.rollup_days`. |
 | `decisions`, capture manifests and evidence snapshots | Original policy or local-protection outcome, explanation, attributed context and immutable cited evidence. Default 30 days via `log.decision_retention_days`. Captures expire with their decision. Legacy decisions explicitly disclose mutable-reference limitations. |
 | `findings`, `finding_reviews`, `finding_review_history` | Measured signals and bounded example names, confidence/score limitations, domain/device/network context, operator classifications, notes and authenticated actor labels. Default finding retention 30 days; associated review rows cascade when the finding is removed. Reviewing does not rewrite original evidence. |
 | `evidence`, `intel_verdicts`, `intel_enrichment` | Local/feed/provider claims, queried subjects and bounded provider response excerpts/context. Expiring records are pruned by their expiry; non-expiring operator/local claims can remain. These tables are not erased merely by switching query logging off. |
-| Configuration and authentication | Networks/CIDRs, client names, policies/rules, enabled feeds, provider/webhook settings, password/token hashes, sessions and credential ciphertext. Some configuration values themselves are sensitive. Retained until explicitly changed, removed or expired as applicable. |
+| Configuration and authentication | Networks/CIDRs, client names, policies/rules, enabled feeds, DNS transport selection and approved endpoint/bootstrap settings, provider/webhook settings, password/token hashes, sessions and credential ciphertext. Some configuration values themselves are sensitive. Retained until explicitly changed, removed or expired as applicable. |
 | `config_change_history` | Actor, action, target, times, pending/completed/error outcome and redacted configuration differences. It currently has no automatic pruning. It does not include request bodies, authorization headers or plaintext credentials. |
 | `webhook_outbox` and `webhook_stats` | Pending bounded event payloads, retry/lease state and durable delivery counters. Delivered or terminally failed payloads are removed. Any saved webhook configuration change discards pending payloads and counts the drops. This queue has its own lifecycle, independent of finding retention. |
 | `export_sequences` | Three non-identifying insertion counters that preserve export boundaries and prevent new query-ID reuse after pruning or restart. They contain no names, client identities or per-query ledger. |
@@ -173,7 +195,7 @@ learning:
   enabled: false
 ```
 
-These YAML options apply on restart. Native serving mode and external API
+These YAML options apply on restart. Daddybound mode, DNS transport and external API
 modes have their own dashboard controls. If reducing outbound sharing, disable
 reputation, enrichment and webhook delivery separately, and review enabled
 feed URLs and the selected DNS transport. For shorter retention, set the
