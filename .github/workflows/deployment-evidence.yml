@@ -37,6 +37,8 @@ jobs:
           tar -rf /tmp/deployment-source.tar vendor
           gzip /tmp/deployment-source.tar
           mv /tmp/deployment-source.tar.gz /tmp/deployment-evidence/
+          tar -czf /tmp/deployment-evidence/go-toolchain.tar.gz -C "$(go env GOROOT)" .
+          CGO_ENABLED=0 go build -trimpath -o /tmp/deployment-evidence/dnsdaddy ./cmd/dnsdaddy
       - name: Dashboard regression tests
         run: node --test internal/web/app.test.js
       - name: Upload reproducible inputs
