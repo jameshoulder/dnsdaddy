@@ -9,7 +9,8 @@ evidence index, not a certification, legal opinion or promise of production safe
 | What can it actually do? | [Capabilities](docs/capabilities.md), with available, experimental and planned features separated. |
 | What data does it process and send? | [Privacy and outbound traffic](docs/privacy.md) and the [data inventory](docs/trust/data-inventory.json). |
 | What security checks exist? | [Engineering assurance](docs/assurance.md), the exact commit's CI results and retained scan artifacts. A configured workflow is not a passed check. |
-| What vulnerabilities are published? | [Public register](docs/trust/vulnerabilities.json) and [triage process](docs/trust/vulnerability-management.md). The initial inventory is **not assessed**, not "zero vulnerabilities". |
+| What vulnerabilities are published? | [Public register](docs/trust/vulnerabilities.json) and [triage process](docs/trust/vulnerability-management.md). The inventory is **partial**: three module-level candidates, not three confirmed exploitable product flaws and not zero vulnerabilities. |
+| What has actually run? | [First-run evidence](docs/trust/evidence-2026-10-01.md), including source-scan candidates, KEV correlation and scoped reachability results. |
 | What remains unresolved? | [Risk register](docs/trust/risks.json) and [prioritised compliance roadmap](docs/trust/compliance-roadmap.md). |
 | How was AI used? | [AI assistance and human accountability](AI_ASSISTANCE.md). No automated tool can sign a human review. |
 | What do ATT&CK labels establish? | [Mapping policy](docs/detection/mitre.md): investigation hypotheses, not confirmed compromise or certified coverage. |
