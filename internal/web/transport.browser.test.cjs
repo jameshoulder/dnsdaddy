@@ -249,7 +249,19 @@ async function ask(port, name, id) {
     for (const asset of ['app.js', 'app.css', 'index.html']) {
       const served = Buffer.from(await (await fetch(base + (asset === 'index.html' ? '/' : '/' + asset))).arrayBuffer());
       assets[asset] = createHash('sha256').update(served).digest('hex');
-      assert.equal(assets[asset], createHash('sha256').update(await fs.readFile(path.join(__dirname, 'static', asset))).digest('hex'), `Served ${asset} matches current source`);
+      let expected = await fs.readFile(path.join(__dirname, 'static', asset));
+      if (asset === 'index.html') {
+        // The server inserts deterministic asset fingerprints into its HTML.
+        // Still compare every byte: do not skip index integrity or accept an
+        // arbitrary hash from the response under test.
+        let template = expected.toString('utf8');
+        for (const name of ['app.js', 'app.css']) {
+          const digest = createHash('sha256').update(await fs.readFile(path.join(__dirname, 'static', name))).digest('hex');
+          template = template.replaceAll(`"/${name}"`, `"/${name}?v=${digest.slice(0, 16)}"`);
+        }
+        expected = Buffer.from(template, 'utf8');
+      }
+      assert.equal(assets[asset], createHash('sha256').update(expected).digest('hex'), `Served ${asset} matches current source`);
     }
     check('served assets match the current source', true);
     const report = { generatedAt: new Date().toISOString(), browser: await browser.version(), checks, images, assets, binarySha256: createHash('sha256').update(await fs.readFile(binary)).digest('hex'), serverAddresses: await api('/server-addresses'), overview: await api('/overview'), live: await api('/activity/live'), transport: await api('/dns/transport'), modeChanges, upstreamQueries, note: 'Real isolated app with fresh Forward mode, query logging disabled, external feeds disabled and a synthetic local file feed loaded through the management API. Mode changes exercise encrypted loopback failure targets, and all DNS fixtures use loopback. The browser goes offline briefly to test unavailable telemetry. No API response or DOM content was replaced. Screenshots show actual first-run counters over synthetic .lab.example queries.' };
