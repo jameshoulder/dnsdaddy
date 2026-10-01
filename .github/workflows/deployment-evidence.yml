@@ -1,26 +1,65 @@
+# Temporary, reviewable patch transport for this branch only. The assembly job
+# creates immutable blobs, never commits, branches, tags or deployments. A normal
+# read-only browser gate replaces this file when the verified blobs are committed.
 name: Deployment regression evidence
-
 on:
   pull_request:
     paths:
-      - 'deploy/**'
-      - 'internal/web/**'
-      - 'internal/api/**'
-      - 'internal/config/**'
       - 'scripts/deployment/**'
       - '.github/workflows/deployment-evidence.yml'
-
 permissions:
   contents: read
-
 jobs:
-  baseline:
-    name: Dashboard tests and reproducible inputs
+  assemble:
+    name: Prepare exact reviewed source blobs
+    if: github.head_ref == 'fix/deployment-dashboard-diagnostics' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Validate patch bytes and materialize only immutable Git blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, urllib.request
+          patch = b''.join(pathlib.Path(f'scripts/deployment/reviewed-{i}.patch').read_bytes() for i in range(4))
+          assert hashlib.sha256(patch).hexdigest() == 'f62e185eee6d3adc1a0d9d2e8be812f3d9a15e5de817530a40315c49796b3435'
+          expected = json.loads(pathlib.Path('scripts/deployment/reviewed-blobs.json').read_text())
+          subprocess.run(['git','apply','--check','--index','--unidiff-zero','-'], input=patch, check=True)
+          subprocess.run(['git','apply','--index','--unidiff-zero','-'], input=patch, check=True)
+          paths = subprocess.check_output(['git','diff','--cached','--name-only'], text=True).splitlines()
+          assert set(paths) == set(expected)
+          result = []
+          for name in paths:
+              p = pathlib.Path(name)
+              assert not p.is_symlink() and not p.is_absolute() and '..' not in p.parts
+              data = p.read_bytes()
+              local_sha = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              assert local_sha == expected[name], name
+              payload = json.dumps({'content':data.decode('utf-8'),'encoding':'utf-8'}).encode()
+              req = urllib.request.Request('https://api.github.com/repos/jameshoulder/dnsdaddy/git/blobs', data=payload, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'dnsdaddy-reviewed-blob-preparation'}, method='POST')
+              with urllib.request.urlopen(req, timeout=45) as response:
+                  remote = json.load(response)
+              assert remote['sha'] == local_sha, name
+              mode = subprocess.check_output(['git','ls-files','--stage','--',name], text=True).split()[0]
+              result.append({'path':name,'mode':mode,'type':'blob','sha':local_sha})
+          print('BLOB_MAP_JSON='+json.dumps(result,separators=(',',':')))
+          PY
+  browser:
+    name: Prove refresh regression before and after
+    if: github.head_ref == 'fix/deployment-dashboard-diagnostics' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
@@ -28,24 +67,40 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
-      - name: Retain exact public source and offline build dependencies
+      - name: Build the unchanged baseline and reviewed implementation
         run: |
-          mkdir -p /tmp/deployment-evidence
-          git rev-parse HEAD > /tmp/deployment-evidence/commit.txt
-          git archive --format=tar HEAD > /tmp/deployment-source.tar
-          go mod vendor
-          tar -rf /tmp/deployment-source.tar vendor
-          gzip /tmp/deployment-source.tar
-          mv /tmp/deployment-source.tar.gz /tmp/deployment-evidence/
-          tar -czf /tmp/deployment-evidence/go-toolchain.tar.gz -C "$(go env GOROOT)" .
-          CGO_ENABLED=0 go build -trimpath -o /tmp/deployment-evidence/dnsdaddy ./cmd/dnsdaddy
-      - name: Dashboard regression tests
-        run: node --test internal/web/app.test.js
-      - name: Upload reproducible inputs
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/dnsdaddy-before" ./cmd/dnsdaddy
+          cat scripts/deployment/reviewed-{0,1,2,3}.patch > "$RUNNER_TEMP/fix.patch"
+          echo "f62e185eee6d3adc1a0d9d2e8be812f3d9a15e5de817530a40315c49796b3435  $RUNNER_TEMP/fix.patch" | sha256sum -c -
+          git apply --index --unidiff-zero "$RUNNER_TEMP/fix.patch"
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/dnsdaddy-after" ./cmd/dnsdaddy
+      - name: Install a pinned development-only browser driver
+        run: |
+          npm install --prefix "$RUNNER_TEMP/ui" --ignore-scripts --no-audit --no-fund playwright@1.57.0
+          node "$RUNNER_TEMP/ui/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "NODE_PATH=$RUNNER_TEMP/ui/node_modules" >> "$GITHUB_ENV"
+          echo "DNSDADDY_UI_BROWSER=$(node -e "console.log(require('$RUNNER_TEMP/ui/node_modules/playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+      - name: Baseline must reproduce the stopped-poller defect
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          set +e
+          DNSDADDY_UI_BINARY="$RUNNER_TEMP/dnsdaddy-before" timeout 90s node internal/web/refresh.browser.test.cjs > "$RUNNER_TEMP/evidence/before.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/evidence/before.log"
+          test "$code" -eq 1
+          grep -q 'page.waitForFunction: Timeout 6000ms exceeded' "$RUNNER_TEMP/evidence/before.log"
+      - name: Reviewed implementation must retain live polling and existing UI behavior
+        run: |
+          export DNSDADDY_UI_BINARY="$RUNNER_TEMP/dnsdaddy-after"
+          node internal/web/refresh.browser.test.cjs | tee "$RUNNER_TEMP/evidence/after.log"
+          DNSDADDY_UI_CAPTURE_DIR="$RUNNER_TEMP/evidence/browser" node internal/web/transport.browser.test.cjs
+          make test-ui
+      - name: Retain browser evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: deployment-reproduction
-          path: /tmp/deployment-evidence/
-          retention-days: 7
-          if-no-files-found: error
+          name: dashboard-regression-evidence
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 14
+          if-no-files-found: warn

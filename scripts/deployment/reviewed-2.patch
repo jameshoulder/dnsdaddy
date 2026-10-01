@@ -1,0 +1,270 @@
+diff --git a/internal/web/embed.go b/internal/web/embed.go
+index 6af5507..4c7eda5 100644
+--- a/internal/web/embed.go
++++ b/internal/web/embed.go
+@@ -2,6 +1,0 @@
+-//
+-// The dashboard is hand-written HTML, CSS, and JavaScript with no build step
+-// and no runtime dependencies. That is a deliberate choice for a self-hosted
+-// product: `go build` produces the whole thing, there is no npm tree to audit
+-// before pointing your network at it, and the page works on a box with no
+-// outbound internet access.
+@@ -10,0 +5,2 @@ import (
++	"bytes"
++	"crypto/sha256"
+@@ -11,0 +8 @@ import (
++	"fmt"
+@@ -13,0 +11 @@ import (
++	"path"
+@@ -14,0 +13 @@ import (
++	"time"
+@@ -20,2 +19,25 @@ var static embed.FS
+-// Handler serves the dashboard. Unknown paths fall back to index.html so the
+-// client-side router can own them.
++// dashboardIndex ties the HTML to the exact script/style bytes in this binary.
++// Stable /app.js names with max-age alone allowed an upgraded server to run an
++// old cached dashboard. Fingerprinted URLs prevent that, including for a browser
++// which still holds the old five-minute cache policy. No remote resources,
++// credentials or runtime configuration enter the public page.
++func dashboardIndex(sub fs.FS) ([]byte, map[string]string, error) {
++	index, err := fs.ReadFile(sub, "index.html")
++	if err != nil {
++		return nil, nil, err
++	}
++	etags := make(map[string]string)
++	for _, name := range []string{"app.js", "app.css"} {
++		data, err := fs.ReadFile(sub, name)
++		if err != nil {
++			return nil, nil, err
++		}
++		hash := sha256.Sum256(data)
++		etags[name] = fmt.Sprintf(`"%x"`, hash)
++		index = bytes.ReplaceAll(index, []byte(`"/`+name+`"`), []byte(fmt.Sprintf(`"/%s?v=%x"`, name, hash[:8])))
++	}
++	return index, etags, nil
++}
++
++// Handler serves the embedded UI; a missing asset is not a successful HTML API
++// response. Extensionless browser routes retain the SPA fallback.
+@@ -26,0 +49,4 @@ func Handler() http.Handler {
++	index, etags, err := dashboardIndex(sub)
++	if err != nil {
++		panic("web: embedded dashboard incomplete: " + err.Error())
++	}
+@@ -28 +54,4 @@ func Handler() http.Handler {
+-
++	serveIndex := func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "text/html; charset=utf-8")
++		http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(index))
++	}
+@@ -31 +60,8 @@ func Handler() http.Handler {
+-
++		// Revalidate stable paths too: a bookmarked old fingerprint must never
++		// be served as an immutable new build with yesterday's cache metadata.
++		w.Header().Set("Cache-Control", "no-cache")
++		if r.Method != http.MethodGet && r.Method != http.MethodHead {
++			w.Header().Set("Allow", "GET, HEAD")
++			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
++			return
++		}
+@@ -33,2 +69,3 @@ func Handler() http.Handler {
+-		if clean == "" {
+-			clean = "index.html"
++		if clean == "" || clean == "index.html" {
++			serveIndex(w, r)
++			return
+@@ -36,4 +73,8 @@ func Handler() http.Handler {
+-		if _, err := fs.Stat(sub, clean); err != nil {
+-			// Not a real asset: hand it to the SPA.
+-			r = r.Clone(r.Context())
+-			r.URL.Path = "/"
++		info, err := fs.Stat(sub, clean)
++		if err != nil || info.IsDir() {
++			if path.Ext(clean) != "" || strings.HasPrefix(clean, "api/") {
++				http.NotFound(w, r)
++				return
++			}
++			serveIndex(w, r)
++			return
+@@ -41,5 +82,2 @@ func Handler() http.Handler {
+-		if strings.HasSuffix(clean, ".css") || strings.HasSuffix(clean, ".js") {
+-			// Assets are versioned by the binary they ship in; a short cache
+-			// keeps a browser from serving yesterday's dashboard after an
+-			// upgrade while still avoiding a refetch on every navigation.
+-			w.Header().Set("Cache-Control", "public, max-age=300")
++		if etag := etags[clean]; etag != "" {
++			w.Header().Set("ETag", etag)
+@@ -53,3 +90,0 @@ func setSecurityHeaders(w http.ResponseWriter) {
+-	// The dashboard loads nothing from anywhere else, so the policy can be
+-	// this tight. 'unsafe-inline' is not granted: all script and style is in
+-	// its own file.
+diff --git a/internal/web/embed_test.go b/internal/web/embed_test.go
+new file mode 100644
+index 0000000..55bb1cb
+--- /dev/null
++++ b/internal/web/embed_test.go
+@@ -0,0 +1,71 @@
++package web
++
++import (
++	"bytes"
++	"net/http"
++	"net/http/httptest"
++	"regexp"
++	"strings"
++	"testing"
++	"testing/fstest"
++)
++
++func TestDashboardFingerprintsFollowEmbeddedAssets(t *testing.T) {
++	input := fstest.MapFS{
++		"index.html": {Data: []byte(`<link href="/app.css"><script src="/app.js"></script>`)},
++		"app.js":     {Data: []byte("old script")}, "app.css": {Data: []byte("body{}")},
++	}
++	before, etags, err := dashboardIndex(input)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !bytes.Contains(before, []byte("/app.js?v=")) || !bytes.Contains(before, []byte("/app.css?v=")) || etags["app.js"] == "" {
++		t.Fatalf("missing fingerprints: %s", before)
++	}
++	input["app.js"].Data = []byte("new script")
++	after, later, err := dashboardIndex(input)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if bytes.Equal(before, after) || etags["app.js"] == later["app.js"] {
++		t.Fatal("a different binary's script reused the old cache key")
++	}
++	if etags["app.css"] != later["app.css"] {
++		t.Fatal("unchanged CSS should retain its content hash")
++	}
++}
++
++func TestDashboardServesRevalidatableAssetsAndActual404s(t *testing.T) {
++	h := Handler()
++	w := httptest.NewRecorder()
++	h.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
++	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-cache" {
++		t.Fatalf("index response: %d %v", w.Code, w.Header())
++	}
++	match := regexp.MustCompile(`src="(/app.js\?v=[0-9a-f]{16})"`).FindStringSubmatch(w.Body.String())
++	if len(match) != 2 {
++		t.Fatal("served HTML does not select its own embedded script")
++	}
++	asset := httptest.NewRecorder()
++	h.ServeHTTP(asset, httptest.NewRequest("GET", match[1], nil))
++	if asset.Code != 200 || asset.Header().Get("ETag") == "" || !strings.Contains(asset.Header().Get("Content-Type"), "javascript") {
++		t.Fatalf("script response: %d %v", asset.Code, asset.Header())
++	}
++	r := httptest.NewRequest("GET", match[1], nil)
++	r.Header.Set("If-None-Match", asset.Header().Get("ETag"))
++	cached := httptest.NewRecorder()
++	h.ServeHTTP(cached, r)
++	if cached.Code != http.StatusNotModified || cached.Body.Len() != 0 {
++		t.Fatalf("ETag was not honoured: %d", cached.Code)
++	}
++	for _, path := range []string{"/missing.js", "/missing.css", "/api/missing"} {
++		out := httptest.NewRecorder()
++		h.ServeHTTP(out, httptest.NewRequest("GET", path, nil))
++		if out.Code != http.StatusNotFound {
++			t.Errorf("%s returned SPA success: %d", path, out.Code)
++		}
++	}
++	if strings.Contains(w.Header().Get("Content-Security-Policy"), "unsafe-inline") {
++		t.Fatal("cache repair relaxed CSP")
++	}
++}
+diff --git a/internal/web/refresh.browser.test.cjs b/internal/web/refresh.browser.test.cjs
+new file mode 100644
+index 0000000..c196d18
+--- /dev/null
++++ b/internal/web/refresh.browser.test.cjs
+@@ -0,0 +1,87 @@
++/* Real daemon regression: discarding an automatic history refresh must not
++ * cancel the live poller of the page which remains on screen. All DNS and
++ * HTTP traffic is local. The history response is delayed, not fabricated.
++ * Required: DNSDADDY_UI_BINARY, DNSDADDY_UI_BROWSER and Playwright on NODE_PATH.
++ */
++'use strict';
++const assert = require('node:assert/strict');
++const fs = require('node:fs/promises');
++const os = require('node:os');
++const path = require('node:path');
++const net = require('node:net');
++const dgram = require('node:dgram');
++const { spawn } = require('node:child_process');
++const { chromium } = require('playwright');
++const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
++async function port() {
++  const s = net.createServer(); await new Promise((resolve) => s.listen(0, '127.0.0.1', resolve));
++  const p = s.address().port; await new Promise((resolve) => s.close(resolve)); return p;
++}
++function query(id) {
++  const name = `probe${id}.example.test`;
++  const head = Buffer.alloc(12); head.writeUInt16BE(id); head.writeUInt16BE(0x0100, 2); head.writeUInt16BE(1, 4);
++  return Buffer.concat([head, ...name.split('.').map((l) => Buffer.concat([Buffer.from([l.length]), Buffer.from(l)])), Buffer.from([0, 0, 1, 0, 1])]);
++}
++async function ask(p, id) {
++  const s = dgram.createSocket('udp4'); let timer;
++  try {
++    return await new Promise((resolve, reject) => {
++      timer = setTimeout(() => reject(new Error('DNS test timeout')), 4000);
++      s.once('error', reject); s.once('message', (answer) => { assert.equal(answer.readUInt16BE(2) & 15, 0); resolve(answer); });
++      s.send(query(id), p, '127.0.0.1');
++    });
++  } finally { clearTimeout(timer); s.close(); }
++}
++(async () => {
++  assert.ok(process.env.DNSDADDY_UI_BINARY && process.env.DNSDADDY_UI_BROWSER, 'binary and browser must be supplied; this gate must not silently skip');
++  const work = await fs.mkdtemp(path.join(os.tmpdir(), 'dnsdaddy-refresh-'));
++  const upstream = dgram.createSocket('udp4');
++  await new Promise((resolve) => upstream.bind(0, '127.0.0.1', resolve));
++  upstream.on('message', (message, peer) => {
++    let end = 12; while (message[end]) end += message[end] + 1; end += 5;
++    const head = Buffer.from(message.subarray(0, 12)); head.writeUInt16BE(0x8180, 2); head.writeUInt16BE(1, 6); head.writeUInt32BE(0, 8);
++    upstream.send(Buffer.concat([head, message.subarray(12, end), Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 8, 8, 4, 4])]), peer.port, peer.address);
++  });
++  const httpPort = await port(), dnsPort = await port();
++  const base = `http://127.0.0.1:${httpPort}`, password = 'local-refresh-regression-password';
++  const config = path.join(work, 'config.yaml');
++  await fs.writeFile(config, `data_dir: ${work}/data\ndns:\n  listen_udp: "127.0.0.1:${dnsPort}"\n  listen_tcp: "127.0.0.1:${dnsPort}"\n  upstreams: ["127.0.0.1:${upstream.address().port}"]\nhttp:\n  listen: "127.0.0.1:${httpPort}"\n  admin_password: "${password}"\nfeeds:\n  refresh_on_start: false\nlog:\n  query_log: false\n`);
++  const app = spawn(process.env.DNSDADDY_UI_BINARY, ['-config', config], { stdio: ['ignore', 'pipe', 'pipe'] });
++  let logs = '', browser;
++  app.stdout.on('data', (b) => { logs += b; }); app.stderr.on('data', (b) => { logs += b; });
++  try {
++    for (let n = 0; n < 100; n++) {
++      if (app.exitCode !== null) throw new Error(logs);
++      try { if ((await fetch(base + '/api/v1/health')).ok) break; } catch { /* not listening yet */ }
++      if (n === 99) throw new Error('Daemon did not start: ' + logs); await delay(100);
++    }
++    browser = await chromium.launch({ executablePath: process.env.DNSDADDY_UI_BROWSER, args: ['--no-sandbox'] });
++    const context = await browser.newContext(); const page = await context.newPage();
++    const errors = []; page.on('pageerror', (e) => errors.push(e.message));
++    await page.goto(base); await page.locator('#password').fill(password); await page.locator('#login-form button[type=submit]').click();
++    await page.locator('#resolver-live').waitFor(); await ask(dnsPort, 1);
++    await page.waitForFunction(() => Number(document.querySelector('[data-live-count=received]').textContent.replaceAll(',', '')) >= 1);
++    const original = await page.locator('#daddybound-mode-form').elementHandle();
++    let release, arrived;
++    const held = new Promise((resolve) => { release = resolve; });
++    const requestSeen = new Promise((resolve) => { arrived = resolve; });
++    await page.route(base + '/api/v1/overview', async (route) => { arrived(); await held; await route.continue(); });
++    await page.evaluate(() => { document.activeElement.blur(); window.pendingRefresh = router.reload({ automatic: true }); });
++    await requestSeen;
++    await page.locator('#daddybound-mode-form [value=off]').focus();
++    release();
++    assert.equal(await page.evaluate(() => window.pendingRefresh), false, 'history replacement is abandoned to preserve input');
++    await page.unroute(base + '/api/v1/overview');
++    assert.ok(await original.evaluate((e) => e.isConnected), 'focused form must not be replaced');
++    await ask(dnsPort, 2);
++    await page.waitForFunction(() => Number(document.querySelector('[data-live-count=received]').textContent.replaceAll(',', '')) >= 2, null, { timeout: 6000 });
++    assert.ok(await page.locator('#daddybound-mode-form [value=off]').evaluate((e) => e === document.activeElement), 'polling preserves focus');
++    assert.deepEqual(errors, []);
++    console.log('PASS: real DNS counters continue after an automatic refresh is discarded; form and focus survive.');
++  } finally {
++    if (browser) await browser.close();
++    app.kill('SIGTERM'); await Promise.race([new Promise((resolve) => app.once('exit', resolve)), delay(3000)]);
++    if (app.exitCode === null) app.kill('SIGKILL');
++    upstream.close(); await fs.rm(work, { recursive: true, force: true });
++  }
++})().catch((e) => { console.error(e); process.exitCode = 1; });
