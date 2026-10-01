@@ -1,0 +1,3 @@
+# Review routing only. Repository rules must separately require review/checks.
+# The maintainer owning a file does not make self-review independent assurance.
+* @jameshoulder

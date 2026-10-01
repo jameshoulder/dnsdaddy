@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "updated": "2026-10-01",
+  "inventory_status": "not_assessed",
+  "scope": "Manually triaged, publicly disclosed DNS Daddy and dependency advisories. Historical review records and current scanner findings still require reconciliation. This is not a complete vulnerability inventory.",
+  "assessment_evidence": [],
+  "notice": "An empty register is not evidence that there are no vulnerabilities. Embargoed reports are handled privately. Automated candidates and CISA KEV matches require applicability review.",
+  "vulnerabilities": []
+}

@@ -10,6 +10,11 @@ software actually does before reading anything else. It is the single source of
 truth for what is implemented, what is experimental, and what is only an
 intention, and everything else here is expected to agree with it.
 
+For data handling, vulnerability management, AI-development disclosure and scoped
+standards readiness, use the [trust and assurance index](../TRUST.md). It links
+the data inventory, public advisory register, tracked risks, evidence templates
+and compliance roadmap without claiming certification or an independent audit.
+
 ---
 
 ## Running it
