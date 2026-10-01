@@ -48,6 +48,10 @@ func (a *API) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// by the people it should be, and only by them?".
 	exposureCount, exposureAddr := a.exposure.snapshot()
 	checks = append(checks, diag.ManagementExposure(exposureCount, exposureAddr))
+	if check, ok := a.proxyRequestCheck(r); ok {
+		checks = append(checks, check)
+	}
+	w.Header().Set("Cache-Control", "no-store")
 
 	writeJSON(w, http.StatusOK, DiagnosticsResponse{
 		Status: diag.Worst(checks),

@@ -23,6 +23,7 @@ services:
       context: .
       args:
         VERSION: ${DNSDADDY_VERSION:-dev}
+        COMMIT: ${DNSDADDY_COMMIT:-}
     # Or use a published image instead of building:
     # image: ghcr.io/jameshoulder/dnsdaddy:latest
     container_name: dnsdaddy
@@ -101,6 +102,8 @@ services:
       # See .env.example for an encrypted starter with selectable resolver modes.
       DNSDADDY_UPSTREAMS:
       DNSDADDY_UPSTREAM_MODE:
+      # Display-only client-facing IP:port for NAT/containers; no DNS access is granted.
+      DNSDADDY_ADVERTISED_DNS:
       DNSDADDY_RESOLUTION_TRANSPORT:
       DNSDADDY_ENCRYPTED_UPSTREAMS:
       DNSDADDY_LOCAL_DNSSEC_VALIDATION:

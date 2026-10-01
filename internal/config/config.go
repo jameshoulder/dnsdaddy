@@ -95,12 +95,16 @@ type Integrations struct {
 
 // DNS holds the resolver-side settings: what we listen on and where we forward.
 type DNS struct {
-	ListenUDP   string   `yaml:"listen_udp"`
-	ListenTCP   string   `yaml:"listen_tcp"`
-	ListenDoT   string   `yaml:"listen_dot"`
-	TLSCertFile string   `yaml:"tls_cert_file"`
-	TLSKeyFile  string   `yaml:"tls_key_file"`
-	Upstreams   []string `yaml:"upstreams"`
+	// AdvertisedEndpoint is an optional client-facing literal IP:port, for
+	// deployments whose host/NAT address differs from the process interfaces.
+	// Display only: it never changes listeners, ACLs, TLS or upstream routing.
+	AdvertisedEndpoint string   `yaml:"advertised_endpoint,omitempty"`
+	ListenUDP          string   `yaml:"listen_udp"`
+	ListenTCP          string   `yaml:"listen_tcp"`
+	ListenDoT          string   `yaml:"listen_dot"`
+	TLSCertFile        string   `yaml:"tls_cert_file"`
+	TLSKeyFile         string   `yaml:"tls_key_file"`
+	Upstreams          []string `yaml:"upstreams"`
 	// ResolutionTransport chooses native iteration or authenticated encrypted
 	// forwarding. Empty preserves the dashboard's saved selection. It is
 	// independent of Daddybound's Forward, Learn and Live validation modes.
@@ -564,6 +568,7 @@ func Load(path string) (Config, error) {
 func applyEnv(cfg *Config) error {
 	envStr("DNSDADDY_DATA_DIR", &cfg.DataDir)
 	envStr("DNSDADDY_DNS_LISTEN_UDP", &cfg.DNS.ListenUDP)
+	envStr("DNSDADDY_ADVERTISED_DNS", &cfg.DNS.AdvertisedEndpoint)
 	envStr("DNSDADDY_DNS_LISTEN_TCP", &cfg.DNS.ListenTCP)
 	envStr("DNSDADDY_DNS_LISTEN_DOT", &cfg.DNS.ListenDoT)
 	envStr("DNSDADDY_TLS_CERT_FILE", &cfg.DNS.TLSCertFile)
@@ -723,6 +728,13 @@ func (c *Config) validate() error {
 	}
 	if _, err := protection.New(c.Protection, nil); err != nil {
 		return fmt.Errorf("protection: %w", err)
+	}
+	if c.DNS.AdvertisedEndpoint != "" {
+		ep, err := netip.ParseAddrPort(c.DNS.AdvertisedEndpoint)
+		if err != nil || ep.Port() == 0 || ep.Addr().Zone() != "" ||
+			(!ep.Addr().IsGlobalUnicast() && !ep.Addr().IsLoopback()) {
+			return fmt.Errorf("dns.advertised_endpoint must be a literal unicast IP and nonzero port, such as 192.0.2.53:53 or [2001:db8::53]:53")
+		}
 	}
 	if c.DNS.ListenUDP == "" && c.DNS.ListenTCP == "" && c.DNS.ListenDoT == "" {
 		return fmt.Errorf("no DNS listener configured")

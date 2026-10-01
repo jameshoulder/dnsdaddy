@@ -376,6 +376,7 @@ func (s *statusRecorder) WriteHeader(code int) {
 // --- helpers ---------------------------------------------------------------
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)

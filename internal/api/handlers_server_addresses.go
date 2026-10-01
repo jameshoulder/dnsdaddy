@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/diag"
 )
 
 const (
@@ -23,14 +24,33 @@ const (
 // listeners and candidate client endpoints separate and never calls an external
 // discovery service.
 type ServerAddressesResponse struct {
-	Source           string              `json:"source"`
-	PreferredAddress *string             `json:"preferredAddress"`
-	Addresses        []ServerAddress     `json:"addresses"`
-	Listeners        []ServerDNSListener `json:"listeners"`
-	Limit            int                 `json:"limit"`
-	Truncated        bool                `json:"truncated"`
-	Partial          bool                `json:"partial"`
-	Notes            []string            `json:"notes"`
+	Runtime          diag.Runtime           `json:"runtime"`
+	Advertised       *AdvertisedDNSEndpoint `json:"advertised,omitempty"`
+	Source           string                 `json:"source"`
+	PreferredAddress *string                `json:"preferredAddress"`
+	Addresses        []ServerAddress        `json:"addresses"`
+	Listeners        []ServerDNSListener    `json:"listeners"`
+	Limit            int                    `json:"limit"`
+	Truncated        bool                   `json:"truncated"`
+	Partial          bool                   `json:"partial"`
+	Notes            []string               `json:"notes"`
+}
+
+// AdvertisedDNSEndpoint is operator configuration, not an observed public IP.
+type AdvertisedDNSEndpoint struct {
+	Address  string `json:"address"`
+	Port     uint16 `json:"port"`
+	Source   string `json:"source"`
+	Verified bool   `json:"verified"`
+}
+
+func withServerDeployment(out ServerAddressesResponse, cfg config.DNS, runtime diag.Runtime) ServerAddressesResponse {
+	out.Runtime = runtime
+	if ep, err := netip.ParseAddrPort(cfg.AdvertisedEndpoint); err == nil && ep.Port() > 0 &&
+		ep.Addr().Zone() == "" && (ep.Addr().IsGlobalUnicast() || ep.Addr().IsLoopback()) {
+		out.Advertised = &AdvertisedDNSEndpoint{Address: ep.Addr().Unmap().String(), Port: ep.Port(), Source: "configuration", Verified: false}
+	}
+	return out
 }
 
 type ServerAddress struct {
@@ -81,13 +101,20 @@ func (a *API) handleServerAddresses(w http.ResponseWriter, r *http.Request) {
 			a.Log.Warn("read local server interfaces", "error", err)
 		}
 		if fallback, ok := serverConnectionAddress(a.Config.DNS, r); ok {
-			writeJSON(w, http.StatusOK, fallback)
+			writeJSON(w, http.StatusOK, withServerDeployment(fallback, a.Config.DNS, diag.DetectRuntime()))
+			return
+		}
+		configured := withServerDeployment(serverAddresses(a.Config.DNS, serverInterfaceSnapshot{partial: true}), a.Config.DNS, diag.DetectRuntime())
+		if configured.Advertised != nil {
+			configured.Source = "configuration_only"
+			configured.Notes = append(configured.Notes, "No local interface or accepted socket address could be read. Only the operator-configured endpoint is available; reachability is unverified.")
+			writeJSON(w, http.StatusOK, configured)
 			return
 		}
 		writeError(w, http.StatusServiceUnavailable, "Server interface addresses could not be read. Check host network permissions and configure clients using the deployment's DNS address.")
 		return
 	}
-	writeJSON(w, http.StatusOK, serverAddresses(a.Config.DNS, snapshot))
+	writeJSON(w, http.StatusOK, withServerDeployment(serverAddresses(a.Config.DNS, snapshot), a.Config.DNS, diag.DetectRuntime()))
 }
 
 // net/http supplies LocalAddrContextKey from the accepted server connection.

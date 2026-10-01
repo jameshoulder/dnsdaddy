@@ -10,6 +10,9 @@
 data_dir: /var/lib/dnsdaddy
 
 dns:
+  # Optional display-only host/NAT endpoint for clients. This does not change
+  # listeners, access permissions, TLS or upstreams and is not a connectivity test.
+  # advertised_endpoint: "192.0.2.53:53"
   # Address:port for plain DNS. Use "127.0.0.1:53" to listen only on loopback,
   # or ":53" for every interface. If you expose this to the internet, restrict
   # it with a firewall — an open resolver will be found and abused for

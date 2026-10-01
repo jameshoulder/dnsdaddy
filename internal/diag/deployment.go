@@ -225,7 +225,7 @@ func proxyTrust(in DeploymentInput) Check {
 	}
 
 	c.Status = StatusPass
-	c.Summary = fmt.Sprintf("%d proxy range(s) trusted to report the client address.", len(in.TrustedProxyCIDRs))
+	c.Summary = fmt.Sprintf("%d proxy range(s) trusted to report the client address (configuration only; actual proxy peer not checked by doctor).", len(in.TrustedProxyCIDRs))
 	c.Evidence = []string{"trusted_proxy_cidrs: " + strings.Join(in.TrustedProxyCIDRs, ", ")}
 	return c
 }

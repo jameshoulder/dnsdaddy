@@ -52,7 +52,7 @@ test-race: ## Run tests with the race detector
 
 .PHONY: test-ui
 test-ui: ## Run the dashboard's JavaScript tests (needs node; no packages to install)
-	node --test internal/web/app.test.js
+	node --test internal/web/app.test.js internal/web/deployment.test.js
 
 .PHONY: test-daddybound
 test-daddybound: ## Compare Daddybound against libunbound and BIND delv (needs libunbound-dev, bind9-dnsutils, cgo)

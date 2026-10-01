@@ -178,6 +178,7 @@ class ApiError extends Error {
 async function api(path, options = {}) {
   const res = await fetch(`/api/v1${path}`, {
     credentials: 'same-origin',
+    cache: 'no-store',
     headers: options.body ? { 'Content-Type': 'application/json' } : {},
     ...options,
   });
@@ -189,14 +190,15 @@ async function api(path, options = {}) {
   if (res.status === 204) return null;
 
   const text = await res.text();
-  let body = null;
-  if (text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = { error: text };
-    }
+  const contentType = res.headers.get('Content-Type') || '';
+  const endpoint = '/api/v1' + path.split('?')[0];
+  const jsonType = /^application\/(?:json|[a-z0-9.+-]+\+json)(?:;|$)/i.test(contentType);
+  if (!jsonType) {
+    throw new ApiError(res.status, `${endpoint} returned ${contentType.split(';')[0] || 'no content type'} instead of JSON (HTTP ${res.status}). Check that the reverse proxy preserves /api/v1 and reaches this DNS Daddy instance.`);
   }
+  let body;
+  try { body = JSON.parse(text); }
+  catch { throw new ApiError(res.status, `${endpoint} returned invalid or empty JSON (HTTP ${res.status}). Check the backend and reverse proxy.`); }
   if (!res.ok) {
     throw new ApiError(res.status, (body && body.error) || `Request failed (${res.status})`, body);
   }
@@ -583,22 +585,29 @@ function serverAddressesCard(data) {
   if (!data) return html`<section class="card section server-address-card" aria-labelledby="server-address-title"><div class="card-head"><div><h2 id="server-address-title">Server IP addresses</h2><p>Addresses for configuring your DNS clients.</p></div><a class="btn btn-ghost btn-sm" href="#/setup">Connection setup</a></div>
     ${raw(unavailableState('Server addresses unavailable', 'The server could not report its local interface addresses. No address is inferred from this browser’s location.'))}</section>`;
   const addresses = Array.isArray(data.addresses) ? data.addresses : [];
-  const preferred = addresses.find((address) => address.address === data.preferredAddress && ['private', 'public'].includes(address.type) && (address.dns || []).length);
+  const container = data.runtime === 'container';
+  const advertised = data.advertised && data.advertised.source === 'configuration' ? data.advertised : null;
+  const preferred = !container && addresses.find((address) => address.address === data.preferredAddress && ['private', 'public'].includes(address.type) && (address.dns || []).length);
   // Show a known local address even when none can be recommended to another
   // device. Visibility must not promote loopback or an unmatched interface
   // into a preferred LAN destination.
   const displayed = preferred || addresses.find((address) => address.type !== 'link_local' && (address.dns || []).length) || addresses[0];
-  const displayedLabel = preferred ? '' : displayed && displayed.type === 'loopback' ? 'Host-only IP' : data.source === 'connection_local_address' ? 'Local connection IP' : 'Detected IP';
+  const displayedLabel = container ? 'Container-internal IP' : preferred ? '' : displayed && displayed.type === 'loopback' ? 'Host-only IP' : data.source === 'connection_local_address' ? 'Local connection IP' : 'Detected IP';
+  const featureLocal = !container && !advertised;
   const others = addresses.filter((address) => address !== displayed);
   const listeners = Array.isArray(data.listeners) ? data.listeners : [];
   const hasNonstandardDNSPort = displayed && (displayed.dns || []).some((endpoint) => ['udp', 'tcp'].includes(endpoint.transport) && endpoint.port !== 53);
   return html`<section class="card section server-address-card" aria-labelledby="server-address-title"><div class="card-head"><div><div class="card-eyebrow">Connect your devices</div><h2 id="server-address-title">Server IP addresses</h2></div><a class="btn btn-ghost btn-sm" href="#/setup">Connection setup</a></div>
-    ${raw(displayed ? serverAddressRow(displayed, { featured: true, label: displayedLabel }) : '')}
-    ${raw(!preferred ? html`<p class="notice-inline">No LAN or public address matching a DNS listener was identified. Review the available interfaces and configured listeners below.</p>` : '')}
-    <p class="small muted server-address-note">${data.source === 'connection_local_address' ? 'Reported by this dashboard connection’s local socket; other interfaces could not be enumerated.' : 'Detected on this server’s interfaces; reachability has not been tested.'} Containers, NAT and port mappings may require a different host address.</p>
-    ${raw(hasNonstandardDNSPort ? html`<p class="small rec-note is-warn">DNS is using a non-standard port. Copy IP copies the address only; configure the displayed port separately on clients that support it.</p>` : '')}
+    ${raw(advertised ? html`<div class="server-address-featured"><strong>Client-facing DNS address</strong><p class="mono">${advertised.address} <button type="button" class="btn btn-ghost btn-sm" data-copy="${advertised.address}">Copy IP</button></p><p class="small muted">Port ${advertised.port} · configured by the operator, not a reachability test. Client permissions and host port mappings still apply.</p></div>` : '')}
+    ${raw(container && !advertised ? html`<p class="notice-inline">This is a container. Its internal IP is not the public server IP. Set <code>DNSDADDY_ADVERTISED_DNS</code> to the client-facing IP:port to display your host/NAT endpoint here; this grants no DNS access.</p>` : '')}
+    ${raw(featureLocal && displayed ? serverAddressRow(displayed, { featured: true, label: displayedLabel }) : '')}
+    ${raw(!preferred && !advertised && !container ? html`<p class="notice-inline">No LAN or public address matching a DNS listener was identified. Review the available interfaces and configured listeners below.</p>` : '')}
+    <p class="small muted server-address-note">${data.source === 'configuration_only' ? 'Only an operator-configured endpoint is available; local interfaces could not be read.' : data.source === 'connection_local_address' ? 'Reported by this dashboard connection’s local socket; other interfaces could not be enumerated.' : 'Detected on this server’s interfaces; reachability has not been tested.'} Containers, NAT and port mappings may require a different host address.</p>
+    ${raw(container ? html`<p class="small muted">Listener ports below are inside the container. Docker may publish host port 53 to internal port 5353; use the actual published host port on clients.</p>` : '')}
+    ${raw(hasNonstandardDNSPort && !container && !advertised ? html`<p class="small rec-note is-warn">DNS is using a non-standard port. Copy IP copies the address only; configure the displayed port separately on clients that support it.</p>` : '')}
     ${raw(data.partial || data.truncated ? html`<p class="small rec-note is-warn">${data.partial ? 'Some interfaces could not be read. ' : ''}${data.truncated ? `The address list is limited to ${data.limit || 32} entries. ` : ''}This list may be incomplete.</p>` : '')}
     <details class="server-address-details"><summary>All addresses, listeners and connection notes</summary>
+      ${raw(!featureLocal && displayed ? serverAddressRow(displayed, { label: displayedLabel }) : '')}
       ${raw(others.length ? html`<div class="server-address-list">${raw(others.map((address) => serverAddressRow(address)).join(''))}</div>` : !displayed ? html`<p class="small muted">No local interface address was returned.</p>` : '')}
       ${raw(listeners.length ? html`<div class="table-wrap note-tight"><table><thead><tr><th>Client transport</th><th>Configured listener</th><th>Binding</th></tr></thead><tbody>${raw(listeners.map((listener) => html`<tr>
         <td>${listener.transport === 'dot' ? 'DNS-over-TLS' : String(listener.transport || '').toUpperCase()}</td><td class="mono small">${listener.listen || 'Not configured'}</td><td>${listener.enabled ? listener.binding : 'Disabled'}</td></tr>`).join(''))}</tbody></table></div>` : '')}
@@ -1292,7 +1301,7 @@ function createLiveActivityPoller({ read, onUpdate, canRead = () => true, initia
   return { refresh, stop };
 }
 
-async function readDashboardPanel(path, { signal, timeoutMs = 8000, read = apiGet } = {}) {
+async function readDashboardPanel(path, { signal, timeoutMs = 8000, read = apiGet, onError = () => {} } = {}) {
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal && signal.aborted) controller.abort();
@@ -1303,6 +1312,7 @@ async function readDashboardPanel(path, { signal, timeoutMs = 8000, read = apiGe
     // An unavailable/hung history panel must not hide the independent live
     // measurement. Route changes and expired sessions still cancel the page.
     if (error.status === 401 || signal && signal.aborted) throw error;
+    onError(path, error);
     return null;
   } finally { clearTimeout(timeout); if (signal) signal.removeEventListener('abort', abort); }
 }
@@ -1338,13 +1348,21 @@ function mountLiveActivity(initial, context = {}) {
   paint();
 }
 
+function dashboardReadFailures(failures) {
+  if (!failures.length) return '';
+  return html`<section class="card section" aria-labelledby="dashboard-api-problems"><div class="card-head"><div><h2 id="dashboard-api-problems">Dashboard connection problems</h2><p>These are failed data reads, not evidence that no DNS queries occurred.</p></div></div>
+    <ul>${raw(failures.slice(0, 12).map(({ path, error }) => html`<li><code>${'/api/v1' + path.split('?')[0]}</code>: ${error.name === 'AbortError' ? 'Request timed out.' : String(error.message || 'Request failed.').slice(0, 400)}</li>`).join(''))}</ul>
+    <p><a href="/api/v1/activity/live" target="_blank" rel="noopener">Open live measurements on this dashboard connection</a>. Sign in on this same origin; do not share cookies or tokens.</p></section>`;
+}
+
 const pages = {};
 
 pages.dashboard = {
   title: 'Overview',
   subtitle: 'Resolver activity, filtering configuration and the next thing to check.',
   async render(context = {}) {
-    const optional = (path) => readDashboardPanel(path, { signal: context.signal });
+    const failures = [];
+    const optional = (path) => readDashboardPanel(path, { signal: context.signal, onError: (path, error) => failures.push({ path, error }) });
     const [overview, live, activity, categories, recent, feeds, diagnostics, detections, native, learning, addresses] = await Promise.all([
       optional('/overview'),
       optional('/activity/live'),
@@ -1358,7 +1376,7 @@ pages.dashboard = {
       optional('/learning/status'),
       optional('/server-addresses'),
     ]);
-    const liveSnapshot = live || overview && overview.live;
+    const liveSnapshot = live;
     if (!context.isCurrent || context.isCurrent()) { this.feeds = feeds; this.liveSnapshot = liveSnapshot; }
 
     const catRows = categories ? (categories.categories || []).map((c) => ({
@@ -1376,7 +1394,8 @@ pages.dashboard = {
 
     return html`
       <div class="overview-workspace">
-        ${raw(resolverLiveCard(liveSnapshot))}
+        ${raw(dashboardReadFailures(failures))}
+        ${raw(resolverLiveCard(liveSnapshot, { unavailable: !validLiveActivity(live) }))}
         ${raw(nativeModeCard(native, { compact: true }))}
         ${raw(serverAddressesCard(addresses))}
         ${raw(overview ? statusHero(overview, feeds, detections) : unavailableState('Historical overview unavailable', 'The stored overview could not be retrieved. Live activity is measured separately above.'))}
@@ -5853,12 +5872,19 @@ const router = {
   busy: false,
   gate: createRenderGate(),
   controller: null,
+  viewController: null,
+
+  stopView() {
+    if (this.viewController) this.viewController.abort();
+    this.viewController = null;
+  },
 
   route() {
     return routeName(window.location.hash);
   },
 
   invalidate() {
+    this.stopView();
     this.gate.cancel();
     if (this.controller) this.controller.abort();
     this.busy = false;
@@ -5899,14 +5925,24 @@ const router = {
     const view = $('#view');
     view.setAttribute('aria-busy', 'true');
     if (routeChanged) {
+      this.stopView();
       view.innerHTML = sanitize(emptyState('Loading…', `Opening ${page.title.toLowerCase()}.`, { icon: '·' }));
     }
 
     try {
       const markup = await page.render(context);
       if (!context.isCurrent() || (automatic && pageInteractionActive())) return false;
+      // A pending render owns its requests, not the existing view's poller.
+      // Only replacing that view, changing route, or logout ends its lifetime.
+      this.stopView();
+      const viewController = new AbortController();
+      this.viewController = viewController;
+      const mountedContext = {
+        hash, signal: viewController.signal,
+        isCurrent: () => !viewController.signal.aborted && window.location.hash === hash && !$('#app').hidden,
+      };
       view.innerHTML = sanitize(markup);
-      if (page.mounted) await page.mounted(context);
+      if (page.mounted) await page.mounted(mountedContext);
       if (!context.isCurrent()) return false;
       paintDynamic(view);
       bindCopyButtons();
@@ -5917,6 +5953,7 @@ const router = {
       if (context.isCurrent() && err.name !== 'AbortError' && !(err instanceof ApiError && err.status === 401)) {
         $('#refresh-note').textContent = 'Update unavailable';
         if (!automatic || !pageInteractionActive()) {
+          this.stopView();
           view.innerHTML = sanitize(unavailableState('Could not load this page', err.message || 'The request failed. Try again.'));
         }
         reportError(err);
@@ -6130,6 +6167,8 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     esc,
     ApiError,
+    api,
+    dashboardReadFailures,
     claimRefresh,
     feedStatusBadge,
     threatIntelPanel,
