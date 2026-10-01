@@ -273,7 +273,8 @@ env_is_managed() { # key
 #
 # It does overwrite a line the operator set by hand — correctly, because
 # env_set is only reached when they have just chosen this value at the prompt
-# or with --lan. The upgrade path never calls it, and preserves hand-set lines.
+# or with --lan. Upgrade migrations call it only for installer-managed keys;
+# hand-set lines and shell overrides are preserved.
 # Neither step is allowed to fail quietly. If the delete or the append does not
 # land — a readable but unwritable .env is the ordinary way — the caller goes on
 # to announce the value it asked for while compose reads the old one. For the
@@ -2300,6 +2301,10 @@ reconcile_env() {
 # Resolve the running container, trust only gateway host addresses, and never
 # replace an operator's explicit proxy list.
 configure_proxy_trust() {
+  if [[ "${DNSDADDY_TRUSTED_PROXY_CIDRS+x}" == "x" ]]; then
+    warn "Keeping the explicit trusted proxy environment override; .env is not authoritative for this run"
+    return 0
+  fi
   if env_is_set DNSDADDY_TRUSTED_PROXY_CIDRS && ! env_is_managed DNSDADDY_TRUSTED_PROXY_CIDRS; then
     pass "Keeping your explicitly configured trusted proxy CIDRs"
     return 0
@@ -2334,6 +2339,35 @@ configure_proxy_trust() {
   # before probing Caddy or doctor so a restart is never diagnosed as an outage.
   "${COMPOSE[@]}" up -d >/dev/null 2>&1 || return 1
   wait_for_health
+}
+
+# Reconcile only HTTPS deployments this installer owns. A plain --upgrade used
+# to skip configure_https entirely, preserving an obsolete global-bridge subnet
+# forever. The actual project's gateway is discovered AFTER the container starts.
+# This neither installs/reloads Caddy nor infers a proxy from a private address.
+reconcile_upgrade_proxy_trust() {
+  [[ "$(env_value DNSDADDY_BASE_URL)" == https://* ]] || return 0
+  env_is_managed DNSDADDY_BASE_URL || return 0
+  if [[ "${DNSDADDY_BASE_URL+x}" == "x" ]]; then
+    warn "Keeping the explicit base URL environment override; proxy topology is not inferred"
+    return 0
+  fi
+  if env_is_set DNSDADDY_TRUSTED_PROXY_CIDRS && ! env_is_managed DNSDADDY_TRUSTED_PROXY_CIDRS; then
+    pass "Keeping your explicitly configured trusted proxy CIDRs"
+    return 0
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '  Would reconcile installer-managed HTTPS proxy trust with the running container gateway.\n'
+    printf '  Custom values and environment overrides remain unchanged.\n'
+    return 0
+  fi
+  head_ "HTTPS proxy upgrade"
+  if ! configure_proxy_trust; then
+    fail "Could not reconcile the installer-managed HTTPS proxy settings"
+    note "No gateway was guessed. Check Docker's network and the container health."
+    note "Do not trust all private networks or expose port 8080 as a workaround."
+    return 1
+  fi
 }
 
 # revert_env_to_tunnel undoes the HTTPS-mode settings after a failed attempt.
@@ -2473,7 +2507,14 @@ wait_for_rollback_health() {
 # --- runtime -----------------------------------------------------------------
 
 compose_up() { # extra args
-  "${COMPOSE[@]}" up -d "$@" || die "\`docker compose up -d\` failed." \
+  local revision=""
+  revision=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || revision=""
+  [[ "$revision" =~ ^[0-9a-f]{40,64}$ ]] || revision=""
+  if [[ -n "$revision" ]] && ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
+    warn "Tracked source has local changes; no exact commit ID is stamped into this build"
+    revision=""
+  fi
+  DNSDADDY_COMMIT="$revision" "${COMPOSE[@]}" up -d "$@" || die "\`docker compose up -d\` failed." \
     "The output above says why. Common causes: no disk space, a port taken
   between the check above and now, or a build failure."
   pass "Containers started"
@@ -2660,6 +2701,7 @@ do_upgrade() {
   fi
 
   if [[ $DRY_RUN -eq 1 ]]; then
+    reconcile_upgrade_proxy_trust
     printf '\n  Would run: docker compose up -d --build\n'
     printf '  Would wait for health, then run dnsdaddy doctor.\n'
     printf '\n  Dry run complete. Nothing was changed.\n\n'
@@ -2691,6 +2733,10 @@ EOF
     exit 1
   fi
 
+  if ! reconcile_upgrade_proxy_trust; then
+    print_summary
+    exit 1
+  fi
   run_doctor
   print_next_steps
   print_summary
@@ -2937,7 +2983,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
     # and Caddy is the only public listener.
     printf '    DNSDADDY_BASE_URL=%s\n' "$(https_url)"
     printf '    DNSDADDY_SECURE_COOKIES=always\n'
-    printf '    DNSDADDY_TRUSTED_PROXY_CIDRS=<docker bridge subnet>\n'
+    printf '    DNSDADDY_TRUSTED_PROXY_CIDRS=<actual container gateway /32 or /128>\n'
     printf '    (backend stays on loopback — DNSDADDY_DASHBOARD_BIND is not set)\n'
     printf '\n  Would then configure Caddy for %s (%s), validate the config,\n' "$HTTPS_TARGET" "$HTTPS_TARGET_KIND"
     printf '  reload it, and require a publicly trusted certificate before reporting\n'

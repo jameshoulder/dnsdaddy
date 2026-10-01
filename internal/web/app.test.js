@@ -2799,7 +2799,7 @@ test('the overview remains useful when an optional endpoint fails and names what
       '/findings/summary?days=1': { enabled: false },
     };
     const ok = Object.prototype.hasOwnProperty.call(replies, path);
-    return { status: ok ? 200 : 503, ok, text: async () => JSON.stringify(ok ? replies[path] : { error: 'unavailable' }) };
+    return { status: ok ? 200 : 503, ok, headers: new Headers({ 'Content-Type': 'application/json' }), text: async () => JSON.stringify(ok ? replies[path] : { error: 'unavailable' }) };
   };
   try {
     const out = await pages.dashboard.render();
@@ -4034,7 +4034,7 @@ test('the overview keeps live activity and direct mode choices when all history 
   global.fetch = async (url) => {
     const replies = { '/api/v1/activity/live': liveSnapshot({ status: 'active', sinceStart: { received: 73, completed: 73 } }), '/api/v1/dnssec/status?hours=24': { transport: 'native', mode: { effective: 'off' } } };
     const ok = Object.hasOwn(replies, url);
-    return { status: ok ? 200 : 503, ok, text: async () => JSON.stringify(ok ? replies[url] : { error: 'database unavailable' }) };
+    return { status: ok ? 200 : 503, ok, headers: new Headers({ 'Content-Type': 'application/json' }), text: async () => JSON.stringify(ok ? replies[url] : { error: 'database unavailable' }) };
   };
   try {
     const out = await pages.dashboard.render();

@@ -52,7 +52,7 @@ paths:
       operationId: getServerAddresses
       tags:
       - Administration
-      summary: Local server IPs and configured DNS endpoint candidates
+      summary: Local process IPs and an optional configured client-facing DNS endpoint
       description: Authenticated read-only enumeration of up network interfaces visible to this process. No
         external IP-discovery request, hostname lookup or reachability probe occurs. Request Host, Forwarded
         and X-Forwarded-* headers are not address sources. Address lists are read for at most 256 up interfaces
@@ -64,7 +64,10 @@ paths:
         is not added to public health, login or session responses. If interface enumeration is unavailable,
         the server may return only the literal IP from the accepted connection's http.LocalAddrContextKey with
         source connection_local_address, partial true and unknown empty interface name. The peer/client address
-        and HTTP headers are never a fallback source. An absent or unusable local socket address returns 503.
+        and HTTP headers are never a fallback source. An absent or unusable local socket address returns 503
+        unless a display-only dns.advertised_endpoint was configured, in which case source is configuration_only.
+        runtime reports host or container using explicit runtime markers. advertised is optional operator configuration,
+        never an automatically discovered public IP, reachability result, listener change or access grant.
       responses:
         '200':
           description: Local interface or accepted local socket evidence with explicit limitations
@@ -3886,6 +3889,7 @@ components:
     ServerAddressesResponse:
       type: object
       required:
+      - runtime
       - source
       - preferredAddress
       - addresses
@@ -3900,9 +3904,32 @@ components:
           enum:
           - local_interfaces
           - connection_local_address
+          - configuration_only
           description: local_interfaces is operating-system interface enumeration. connection_local_address
             is only the server-side local IP of the accepted management connection when enumeration was unavailable;
             it always has partial true and an empty interface name.
+        runtime:
+          type: string
+          enum: [host, container]
+          description: Runtime marker evidence, not a claim about host port publishing or routing.
+        advertised:
+          type: object
+          description: Optional operator-configured ordinary DNS endpoint, independent of local interfaces.
+          required: [address, port, source, verified]
+          properties:
+            address:
+              type: string
+              description: Literal IP, never taken from request headers or an external discovery service.
+            port:
+              type: integer
+              minimum: 1
+              maximum: 65535
+            source:
+              type: string
+              const: configuration
+            verified:
+              type: boolean
+              const: false
         preferredAddress:
           type:
           - string

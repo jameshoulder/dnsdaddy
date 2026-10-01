@@ -1,0 +1,61 @@
+name: Deployment regression evidence
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'internal/**'
+      - 'cmd/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'Makefile'
+      - '.github/workflows/deployment-evidence.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    name: Real daemon dashboard and upgrade regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Build the complete daemon and run focused deployment tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/dnsdaddy-ui" ./cmd/dnsdaddy
+          git rev-parse HEAD > "$RUNNER_TEMP/evidence/commit.txt"
+          sha256sum "$RUNNER_TEMP/dnsdaddy-ui" > "$RUNNER_TEMP/evidence/binary.sha256"
+          go test ./deploy -run '^TestUpgrade' -count=1
+          go test ./internal/web ./internal/config ./internal/api -run 'DashboardFingerprints|DashboardServes|Advertised|ConfiguredEndpoint|ProxyDiagnostic' -count=1
+          make test-ui
+      - name: Install a pinned development-only browser driver
+        run: |
+          npm install --prefix "$RUNNER_TEMP/ui" --ignore-scripts --no-audit --no-fund playwright@1.57.0
+          node "$RUNNER_TEMP/ui/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "NODE_PATH=$RUNNER_TEMP/ui/node_modules" >> "$GITHUB_ENV"
+          echo "DNSDADDY_UI_BROWSER=$(node -e "console.log(require('$RUNNER_TEMP/ui/node_modules/playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+          echo "DNSDADDY_UI_BINARY=$RUNNER_TEMP/dnsdaddy-ui" >> "$GITHUB_ENV"
+      - name: A discarded refresh must retain live polling and form focus
+        run: node internal/web/refresh.browser.test.cjs | tee "$RUNNER_TEMP/evidence/refresh.log"
+      - name: Existing transport controls and actual DNS activity must still work
+        run: DNSDADDY_UI_CAPTURE_DIR="$RUNNER_TEMP/evidence/browser" node internal/web/transport.browser.test.cjs
+      - name: Retain regression evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dashboard-regression-evidence
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 14
+          if-no-files-found: warn

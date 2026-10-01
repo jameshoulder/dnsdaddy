@@ -1034,3 +1034,9 @@ docker compose logs -f dnsdaddy    # docker
 
 Run with `-log-level debug` for per-query detail. It is verbose — do not leave
 it on.
+
+### DNS works but dashboard data does not appear
+
+See [dashboard data troubleshooting](troubleshooting/dashboard-data.md) for
+installer-managed proxy upgrade migration, client-facing versus container IPs,
+source build identifiers, authenticated API failures and end-to-end release checks.

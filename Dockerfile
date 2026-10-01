@@ -12,11 +12,12 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
+ARG COMMIT=""
 # CGO_ENABLED=0 keeps the binary static — the SQLite driver is pure Go, so
 # there is nothing to link against and the runtime image can be scratch.
 RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
-        -ldflags="-s -w -X github.com/jameshoulder/dnsdaddy/internal/version.Version=${VERSION}" \
+        -ldflags="-s -w -X github.com/jameshoulder/dnsdaddy/internal/version.Version=${VERSION} -X github.com/jameshoulder/dnsdaddy/internal/version.Commit=${COMMIT}" \
         -o /out/dnsdaddy ./cmd/dnsdaddy
 
 # The lab tools are built here but land only in the `lab` stage below, so the
