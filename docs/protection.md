@@ -1,7 +1,7 @@
 # Resolver admission and rebinding protection
 
-These local controls are enabled by default and work in Daddybound Live,
-Learn and Off. They use no provider API and never learn exceptions from
+These local controls are enabled by default and work in Forward, Learn and
+Live. They use no provider API and never learn exceptions from
 traffic. **Settings → Resolver protection** shows the current configuration,
 version and operational counts.
 
@@ -75,7 +75,7 @@ another operator's configuration is not overwritten.
 An exception permits an address; it does not create a DNS zone or a route.
 Native Live has no conditional forwarding or automatic access to private
 split-DNS zones. For such deployments, use the configured forwarding path in
-Learn or Off, with the required rebinding exceptions. Native resolver egress
+Forward or Learn, with the required rebinding exceptions. Native resolver egress
 also has its own restrictions; a response exception does not relax those.
 
 ## Configuration and persistence

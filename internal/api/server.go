@@ -171,6 +171,7 @@ func (a *API) Handler() http.Handler {
 	// so in plain English; `dnsdaddy doctor` renders the same checks.
 	api.HandleFunc("GET /api/v1/diagnostics", a.handleDiagnostics)
 	api.HandleFunc("GET /api/v1/activity/queries", a.handleQueryActivity)
+	api.HandleFunc("GET /api/v1/activity/live", a.handleLiveActivity)
 	api.HandleFunc("GET /api/v1/threats/categories", a.handleThreatsByCategory)
 	api.HandleFunc("GET /api/v1/threats/top-domains", a.handleTopBlocked)
 	api.HandleFunc("GET /api/v1/queries", a.handleQueryLog)

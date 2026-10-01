@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -110,15 +111,22 @@ func ParseUpstream(spec string, timeout time.Duration) (*Upstream, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid DoH upstream %q: %w", u.Spec, err)
 		}
+		if parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.Opaque != "" || parsed.Fragment != "" {
+			return nil, fmt.Errorf("invalid DoH upstream %q: use an absolute HTTPS URL without a fragment", u.Spec)
+		}
 		u.url = parsed.String()
 		u.Address = parsed.Host
 		u.httpc = &http.Client{
 			Timeout: timeout,
+			// The configured URL is the approved destination. A redirect may
+			// otherwise silently resend the DNS question over plaintext HTTP.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 			Transport: &http.Transport{
 				MaxIdleConns:        4,
 				MaxIdleConnsPerHost: 4,
 				IdleConnTimeout:     90 * time.Second,
 				ForceAttemptHTTP2:   true,
+				DisableCompression:  true,
 				TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 			},
 		}
@@ -143,6 +151,9 @@ func (u *Upstream) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 		resp, err = u.exchangeDoH(ctx, m)
 	} else {
 		resp, err = u.exchangeDNS(ctx, m)
+	}
+	if err == nil && !systemDNSAnswerMatches(resp, m) {
+		resp, err = nil, fmt.Errorf("upstream returned a mismatched DNS response")
 	}
 
 	// A negative elapsed time is possible if the wall clock steps backwards
@@ -302,7 +313,10 @@ func (u *Upstream) exchangeOnConn(ctx context.Context, conn *dns.Conn, m *dns.Ms
 }
 
 func (u *Upstream) exchangeDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
-	packed, err := m.Pack()
+	// Use the same bounded wire envelope as the strict encrypted profile.
+	// ID zero avoids provider/cache interoperability issues, and client EDNS
+	// identifiers must not leak through this older forwarding entry point.
+	query, packed, err := prepareEncryptedQuery(m)
 	if err != nil {
 		return nil, err
 	}
@@ -312,6 +326,7 @@ func (u *Upstream) exchangeDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error
 	}
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("Accept", "application/dns-message")
+	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := u.httpc.Do(req)
 	if err != nil {
@@ -322,19 +337,33 @@ func (u *Upstream) exchangeDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("DoH upstream returned HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, dns.MaxMsgSize))
+	mediaType, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/dns-message" || len(params) != 0 {
+		return nil, fmt.Errorf("%w: DoH endpoint did not return a DNS wire message", ErrEncryptedResponse)
+	}
+	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
+		return nil, fmt.Errorf("%w: compressed DNS bodies are not accepted", ErrEncryptedResponse)
+	}
+	if resp.ContentLength > dns.MaxMsgSize {
+		return nil, fmt.Errorf("%w: oversized DNS body", ErrEncryptedResponse)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, dns.MaxMsgSize+1))
 	if err != nil {
 		return nil, err
 	}
-	out := new(dns.Msg)
-	if err := out.Unpack(body); err != nil {
+	out, err := validateEncryptedReply(body, query)
+	if err != nil {
 		return nil, err
 	}
+	out.Id = m.Id
 	return out, nil
 }
 
 // Close releases any pooled connection.
 func (u *Upstream) Close() {
+	if u.httpc != nil {
+		u.httpc.CloseIdleConnections()
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.conn != nil {

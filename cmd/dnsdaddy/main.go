@@ -184,7 +184,7 @@ func run() error {
 	// file: Load unmarshals YAML over Default(), so by the time the config
 	// struct exists there is no way to tell an omitted key from a written one.
 	// The installation record, written on first run, can tell the difference —
-	// a fresh install runs Live; an existing installation keeps its recorded choice.
+	// a fresh install uses Forward; an existing installation keeps its recorded choice.
 	//
 	// The resolved value is written back into cfg so that every later reader —
 	// the observer, the API, /metrics, the dashboard — sees one answer instead
@@ -346,7 +346,7 @@ func run() error {
 	}
 
 	// One runtime selection drives Live native answers or independent Learn
-	// observations. An explicit Off constructs no native resolver. Learn and
+	// observations. Forward constructs no native resolver. Learn and
 	// Live share one anchor manager, and mode changes are persisted first.
 	dnssecController, err := newDNSSECControl(ctx, cfg, st, log, dnssecPinned, dnssecModeSource)
 	if err != nil {

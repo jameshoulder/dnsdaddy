@@ -24,7 +24,7 @@ func (f fakeAnchors) TrustPoint() trustanchors.TrustPoint { return f.tp }
 func (f fakeAnchors) Viable() bool                        { return f.viable }
 func (f fakeAnchors) Health() trustanchors.Health         { return f.health }
 
-func TestDNSSECStatusWithLearnOffSaysNothingIsRunning(t *testing.T) {
+func TestDNSSECStatusInForwardReportsForwardingWithoutLocalValidation(t *testing.T) {
 	h := newHarness(t)
 	h.login()
 
@@ -37,8 +37,9 @@ func TestDNSSECStatusWithLearnOffSaysNothingIsRunning(t *testing.T) {
 	if body.Mode.Live.Available || body.Mode.Live.Reason == "" {
 		t.Errorf("live = %+v, want unavailable with a reason", body.Mode.Live)
 	}
-	if body.Resolution.Source != "none" || !strings.Contains(body.Resolution.Transport, "none") {
-		t.Errorf("resolution = %+v, want none", body.Resolution)
+	if body.Resolution.Source != "none" || !strings.Contains(body.Resolution.Transport, "configured forwarding upstreams") ||
+		!strings.Contains(body.Resolution.ClientPath, "forwarding resolver") {
+		t.Errorf("resolution = %+v, want active forwarding with no local validation source", body.Resolution)
 	}
 	if body.Anchors.Available || body.Anchors.Unavailable == "" {
 		t.Errorf("anchors = %+v, want unavailable with a reason", body.Anchors)

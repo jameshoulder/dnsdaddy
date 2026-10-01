@@ -275,7 +275,7 @@ func routeFixtureHTTPUpstream(answer func(*dns.Msg) (*dns.Msg, error)) *Upstream
 			if err != nil {
 				return nil, err
 			}
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/dns-message"}},
 				Body: io.NopCloser(bytes.NewReader(wire))}, nil
 		})}}
 }

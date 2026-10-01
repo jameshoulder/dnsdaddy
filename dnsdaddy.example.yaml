@@ -22,7 +22,10 @@ dns:
   tls_cert_file: ""
   tls_key_file: ""
 
-  # Legacy forwarders for client answers in native Off/Learn mode.
+  # Forwarders for client answers in native Forward/Learn mode. New installs
+  # start in Forward. Cloudflare DoH uses outbound TCP 443, and these literal
+  # IP URLs work without resolving an upstream hostname first. TLS verifies
+  # the IP against the server certificate. Both belong to the same provider.
   # Native Live uses direct authoritative recursion. The encrypted profile
   # below uses only its approved endpoints, never these as fallback.
   #
@@ -33,8 +36,8 @@ dns:
   # The "#name" suffix on a tls:// upstream is the certificate name to verify.
   # Without it, the certificate must authenticate the literal IP itself.
   upstreams:
-    - "tls://9.9.9.9:853#dns.quad9.net"
-    - "tls://1.1.1.1:853#cloudflare-dns.com"
+    - "https://1.1.1.1/dns-query"
+    - "https://1.0.0.1/dns-query"
 
   # failover: try upstreams in order (fewer upstream queries).
   # race:     ask all at once, take the first answer (lower latency, more traffic).
@@ -45,7 +48,7 @@ dns:
   # dashboard transport changes; DNSDADDY_RESOLUTION_TRANSPORT also pins it.
   resolution_transport: ""
   encrypted_upstreams: []
-  # For a complete working opt-in Cloudflare HTTPS + Daddybound Live setup,
+  # For a complete working opt-in Cloudflare HTTPS setup across all modes,
   # use dnsdaddy.encrypted.example.yaml or the dashboard's explicit example.
   # Environment deployments may supply DNSDADDY_ENCRYPTED_UPSTREAMS as a JSON
   # array using API field names: protocol, address, serverName, bootstrapIPs.
@@ -132,7 +135,7 @@ dns:
   # it authenticated each answer (RFC 6840 s5.7), recorded per query as
   # validated / unvalidated / servfail.
   #
-  # This is upstream telemetry for the forwarding path in Off/Learn modes.
+  # This is upstream telemetry for the forwarding path in Forward/Learn modes.
   # Live validates locally on either transport and does not use this switch.
   # This telemetry switch does not
   # request DNSSEC records from a forwarder, so forwarded response
@@ -145,17 +148,17 @@ dns:
 
   # Local DNSSEC validation with DNS Daddy's own engine, Daddybound.
   #
-  #   off      nothing is constructed and no extra query is sent.
-  #   observe  validate alongside resolution and record what it concludes.
-  #            The dashboard calls this Learn mode.
+  #   off      Forward: forward allowed questions without local validation.
+  #            No local validation runtime or anchor refresh is started.
+  #   observe  Learn: forward answers, then validate sampled names separately.
   #   enforce  Live: validate the exact data returned from the selected
   #            acquisition transport. Bogus/indeterminate answers return
   #            SERVFAIL; no weaker fallback is permitted.
   #
-  # Empty or omitted lets the installation decide: a NEW installation runs
-  # native Live. Existing recorded Learn/off choices are preserved; an older
-  # installation without a first-run record stays off. An explicit mode here
-  # or in DNSDADDY_LOCAL_DNSSEC_VALIDATION overrides dashboard mode changes.
+  # Empty or omitted lets the dashboard manage the mode. A NEW installation
+  # starts in Forward (off); existing saved/configured choices are preserved.
+  # Choose Forward, Learn or Live in Overview or Daddybound. An explicit mode
+  # here or in DNSDADDY_LOCAL_DNSSEC_VALIDATION locks dashboard mode changes.
   #
   # On native transport, Live/Learn contact authoritative servers directly
   # over plaintext UDP/TCP 53, even if legacy forwarders use DoH/DoT. On the
@@ -166,7 +169,7 @@ dns:
   # by encrypted transport. Review split-DNS requirements before enabling Live.
   #
   # Learn records an independent validation without changing the forwarded
-  # answer. Off constructs no local validation runtime or anchor refresh.
+  # answer. Forward constructs no local validation runtime or anchor refresh.
   # See docs/decisions/0003-daddybound-native-live.md and docs/encrypted-dns.md.
   local_dnssec_validation: ""
 
@@ -420,7 +423,7 @@ detection:
 # --- Resolver protection ----------------------------------------------------
 # Local admission and answer checks. Defaults apply until a versioned dashboard
 # setting is saved; saved Settings → Resolver protection values then prevail.
-# Both protections also run when native DNS validation is Off.
+# Both protections also run in Forward mode, with local DNS validation off.
 protection:
   rate_limit:
     enabled: true

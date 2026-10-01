@@ -103,7 +103,7 @@ type DNS struct {
 	Upstreams   []string `yaml:"upstreams"`
 	// ResolutionTransport chooses native iteration or authenticated encrypted
 	// forwarding. Empty preserves the dashboard's saved selection. It is
-	// independent of Daddybound's Off, Learn and Live validation modes.
+	// independent of Daddybound's Forward, Learn and Live validation modes.
 	ResolutionTransport string              `yaml:"resolution_transport,omitempty"`
 	EncryptedUpstreams  []EncryptedUpstream `yaml:"encrypted_upstreams,omitempty"`
 	UpstreamMode        string              `yaml:"upstream_mode"` // "failover" or "race"
@@ -133,20 +133,21 @@ type DNS struct {
 	// validation engine, does with real traffic. See
 	// docs/decisions/0003-daddybound-native-live.md.
 	//
-	//	off      no validator is constructed and no supporting DNSSEC query is
-	//	         sent. Behaviourally identical to a build without the feature.
+	//	off      presented as Forward in the dashboard. Queries use the selected
+	//	         forwarders without constructing a local validator or sending
+	//	         supporting DNSSEC queries.
 	//	observe  presented as Learn in the dashboard. Daddybound validates
 	//	         alongside resolution and records the verdict. The answer a
 	//	         client receives is unchanged, whatever it concludes.
-	//	enforce  presented as Live. Native authoritative recursion supplies
-	//	         the client answer and validates its exact data. Bogus and
-	//	         indeterminate answers fail closed without upstream fallback.
+	//	enforce  presented as Live. Daddybound validates the exact client
+	//	         answer from native recursion or the selected encrypted
+	//	         forwarders. Bogus and indeterminate answers fail closed.
 	//
-	// Left empty, the installation decides: a fresh install runs Live, and an
-	// upgrade of an installation that never configured this keeps it off,
-	// while recorded Learn/off choices are preserved. Native recursion sends
-	// plaintext DNS to authoritative servers instead of using the configured
-	// encrypted forwarders. An upgrade must not silently change that traffic.
+	// Left empty, a fresh installation starts in Forward. Existing recorded
+	// Forward, Learn and Live choices are preserved. Live with native transport
+	// sends plaintext DNS to authoritative servers instead of using the
+	// configured encrypted forwarders. An upgrade must not silently change
+	// that traffic.
 	// The installation decision is recorded once in the database; an explicit
 	// file or environment mode always wins. Live remains experimental pending
 	// longer operational evaluation; it never silently downgrades to Learn.
@@ -412,26 +413,25 @@ func Default() Config {
 			ListenUDP: ":53",
 			ListenTCP: ":53",
 			ListenDoT: "",
-			// Quad9 and Cloudflare over DNS-over-TLS. Both are widely peered in
-			// the UK and EU, which is where the reference deployment lives.
-			Upstreams:    []string{"tls://9.9.9.9:853#dns.quad9.net", "tls://1.1.1.1:853#cloudflare-dns.com"},
+			// Cloudflare over HTTPS uses port 443, including on networks that
+			// block DNS-over-TLS on port 853. Literal IPs avoid depending on the
+			// host resolver to bootstrap its own configured DNS service.
+			Upstreams:    []string{"https://1.1.1.1/dns-query", "https://1.0.0.1/dns-query"},
 			UpstreamMode: "failover",
 			Timeout:      Duration(4 * time.Second),
 			MaxInflight:  2048,
-			// Serve the private address space out of the box. This is the
-			// deployment nearly everyone actually has — a resolver on a VPS or
-			// a home box answering its own networks — and it means the default
-			// configuration is both usable and closed to the public internet.
-			// Opening it up is a deliberate edit, not the fallback.
+			// Eligible bootstrap ranges for ad-hoc access. A fresh installation
+			// keeps that access off while admitting its configured loopback
+			// ranges; LAN clients need an explicit network permission.
 			AllowedClientCIDRs: append([]string(nil), DefaultAllowedClientCIDRs...),
 			RefuseANY:          true,
 			DNSSECTelemetry:    true,
 			// Deliberately empty rather than a mode. Load unmarshals YAML over
 			// these defaults, so anything chosen here is indistinguishable
 			// afterwards from a value the operator wrote — and the choice
-			// between Learn and off depends on whether this is a new install,
-			// which config cannot see. Resolve() answers it against the
-			// installation record.
+			// of Forward, Learn or Live may already be recorded in the database,
+			// which config cannot see. ResolveLocalDNSSEC answers it against
+			// the installation record.
 			LocalDNSSECValidation: LocalDNSSECUnset,
 			LocalDNSSECWorkers:    2,
 			LocalDNSSECQueue:      256,
@@ -711,7 +711,7 @@ func (c *Config) validate() error {
 	// approved endpoints. Requiring unused legacy forwarders prevented a
 	// minimal encrypted-only configuration from starting.
 	if len(c.DNS.Upstreams) == 0 && c.DNS.TransportMode() != ResolutionEncrypted {
-		return fmt.Errorf("at least one upstream resolver is required for native transport Off/Learn; encrypted transport uses dns.encrypted_upstreams")
+		return fmt.Errorf("at least one upstream resolver is required for Forward/Learn with native transport; encrypted transport uses dns.encrypted_upstreams")
 	}
 	switch c.DNS.UpstreamMode {
 	case "failover", "race":

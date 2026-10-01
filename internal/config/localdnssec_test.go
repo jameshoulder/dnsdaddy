@@ -25,14 +25,14 @@ func TestTheShippedConfigLeavesTheModeToTheInstallation(t *testing.T) {
 	}
 }
 
-// Fresh installation state enables real native client answers. A product
-// default must not accidentally select the independent Learn observer.
-func TestAFreshInstallRunsNativeLive(t *testing.T) {
+// A recorded Live installation keeps real native client answers even when the
+// product's first-run default changes to Forward.
+func TestARecordedLiveInstallationKeepsLive(t *testing.T) {
 	cfg := Default()
 	mode, fromInstall := cfg.ResolveLocalDNSSEC(LocalDNSSECEnforce)
 
 	if mode != LocalDNSSECEnforce {
-		t.Fatalf("a fresh installation resolved to %q, want %q", mode, LocalDNSSECEnforce)
+		t.Fatalf("a recorded Live installation resolved to %q, want %q", mode, LocalDNSSECEnforce)
 	}
 	if !fromInstall {
 		t.Fatal("the mode was not reported as coming from the installation record")

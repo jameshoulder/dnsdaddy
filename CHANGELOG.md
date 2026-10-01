@@ -22,6 +22,30 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Basic forwarding, clearer modes and immediate activity
+
+- Fresh installations start in **Forward**, the existing `off` mode, with
+  Cloudflare HTTPS forwarders at literal IP addresses on TCP 443. They no longer
+  require native authoritative-server reachability or outbound DoT on port 853 to answer
+  their first queries. Saved installation, dashboard and explicit configuration
+  choices retain precedence; an existing Live installation is changed by
+  selecting Forward, not by silently resetting its configuration.
+- **Forward**, **Learn** and **Live** are selectable from Overview as well as
+  Daddybound. The encrypted starter keeps its approved Cloudflare transport
+  but leaves the resolver mode editable. The native installer no longer writes
+  an obsolete duplicate of the upstream defaults when no example file is found.
+- `GET /api/v1/activity/live` and `overview.live` report immediate anonymous
+  DNS handler counters, pending work, last arrival/response and a rolling
+  one-minute window. They include ACL refusals, rate limits and invalid messages
+  that never enter the query log. The dashboard refreshes the lightweight data
+  every two seconds while visible and distinguishes waiting, active, idle,
+  mixed failures, refusals and unavailable measurements. No query logging or
+  DNS probes are enabled by viewing activity.
+- Standard HTTPS forwarding rejects redirects, including HTTPS-to-HTTP
+  downgrades, and validates the response content type, complete DNS wire message
+  and matching response/question before returning or caching it. DoH wire IDs
+  are zeroed and the requesting client's ID is restored on the returned reply.
+
 ### Resolver reliability and a complete encrypted setup
 
 - Native recursion retains both IPv4 and IPv6 addresses for delegated
@@ -46,8 +70,8 @@ should be swapping a binary, not restoring a backup.
   the endpoint, certificate name and bootstrap addresses without testing,
   saving or granting consent. `make run-encrypted` and the optional
   `deploy/docker-compose.encrypted.yml` provide a complete configuration for
-  Daddybound Live over HTTP/2 with TLS 1.3. Native remains the default and
-  existing saved choices are preserved.
+  encrypted forwarding over HTTP/2 with TLS 1.3, with optional Daddybound Learn
+  and Live. Existing saved choices are preserved.
 - Setup instructions distinguish dashboard access, DNS listener ports, Docker
   published ports and client permissions. Installer reruns rebuild changed
   source, report failing doctor checks as failures, and identify the actual
@@ -60,9 +84,8 @@ constitute independent security or production-performance assurance.
 
 ### Native protection and investigation workflows
 
-Daddybound Live is now implemented. A fresh installation selects the experimental
-native recursive resolver by default; stored Off/Learn selections and explicit
-YAML modes keep their precedence. Authenticated dashboard controls can change an
+Daddybound Live is now implemented as an optional experimental resolver mode;
+stored selections and explicit YAML modes keep their precedence. Authenticated dashboard controls can change an
 unpinned mode after the operator acknowledges native plaintext UDP/TCP port 53
 traffic. Live validates the exact records it returns, honours DNSSEC AD/CD/DO
 semantics, fails closed on validation or resolution failure, and never silently

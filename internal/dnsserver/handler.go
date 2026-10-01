@@ -60,10 +60,11 @@ type Handler struct {
 	// clientacl.Controller.
 	acl ClientACL
 
-	queries atomic.Uint64
-	blocked atomic.Uint64
-	errors  atomic.Uint64
-	refused atomic.Uint64
+	queries  atomic.Uint64
+	blocked  atomic.Uint64
+	errors   atomic.Uint64
+	refused  atomic.Uint64
+	activity activityTracker
 	// dnssecPanics counts panics contained at the observer seam. Should be
 	// zero; a non-zero value is a bug report rather than an operational
 	// statistic, which is why it is exposed rather than only logged.
@@ -176,6 +177,7 @@ func NewHandler(
 		decisions:       o.Decisions,
 		dnssec:          o.DNSSEC,
 		timeout:         timeout,
+		activity:        activityTracker{startedAt: time.Now()},
 	}
 }
 
@@ -254,7 +256,11 @@ type networkIdentified interface {
 }
 
 // Handle resolves one message and returns the response to send.
-func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *dns.Msg {
+func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (response *dns.Msg) {
+	h.activity.begin(time.Now())
+	outcome, cached := activityInvalid, false
+	defer func() { h.activity.finish(time.Now(), outcome, cached, response) }()
+
 	if req == nil || len(req.Question) == 0 {
 		return errorResponse(req, dns.RcodeFormatError)
 	}
@@ -279,10 +285,12 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	// refusal is counted for /metrics instead.
 	if meta.networkID == "" && !h.clientAllowed(meta.clientAddr) {
 		h.refused.Add(1)
+		outcome = activityRefused
 		return errorResponse(req, dns.RcodeRefused)
 	}
 	if h.protection != nil && !h.protection.Allow(meta.clientAddr, meta.networkID, time.Now()) {
 		// No per-query disk writes on the flood rejection path.
+		outcome = activityRateLimited
 		return protectedResponse(req, dns.ExtendedErrorCodeProhibited, "Client query rate limit exceeded")
 	}
 
@@ -291,6 +299,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	// amplification lever, and essentially nothing legitimate depends on them.
 	if h.refuseANY && req.Question[0].Qtype == dns.TypeANY {
 		h.queries.Add(1)
+		outcome = activityAnswered
 		return rfc8482Response(req)
 	}
 
@@ -357,6 +366,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 
 	if decision.Blocked {
 		h.blocked.Add(1)
+		outcome = activityBlocked
 		event.Action = store.ActionBlocked
 		event.ElapsedMS = int(time.Since(start).Milliseconds())
 		h.qlog.Record(event, persist)
@@ -400,6 +410,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 
 	if err != nil {
 		h.errors.Add(1)
+		outcome = activityError
 		event.Action = store.ActionError
 		event.Reason = "Upstream resolution failed: " + err.Error()
 		// Every upstream failing is not the same event as an upstream saying
@@ -422,6 +433,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	}
 	if res.Rcode != dns.RcodeSuccess && res.Rcode != dns.RcodeNameError {
 		h.errors.Add(1)
+		outcome = activityError
 		event.Action = store.ActionError
 		if nativeResult == nil {
 			event.Reason = "Upstream returned " + dns.RcodeToString[res.Rcode]
@@ -437,6 +449,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 	if h.protection != nil {
 		if reason := h.protection.CheckResponse(normalized, res.Msg); reason != "" {
 			h.blocked.Add(1)
+			outcome = activityBlocked
 			event.Action, event.Category, event.Source, event.Reason = store.ActionBlocked, "dns_rebinding", "Local response protection", reason
 			h.qlog.Record(event, persist)
 			if persist {
@@ -462,6 +475,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) *d
 		h.recordDecision(event, match, decision)
 	}
 	h.observe(event, meta, res.Rcode, res.MinTTL, res.Validated, false, persist)
+	outcome, cached = activityAnswered, res.Cached
 	return res.Msg
 }
 

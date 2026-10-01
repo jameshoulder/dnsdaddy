@@ -100,6 +100,10 @@ immediately regardless of what is cached.
 
 ### Configuring it
 
+This topology requires **native transport** with **Forward** or **Learn**
+mode. New installations start in Forward, but an existing saved Live or
+encrypted selection is preserved and bypasses the upstream setting below.
+Choose the required transport and mode in Daddybound before testing Pi-hole.
 On DNS Daddy, point the upstream at Pi-hole:
 
 ```yaml
@@ -111,7 +115,7 @@ or `DNSDADDY_UPSTREAMS=udp://192.168.1.5:53`.
 
 Two things to be deliberate about:
 
-- **That leg is unencrypted.** DNS Daddy defaults to DNS-over-TLS upstreams;
+- **That leg is unencrypted.** DNS Daddy defaults to Cloudflare DNS-over-HTTPS upstreams;
   pointing it at Pi-hole over plain UDP replaces that. The leg is inside your
   LAN, which is usually fine — but the *encrypted* leg is now Pi-hole's
   responsibility, so configure Pi-hole with an encrypted upstream (cloudflared

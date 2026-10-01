@@ -35,8 +35,9 @@ is a genuine privacy win against a hostile network, and it is precisely what
 makes it unblockable by port for a network operator who *is* the legitimate
 administrator.
 
-**DNS-over-QUIC (DoQ)**, [RFC 9250], port 853/UDP. Less common. DNS Daddy does
-not implement it.
+**DNS-over-QUIC (DoQ)**, [RFC 9250], normally port 853/UDP. DNS Daddy supports
+it as an outbound option in the [encrypted profile](../encrypted-dns.md),
+alongside DoH over HTTP/3 and HTTP/2. This does not add a client-facing DoQ listener.
 
 ---
 
@@ -44,18 +45,27 @@ not implement it.
 
 ### Upstream: encrypted by default
 
-The shipped configuration forwards over DoT with certificate verification:
+New installations start in **Forward**, using Cloudflare DoH with certificate
+verification. The literal addresses avoid depending on another resolver to
+find the upstream:
 
 ```yaml
 dns:
   upstreams:
-    - "tls://9.9.9.9:853#dns.quad9.net"
-    - "tls://1.1.1.1:853#cloudflare-dns.com"
+    - "https://1.1.1.1/dns-query"
+    - "https://1.0.0.1/dns-query"
 ```
 
-The `#hostname` is not decoration — it is the name the upstream's certificate
-is verified against. Without verification, TLS gives you encryption to
-*somebody*, which is not the point.
+TLS verifies the certificate for the configured endpoint. Configured DoT
+upstreams remain supported; for a URL such as
+`tls://9.9.9.9:853#dns.quad9.net`, the `#hostname` identifies the certificate
+name to verify.
+
+With native transport, Forward and Learn client answers use these configured
+upstreams, while Learn adds independent authoritative traffic over UDP/TCP53.
+Native Live uses direct authoritative recursion instead of this forwarding
+path. The [complete encrypted profile](../encrypted-dns.md) also encrypts
+supporting validation and daemon background DNS using approved endpoints.
 
 This means your ISP, and anyone between you and the upstream, cannot read or
 tamper with the lookups DNS Daddy forwards. It also removes off-path cache
@@ -68,8 +78,8 @@ Configuring a plaintext upstream is possible and logs a warning at startup.
 
 | Transport | Where | Authentication |
 |---|---|---|
-| UDP/TCP :53 | Always | Source IP against the client ACL |
-| DoT :853 | If a certificate is configured | Per-network token via TLS |
+| UDP/TCP :53 | Configured DNS listeners | Source IP against the client ACL |
+| DoT :853 | If its listener and certificate are configured | Source IP against the client ACL; TLS authenticates the server |
 | DoH :443 | `/dns-query/<token>` behind your reverse proxy | The token in the path |
 
 **The DoH token is what makes roaming work.** A laptop in a hotel has no IP you

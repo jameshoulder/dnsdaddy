@@ -6,6 +6,12 @@ The native transport described here remains supported. [ADR 0004](0004-encrypted
 adds independently selected encrypted record acquisition with local validation;
 it also defines the transport-aware mode acknowledgement and provenance.
 
+**Default superseded:** the current product starts new installations in
+**Forward** (`off`), retaining existing saved choices and the Live behavior
+described below. The original fresh-install `enforce` decision in this ADR is
+historical. Forward, Learn and Live remain explicitly selectable; see
+[current mode defaults](../dns-security/dnssec.md#defaults-and-precedence).
+
 ## Decision
 
 Daddybound can supply a real client answer. In Live

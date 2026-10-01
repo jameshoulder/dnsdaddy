@@ -3,18 +3,23 @@
 DNS Daddy can acquire DNS answers and supporting DNSSEC records through your
 approved **DNS over QUIC (DoQ), DNS over HTTPS over HTTP/3, or DNS over HTTPS
 over HTTP/2** endpoints. Daddybound can still validate the exact returned
-records locally in Live mode. Transport and Off/Learn/Live are separate choices.
+records locally in Live mode. Transport and Forward/Learn/Live are separate choices.
 
 Native transport remains the default when no transport is saved or pinned.
-Existing mode selections are preserved; a fresh installation still selects
-Daddybound Live. No public resolver is silently chosen for encrypted transport.
+A fresh installation starts in **Forward**, using Cloudflare DoH at
+`https://1.1.1.1/dns-query` and `https://1.0.0.1/dns-query` for client answers.
+Existing mode and provider choices are preserved. The optional encrypted
+profile below also encrypts supporting validation and daemon background DNS;
+the standard native profile leaves background hostname lookups to the system
+resolver. No endpoint bundle is silently enabled for the encrypted profile.
 Read [ADR 0004](decisions/0004-encrypted-forwarding.md) for the architecture and
 [privacy.md](privacy.md) for the full data-flow inventory.
 
 ## Start with a working example
 
 For a first encrypted setup, DNS Daddy includes a complete **Cloudflare DoH
-over HTTP/2 + Daddybound Live** example. It uses outbound TCP 443, so it does
+over HTTP/2** starter with selectable **Forward, Learn and Live** modes. It
+starts in Forward on a new database. It uses outbound TCP 443, so it does
 not require QUIC or direct access to authoritative servers on port 53. No API
 key, account, domain name or server certificate is needed for this outbound
 connection. You are explicitly choosing Cloudflare to receive the queries.
@@ -26,12 +31,15 @@ connection. You are explicitly choosing Cloudflare to receive the queries.
 | Endpoint | `https://cloudflare-dns.com/dns-query` | Cloudflare's standard public resolver. |
 | TLS server name | `cloudflare-dns.com` | The identity the certificate must authenticate. |
 | Bootstrap IPs | `1.1.1.1`, `1.0.0.1` | Finds the endpoint without first needing a working DNS resolver. Both IPs belong to the same provider. |
-| Daddybound | `Live` / `enforce` | Validates the returned DNS data locally before answering. |
+| Resolver mode | Unpinned; new data starts in `Forward` / `off` | The dashboard can select Forward, Learn or Live. Existing saved selections are retained. |
 
 Cloudflare documents its [resolver addresses](https://developers.cloudflare.com/1.1.1.1/ip-addresses/),
 [DoH protocols](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/),
 [endpoint and DNS wire format](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-wireformat/),
 and [privacy policy](https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/).
+Its [IP certificate and bootstrap explanation](https://blog.cloudflare.com/unauthorized-issuance-of-certificates-for-1-1-1-1/)
+also describes how the literal-IP DoH URLs used by DNS Daddy's standard
+Forward defaults authenticate the resolver without a prior DNS lookup.
 The example uses the standard resolver so DNS Daddy remains responsible for
 its local filtering policy. The example does not select Cloudflare's Families
 filtering service. IPv6-only hosts can replace the bootstrap list with
@@ -42,9 +50,19 @@ filtering service. IPv6-only hosts can replace the bootstrap list with
 Use **Daddybound → DNS transport → Encrypted forwarding → Add Cloudflare
 example**. Review the filled fields, check the sharing agreement, select
 **Test endpoints**, then **Apply DNS transport** after a successful test.
-Select or keep **Live** in the Daddybound card above it. The example button
+Use **Forward** for your first real lookup. In **Overview** or **Daddybound**,
+choose the mode and select **Apply resolver mode**. Later, choose **Learn**
+for independent background validation or **Live** for local enforcement.
+The example button
 only edits the draft; it preserves existing endpoints and does not test,
-save, grant consent or change your current Off/Learn/Live setting.
+save, grant consent or change your current Forward/Learn/Live setting.
+
+An upgrade preserves a previously selected Live mode. If that installation
+cannot resolve ordinary names, deliberately select **Forward** to check the
+forwarding path. This removes local DNSSEC enforcement while retaining
+filtering and the selected transport. A locked mode control means YAML or an
+environment variable pins the mode: remove that explicit selector and restart
+to use the dashboard. The saved mode remains selected until you change it.
 
 Finish with the client tests below. **Test endpoints checks a root DNSKEY
 exchange, not a complete locally validated Live lookup.**
@@ -112,10 +130,12 @@ dig @127.0.0.1 -p 53 example.com A +tcp
 ```
 
 Use both `-f` arguments for subsequent updates and diagnostics. This
-configuration pins transport and
-Live in the dashboard. Environment overrides still take precedence: review
+configuration pins transport and endpoints, leaving **Forward/Learn/Live
+editable in the dashboard**. A fresh database starts in Forward; an existing
+database retains its saved mode. Environment overrides still take precedence: review
 any existing `DNSDADDY_RESOLUTION_TRANSPORT`, `DNSDADDY_ENCRYPTED_UPSTREAMS`
 or `DNSDADDY_LOCAL_DNSSEC_VALIDATION` settings before using the example.
+Remove an explicit mode override if you want to unlock the mode chooser.
 Removing the overlay returns to the normal configuration and any previously
 saved choices; it does not save the example as a dashboard choice.
 
@@ -142,9 +162,11 @@ dig @<server-ip> -p 53 example.com A +tcp
 nslookup -port=53 example.com <server-ip>
 ```
 
-Look for `NOERROR` with an answer, and confirm the query and local DNSSEC
-result in the dashboard. In Live, both secure signed answers and proven
-unsigned answers can be valid; an unsigned domain does not acquire a DNSSEC
+Look for `NOERROR` with an answer, and watch **Overview → Resolver activity**
+for received and answered queries. Forward has no local DNSSEC result to
+claim. If query logging is enabled, inspect the individual request in
+**Query log**; in Live, also inspect its local validation result.
+In Live, both secure signed answers and proven unsigned answers can be valid; an unsigned domain does not acquire a DNSSEC
 signature because the transport is encrypted. Then configure one device's
 normal DNS setting and watch its traffic before changing DHCP for everyone.
 Most IP-only device and DHCP DNS settings require port 53.
@@ -156,6 +178,7 @@ Most IP-only device and DHCP DNS settings require port 53.
 | The dashboard opens, but `dig` times out | The web and DNS listeners are separate. Check the host IP, UDP/TCP DNS ports, Docker mappings, firewall and any existing service already using port 53. |
 | `REFUSED` | Permit the client's actual source IP or network under **Networks**. New installations keep Default ad-hoc access off. For host-to-Docker tests, the source may be the Docker gateway even when the command targets `127.0.0.1`. |
 | The endpoint test fails | Check outbound TCP 443, the system clock and CA certificates. Confirm that the protocol, TLS name and bootstrap IPs match the chosen provider. The Cloudflare example is DoH2, not DoQ. |
+| Upgrading still leaves the installation in Live | Saved modes are preserved. Choose **Forward** and **Apply resolver mode** in Overview or Daddybound to test ordinary forwarding. Remove an explicit YAML/environment mode pin and restart first if the chooser is locked. |
 | Endpoint test passes, but Live returns `SERVFAIL` | Inspect **Daddybound → Trust anchors, observation health and evidence**, transport errors and the Query log's local DNSSEC reason. The endpoint test did not prove a complete validation chain. A bogus answer is supposed to fail; repeated failures for normal names require investigation. |
 | Local tests work but another device fails | Check that the listener binds a reachable interface, that both UDP and TCP reach it, and that the client is permitted. The standalone example deliberately binds loopback. |
 | Tests on 5353 work but setting the device's DNS IP does not | Most device settings use port 53. Publish or listen on host UDP/TCP 53, or use a client that supports an explicit port. |
@@ -221,8 +244,8 @@ discovery to reach a different service. Zero-RTT queries are disabled.
    failover stops after an accepted response. This checks the exchange and
    response, not the provider's accuracy or a local DNSSEC proof.
 7. After a successful test, select **Apply DNS transport**. The current
-   Off/Learn/Live choice remains selected. Select **Live** separately if it was
-   Off or Learn and you want enforcement. Live continues to validate locally
+   Forward/Learn/Live choice remains selected. Test a real query in Forward,
+   then choose Learn or Live separately when ready. Live validates locally
    over the new record source. The API does not require a prior test; testing
    is the recommended setup sequence.
 
@@ -238,7 +261,7 @@ incorrect clock or blocked egress port instead of bypassing authentication.
 
 To return to native transport, deliberately select and acknowledge it. Saved
 endpoint entries can remain available for a future switch. In native Live,
-answers come from direct authoritative iteration. In native Learn and Off,
+answers come from direct authoritative iteration. In native Forward and Learn,
 client answers use the existing `dns.upstreams` configuration; native Learn
 also performs independent native observations. Native background hostname
 lookups use the system's configured DNS servers.
@@ -263,14 +286,15 @@ dns:
       address: https://cloudflare-dns.com/dns-query
       server_name: cloudflare-dns.com
       bootstrap_ips: ["1.1.1.1", "1.0.0.1"]
-  local_dnssec_validation: enforce
   timeout: 4s
 ```
 
-Retain the existing `dns.upstreams` configuration for native Off/Learn mode;
-it is not an encrypted-profile fallback. Pinning the mode with `enforce` is
-separate from pinning transport. Leave the mode unset if you want its saved
-installation/dashboard choice to remain effective.
+Retain the existing `dns.upstreams` configuration for native Forward/Learn;
+it is not an encrypted-profile fallback. The mode is intentionally omitted
+above, so the saved dashboard choice remains effective and selectable. New
+data starts in Forward. To lock the mode deliberately, set
+`dns.local_dnssec_validation` to `off`, `observe` or `enforce` (Forward, Learn
+or Live). Pinning mode and pinning transport are separate decisions.
 
 Certificates use the operating system's trusted root store. There is no
 dashboard certificate-verification bypass or trust-on-first-use setting.
@@ -284,9 +308,9 @@ transport; External APIs is a separate feature.
 
 | Daddybound mode with encrypted transport | Client behavior | Recorded evidence |
 | --- | --- | --- |
+| Forward (`off`) | The approved encrypted forwarder supplies the client answer. No local validation runtime or anchor refresh is started. | Existing upstream telemetry where enabled, without a claim of local validation. |
+| Learn (`observe`) | The approved encrypted forwarder supplies the client answer. A bounded independent lookup of sampled names is validated afterward. | `encrypted_forwarded` observation; the client query retains `upstream` validation provenance. The observation cannot authenticate the earlier forwarded packet. |
 | Live (`enforce`) | Daddybound acquires records from approved encrypted endpoints and validates the exact packet projection it returns. | `encrypted_live` observation; `encrypted_forwarded` query validation source. |
-| Learn (`observe`) | The approved encrypted forwarder supplies the client answer. A bounded independent lookup is validated afterward. | `encrypted_forwarded` observation; the client query retains `upstream` validation provenance. The observation cannot authenticate the earlier forwarded packet. |
-| Off (`off`) | The approved encrypted forwarder supplies the client answer. No local validation runtime or anchor refresh is started. | Existing upstream telemetry where enabled, without a claim of local validation. |
 
 For Live, a provider's AD flag is not evidence of local validation. The
 validator requests the material it needs with DO/CD, checks the signed chain

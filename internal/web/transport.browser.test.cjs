@@ -69,7 +69,7 @@ async function ask(port, name, id) {
   const password = 'isolated-ui-lab-password';
   const config = path.join(work, 'config.yaml');
   await fs.writeFile(path.join(work, 'lab-feed.txt'), '0.0.0.0 blocked.lab.example\n');
-  await fs.writeFile(config, `data_dir: ${path.join(work, 'data')}\ndns:\n  listen_udp: "127.0.0.1:${dnsPort}"\n  listen_tcp: "127.0.0.1:${dnsPort}"\n  local_dnssec_validation: "off"\n  upstreams: ["127.0.0.1:${upstream.address().port}"]\nhttp:\n  listen: "127.0.0.1:${httpPort}"\n  admin_password: "${password}"\nfeeds:\n  refresh_on_start: false\n  local_feed_dir: ${work}\n`);
+  await fs.writeFile(config, `data_dir: ${path.join(work, 'data')}\ndns:\n  listen_udp: "127.0.0.1:${dnsPort}"\n  listen_tcp: "127.0.0.1:${dnsPort}"\n  upstreams: ["127.0.0.1:${upstream.address().port}"]\nhttp:\n  listen: "127.0.0.1:${httpPort}"\n  admin_password: "${password}"\nlog:\n  query_log: false\nfeeds:\n  refresh_on_start: false\n  local_feed_dir: ${work}\n`);
   const app = spawn(binary, ['-config', config], { stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = ''; app.stdout.on('data', (data) => { logs += data; }); app.stderr.on('data', (data) => { logs += data; });
   let browser; let page;
@@ -83,9 +83,13 @@ async function ask(port, name, id) {
     }
     browser = await chromium.launch({ executablePath, args: ['--no-sandbox'] });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, permissions: ['clipboard-read', 'clipboard-write'] });
-    page = await context.newPage(); const errors = []; const requests = [];
+    page = await context.newPage(); const errors = []; const requests = []; const liveReads = []; const modeChanges = [];
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('request', (request) => { if (request.url().includes('/dns/transport') && request.method() !== 'GET') requests.push({ method: request.method(), url: request.url(), body: request.postDataJSON() }); });
+    page.on('request', (request) => {
+      if (request.url().includes('/activity/live')) liveReads.push(Date.now());
+      if (request.url().includes('/dnssec/mode') && request.method() === 'PUT') modeChanges.push(request.postDataJSON());
+    });
     const api = async (route, method = 'GET', body) => {
       const result = await page.evaluate(async ({ route, method, body }) => {
         const response = await fetch('/api/v1' + route, { method, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -102,6 +106,15 @@ async function ask(port, name, id) {
     };
     await page.goto(base); await page.locator('#password').fill(password); await page.locator('#login-form button[type=submit]').click();
     await page.locator('.server-address-card').waitFor();
+    check('a fresh install exposes selectable Forward mode directly on Overview', await page.locator('#daddybound-mode-form [name=mode][value=off]').isChecked() && await page.locator('#daddybound-mode-form button[type=submit]').isEnabled() && (await api('/dnssec/status')).mode.effective === 'off');
+    check('a new instance honestly waits for its first DNS query', await page.locator('#resolver-live').getAttribute('data-live-state') === 'waiting' && (await api('/activity/live')).sinceStart.received === 0);
+    await delay(2200);
+    check('a timer tick with no traffic does not flash or claim processing', await page.locator('.live-activity-dot.has-activity').count() === 0 && await page.locator('#resolver-live').getAttribute('data-live-state') === 'waiting' && liveReads.length >= 2);
+    await page.locator('#daddybound-mode-form [name=mode][value=observe]').check(); await page.locator('#daddybound-mode-form button[type=submit]').click();
+    check('native Learn still requires explicit authoritative-DNS acknowledgement', modeChanges.length === 0 && (await page.locator('#native-mode-error').innerText()).includes('Confirm the native DNS transport'));
+    await page.locator('#daddybound-mode-form [name=mode][value=off]').check(); await page.locator('#daddybound-mode-form button[type=submit]').click();
+    await page.waitForFunction(() => document.querySelector('#daddybound-mode-form button[type=submit]')?.disabled === false);
+    check('Forward applies from Overview without native transport consent', modeChanges.length === 1 && modeChanges[0].mode === 'off' && modeChanges[0].acknowledgeNativeTransport === false);
     check('server addresses come from the actual authenticated endpoint', (await api('/server-addresses')).source.length > 0);
     check('loopback-only lab does not claim a usable LAN address', (await page.locator('.server-address-card').innerText()).includes('No LAN or public address'));
     check('the non-preferred host-only IP and copy action are visible without opening details', await page.locator('.server-address-card [data-copy="127.0.0.1"]').isVisible() && (await page.locator('.server-address-card').innerText()).includes('Host-only IP') && !(await page.locator('.server-address-details').evaluate((element) => element.open)));
@@ -118,12 +131,29 @@ async function ask(port, name, id) {
       await delay(100);
     }
     check('fixture feed loads through the ordinary API without public network traffic', (await api('/feeds')).feeds.find((feed) => feed.id === fixtureFeed.id).loaded);
+    const modeForm = await page.locator('#daddybound-mode-form').elementHandle();
+    await page.locator('#daddybound-mode-form [name=mode][value=off]').focus();
     for (let id = 1; id <= 30; id++) await ask(dnsPort, id % 5 === 0 ? 'blocked.lab.example' : `service${id}.lab.example`, id);
-    await delay(800);
-    await page.reload(); await page.locator('.server-address-card').waitFor();
+    await page.waitForFunction(() => Number(document.querySelector('[data-live-count=received]').textContent.replaceAll(',', '')) >= 30);
+    check('live activity shows real processing while query logging is disabled', (await api('/settings')).queryLog === false && (await api('/queries?limit=2')).queries.length === 0 && (await page.locator('#resolver-live').innerText()).includes('Processing DNS queries'));
+    check('live polling preserves mode-form focus and does not replace the page', await modeForm.evaluate((element) => element.isConnected) && await page.locator('#daddybound-mode-form [name=mode][value=off]').evaluate((element) => element === document.activeElement));
+    const receivedBeforePause = await page.locator('[data-live-count=received]').innerText();
+    await page.locator('#auto-refresh-btn').click(); await ask(dnsPort, 'paused.lab.example', 31); await delay(2200);
+    check('Pause updates freezes the sample and clearly labels it paused', await page.locator('[data-live-count=received]').innerText() === receivedBeforePause && await page.locator('#resolver-live').getAttribute('data-live-state') === 'paused');
+    await page.locator('#auto-refresh-btn').click();
+    await page.waitForFunction(() => Number(document.querySelector('[data-live-count=received]').textContent.replaceAll(',', '')) >= 31);
+    check('Resume updates catches up with actual DNS counters', await page.locator('#resolver-live').getAttribute('data-live-state') === 'active');
+    await context.setOffline(true);
+    await page.waitForFunction(() => document.querySelector('#resolver-live').dataset.liveState === 'unavailable');
+    check('unreachable telemetry keeps the last sample visibly stale', Number((await page.locator('[data-live-count=received]').innerText()).replaceAll(',', '')) >= 31 && (await page.locator('[data-live-summary]').innerText()).includes('current activity is unknown'));
+    await context.setOffline(false);
+    await page.waitForFunction(() => document.querySelector('#resolver-live').dataset.liveState === 'active');
+    check('live telemetry recovers after a real browser connection failure', true);
     await shot('dashboard.png', '#/dashboard', false);
 
     await page.goto(base + '/#/daddybound'); await page.locator('#dns-transport-form').waitFor();
+    const readsAway = liveReads.length; await delay(2200);
+    check('leaving Overview stops its independent live polling', liveReads.length === readsAway);
     const form = page.locator('#dns-transport-form');
     check('GET and rendering never perform a transport test', requests.length === 0);
     check('native is initially selected and forwarder fields are not interactive', await form.locator('[name=transport][value=native]').isChecked() && await form.locator('[name=address]').isDisabled());
@@ -169,7 +199,7 @@ async function ask(port, name, id) {
     await page.waitForFunction(() => document.querySelector('#dns-transport-form').dataset.currentTransport === 'encrypted');
     const saved = await api('/dns/transport');
     check('approved encrypted settings persist through the real API', saved.transport === 'encrypted' && saved.endpoints[0].protocol === 'doh2' && saved.plaintextFallback === false);
-    check('encrypted transport remains separate from pinned Off validation', (await api('/dnssec/status')).mode.effective === 'off');
+    check('encrypted transport preserves the separately chosen Forward mode', (await api('/dnssec/status')).mode.effective === 'off');
     await page.locator('#transport-test').click();
     check('a saved endpoint still needs consent before an explicit test', !(await page.locator('[name=acknowledgeForwarding]').isChecked()));
     await page.locator('[name=acknowledgeForwarding]').check(); await page.locator('#transport-test').click();
@@ -179,6 +209,20 @@ async function ask(port, name, id) {
     check('phone transport form has no page-level horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
     await shot('features-daddybound-mobile.png', '#/daddybound');
     await page.setViewportSize({ width: 1440, height: 1000 });
+
+    for (const mode of ['observe', 'enforce', 'off']) {
+      await page.locator(`#daddybound-mode-form [name=mode][value=${mode}]`).check();
+      check(`encrypted ${mode} never asks for plaintext authoritative consent`, await page.locator('#native-transport-consent').isHidden());
+      await page.locator('#daddybound-mode-form button[type=submit]').click();
+      await page.waitForFunction((mode) => document.querySelector(`#daddybound-mode-form [name=mode][value=${mode}]`)?.checked && document.querySelector('#daddybound-mode-form button[type=submit]')?.disabled === false, mode);
+      check(`the real mode API accepts ${mode} while preserving encrypted transport`, (await api('/dnssec/status')).mode.effective === mode && (await api('/dns/transport')).transport === 'encrypted');
+    }
+    const upstreamBeforeFailure = upstreamQueries;
+    const failedAnswer = await ask(dnsPort, 'unreachable.lab.example', 500);
+    check('an unreachable encrypted endpoint produces a real failure without standard-upstream fallback', (failedAnswer.readUInt16BE(2) & 0x000f) === 2 && upstreamQueries === upstreamBeforeFailure);
+    await page.goto(base + '/#/dashboard'); await page.locator('#resolver-live').waitFor();
+    check('Overview distinguishes measured query failures from idle or successful processing', ['degraded', 'failing'].includes(await page.locator('#resolver-live').getAttribute('data-live-state')) && (await api('/activity/live')).recent.errors > 0);
+    await page.goto(base + '/#/daddybound'); await page.locator('#dns-transport-form').waitFor();
 
     await page.locator('[name=transport][value=native]').check(); const countBefore = requests.length;
     await page.locator('#dns-transport-form button[type=submit]').click();
@@ -208,7 +252,7 @@ async function ask(port, name, id) {
       assert.equal(assets[asset], createHash('sha256').update(await fs.readFile(path.join(__dirname, 'static', asset))).digest('hex'), `Served ${asset} matches current source`);
     }
     check('served assets match the current source', true);
-    const report = { generatedAt: new Date().toISOString(), browser: await browser.version(), checks, images, assets, binarySha256: createHash('sha256').update(await fs.readFile(binary)).digest('hex'), serverAddresses: await api('/server-addresses'), overview: await api('/overview'), transport: await api('/dns/transport'), upstreamQueries, note: 'Real isolated app, validation pinned Off, external feeds disabled and a synthetic local file feed loaded through the management API. All DNS traffic and configured failure targets use loopback. No API response or DOM content was replaced. Screenshots show actual first-run counters over synthetic .lab.example queries.' };
+    const report = { generatedAt: new Date().toISOString(), browser: await browser.version(), checks, images, assets, binarySha256: createHash('sha256').update(await fs.readFile(binary)).digest('hex'), serverAddresses: await api('/server-addresses'), overview: await api('/overview'), live: await api('/activity/live'), transport: await api('/dns/transport'), modeChanges, upstreamQueries, note: 'Real isolated app with fresh Forward mode, query logging disabled, external feeds disabled and a synthetic local file feed loaded through the management API. Mode changes exercise encrypted loopback failure targets, and all DNS fixtures use loopback. The browser goes offline briefly to test unavailable telemetry. No API response or DOM content was replaced. Screenshots show actual first-run counters over synthetic .lab.example queries.' };
     await fs.writeFile(path.join(output, 'transport-browser-report.json'), JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify({ passed: checks.length, output, images: images.map((image) => image.file) }));
   } catch (error) {

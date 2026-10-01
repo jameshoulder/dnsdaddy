@@ -110,7 +110,7 @@ func (c *dnssecControl) TransportState() api.DNSTransportState {
 		Endpoints: cloneEncryptedEndpoints(s.endpoints), TLSMinimum: "1.3",
 		EncryptedOnly: s.transport == config.ResolutionEncrypted,
 		Bootstrap:     "system", DaddyboundMode: s.mode,
-		Scope: "Daddybound native iteration uses UDP/TCP port 53. Off and Learn answer through the legacy configured upstreams; background hostname resolution uses the system DNS servers.",
+		Scope: "Forward and Learn answer through the configured upstreams. Daddybound native validation uses UDP/TCP port 53; background hostname resolution uses the system DNS servers.",
 	}
 	if c.transportPinned {
 		out.Reason = api.ErrDNSTransportLocked.Error()

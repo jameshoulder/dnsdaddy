@@ -28,7 +28,8 @@ the normal management API, with external catalog feeds disabled. It sent
 30 queries, recorded six security blocks, and forwarded 24 queries to its
 local UDP fixture. The local model had one warming client and zero mature
 baselines. Validation was deliberately pinned Off to keep UI capture isolated;
-that is a lab setting, not the fresh-install default.
+that is an explicit lab pin. The current UI calls this mode Forward (`off`),
+which is also the default for new unpinned installations.
 
 The OS denied interface enumeration, exercising the real accepted local socket
 fallback. The API returned `127.0.0.1`, `preferredAddress: null`,
@@ -120,7 +121,7 @@ The manual fixture sent A and AAAA lookups for `service0.lab.example` through `s
 
 The built-in `dns-tunnelling` and `suspicious-txt` scenarios ran with seed 1 and tenfold time compression. Detection used `window_scale: 0.1`, `eval_interval: 5s` and `cooldown: 2m`. Repeated manual traffic across the interactive checks and captures produced **6,337 retained queries**, **240 blocked queries** and **4 stored heuristic findings** at final capture. Existing decisions were retained when the manual policy rule was replaced by the local malware feed, so the investigation shows real historical and current evidence.
 
-**Native mode was explicitly Off in this lab.** This is a lab choice to avoid outbound authoritative DNS queries during UI capture; it is not the default for a fresh installation. The local learning worker remained enabled and processed **1,450 observations** in the final process. It reported **7 tracked clients**, **0 mature baselines** and **7 warming clients**. The screenshots preserve that cold-start limitation. The stored heuristic findings are not presented as model-learning results.
+**Native mode was explicitly Off in this lab.** This lab pin avoided outbound authoritative DNS queries during UI capture. The current UI calls the same `off` mode Forward, and new unpinned installations also start there. The local learning worker remained enabled and processed **1,450 observations** in the final process. It reported **7 tracked clients**, **0 mature baselines** and **7 warming clients**. The screenshots preserve that cold-start limitation. The stored heuristic findings are not presented as model-learning results.
 
 A synthetic Custom HTTP provider and webhook were saved with throwaway fixture credentials and HTTPS `.invalid` destinations. Both were switched off in the final capture; automatic reputation checks and on-demand enrichment were off. No live provider or webhook test was sent. The UI and management responses returned only write-only credential state. The sign-in screenshot was taken before the lab password was entered, and every screenshot was checked for empty password inputs.
 

@@ -72,7 +72,7 @@ func prepareDoctorTransport(ctx context.Context, st *store.Store, cfg config.Con
 			"Network probes and this command's background hostname lookups never fall back to plaintext upstream DNS.",
 			"Local listener checks are a separate client-to-daemon connection; provider onward traffic is outside this command.")
 	} else {
-		c.Evidence = append(c.Evidence, "Native authoritative resolution uses UDP/TCP port 53; Off and Learn forward answers through configured upstreams.")
+		c.Evidence = append(c.Evidence, "Forward and Learn answer through configured upstreams; native local validation uses authoritative DNS over UDP/TCP port 53.")
 	}
 	return &doctorTransport{selection: selection}, cfg, c
 }

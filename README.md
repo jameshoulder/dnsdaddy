@@ -141,7 +141,7 @@ Public resolvers like Quad9 and Cloudflare can block known-bad domains. What the
 | **Plain-English logs** | Recorded queries explain what happened and why, subject to configured privacy, retention and bounded logging queues. |
 | **Per-network policies** | Match clients by CIDR, including different sites and VLANs. |
 | **Instant allow-listing** | Clear a false positive from the dashboard and purge the cached answer. |
-| **Daddybound Live** | Fresh installations use the experimental native recursive resolver and DNSSEC validation. Existing Off/Learn selections are preserved on upgrade. |
+| **Forward, Learn or Live** | Start with straightforward Cloudflare DoH forwarding. Choose background DNSSEC learning or local enforcement when ready; saved mode selections survive upgrades. |
 | **Choose the DNS transport** | Native remains the default. An optional encrypted profile uses your approved DoQ, HTTP/3 DoH or HTTP/2 DoH endpoints with authenticated TLS 1.3 and no plaintext fallback. Live validates the returned records locally with either profile. |
 | **DoH and DoT** | Serves DNS-over-HTTPS and DNS-over-TLS as well as plain DNS. |
 | **Server address on the homepage** | Copy a compatible local server IP with its configured DNS ports. Address discovery is authenticated and labels interface, loopback, container/NAT and accepted-socket fallback limitations. |
@@ -159,7 +159,7 @@ Public resolvers like Quad9 and Cloudflare can block known-bad domains. What the
 
 **DNS Daddy is not a Pi-hole replacement.** Pi-hole is excellent at blocking ads and trackers. DNS Daddy focuses on protective DNS, threat intelligence, explainable security decisions and visibility into what devices are resolving.
 
-The two can run together. With the **native transport profile in Learn or Off mode**, DNS Daddy can sit in front with Pi-hole as its configured upstream, retaining per-client identity while Pi-hole handles ad/tracker blocking. Native Live bypasses that forwarding path. The optional encrypted profile sends all client DNS through its approved encrypted endpoints; it does not inherit the legacy Pi-hole upstream setting.
+The two can run together. With the **native transport profile in Forward or Learn mode**, DNS Daddy can sit in front with Pi-hole as its configured upstream, retaining per-client identity while Pi-hole handles ad/tracker blocking. Native Live bypasses that forwarding path. The optional encrypted profile sends all client DNS through its approved encrypted endpoints; it does not inherit the Pi-hole upstream setting.
 
 See **[docs/pi-hole.md](docs/pi-hole.md)** for the topology options, trade-offs and current evidence level.
 
@@ -195,6 +195,21 @@ cd dnsdaddy
 Use `--dry-run` first if you want to see what the installer would do without changing anything. `--upgrade` rebuilds and restarts while keeping your data and `.env`; `--uninstall` stops the deployment while keeping your data.
 
 > `./deploy/install-docker.sh` configures and launches DNS Daddy. It does **not** install Git, Docker Engine or Docker Compose for you.
+
+**A new installation starts in Forward mode.** Allowed queries are filtered
+locally, then forwarded to Cloudflare over HTTPS on TCP 443 using
+`https://1.1.1.1/dns-query` and `https://1.0.0.1/dns-query`. These literal IP
+endpoints do not need another DNS resolver to find the upstream. Learn and
+Live are available in **Overview** and **Daddybound** through **Apply resolver
+mode**. Forward does not perform Daddybound's local DNSSEC validation.
+
+**Upgrading preserves your mode.** If an earlier installation is stuck in Live
+and returns `SERVFAIL`, select **Forward** explicitly to establish working
+forwarding, then investigate validation before re-enabling Live. If the mode
+control is locked, remove the explicit `dns.local_dnssec_validation` or
+`DNSDADDY_LOCAL_DNSSEC_VALIDATION` override and restart to unlock it. Existing
+saved upstreams and configuration remain in effect; review old custom DoT
+endpoints if your network blocks outbound port 853.
 
 ### Reaching the dashboard
 
@@ -261,22 +276,26 @@ may make that address loopback. No external “what is my IP” service or reque
 header supplies the result; container/NAT mappings, firewall rules and client
 access still need checking.
 
-### Start with encrypted DNS and Daddybound Live
+### Start with encrypted DNS, then choose a resolver mode
 
 In **Daddybound → DNS transport → Encrypted forwarding**, select **Add
 Cloudflare example**. This fills a complete HTTPS-over-HTTP/2 endpoint with
 the TLS name and bootstrap IPs; you do not need an API key or your own
 certificate. Review the provider, check the sharing agreement, select **Test
-endpoints**, then **Apply DNS transport** after a successful test. Keep or
-select **Live** in the Daddybound card for local DNSSEC validation. Adding
-the example only edits your draft and preserves your current resolution mode.
+endpoints**, then **Apply DNS transport** after a successful test. Start with
+**Forward** for a real lookup; choose **Learn** for independent background
+checks or **Live** for local DNSSEC enforcement when ready. Adding the example
+only edits your draft and preserves your current resolver mode.
 
 The [encrypted DNS guide](docs/encrypted-dns.md#start-with-a-working-example)
 walks through the provider choice, client ports and the first real lookup.
 The example uses Cloudflare's [documented DoH service](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/)
-over outbound TCP 443. Native remains the default; existing installations
-are never silently switched to a provider. Native Live needs outbound UDP
-and TCP 53 to authoritative DNS servers.
+over outbound TCP 443. This explicit encrypted profile also covers supporting
+DNSSEC queries and the daemon's background hostname lookups. The standard
+Forward default uses DoH for client answers; its native transport profile
+leaves background hostname lookups to the system resolver. Native Learn and
+Live need outbound UDP and TCP 53 to authoritative DNS servers. Your saved
+transport and configured provider choices survive upgrades.
 
 For a complete configuration example in Docker:
 
@@ -287,9 +306,11 @@ docker compose -f docker-compose.yml -f deploy/docker-compose.encrypted.yml exec
 
 This explicitly selects the provider in
 [dnsdaddy.encrypted.example.yaml](dnsdaddy.encrypted.example.yaml), pins
-encrypted transport and Live, and keeps the normal data volume. Repeat both
-`-f` arguments for updates. Existing environment overrides take precedence;
-review them first. If you prefer a standalone local trial, `make run-encrypted`
+encrypted transport and its endpoints, and keeps the normal data volume.
+**Forward/Learn/Live remain selectable in the UI:** new data starts in Forward;
+existing saved modes are preserved. Repeat both `-f` arguments for updates.
+Environment overrides take precedence; remove an explicit mode override if you
+want the mode chooser unlocked. For a standalone local trial, `make run-encrypted`
 uses the same example with DNS on `127.0.0.1:5353` and a
 separate data directory.
 
@@ -320,7 +341,26 @@ lookup, so inspect Daddybound and transport status; a timeout points to the
 address, listener, port mapping or firewall. A successful **Test endpoints**
 only checks the encrypted exchange; finish with these real client lookups.
 
-Point **one device** at DNS Daddy first and watch the query log before rolling it out network-wide.
+Point **one device** at DNS Daddy first and watch its traffic before rolling it out network-wide.
+
+### See requests arriving and completing
+
+**Overview → Resolver activity** shows messages reaching the DNS handler,
+independently of query logging: received, answered, blocked, cached, failed, refused and
+rate-limited counts, plus in-flight work and the last activity time. The
+indicator changes when new requests arrive. The status distinguishes waiting
+or idle traffic from active, degraded, refused or failing traffic; a failed
+dashboard fetch appears unavailable or stale.
+
+The recent window covers **60 seconds**; lifetime totals reset when the process
+restarts. This is an in-memory aggregate without query names or client IPs.
+Internal health probes count, and a completed response means the handler
+produced a reply, not that a remote device received it. Malformed wire messages
+and DoH authentication/parsing failures rejected before the handler are outside
+these counters. Keep using the client lookups above to verify the whole path.
+Enable **Query log** when you also need
+individual names, policy decisions and validation evidence. The authenticated
+API exposes the same counters at `GET /api/v1/activity/live`.
 
 ## See it working without real traffic
 
@@ -375,7 +415,7 @@ Start with:
 Worth knowing before you rely on DNS Daddy:
 
 - **No independent professional security review.** Automated testing and implementation evidence are not an independent audit.
-- **Native Live is experimental.** It is the fresh-install default, but production reliability, constrained-hardware performance and long-running key-rollover behavior are not established. Existing Off/Learn selections survive upgrades.
+- **Native Live is experimental.** Fresh installations start in Forward. Select Live deliberately after verifying real answers; production reliability, constrained-hardware performance and long-running key-rollover behavior are not established. Saved selections survive upgrades.
 - **Native authoritative traffic is plaintext.** With the native profile, Live uses UDP/TCP 53 and Learn adds independent native observation traffic. The optional encrypted profile instead forwards to explicitly approved recursive resolvers; it does not make native authoritative recursion encrypted.
 - **Encryption has boundaries.** An approved encrypted resolver receives the DNS names. Client-to-DNS-Daddy traffic and the provider's onward resolution are separate connections. Daemon background hostname lookups use the encrypted profile when selected, but do not receive Daddybound's independent Live validation.
 - **Live does not silently fall back.** With checking enabled, bogus, indeterminate, timeout and bounded-work failures return SERVFAIL. A client's explicit CD bit skips DNSSEC checking without skipping policy or rebinding checks. Encrypted endpoint failures never select plaintext DNS automatically.
@@ -396,15 +436,18 @@ claims and remain visible as separate evidence.
 
 | Mode | Client answer path | Behavior |
 | --- | --- | --- |
+| **Forward** (`off`) | Configured upstreams with the native profile; approved endpoints with the encrypted profile | Forwards allowed queries without Daddybound validation, observations or anchor refresh. Filtering, rate limiting and rebinding protection remain active. |
+| **Learn** (`observe`) | The same forwarding path as Forward | Independently validates sampled allowed names after their answers are decided. Observations cannot change those answers. Supporting lookups and anchor refresh use the selected profile. |
 | **Live** (`enforce`) | Native authoritative recursion, or approved encrypted recursive endpoints | Locally validates the records actually returned. With checking enabled, secure or proven-insecure answers can be served; bogus, indeterminate and operational failures return SERVFAIL. |
-| **Learn** (`observe`) | Legacy configured upstreams with the native profile; approved encrypted endpoints with the encrypted profile | Independently validates allowed names after their answers are decided. Observations cannot change those answers. Supporting lookups and anchor refresh use the selected profile. |
-| **Off** (`off`) | The profile's forwarding path | Stops Daddybound validation, observations and anchor refresh. An encrypted selection continues to encrypt forwarding. Local policy, rate limiting and rebinding protection remain active. |
 
-**Fresh installations default to Live.** Upgrades preserve recorded Off/Learn
-choices. Explicit YAML mode settings pin the choice; otherwise the dashboard
-can save an acknowledged mode change. Transport is a separate persisted choice:
-native remains the default, while encrypted forwarding requires the operator's
-endpoints and acknowledgement. Native authoritative traffic uses plaintext
+**Fresh installations default to Forward.** The stored/API value remains
+`off` for compatibility with existing configurations. Upgrades preserve all
+recorded choices, including Live. Explicit YAML or environment mode settings
+pin the choice; otherwise **Overview** and **Daddybound** can save an
+acknowledged mode change. Transport is a separate persisted choice: native
+remains the default and uses the configured DoH upstreams for Forward/Learn
+answers; the encrypted profile requires approved endpoints and acknowledgement.
+Native authoritative traffic uses plaintext
 UDP/TCP port 53 with QNAME minimisation. The encrypted profile supports outbound
 DoQ, HTTP/3 DoH and HTTP/2 DoH with TLS 1.3; these are not new inbound listeners.
 A client DNSSEC CD request skips cryptographic checking only; policy and
@@ -412,7 +455,7 @@ rebinding checks still apply.
 
 Recorded provenance distinguishes `native_live` and `encrypted_live`
 observations, and `native` and `encrypted_forwarded` local query validation
-sources. Off/Learn client answers retain their upstream source. Changing the
+sources. Forward/Learn client answers retain their upstream source. Changing the
 current profile never relabels older evidence. See
 [encrypted DNS](docs/encrypted-dns.md).
 
@@ -450,20 +493,17 @@ The 1 GB / 1 vCPU figure is a design target, not a fresh benchmark of native Liv
 
 Configuration is YAML with `DNSDADDY_*` environment variables taking precedence. Every option is documented in **[`dnsdaddy.example.yaml`](dnsdaddy.example.yaml)**.
 
-This example pins the native profile and Learn mode: the legacy DoT upstreams
-answer client queries, while Daddybound's independent observations use native
-plaintext authoritative DNS. It does not enable the encrypted profile for
-validation. Omit explicit mode/transport settings only when the installation
-default or saved dashboard selection is intended. See
-[encrypted-dns.md](docs/encrypted-dns.md) for the optional encrypted profile.
+This starter leaves mode and transport under dashboard control. New data
+starts in Forward using the same Cloudflare HTTPS upstreams as the built-in
+defaults; an existing database keeps its saved mode and transport. Query
+history is enabled explicitly here. See [encrypted-dns.md](docs/encrypted-dns.md)
+for the profile that also encrypts validation and background DNS.
 
 ```yaml
 dns:
-  resolution_transport: native
-  local_dnssec_validation: observe
   upstreams:
-    - "tls://9.9.9.9:853#dns.quad9.net"
-    - "tls://1.1.1.1:853#cloudflare-dns.com"
+    - "https://1.1.1.1/dns-query"
+    - "https://1.0.0.1/dns-query"
 log:
   query_log: true
   log_client_ip: true
