@@ -1,0 +1,49 @@
+name: Deployment regression evidence
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'internal/web/**'
+      - 'internal/api/**'
+      - 'internal/config/**'
+      - 'scripts/deployment/**'
+      - '.github/workflows/deployment-evidence.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Dashboard tests and reproducible inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Retain exact public source and offline build dependencies
+        run: |
+          mkdir -p /tmp/deployment-evidence
+          git rev-parse HEAD > /tmp/deployment-evidence/commit.txt
+          git archive --format=tar HEAD > /tmp/deployment-source.tar
+          go mod vendor
+          tar -rf /tmp/deployment-source.tar vendor
+          gzip /tmp/deployment-source.tar
+          mv /tmp/deployment-source.tar.gz /tmp/deployment-evidence/
+      - name: Dashboard regression tests
+        run: node --test internal/web/app.test.js
+      - name: Upload reproducible inputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deployment-reproduction
+          path: /tmp/deployment-evidence/
+          retention-days: 7
+          if-no-files-found: error
