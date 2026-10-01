@@ -1,0 +1,77 @@
+name: Assurance evidence
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '41 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  records:
+    name: Assurance tools and public register
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python3 -m unittest discover -s scripts/security -p 'test_assurance.py' -v
+      - run: python3 scripts/security/assurance.py validate-register docs/trust/vulnerabilities.json
+
+  inventory:
+    name: Source dependency inventory and CISA KEV
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Start with an unavailable assessment, never an assumed pass
+        run: |
+          mkdir -p assurance-artifacts
+          printf '%s\n' '{"schema_version":1,"assessment":"unavailable"}' > assurance-artifacts/report.json
+      # Reuse the reviewed action pin already used by security.yml. This job
+      # supplements its blocking scans; it must not suppress unfixed/low findings.
+      - name: Collect source dependency candidates
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          format: json
+          output: assurance-artifacts/trivy.json
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          list-all-pkgs: true
+          exit-code: '0'
+          cache: false
+          trivy-config: scripts/security/assurance-trivy.yaml
+          trivyignores: scripts/security/assurance.trivyignore
+      - name: Fetch the public CISA catalogue
+        run: python3 scripts/security/assurance.py download-kev assurance-artifacts/kev.json
+      - name: Correlate and fail for KEV candidates or unavailable evidence
+        run: >-
+          python3 scripts/security/assurance.py correlate
+          --scan assurance-artifacts/trivy.json
+          --kev assurance-artifacts/kev.json
+          --commit "$GITHUB_SHA"
+          --output assurance-artifacts/report.json
+      - name: Retain evidence including failed assessments
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: assurance-evidence
+          path: assurance-artifacts/
+          retention-days: 90
+          if-no-files-found: error

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "updated": "2026-10-01",
+  "baseline_commit": "e397bb503ce8e93cdb419c3e432269a61c7bc181",
+  "scope": "Documentation-derived inventory, not runtime configuration or an exhaustive data-discovery result. See docs/privacy.md for precise controls and limitations.",
+  "datasets": [
+    {"id":"query_history","storage":"query_log, client_hourly, dnssec_observations","contents":"Names, time, result, optional client identity, policy and validation provenance","retention":"7 days by default; log.retention_days","limits":"Query logging and client-attribution controls; no retrospective all-copies erasure","evidence":"docs/privacy.md"},
+    {"id":"rollups","storage":"stats_hourly, blocked_domain_stats","contents":"Network/category aggregates and blocked domains; not automatically anonymous","retention":"90 days by default; log.rollup_days","limits":"Independent rollup retention; network and domain context can remain sensitive","evidence":"docs/privacy.md"},
+    {"id":"decisions","storage":"decisions, capture manifests, evidence snapshots","contents":"Policy outcomes, original evidence and optional attributed context","retention":"30 days by default; log.decision_retention_days","limits":"Capture lifetime follows decision; logging admission controls new records","evidence":"docs/privacy.md"},
+    {"id":"findings","storage":"findings, finding_reviews, finding_review_history","contents":"Measured signals, example names, device/network context and review notes/actor labels","retention":"30-day finding default; review rows cascade with findings","limits":"Detection and logging controls; historical findings are not retroactively reclassified","evidence":"docs/privacy.md"},
+    {"id":"intelligence","storage":"evidence, intel_verdicts, intel_enrichment","contents":"Domains, external/local claims and bounded response excerpts","retention":"Per-record expiry; some local/operator claims do not expire","limits":"Separate provider controls; turning logging off does not delete caches","evidence":"docs/privacy.md"},
+    {"id":"management","storage":"configuration, authentication, config_change_history","contents":"Network/client names, policy/settings, hashes/ciphertext, actor/change records","retention":"Configuration until changed/deleted; session expiry; change history currently unpruned","limits":"Authenticated management and redaction; host access and retention are separate","evidence":"docs/privacy.md"},
+    {"id":"delivery","storage":"webhook_outbox, webhook_stats, optional finding JSONL","contents":"Finding/review payloads and delivery state; may include names/addresses/notes","retention":"Queue bounded; completed/terminal payloads removed; files/SIEM have separate lifetimes","limits":"Consent and receiver configuration; cannot recall already delivered events","evidence":"docs/privacy.md"},
+    {"id":"learning","storage":"daddybound-learning.json and in-memory windows","contents":"Client-attributed statistical baselines; no raw queried names in checkpoint","retention":"Default client idle lifetime 24h; active baselines survive restarts","limits":"Sensitive metadata, not anonymised; disabling learning does not erase checkpoint","evidence":"docs/privacy.md"},
+    {"id":"keys_and_state","storage":"secrets.key, source YAML, TLS keys, trust anchors, feed caches","contents":"Credential master key/private keys; YAML may include old secrets; anchors are public trust state","retention":"Operator lifecycle; not query retention","limits":"Private filesystem permissions and host protection; whole SQLite/WAL not application-encrypted","evidence":"docs/privacy.md"},
+    {"id":"copies","storage":"NDJSON exports, .ddbackup, operational/container/proxy logs, external copies","contents":"Potentially repeated retained data, configuration and secrets in recovery packages","retention":"Independent operator/recipient schedules","limits":"Exports plaintext; backups passphrase-encrypted; erasure/expiry must include restores and recipients","evidence":"docs/privacy.md"}
+  ],
+  "outbound_paths": [
+    "Configured DNS forwarders (fresh default Cloudflare DoH)",
+    "Native authoritative DNS in Native Learn/Live",
+    "Operator-approved encrypted profile endpoints",
+    "Background hostname DNS; selected profile determines recipient",
+    "Enabled threat-feed HTTP downloads",
+    "Deliberately enabled reputation/enrichment providers",
+    "Consented webhook receiver",
+    "Authenticated operator exports/backups and subsequent operator-managed sharing"
+  ],
+  "warning": "Operator acknowledgement is not automatically a data subject consent or other lawful basis. Logging off does not prevent DNS resolution or all separately enabled disclosures."
+}
