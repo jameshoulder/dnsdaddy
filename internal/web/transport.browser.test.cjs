@@ -24,6 +24,15 @@ const { chromium } = require(process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES ? pa
 const checks = [];
 const check = (name, value) => { assert.ok(value, name); checks.push(name); };
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The production app.js response includes the setup extension in one script
+// task. Reconstruct its bytes from both source files rather than trusting the
+// response under test or dropping the served-asset integrity assertion.
+async function sourceAsset(name) {
+  const data = await fs.readFile(path.join(__dirname, 'static', name));
+  if (name !== 'app.js') return data;
+  const setup = await fs.readFile(path.join(__dirname, 'static', 'setup.js'));
+  return Buffer.concat([data, Buffer.from('\n;\n'), setup]);
+}
 async function port() {
   const server = net.createServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -169,7 +178,7 @@ async function ask(port, name, id) {
     for (let index = 0; index < 2; index++) await form.locator('[data-forwarder]').last().locator('[data-transport-action=remove]').click();
     await form.locator('#transport-add-endpoint').click();
     for (let index = 1; index < 16; index++) await form.locator('#transport-add-endpoint').click();
-    check('the endpoint editor enforces the sixteen-endpoint bound for examples and custom entries', await form.locator('#transport-add-endpoint').isDisabled() && await form.locator('[data-transport-example=cloudflare]').isDisabled() && await form.locator('[data-forwarder]').count() === 16);
+    check('the endpoint editor enforces the sixteen-endpoint bound for examples and custom entries', await form.locator('#transport-add-endpoint]').isDisabled() && await form.locator('[data-transport-example=cloudflare]').isDisabled() && await form.locator('[data-forwarder]').count() === 16);
     for (let index = 15; index > 0; index--) await form.locator('[data-forwarder]').last().locator('[data-transport-action=remove]').click();
     check('endpoint boundary controls stay correct after removals', await form.locator('[data-transport-action=up]').isDisabled() && await form.locator('[data-transport-action=down]').isDisabled());
     await form.locator('[name=protocol]').selectOption('doq'); await form.locator('[name=address]').fill(`127.0.0.1:${unusedPort}`);
@@ -249,14 +258,14 @@ async function ask(port, name, id) {
     for (const asset of ['app.js', 'app.css', 'index.html']) {
       const served = Buffer.from(await (await fetch(base + (asset === 'index.html' ? '/' : '/' + asset))).arrayBuffer());
       assets[asset] = createHash('sha256').update(served).digest('hex');
-      let expected = await fs.readFile(path.join(__dirname, 'static', asset));
+      let expected = await sourceAsset(asset);
       if (asset === 'index.html') {
         // The server inserts deterministic asset fingerprints into its HTML.
         // Still compare every byte: do not skip index integrity or accept an
         // arbitrary hash from the response under test.
         let template = expected.toString('utf8');
         for (const name of ['app.js', 'app.css']) {
-          const digest = createHash('sha256').update(await fs.readFile(path.join(__dirname, 'static', name))).digest('hex');
+          const digest = createHash('sha256').update(await sourceAsset(name)).digest('hex');
           template = template.replaceAll(`"/${name}"`, `"/${name}?v=${digest.slice(0, 16)}"`);
         }
         expected = Buffer.from(template, 'utf8');
