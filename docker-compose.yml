@@ -1,6 +1,6 @@
 # DNS Daddy — protective DNS on a small VPS.
 #
-#   ./deploy/install-docker.sh
+#   ./install.sh
 #
 # Or by hand — this file works with no .env at all, every value has a default:
 #
@@ -104,6 +104,9 @@ services:
       DNSDADDY_UPSTREAM_MODE:
       # Display-only client-facing IP:port for NAT/containers; no DNS access is granted.
       DNSDADDY_ADVERTISED_DNS:
+      # Host installer hint, below explicit configuration and saved UI choices.
+      # No Docker socket or host networking is needed inside the resolver.
+      DNSDADDY_DEPLOYMENT_DNS:
       DNSDADDY_RESOLUTION_TRANSPORT:
       DNSDADDY_ENCRYPTED_UPSTREAMS:
       DNSDADDY_LOCAL_DNSSEC_VALIDATION:
