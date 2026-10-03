@@ -1,0 +1,41 @@
+name: Docker network handoff
+
+on:
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'deploy/docker_*'
+      - 'deploy/test_docker_network.py'
+      - 'docker-compose.yml'
+      - 'Dockerfile'
+      - 'internal/api/**'
+      - '.github/workflows/docker-network-handoff.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-network-handoff-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  handoff:
+    name: Real Docker address and access boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Offline host safety tests
+        run: |
+          bash -n install.sh
+          cd deploy
+          python3 -m unittest -v test_docker_network.py
+      - name: Build the actual resolver image
+        run: docker build -t dnsdaddy-handoff-ci:local .
+      - name: Verify the real installation handoff and UDP/TCP refusal boundary
+        env:
+          CI: 'true'
+        run: python3 deploy/docker_handoff_live.py
