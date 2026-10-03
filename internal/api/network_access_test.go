@@ -619,9 +619,10 @@ func TestTheWarningClaimsOnlyThatItCouldNotConfirm(t *testing.T) {
 // doctor runs as a separate process and rebuilds the ACL from configuration
 // and the database — the desired state, not the enforced one. The health
 // endpoint is the only place the running daemon's reload failure is visible,
-// which is why the flag is there rather than only behind authentication.
+// but reading that private state requires a session or API token.
 func TestHealthReportsAStaleClientACL(t *testing.T) {
 	h := newHarness(t)
+	h.login()
 
 	var health map[string]any
 	h.getJSON("/api/v1/health", &health)
@@ -642,7 +643,7 @@ func TestHealthReportsAStaleClientACL(t *testing.T) {
 		"publicAck":     true,
 	})
 
-	// Unauthenticated, deliberately: this is what doctor can reach.
+	// Authenticated: doctor also needs an explicit token for live private state.
 	resp, raw := h.do("GET", "/api/v1/health", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d, body %s", resp.StatusCode, raw)
