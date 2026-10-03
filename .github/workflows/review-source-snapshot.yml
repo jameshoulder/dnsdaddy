@@ -1,0 +1,25 @@
+name: Review source snapshot
+on:
+  push:
+    branches: [fix/privacy-review-followup-20261003]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: |
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/source.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/source-commit.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: review-source
+          path: |
+            ${{ runner.temp }}/source.tar.gz
+            ${{ runner.temp }}/source-commit.txt
+          retention-days: 3
