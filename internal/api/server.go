@@ -165,7 +165,10 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/auth/password", a.handleChangePassword)
 
 	api.HandleFunc("GET /api/v1/overview", a.handleOverview)
-	api.HandleFunc("GET /api/v1/server-addresses", a.handleServerAddresses)
+	api.HandleFunc("GET /api/v1/server-addresses", a.handleSetupServerAddresses)
+	api.HandleFunc("GET /api/v1/setup", a.handleSetup)
+	api.HandleFunc("POST /api/v1/setup/preview", a.handleSetupPreview)
+	api.HandleFunc("PUT /api/v1/setup/address", a.handleSetupAddress)
 
 	// Why DNS is not working. Reads configuration and live counters and says
 	// so in plain English; `dnsdaddy doctor` renders the same checks.
@@ -449,7 +452,8 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 // those three must never disagree about who the client is, or an attacker
 // picks whichever view suits them. It honours X-Forwarded-For only from a
 // configured proxy, so a direct caller still cannot rotate its own key by
-// inventing a header — it would only be rate-limiting a stranger.
+// inventing a header — and with it
+// another network's filtering policy.
 func clientKey(r *http.Request, trusted *httpx.TrustedProxies) string {
 	if addr := httpx.ClientAddr(r, trusted); addr.IsValid() {
 		return addr.String()
