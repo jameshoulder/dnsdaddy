@@ -178,7 +178,7 @@ async function ask(port, name, id) {
     for (let index = 0; index < 2; index++) await form.locator('[data-forwarder]').last().locator('[data-transport-action=remove]').click();
     await form.locator('#transport-add-endpoint').click();
     for (let index = 1; index < 16; index++) await form.locator('#transport-add-endpoint').click();
-    check('the endpoint editor enforces the sixteen-endpoint bound for examples and custom entries', await form.locator('#transport-add-endpoint]').isDisabled() && await form.locator('[data-transport-example=cloudflare]').isDisabled() && await form.locator('[data-forwarder]').count() === 16);
+    check('the endpoint editor enforces the sixteen-endpoint bound for examples and custom entries', await form.locator('#transport-add-endpoint').isDisabled() && await form.locator('[data-transport-example=cloudflare]').isDisabled() && await form.locator('[data-forwarder]').count() === 16);
     for (let index = 15; index > 0; index--) await form.locator('[data-forwarder]').last().locator('[data-transport-action=remove]').click();
     check('endpoint boundary controls stay correct after removals', await form.locator('[data-transport-action=up]').isDisabled() && await form.locator('[data-transport-action=down]').isDisabled());
     await form.locator('[name=protocol]').selectOption('doq'); await form.locator('[name=address]').fill(`127.0.0.1:${unusedPort}`);
