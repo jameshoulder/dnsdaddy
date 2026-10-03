@@ -517,6 +517,49 @@ func TestPreservesExistingEnv(t *testing.T) {
 	contains(t, out, "Keeping your existing .env")
 }
 
+// .env is where DNSDADDY_ADMIN_PASSWORD goes, and it is created by copying a
+// world-readable template. The installer left it that way, so on a host with
+// more than one account the dashboard password was readable by all of them —
+// while production-deploy.sh, a different way into the same deployment, had
+// always tightened it.
+func TestEnvIsNotLeftReadableByOtherAccounts(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing bool
+	}{
+		{name: "created by the installer"},
+		{name: "kept from an earlier install", existing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := newInstall(t)
+			in.setenv("STUB_ADMIN_PASSWORD=test-password-1234")
+			if tc.existing {
+				// writeEnv creates it 0644, which is what an operator's own
+				// `cp .env.example .env` produces.
+				in.writeEnv("DNSDADDY_ADMIN_PASSWORD=correct-horse-battery\nTZ=Europe/London\n")
+			}
+
+			out, code := in.run("--yes")
+			if code != 0 {
+				t.Fatalf("exit %d\n%s", code, out)
+			}
+			info, err := os.Stat(in.envPath())
+			must(t, err)
+			if perm := info.Mode().Perm(); perm&0o077 != 0 {
+				t.Errorf(".env has mode %04o; group and other must have no access to a file that can hold the admin password", perm)
+			}
+			// Only ever removes bits: the owner must still be able to read and
+			// edit their own file, or compose and the next install both break.
+			if perm := info.Mode().Perm(); perm&0o600 != 0o600 {
+				t.Errorf(".env has mode %04o; the owner lost access to their own file", perm)
+			}
+			if tc.existing && !strings.Contains(in.readEnv(), "TZ=Europe/London") {
+				t.Error("restricting .env changed its contents")
+			}
+		})
+	}
+}
+
 // --- Docker detection --------------------------------------------------------
 
 func TestDockerMissingGivesTheExactCommand(t *testing.T) {

@@ -3,10 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/retention"
 )
 
 // InsertQueryBatch writes a batch of query events and updates the rollup
@@ -622,41 +625,69 @@ func (s *Store) NetworkActivitySince(ctx context.Context, t time.Time) (map[stri
 // retention setting is a promise broken by a diagnostic feature.
 const DefaultRetentionDays = 7
 
-// Prune deletes query-log rows and rollups past their retention windows.
-// It returns the number of query-log rows removed.
-func (s *Store) Prune(ctx context.Context, retentionDays, rollupDays int) (int64, error) {
+// DefaultRollupDays is the rollup window used when the operator has not
+// configured one.
+const DefaultRollupDays = 90
+
+// LogRetentionSteps provides independent table operations using a single cutoff
+// snapshot. A caller's cancellation is always honoured; the daemon gives each
+// operation its own budget so a timed-out query table does not starve presence
+// or aggregate cleanup.
+func (s *Store) LogRetentionSteps(retentionDays, rollupDays int, now time.Time) []retention.Step {
 	if retentionDays <= 0 {
 		retentionDays = DefaultRetentionDays
 	}
 	if rollupDays <= 0 {
-		rollupDays = 90
+		rollupDays = DefaultRollupDays
 	}
+	logCutoff := now.AddDate(0, 0, -retentionDays)
+	rollupCutoff := now.AddDate(0, 0, -rollupDays)
+	return []retention.Step{
+		{Name: "query_log", Prune: func(ctx context.Context) (int64, error) {
+			res, err := s.db.ExecContext(ctx, "DELETE FROM query_log WHERE ts < ?", unixMilli(logCutoff))
+			if err != nil {
+				return 0, err
+			}
+			return res.RowsAffected()
+		}},
+		{Name: "client_hourly", Prune: func(ctx context.Context) (int64, error) {
+			res, err := s.db.ExecContext(ctx, "DELETE FROM client_hourly WHERE hour < ?", logCutoff.UTC().Truncate(time.Hour).Unix())
+			if err != nil {
+				return 0, err
+			}
+			return res.RowsAffected()
+		}},
+		{Name: "stats_hourly", Prune: func(ctx context.Context) (int64, error) {
+			res, err := s.db.ExecContext(ctx, "DELETE FROM stats_hourly WHERE hour < ?", rollupCutoff.UTC().Truncate(time.Hour).Unix())
+			if err != nil {
+				return 0, err
+			}
+			return res.RowsAffected()
+		}},
+		{Name: "blocked_domain_stats", Prune: func(ctx context.Context) (int64, error) {
+			res, err := s.db.ExecContext(ctx, "DELETE FROM blocked_domain_stats WHERE day < ?", rollupCutoff.UTC().Truncate(24*time.Hour).Unix())
+			if err != nil {
+				return 0, err
+			}
+			return res.RowsAffected()
+		}},
+	}
+}
 
-	logCutoff := unixMilli(time.Now().AddDate(0, 0, -retentionDays))
-	res, err := s.db.ExecContext(ctx, "DELETE FROM query_log WHERE ts < ?", logCutoff)
-	if err != nil {
-		return 0, fmt.Errorf("prune query_log: %w", err)
+// Prune attempts all four tables, returning partial query-row counts and joined
+// errors. An already cancelled parent prevents writes, never a successful sweep.
+func (s *Store) Prune(ctx context.Context, retentionDays, rollupDays int) (int64, error) {
+	var removed int64
+	var errs []error
+	for _, result := range retention.Run(ctx, retention.StepTimeout, s.LogRetentionSteps(retentionDays, rollupDays, time.Now())) {
+		if result.Name == "query_log" {
+			removed = result.Removed
+		}
+		if result.Err != nil {
+			errs = append(errs, fmt.Errorf("prune %s: %w", result.Name, result.Err))
+		}
 	}
-	removed, _ := res.RowsAffected()
-
-	// Client presence expires with the query log, not with the rollups: it
-	// names devices, and the operator's retention setting for device-naming
-	// data is log.retention_days.
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM client_hourly WHERE hour < ?",
-		time.Now().AddDate(0, 0, -retentionDays).UTC().Truncate(time.Hour).Unix()); err != nil {
-		return removed, fmt.Errorf("prune client_hourly: %w", err)
-	}
-
-	rollupCutoff := time.Now().AddDate(0, 0, -rollupDays)
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM stats_hourly WHERE hour < ?",
-		rollupCutoff.UTC().Truncate(time.Hour).Unix()); err != nil {
-		return removed, fmt.Errorf("prune stats_hourly: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM blocked_domain_stats WHERE day < ?",
-		rollupCutoff.UTC().Truncate(24*time.Hour).Unix()); err != nil {
-		return removed, fmt.Errorf("prune blocked_domain_stats: %w", err)
-	}
-	return removed, nil
+	return removed, errors.Join(errs...)
 }
 
 // CountQueryLogRows returns the number of stored query-log rows, used for the

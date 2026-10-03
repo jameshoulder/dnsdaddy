@@ -9,7 +9,7 @@
 # This checks four things independently:
 #
 #   1. the container is running and Docker considers it healthy
-#   2. /api/v1/health reports status=ok with a non-empty blocklist
+#   2. /api/v1/health reports liveness; unavailable private detail is explicit
 #   3. DNS actually answers a known-good query over UDP and TCP
 #   4. the public HTTPS dashboard responds, if one is configured
 #
@@ -73,18 +73,9 @@ fi
 
 # --- 2. application health -------------------------------------------------
 #
-# /api/v1/health answers in two tiers. Every caller gets {"status":"ok"} —
-# liveness and nothing else, because in the HTTPS deployment that endpoint is
-# published to the internet. The protection state comes back only for a caller
-# the server considers entitled: an authenticated one, or one whose peer
-# address is loopback.
-#
-# Run from the host against a published Docker port, this script is NOT a
-# loopback peer — Docker translates the source address to the bridge gateway —
-# so it sees liveness only. That is why the depth check below runs inside the
-# container when it can, and says plainly what it could not verify when it
-# cannot. Announcing "protected" without having looked is the failure this
-# whole script exists to avoid.
+# Public health is liveness-only, including requests from inside a container.
+# Detailed readiness requires an authenticated management request. This script
+# does not collect credentials; use doctor --api-token-file for those checks.
 body=$(curl -fsS --max-time 5 "$API/api/v1/health" 2>/dev/null) || body=""
 if [[ -z "$body" ]]; then
   fail "no response from $API/api/v1/health"
@@ -95,14 +86,9 @@ else
   else
     ok "api responding (status=ok)"
 
-    # Depth. Ask from inside the container, where the peer really is loopback.
-    detail=""
-    if command -v docker >/dev/null 2>&1; then
-      detail=$(docker exec "$CONTAINER" wget -qO- http://127.0.0.1:8080/api/v1/health 2>/dev/null || true)
-    fi
-    if [[ -z "$detail" ]]; then
-      detail=$(curl -fsS --max-time 5 "$API/api/v1/health" 2>/dev/null || true)
-    fi
+    # Public liveness cannot establish the live index. Older instances may
+    # still expose these fields; new instances correctly leave them absent.
+    detail="$body"
 
     protecting=$(printf '%s' "$detail" | sed -n 's/.*"protecting"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
     blocklist=$(printf '%s' "$detail" | sed -n 's/.*"blocklistSize"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
@@ -115,9 +101,8 @@ else
       false) warn "the blocklist is empty — feed-based filtering is not ready"
              say "      feeds may still be downloading; if this persists, refresh them" ;;
       *)     warn "could not read the blocklist state; readiness is not fully verified"
-             say "      this check has to run where the"
-             say "      health endpoint sees a loopback peer, or with an API token."
-             say "      Try: docker exec $CONTAINER dnsdaddy doctor" ;;
+             say "      Run dnsdaddy doctor --api-token-file /path/to/private-token on the host"
+             say "      or inside the container with an owner-only token file mounted there." ;;
     esac
   fi
 fi

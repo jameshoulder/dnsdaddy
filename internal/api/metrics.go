@@ -59,6 +59,7 @@ func (a *API) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	a.writeLearningMetrics(&b)
 	a.writeProtectionMetrics(&b)
 	a.writeWebhookMetrics(r.Context(), &b)
+	a.writeRetentionMetrics(&b)
 
 	metric(&b, "dnsdaddy_cache_entries", "Answers currently cached", "gauge",
 		fmt.Sprintf("dnsdaddy_cache_entries %d", cacheSize))

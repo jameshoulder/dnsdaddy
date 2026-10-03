@@ -92,3 +92,89 @@ func TestNativeInstallerUsesTheChosenHTTPBindAndPreservesExistingConfig(t *testi
 		})
 	}
 }
+
+// The native installer left /etc/dnsdaddy at 0755 and config.yaml at 0644.
+// That file is where http.admin_password goes, and the binary applies it as
+// the live admin password on every start, so every account on the host could
+// read the dashboard password. Runs the installer's own restrict_config rather
+// than a copy of it.
+func TestNativeInstallerRestrictsConfigToTheServiceAccount(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "install.sh"))
+	must(t, err)
+	script := string(b)
+
+	start := strings.Index(script, "restrict_config() {")
+	if start < 0 {
+		t.Fatal("cannot locate restrict_config in the native installer")
+	}
+	end := strings.Index(script[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("cannot locate the end of restrict_config")
+	}
+	fn := script[start : start+end+3]
+
+	// The caller's own group stands in for the service account's: chgrp to a
+	// group you belong to needs no privilege, so this runs anywhere.
+	group, err := exec.Command("id", "-un").Output()
+	must(t, err)
+
+	for _, tc := range []struct {
+		name       string
+		withConfig bool
+	}{
+		{name: "config present", withConfig: true},
+		{name: "no config yet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "dnsdaddy")
+			must(t, os.Mkdir(dir, 0o755))
+			must(t, os.Chmod(dir, 0o755)) // not left to the umask
+			file := filepath.Join(dir, "config.yaml")
+			const content = "http:\n  admin_password: \"correct-horse-battery\"\n"
+			if tc.withConfig {
+				must(t, os.WriteFile(file, []byte(content), 0o644))
+				must(t, os.Chmod(file, 0o644))
+			}
+
+			cmd := exec.Command("bash", "-c", "set -euo pipefail\n"+fn+"\nrestrict_config \"$1\" \"$2\" \"$3\"",
+				"bash", dir, file, strings.TrimSpace(string(group)))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("restrict_config: %v\n%s", err, out)
+			}
+
+			info, err := os.Stat(dir)
+			must(t, err)
+			if perm := info.Mode().Perm(); perm != 0o750 {
+				t.Errorf("config directory has mode %04o, want 0750", perm)
+			}
+			if !tc.withConfig {
+				if _, err := os.Stat(file); !os.IsNotExist(err) {
+					t.Errorf("restrict_config created a config file that was not there: %v", err)
+				}
+				return
+			}
+			info, err = os.Stat(file)
+			must(t, err)
+			if perm := info.Mode().Perm(); perm != 0o640 {
+				t.Errorf("config.yaml has mode %04o, want 0640", perm)
+			}
+			got, err := os.ReadFile(file)
+			must(t, err)
+			if string(got) != content {
+				t.Error("restricting the configuration changed its contents")
+			}
+		})
+	}
+
+	// And it has to actually be reached, before the service reads the file. A
+	// function that exists and is never called looks exactly like one that
+	// works.
+	call := strings.Index(script, `restrict_config "$CONFIG_DIR" "${CONFIG_DIR}/config.yaml" "$SERVICE_USER"`)
+	restart := strings.Index(script, "systemctl restart dnsdaddy")
+	if call < 0 || restart < 0 || call > restart {
+		t.Error("the installer does not restrict the configuration before starting the service")
+	}
+	if strings.Contains(script, `install -d -m 0755 "$CONFIG_DIR"`) {
+		t.Error("the installer creates the configuration directory world-readable")
+	}
+}

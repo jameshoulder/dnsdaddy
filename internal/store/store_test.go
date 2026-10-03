@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -482,6 +483,40 @@ func TestPruneRespectsRetention(t *testing.T) {
 	}
 	if totals.Queries != 2 {
 		t.Errorf("rollup totals = %d, want 2 preserved across the prune", totals.Queries)
+	}
+}
+
+// client_hourly names devices and expires on log.retention_days. It sits behind
+// query_log in Prune, and used to be skipped whenever the query-log delete
+// failed — so the table that most needed to expire was the one a failure held
+// on to. Each table is its own promise; one failing must not keep the others.
+func TestPruneAttemptsEveryTableWhenOneFails(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	oldHour := time.Now().AddDate(0, 0, -30).UTC().Truncate(time.Hour).Unix()
+	freshHour := time.Now().UTC().Truncate(time.Hour).Unix()
+	for _, hour := range []int64{oldHour, freshHour} {
+		if _, err := st.db.ExecContext(ctx,
+			"INSERT INTO client_hourly (hour, client_ip) VALUES (?, ?)", hour, "192.0.2.10"); err != nil {
+			t.Fatalf("seed client_hourly: %v", err)
+		}
+	}
+	if _, err := st.db.ExecContext(ctx, "DROP TABLE query_log"); err != nil {
+		t.Fatalf("drop query_log: %v", err)
+	}
+
+	_, err := st.Prune(ctx, 7, 90)
+	if err == nil || !strings.Contains(err.Error(), "query_log") {
+		t.Fatalf("Prune error = %v; a failed table must still be reported", err)
+	}
+
+	var remaining int
+	if err := st.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM client_hourly").Scan(&remaining); err != nil {
+		t.Fatalf("count client_hourly: %v", err)
+	}
+	if remaining != 1 {
+		t.Errorf("client_hourly has %d rows after the prune, want 1: the expired device-presence row was kept because query_log failed", remaining)
 	}
 }
 

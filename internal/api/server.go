@@ -95,6 +95,10 @@ type Deps struct {
 
 	StartedAt time.Time
 
+	// Retention reports what the retention job has done, or nil when the
+	// process runs without one. Read-only, and only /metrics reads it.
+	Retention RetentionStats
+
 	// TrustedProxies bounds which peers' forwarding headers are believed,
 	// shared with the DoH handler and the cookie logic so all three agree on
 	// who the client is.

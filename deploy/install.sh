@@ -25,6 +25,50 @@ log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Restrict existing config without adding any permission bits. Accept only root
+# or the service account as owner; group ownership is explicitly the service
+# account's primary group. Stricter owner-only settings are preserved when the
+# service owns the path. If root-owned 0700/0600 prevents service access, stop and
+# ask for an explicit operator choice rather than silently widening permissions.
+restrict_config() { # directory file service-user
+  local dir="$1" file="$2" service="$3" uid gid path owner perm links mode need
+  uid=$(id -u "$service") || return 1
+  gid=$(id -g "$service") || return 1
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || return 1
+  [[ -d "$dir" && ! -L "$dir" ]] || { printf '%s\n' "Unsafe configuration directory; refusing links." >&2; return 1; }
+  if [[ -e "$file" || -L "$file" ]]; then
+    [[ -f "$file" && ! -L "$file" ]] || { printf '%s\n' "Unsafe configuration file; refusing links/non-regular files." >&2; return 1; }
+  fi
+  # Validate both paths before changing either. No silent ownership takeover.
+  for path in "$dir" "$file"; do
+    [[ -e "$path" ]] || continue
+    read -r owner perm links < <(stat -c '%u %a %h' -- "$path")
+    [[ "$owner" =~ ^[0-9]+$ && "$perm" =~ ^[0-7]{1,4}$ && "$links" =~ ^[0-9]+$ ]] || return 1
+    [[ "$owner" == 0 || "$owner" == "$uid" ]] || { printf '%s\n' "Unexpected configuration owner; review it explicitly." >&2; return 1; }
+    [[ "$path" == "$dir" || "$links" == 1 ]] || { printf '%s\n' "Refusing a multiply-linked configuration file." >&2; return 1; }
+    if [[ "$path" == "$dir" ]]; then
+      mode=$((8#$perm & 0750)); need=0500
+    else
+      mode=$((8#$perm & 0640)); need=0400
+    fi
+    [[ "$owner" == "$uid" ]] || need=$((need >> 3))
+    (( (mode & need) == need )) || { printf '%s\n' "Existing strict permissions prevent service access; explicitly grant the intended service access, then rerun." >&2; return 1; }
+  done
+  for path in "$dir" "$file"; do
+    [[ -e "$path" ]] || continue
+    perm=$(stat -c '%a' -- "$path") || return 1
+    [[ "$perm" =~ ^[0-7]{1,4}$ ]] || return 1
+    if [[ "$path" == "$dir" ]]; then mode=$((8#$perm & 0750)); else mode=$((8#$perm & 0640)); fi
+    printf -v mode '%04o' "$mode"
+    # Remove bits before changing the group: no transient access to the old mode.
+    chmod "$mode" -- "$path" || return 1
+    chgrp "$gid" -- "$path" || return 1
+    read -r owner perm < <(stat -c '%g %a' -- "$path")
+    [[ "$owner" == "$gid" && "$perm" =~ ^[0-7]{1,4}$ ]] || return 1
+    (( 8#$perm == 8#$mode )) || { printf '%s\n' "Configuration permission verification failed." >&2; return 1; }
+  done
+}
+
 [[ $EUID -eq 0 ]] || die "This script must run as root. Try: sudo $0"
 command -v systemctl >/dev/null || die "systemd is required. For other init systems, run the binary directly or use Docker."
 
@@ -69,7 +113,11 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$DATA_DIR"
-install -d -m 0755 "$CONFIG_DIR"
+# Do not reset a stricter existing mode during an upgrade.
+if [[ ! -e "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]]; then
+  install -d -m 0750 "$CONFIG_DIR"
+fi
+restrict_config "$CONFIG_DIR" "${CONFIG_DIR}/config.yaml" "$SERVICE_USER" || die "Could not protect configuration; deployment stopped before replacing the binary or restarting DNS Daddy."
 
 # --- 4. install the binary ---------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -124,9 +172,9 @@ DASHBOARD_NOTE=""
 
 if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
   if [[ -f "${SCRIPT_DIR}/../dnsdaddy.example.yaml" ]]; then
-    install -m 0644 "${SCRIPT_DIR}/../dnsdaddy.example.yaml" "${CONFIG_DIR}/config.yaml"
+    install -m 0640 "${SCRIPT_DIR}/../dnsdaddy.example.yaml" "${CONFIG_DIR}/config.yaml"
   else
-    cat > "${CONFIG_DIR}/config.yaml" <<EOF
+    (umask 027; set -o noclobber; cat > "${CONFIG_DIR}/config.yaml" <<EOF
 data_dir: ${DATA_DIR}
 dns:
   listen_udp: ":53"
@@ -134,6 +182,7 @@ dns:
 http:
   listen: "${HTTP_LISTEN}"
 EOF
+    )
   fi
   # The example now uses loopback explicitly. Rewrite its HTTP listen field,
   # not just the old ":8080" spelling, so an explicit LAN address takes effect.
@@ -150,6 +199,11 @@ else
 fi
 
 # --- 6. systemd unit ---------------------------------------------------------
+# Before the service reads its configuration. Run on every install, so a
+# config.yaml kept from an earlier version is tightened along with a new one.
+restrict_config "$CONFIG_DIR" "${CONFIG_DIR}/config.yaml" "$SERVICE_USER" || die "Could not protect configuration; DNS Daddy was not restarted."
+log "Verified restricted configuration access for the ${SERVICE_USER} service account."
+
 if [[ -f "${SCRIPT_DIR}/dnsdaddy.service" ]]; then
   install -m 0644 "${SCRIPT_DIR}/dnsdaddy.service" /etc/systemd/system/dnsdaddy.service
 else

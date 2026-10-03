@@ -44,6 +44,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
 	"github.com/jameshoulder/dnsdaddy/internal/resolver"
+	"github.com/jameshoulder/dnsdaddy/internal/retention"
 	"github.com/jameshoulder/dnsdaddy/internal/secrets"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
@@ -114,6 +115,7 @@ Doctor flags:
   -config path              config file
   -json                     emit findings as JSON
   -timeout duration         per-probe timeout (default 5s)
+  -api-token-file path      optional owner-only token file for local health detail
 
 Doctor exits non-zero when a check fails, so it can gate a deployment.
 
@@ -455,9 +457,15 @@ func run() error {
 		AllowUntokenized: cfg.HTTP.AllowUntokenizedDoH,
 	})
 
+	// Shared between the retention job, which writes it, and /metrics, which
+	// reports it. Created here because the API is built before the job starts.
+	retention := &retentionStatus{}
+	warnUnboundedRetention(cfg, log)
+
 	restAPI := api.New(api.Deps{
 		Config:         cfg,
 		Store:          st,
+		Retention:      retention,
 		Engine:         engine,
 		Feeds:          feeds,
 		Lists:          lists,
@@ -526,7 +534,7 @@ func run() error {
 
 	// --- background jobs ----------------------------------------------------
 	go feeds.Run(ctx)
-	go runRetention(ctx, st, cfg, log)
+	go runRetention(ctx, st, cfg, log, retention)
 
 	if cfg.Feeds.RefreshOnStart {
 		go func() {
@@ -803,8 +811,19 @@ func startIntel(
 
 // runRetention prunes the query log on a timer, honouring the configured
 // retention window.
-func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) {
-	prune := func() { pruneOnce(ctx, st, cfg, log) }
+//
+// status may be nil. When it is not, every finished pass is recorded on it,
+// which is what /metrics reports — see retentionStatus.
+func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger, status *retentionStatus) {
+	prune := func() {
+		failed := pruneOnce(ctx, st, cfg, log)
+		// A pass cut short by shutdown did not fail; it was interrupted, and
+		// counting it would turn every restart into a retention alert.
+		if ctx.Err() != nil {
+			return
+		}
+		status.record(time.Now(), failed)
+	}
 
 	// Prune shortly after boot so an install that has been off for a while
 	// reclaims disk before it starts writing again.
@@ -827,95 +846,52 @@ func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *
 	}
 }
 
-// pruneOnce is one pass of the retention job.
-//
-// A named function rather than a closure so a test can run the whole pass and
-// check that everything with a retention window is actually in it. A store
-// method that exists and is never called looks identical to one that works.
-func pruneOnce(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) {
-	pctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
+// pruneOnce attempts cleanup with a fresh cooperative budget for every table
+// or atomic lifecycle operation. It never detaches cancellation from shutdown.
+// Expiry-disabled datasets remain unchanged and are disclosed at startup.
+func pruneOnce(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) (failed []string) {
+	return pruneSteps(ctx, retention.StepTimeout, retentionSteps(st, cfg, time.Now()), log)
+}
 
-	removed, err := st.Prune(pctx, cfg.Log.RetentionDays, cfg.Log.RollupDays)
-	if err != nil {
-		log.Error("retention prune failed", "error", err)
-		return
-	}
-	if removed > 0 {
-		log.Info("pruned expired query-log rows",
-			"rows", removed, "retention_days", cfg.Log.RetentionDays)
-	}
-
-	// Local DNSSEC observations share the query log's window, and must:
-	// each row names the domain it validated, exactly as a query-log row
-	// does, and each one correlates to a query-log row by id. Left
-	// unpruned they would ignore `log.retention_days` entirely and grow
-	// without bound — a diagnostic feature quietly keeping domain names
-	// for longer than the operator agreed to keep them.
+func retentionSteps(st *store.Store, cfg config.Config, now time.Time) []retention.Step {
+	steps := st.LogRetentionSteps(cfg.Log.RetentionDays, cfg.Log.RollupDays, now)
 	obsDays := cfg.Log.RetentionDays
 	if obsDays <= 0 {
 		obsDays = store.DefaultRetentionDays
 	}
-	if obs, err := st.PruneDNSSECObservations(pctx, time.Now().AddDate(0, 0, -obsDays)); err != nil {
-		log.Error("DNSSEC observation prune failed", "error", err)
-	} else if obs > 0 {
-		log.Info("pruned expired DNSSEC observations",
-			"rows", obs, "retention_days", obsDays)
-	}
-
-	// Findings have their own, longer retention: they are small, and the
-	// question they answer is a months-scale one.
-	findings, err := st.PruneFindings(pctx, cfg.Detection.RetentionDays)
-	if err != nil {
-		log.Error("findings prune failed", "error", err)
-		return
-	}
-	if findings > 0 {
-		log.Info("pruned expired findings",
-			"rows", findings, "retention_days", cfg.Detection.RetentionDays)
-	}
-
-	// Decision records, on their own window. Longer than the query log by
-	// default: the log answers "what happened", and this answers "why",
-	// which is the question asked weeks later.
+	steps = append(steps, retention.Step{Name: "dnssec_observations", Prune: func(ctx context.Context) (int64, error) {
+		return st.PruneDNSSECObservations(ctx, now.AddDate(0, 0, -obsDays))
+	}})
+	steps = append(steps, retention.Step{Name: "findings", Prune: func(ctx context.Context) (int64, error) {
+		return st.PruneFindings(ctx, cfg.Detection.RetentionDays)
+	}})
 	if days := cfg.Log.DecisionRetentionDays; days > 0 {
-		if n, err := st.PruneDecisions(pctx, time.Now().AddDate(0, 0, -days)); err != nil {
-			log.Error("decision prune failed", "error", err)
-		} else if n > 0 {
-			log.Info("pruned expired decision records", "rows", n, "retention_days", days)
+		steps = append(steps, retention.Step{Name: "decisions", Prune: func(ctx context.Context) (int64, error) {
+			return st.PruneDecisions(ctx, now.AddDate(0, 0, -days))
+		}})
+	}
+	steps = append(steps, retention.Step{Name: "evidence", Prune: func(ctx context.Context) (int64, error) {
+		return st.PruneEvidence(ctx, now)
+	}})
+	steps = append(steps, st.IntelRetentionSteps(now)...)
+	steps = append(steps, retention.Step{Name: "sessions", Prune: st.PurgeExpiredSessions})
+	return steps
+}
+
+func pruneSteps(ctx context.Context, budget time.Duration, steps []retention.Step, log *slog.Logger) (failed []string) {
+	for _, result := range retention.Run(ctx, budget, steps) {
+		if result.Err != nil {
+			failed = append(failed, result.Name)
+			log.Error("retention step incomplete", "step", result.Name, "error", result.Err)
+		}
+		if result.Removed > 0 {
+			log.Info("pruned expired records", "step", result.Name, "rows", result.Removed)
 		}
 	}
-
-	// Evidence past its own stated expiry. Not "old evidence" — evidence
-	// its own source no longer stands behind. Claims with no expiry
-	// (operator decisions, local first-seen observations) are facts about
-	// the past and are kept.
-	if ev, err := st.PruneEvidence(pctx, time.Now()); err != nil {
-		log.Error("evidence prune failed", "error", err)
-	} else if ev > 0 {
-		log.Debug("pruned expired evidence", "rows", ev)
+	if len(failed) > 0 {
+		log.Error("retention pass incomplete; expired data may remain", "failed_steps", failed)
 	}
-
-	// Cached verdicts and enrichment from external providers. Pruned on
-	// their own expiry rather than on a retention window: they are a cache
-	// with a per-row TTL the provider chose, and a stale verdict is worse
-	// than no verdict — it would block a name on evidence nobody would
-	// stand behind today.
-	if intelRows, err := st.PruneIntel(pctx, time.Now()); err != nil {
-		log.Error("external intelligence prune failed", "error", err)
-	} else if intelRows > 0 {
-		log.Debug("pruned expired external intelligence", "rows", intelRows)
-	}
-
-	// Expired sessions are already refused by the lookup, which enforces
-	// the expiry in the query itself — this only stops the table growing
-	// on a dashboard that is opened every day for a year. Nothing security
-	// relevant depends on it running.
-	if sessions, err := st.PurgeExpiredSessions(pctx); err != nil {
-		log.Error("session purge failed", "error", err)
-	} else if sessions > 0 {
-		log.Debug("purged expired sessions", "rows", sessions)
-	}
+	return failed
 }
 
 func newLogger(level, format string) *slog.Logger {

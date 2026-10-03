@@ -1,0 +1,233 @@
+rule_files:
+- retention.rules.yml
+evaluation_interval: 1m
+tests:
+- name: startup grace does not page
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="starting"}
+    values: 1+0x30
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="starting"}
+    values: 0+60x30
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="starting"}
+    values: 0+0x30
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="starting"}
+    values: 0+0x30
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionMetricsMissing
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionNeverSucceeded
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionStalled
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionSuccessStale
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyScrapeUnavailable
+    exp_alerts: []
+- name: never succeeded is per instance even with healthy sibling
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="never"}
+    values: 1+0x30
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="never"}
+    values: 0+60x30
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="never"}
+    values: 0+0x30
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="never"}
+    values: 0+0x30
+  - series: up{job="dnsdaddy",instance="healthy"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="healthy"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="healthy"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="healthy"}
+    values: 0+0x200
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="healthy"}
+    values: _ 60+60x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="healthy"}
+    values: _ 60+60x199
+  alert_rule_test:
+  - eval_time: 16m
+    alertname: DNSDaddyRetentionNeverSucceeded
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: never
+        severity: warning
+      exp_annotations:
+        summary: No first successful retention sweep has been observed
+  - eval_time: 16m
+    alertname: DNSDaddyRetentionMetricsMissing
+    exp_alerts: []
+- name: missing metrics are per instance
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="missing"}
+    values: 1+0x30
+  - series: up{job="dnsdaddy",instance="healthy"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="healthy"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="healthy"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="healthy"}
+    values: 0+0x200
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="healthy"}
+    values: _ 60+60x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="healthy"}
+    values: _ 60+60x199
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: DNSDaddyRetentionMetricsMissing
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: missing
+        severity: warning
+      exp_annotations:
+        summary: Retention metrics are missing for this instance
+- name: failed sweep is visible
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="failed"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="failed"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="failed"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="failed"}
+    values: 0 1+0x30
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="failed"}
+    values: _ 60+60x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="failed"}
+    values: _ 60+60x199
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: failed
+        severity: warning
+      exp_annotations:
+        summary: The last retention sweep had failed steps
+- name: stalled and stale success are visible
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="stalled"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="stalled"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="stalled"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="stalled"}
+    values: 0+0x200
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="stalled"}
+    values: _ 60+0x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="stalled"}
+    values: _ 60+0x199
+  alert_rule_test:
+  - eval_time: 130m
+    alertname: DNSDaddyRetentionStalled
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: stalled
+        severity: warning
+      exp_annotations:
+        summary: No completed retention sweep has been observed for two hours
+  - eval_time: 130m
+    alertname: DNSDaddyRetentionSuccessStale
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: stalled
+        severity: warning
+      exp_annotations:
+        summary: No fully successful retention sweep has been observed for two hours
+- name: successful recovery clears failed state
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="recovered"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="recovered"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="recovered"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="recovered"}
+    values: 1+0x9 0+0x30
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="recovered"}
+    values: _ 60+60x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="recovered"}
+    values: _ 60+60x199
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: recovered
+        severity: warning
+      exp_annotations:
+        summary: The last retention sweep had failed steps
+  - eval_time: 11m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts: []
+- name: restart clears timestamps and starts grace again
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="restart"}
+    values: 1+0x160
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="restart"}
+    values: 0+60x129 0+60x30
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="restart"}
+    values: 1+0x129 0+0x30
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="restart"}
+    values: 0+0x160
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="restart"}
+    values: 60+0x129 stale _x30
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="restart"}
+    values: 60+0x129 stale _x30
+  alert_rule_test:
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionMetricsMissing
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionNeverSucceeded
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionStalled
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionSuccessStale
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyScrapeUnavailable
+    exp_alerts: []
+- name: scrape failure is not a retention success
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="down"}
+    values: 0+0x20
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: DNSDaddyScrapeUnavailable
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: down
+        severity: warning
+      exp_annotations:
+        summary: DNS Daddy metrics cannot be scraped

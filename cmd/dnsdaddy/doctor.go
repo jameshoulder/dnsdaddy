@@ -35,13 +35,15 @@ const doctorProbeName = "example.com."
 // is definitely wrong, so it can be used in a script.
 //
 // It reads configuration and the database, and sends real queries. It changes
-// nothing: an operator running this is already having a bad day and must not
-// have to wonder whether the diagnostic made it worse.
+// no configuration or query history. Its local database handle is read-only;
+// optional authenticated HTTP probes record normal token-use metadata in the
+// daemon. DNS probes can also appear in the running resolver's telemetry.
 func runDoctor(args []string) error {
 	fs := newFlagSet("doctor")
 	configPath := fs.String("config", envOr("DNSDADDY_CONFIG", "/etc/dnsdaddy/config.yaml"), "path to the config file")
 	asJSON := fs.Bool("json", false, "emit findings as JSON")
 	timeout := fs.Duration("timeout", 5*time.Second, "per-probe timeout")
+	tokenFile := fs.String("api-token-file", envOr("DNSDADDY_DOCTOR_TOKEN_FILE", ""), "optional owner-only file containing a management API token for local health detail")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -51,7 +53,12 @@ func runDoctor(args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	checks := collectDoctorChecks(ctx, *configPath, *timeout)
+	token, err := readDoctorToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "doctor:", err)
+		return err
+	}
+	checks := collectDoctorChecksWithToken(ctx, *configPath, *timeout, token)
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -73,6 +80,10 @@ func runDoctor(args []string) error {
 // network probe. An unreadable selection must not cause diagnostics to send
 // plaintext queries through guessed defaults.
 func collectDoctorChecks(ctx context.Context, configPath string, timeout time.Duration) []diag.Check {
+	return collectDoctorChecksWithToken(ctx, configPath, timeout, "")
+}
+
+func collectDoctorChecksWithToken(ctx context.Context, configPath string, timeout time.Duration, token string) []diag.Check {
 	var checks []diag.Check
 	cfg, cfgChecks := doctorConfig(configPath)
 	checks = append(checks, cfgChecks...)
@@ -111,7 +122,7 @@ func collectDoctorChecks(ctx context.Context, configPath string, timeout time.Du
 
 		// Asked first, rendered last. Runtime ACL staleness lives only in the
 		// daemon, so an unavailable dashboard leaves this explicitly unknown.
-		webChecks, aclStale = doctorWeb(ctx, st, cfg, timeout)
+		webChecks, aclStale = doctorWebWithToken(ctx, st, cfg, timeout, token)
 		checks = append(checks, doctorListeners(ctx, cfg, acl, timeout)...)
 		checks = append(checks, doctorUpstreams(ctx, cfg, timeout)...)
 	}
@@ -364,6 +375,10 @@ func doctorUpstreams(ctx context.Context, cfg config.Config, timeout time.Durati
 // reports is derived from configuration and the database, which is the
 // *desired* state; these two are the enforced one.
 func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration) ([]diag.Check, *bool) {
+	return doctorWebWithToken(ctx, st, cfg, timeout, "")
+}
+
+func doctorWebWithToken(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration, token string) ([]diag.Check, *bool) {
 	c := diag.Check{Section: diag.SectionWeb, Name: "Dashboard responding"}
 	target, err := doctorLocalProbeTarget(cfg.HTTP.Listen)
 	if err != nil {
@@ -386,6 +401,11 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		return []diag.Check{c, intelUnknown()}, nil
 	}
 
+	// The destination was verified local above. Never forward this credential
+	// via HTTP_PROXY or across a redirect, and never log its value.
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: timeout}).DialContext}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport,
@@ -412,8 +432,8 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 
 	var health struct {
 		Status         string `json:"status"`
-		BlocklistSize  int    `json:"blocklistSize"`
-		ClientACLStale bool   `json:"clientAclStale"`
+		BlocklistSize  *int   `json:"blocklistSize"`
+		ClientACLStale *bool  `json:"clientAclStale"`
 	}
 	if err := json.Unmarshal(body, &health); err != nil {
 		c.Status = diag.StatusWarn
@@ -422,13 +442,23 @@ func doctorWeb(ctx context.Context, st *store.Store, cfg config.Config, timeout 
 		return []diag.Check{c, intelUnknown()}, nil
 	}
 
+	if health.Status != "ok" {
+		c.Status = diag.StatusWarn
+		c.Summary = "The dashboard did not report expected liveness."
+		return []diag.Check{c, intelUnknown()}, nil
+	}
 	c.Status = diag.StatusPass
-	c.Summary = "The dashboard and management API are responding."
+	c.Summary = "The dashboard is responding (liveness only)."
 	c.Evidence = []string{"url: " + url, "status: " + health.Status}
-
-	// The running process owns the live index, so its size is only knowable
-	// from the API. Feed timestamps come from the database.
-	return []diag.Check{c, doctorIntel(ctx, st, cfg, health.BlocklistSize)}, &health.ClientACLStale
+	if health.BlocklistSize == nil || health.ClientACLStale == nil {
+		c.Status = diag.StatusWarn
+		c.Action = "Live protection and ACL state are unknown. Supply --api-token-file with an owner-only management token file; absence of detail is not a healthy ACL verdict."
+		return []diag.Check{c, intelUnknown()}, nil
+	}
+	// Only present fields count as measurements. Older servers may also send
+	// these fields to local callers; missing values must never become false/0.
+	c.Summary = "The dashboard responded with live index and ACL state."
+	return []diag.Check{c, doctorIntel(ctx, st, cfg, *health.BlocklistSize)}, health.ClientACLStale
 }
 
 // doctorIntel reports whether filtering is actually in force.
@@ -471,8 +501,7 @@ func intelUnknown() diag.Check {
 		Name:    "Threat index loaded",
 		Status:  diag.StatusWarn,
 		Summary: "Whether filtering is in force could not be determined.",
-		Action: "The live index is only readable from the running process, and its API did not " +
-			"answer — see the WEB INTERFACE check above.",
+		Action:  "The running process did not supply live index detail. Check API reachability and authenticated access — see the WEB INTERFACE check above.",
 	}
 }
 

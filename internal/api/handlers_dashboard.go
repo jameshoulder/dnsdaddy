@@ -56,7 +56,7 @@ type HealthResponse struct {
 	// actually differ is not knowable here: working it out needs the reading
 	// that just failed.
 	//
-	// `dnsdaddy doctor` needs it, which is why the loopback tier below exists:
+	// `dnsdaddy doctor` needs it and can request it with an API token:
 	// doctor runs as a separate process and rebuilds the ACL from
 	// configuration and the database — that is the *desired* state, and this
 	// flag lives only in the running daemon's memory. Without it doctor would
@@ -66,28 +66,13 @@ type HealthResponse struct {
 	ClientACLStale *bool `json:"clientAclStale,omitempty"`
 }
 
-// healthDetailPermitted decides whether a caller may see more than liveness.
-//
-// Two ways in, and the second is the interesting one:
-//
-//	authenticated       a session or an API token — the ordinary answer
-//	a loopback peer     the process is on this machine already
-//
-// The loopback tier is what keeps `dnsdaddy doctor` and the container's own
-// HEALTHCHECK working without inventing a credential for them. It is decided
-// from httpx.PeerAddr — the address that actually opened the socket — and
-// never from a forwarding header, so `X-Forwarded-For: 127.0.0.1` buys
-// nothing. That distinction is the whole control: in the HTTPS deployment
-// Caddy reaches the container from the Docker bridge gateway rather than from
-// loopback, so a request that arrived from the internet is not loopback no
-// matter what it claims about itself.
-//
-// TestHealthDetailIgnoresForwardedLoopbackClaims is the regression test.
+// healthDetailPermitted requires explicit management authentication. A local
+// TCP peer may be a reverse proxy, even if it forwards no identifying headers.
+// Neither source addresses nor forwarding headers are credentials. Public
+// health checks remain liveness-only; doctor can optionally use a token file.
 func (a *API) healthDetailPermitted(r *http.Request) bool {
-	if _, ok := a.Auth.authenticate(r); ok {
-		return true
-	}
-	return httpx.PeerAddr(r).IsLoopback()
+	_, ok := a.Auth.authenticate(r)
+	return ok
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
