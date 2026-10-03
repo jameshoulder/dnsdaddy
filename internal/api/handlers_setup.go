@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"os"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/setupguide"
@@ -16,32 +17,51 @@ const setupAddressSetting = "setup.advertised_dns.v1"
 // Configuration remains authoritative for automated installations. A saved
 // dashboard address is display-only and never mutates listeners or the ACL.
 func (a *API) setupAddress(ctx context.Context) (string, bool, error) {
+	value, locked, _, err := a.setupAddressInfo(ctx)
+	return value, locked, err
+}
+
+// The host installer can see the host interfaces and Docker port mappings;
+// the container cannot. Its hint fills an otherwise unknown display address,
+// never overrides an operator's saved choice and never locks the UI. Reading
+// it does not discover public IPs, trust HTTP headers or grant client access.
+func (a *API) setupAddressInfo(ctx context.Context) (string, bool, string, error) {
 	if a.Config.DNS.AdvertisedEndpoint != "" {
-		return a.Config.DNS.AdvertisedEndpoint, true, nil
+		return a.Config.DNS.AdvertisedEndpoint, true, "configuration", nil
 	}
 	value, err := a.Store.GetSetting(ctx, setupAddressSetting)
 	if errors.Is(err, store.ErrNotFound) {
-		return "", false, nil
+		err = nil
 	}
 	if err != nil {
-		return "", false, err
+		return "", false, "", err
+	}
+	source := "dashboard"
+	if value == "" {
+		value = os.Getenv("DNSDADDY_DEPLOYMENT_DNS")
+		if value != "" {
+			source = "installation_hint"
+		}
 	}
 	if value != "" {
+		if len(value) > 80 {
+			return "", false, source, errors.New("client-facing address exceeds its length limit")
+		}
 		ep, err := netip.ParseAddrPort(value)
 		if err != nil {
-			return "", false, errors.New("saved client-facing address is invalid")
+			return "", false, source, errors.New("client-facing address is invalid")
 		}
 		if _, err := setupguide.Endpoint(ep.Addr().String(), int(ep.Port())); err != nil {
-			return "", false, err
+			return "", false, source, err
 		}
 	}
-	return value, false, nil
+	return value, false, source, nil
 }
 
 func (a *API) handleSetup(w http.ResponseWriter, r *http.Request) {
-	endpoint, locked, err := a.setupAddress(r.Context())
+	endpoint, locked, source, err := a.setupAddressInfo(r.Context())
 	if err != nil {
-		writeError(w, 503, "The saved DNS address could not be read. Do not substitute the container IP; check storage and retry.")
+		writeError(w, 503, "The DNS address could not be read. Check storage and the host installer's address setting; do not substitute the container IP.")
 		return
 	}
 	ip, port := "", 53
@@ -52,7 +72,7 @@ func (a *API) handleSetup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"presets": setupguide.Presets(), "endpoint": endpoint,
 		"serverIp": ip, "dnsPort": port, "addressLocked": locked,
-		"addressSource":       map[bool]string{true: "configuration", false: "dashboard"}[locked],
+		"addressSource":       source,
 		"dashboardClientIp":   clientKey(r, a.TrustedProxies),
 		"dashboardClientNote": "This is the management connection's source, not proof of a DNS client's source. Proxies, NAT, VPNs and IPv6 can make them differ. It is never granted access automatically.",
 		"mode":                mode.Effective, "modeLocked": mode.Locked,
@@ -81,7 +101,7 @@ func (a *API) handleSetupPreview(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleSetupServerAddresses(w http.ResponseWriter, r *http.Request) {
 	endpoint, _, err := a.setupAddress(r.Context())
 	if err != nil {
-		writeError(w, 503, "The configured client-facing DNS address could not be read; check storage and retry.")
+		writeError(w, 503, "The client-facing DNS address could not be read; check storage and the host installer's address setting.")
 		return
 	}
 	deps := a.Deps
