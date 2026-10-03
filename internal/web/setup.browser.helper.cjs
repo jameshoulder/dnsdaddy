@@ -1,0 +1,52 @@
+'use strict';
+const assert = require('node:assert/strict');
+
+// Called by the existing real-daemon browser regression fixture. The public
+// addresses below are documentation addresses; no traffic is sent to them.
+module.exports = async function verifyGuidedSetup(page, context, base) {
+  const beforeResponse = await context.request.get(base + '/api/v1/networks');
+  assert.equal(beforeResponse.status(), 200);
+  const before = await beforeResponse.json();
+  const originalDefault = before.networks.find(n => n.id === 'n_default');
+  await page.locator('a[href$="setup"]').first().click();
+  await page.locator('#setup-guide-form').waitFor();
+  await page.locator('#setup-preset').selectOption('vps');
+  await page.locator('#setup-server').fill('203.0.113.53');
+  await page.locator('#setup-port').fill('53');
+  await page.locator('#setup-name').fill('Guided browser fixture');
+  await page.locator('#setup-policy').selectOption('p_standard');
+  await page.locator('#setup-clients').fill('192.168.1.0/24');
+  await page.locator('#setup-preview').click();
+  await page.waitForFunction(() => document.querySelector('#setup-message').textContent.includes('public egress'));
+  await page.locator('#setup-clients').fill('198.51.100.9');
+  await page.locator('#setup-preview').click();
+  await page.locator('#setup-apply').waitFor();
+  assert.ok((await page.locator('#setup-result').textContent()).includes('198.51.100.9/32'));
+  assert.equal(await page.locator('#setup-reviewed').isChecked(), false);
+  assert.equal(await page.locator('#setup-public-ack').isChecked(), false);
+  await page.locator('#setup-apply').click();
+  await page.waitForFunction(() => document.querySelector('#setup-message').textContent.includes('review'));
+  await page.locator('#setup-reviewed').check();
+  await page.locator('#setup-apply').click();
+  await page.waitForFunction(() => document.querySelector('#setup-message').textContent.includes('Confirm'));
+  let current = await (await context.request.get(base + '/api/v1/networks')).json();
+  assert.equal(current.networks.length, before.networks.length, 'review gates must precede any network write');
+  await page.locator('#setup-public-ack').check();
+  await page.locator('#setup-apply').click();
+  await page.waitForFunction(() => document.querySelector('#setup-message').textContent.includes('Network saved'));
+  current = await (await context.request.get(base + '/api/v1/networks')).json();
+  const created = current.networks.find(n => n.name === 'Guided browser fixture');
+  assert.ok(created && created.enabled && created.allowResolver);
+  assert.deepEqual(created.cidrs, ['198.51.100.9/32']);
+  assert.equal(current.networks.find(n => n.id === 'n_default').allowResolver, originalDefault.allowResolver);
+  assert.equal(await page.locator('#setup-existing').inputValue(), created.id, 'retries must update the created network, not duplicate it');
+  await page.locator('#setup-save-address').click();
+  await page.waitForFunction(() => document.querySelector('#setup-message').textContent.includes('Display address saved'));
+  const addresses = await (await context.request.get(base + '/api/v1/server-addresses')).json();
+  assert.equal(addresses.advertised.address, '203.0.113.53');
+  assert.equal(addresses.advertised.verified, false);
+  await page.goto(base);
+  await page.locator('#resolver-live').waitFor();
+  await page.waitForFunction(() => document.body.textContent.includes('203.0.113.53'));
+  console.log('PASS: guided setup rejects private VPS sources, requires public review, applies one narrow live grant and updates the Overview DNS address.');
+};
