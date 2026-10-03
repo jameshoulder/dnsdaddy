@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,8 @@ func TestPermissionFailureStopsInstallAndUpgradeBeforeComposeChanges(t *testing.
 			if noOp {
 				body = "exit 0"
 			}
+			// Remove the fixture symlink; never overwrite the real host command.
+			must(t, os.Remove(filepath.Join(in.bin, "chmod")))
 			in.stub("chmod", body)
 			args := []string{"--yes"}
 			if upgrade {

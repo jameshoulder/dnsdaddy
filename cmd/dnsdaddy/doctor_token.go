@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -15,11 +16,19 @@ func readDoctorToken(path string) (string, error) {
 		return "", nil
 	}
 	bad := errors.New("doctor token must be in a readable, owner-only regular file containing a dnsd_ API token")
-	before, err := os.Lstat(path)
+	// The operator selects the directory. Resolve only the leaf within that
+	// opened root, so rename/link traversal cannot redirect reads outside it.
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return "", bad
+	}
+	defer root.Close()
+	name := filepath.Base(path)
+	before, err := root.Lstat(name)
 	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0o077 != 0 {
 		return "", bad
 	}
-	f, err := os.Open(path)
+	f, err := root.Open(name)
 	if err != nil {
 		return "", bad
 	}

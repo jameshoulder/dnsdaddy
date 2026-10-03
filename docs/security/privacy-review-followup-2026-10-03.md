@@ -57,3 +57,25 @@ erasure is introduced. DNS enforcement and anomaly thresholds are unchanged.
 References: [Go context](https://pkg.go.dev/context),
 [Prometheus rule tests](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/),
 [OWASP authorisation guidance](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html).
+
+## Initial integrated validation correction
+
+The first privacy workflow, run `37135175973` on branch head `8965fdfb`,
+reported success but its logs contained failures. Its piped `tee` commands lacked
+`pipefail`; that green outcome is **not valid passing-test evidence**. Existing
+health and deployment tests still expected unauthenticated private fields, a test
+fixture attempted to overwrite a symlinked host command, and promtool could not
+write its temporary test store under the read-only container root. No host command
+was changed by the denied fixture write.
+
+The follow-up explicitly enables pipefail, tests failure propagation, unlinks only
+the temporary fixture command before replacement, migrates the old health tests,
+runs the independent cleanup tests without an excluding regex, and supplies an
+isolated writable tmpfs to promtool. The production deployment helper also no
+longer attempts to obtain private detail by moving a request into the container.
+Only the corrected exact-commit reruns establish their respective outcomes.
+
+The first Security run also flagged the new doctor token file's unconstrained
+open call. That call now opens the explicitly selected directory as an `os.Root`
+and accesses only its leaf, preserving the before/after identity and private-mode
+checks, rather than suppressing the scanner rule.
