@@ -59,7 +59,9 @@ async function ask(p, id) {
     const context = await browser.newContext(); const page = await context.newPage();
     const errors = []; page.on('pageerror', (e) => errors.push(e.message));
     await page.goto(base); await page.locator('#password').fill(password); await page.locator('#login-form button[type=submit]').click();
-    await page.locator('#resolver-live').waitFor(); await ask(dnsPort, 1);
+    await page.locator('#resolver-live').waitFor();
+    await require('./setup.browser.helper.cjs')(page, context, base);
+    await ask(dnsPort, 1);
     await page.waitForFunction(() => Number(document.querySelector('[data-live-count=received]').textContent.replaceAll(',', '')) >= 1);
     const original = await page.locator('#daddybound-mode-form').elementHandle();
     let release, arrived;
