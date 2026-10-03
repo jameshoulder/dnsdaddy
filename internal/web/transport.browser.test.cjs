@@ -242,7 +242,9 @@ async function ask(port, name, id) {
     await page.locator('#dns-transport-form button[type=submit]').click();
     await page.waitForFunction(() => document.querySelector('#dns-transport-form button[type=submit]').disabled === false);
     check('reapplying native does not incorrectly demand a hidden acknowledgement', await page.locator('#dns-transport-error').isHidden());
-    await page.goto(base + '/#/setup'); await page.locator('.server-address-card').waitFor();
+    await page.goto(base + '/#/setup');
+    await page.locator('#setup-advanced-tools > summary').click();
+    await page.locator('.server-address-card').waitFor();
     check('setup separates client addresses from outbound transport', (await page.locator('#view').innerText()).includes('Upstream transport'));
     // Per-network DoH tokens are credentials. Capture only the address card.
     await page.locator('.server-address-details summary').click();
