@@ -52,10 +52,10 @@ func (a *API) handleSetup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"presets": setupguide.Presets(), "endpoint": endpoint,
 		"serverIp": ip, "dnsPort": port, "addressLocked": locked,
-		"addressSource": map[bool]string{true: "configuration", false: "dashboard"}[locked],
-		"dashboardClientIp": clientKey(r, a.TrustedProxies),
+		"addressSource":       map[bool]string{true: "configuration", false: "dashboard"}[locked],
+		"dashboardClientIp":   clientKey(r, a.TrustedProxies),
 		"dashboardClientNote": "This is the management connection's source, not proof of a DNS client's source. Proxies, NAT, VPNs and IPv6 can make them differ. It is never granted access automatically.",
-		"mode": mode.Effective, "modeLocked": mode.Locked,
+		"mode":                mode.Effective, "modeLocked": mode.Locked,
 		"listeners": map[string]string{"udp": a.Config.DNS.ListenUDP, "tcp": a.Config.DNS.ListenTCP, "dot": a.Config.DNS.ListenDoT},
 	})
 }
