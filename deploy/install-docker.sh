@@ -320,19 +320,42 @@ env_disable() { # key
   return 0
 }
 
+# Enforce the secret-file boundary before configuration edits or Compose changes.
+# Failure stops this install/upgrade, not an already-running resolver. Preserve
+# owner-only read-only files; never silently chown a file or follow a link.
+restrict_env_file() {
+  [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] || die ".env must be a regular file, not a symlink." "Use an operator-owned file in a trusted deployment directory."
+  local owner mode links
+  read -r owner mode links < <(stat -c '%u %a %h' -- "$ENV_FILE")
+  [[ "$owner" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]{1,4}$ && "$links" == 1 ]] || die "Could not verify .env ownership, permissions or link count." "Use a regular file with one link."
+  if [[ "$owner" != "$EUID" && !( "$EUID" == 0 && "$owner" == "${SUDO_UID:-0}" ) ]]; then
+    die "Refusing a .env owned by another account." "Run as its intended owner (or via that owner's sudo); review ownership explicitly."
+  fi
+  chmod go-rwx -- "$ENV_FILE" 2>/dev/null || die "Could not protect .env; deployment stopped before restart." "Fix its permissions and rerun. The current resolver has not been stopped by this check."
+  mode=$(stat -c '%a' -- "$ENV_FILE") || die "Could not verify .env after chmod." "Deployment stopped."
+  [[ "$mode" =~ ^[0-7]{1,4}$ ]] || die "Unexpected .env mode." "Deployment stopped."
+  (( (8#$mode & 077) == 0 && (8#$mode & 0400) != 0 )) || die ".env permissions remain unsafe or unreadable." "Require owner read access and no group/other access."
+}
+
 ensure_env_file() {
-  if [[ -f "$ENV_FILE" ]]; then
+  if [[ -e "$ENV_FILE" || -L "$ENV_FILE" ]]; then
+    restrict_env_file
     pass "Keeping your existing .env"
     return
   fi
   if [[ -f .env.example ]]; then
-    cp .env.example "$ENV_FILE" && pass "Created .env from .env.example" && return
+    # No world-readable creation window; noclobber also refuses a raced-in path.
+    if (umask 077; set -o noclobber; cat .env.example > "$ENV_FILE"); then
+      restrict_env_file
+      pass "Created .env from .env.example"
+      return
+    fi
     die "Could not create .env from .env.example." "Check that this directory is writable."
   fi
   # No template to copy: write the minimum a working deployment needs, with
   # the defaults the binary already has. Everything else is left to the
   # binary's own defaults rather than guessed at here.
-  cat > "$ENV_FILE" <<'ENVEOF'
+  (umask 077; set -o noclobber; cat > "$ENV_FILE" <<'ENVEOF'
 # DNS Daddy — Docker Compose environment.
 #
 # Created by install-docker.sh. Every value here is optional: the binary and
@@ -343,7 +366,9 @@ ensure_env_file() {
 # policy each one gets — belongs in the dashboard under Networks, and takes
 # effect without a restart. Settings here are bootstrap configuration.
 ENVEOF
+  ) || die "Could not create a private .env." "Check the deployment directory."
   [[ -f "$ENV_FILE" ]] || die "Could not create .env." "Check that this directory is writable."
+  restrict_env_file
   pass "Created .env"
 }
 
@@ -2636,11 +2661,11 @@ do_upgrade() {
   # published — but it must also not leave behind a default that an earlier,
   # buggier version of this script generated.
   head_ "Configuration"
-  if [[ ! -f "$ENV_FILE" ]]; then
-    warn "No .env found; creating one"
-    [[ $DRY_RUN -eq 1 ]] || ensure_env_file
+  if [[ $DRY_RUN -eq 0 ]]; then
+    # Upgrades must validate existing files too, not only freshly created .env.
+    ensure_env_file
   else
-    pass "Keeping your existing .env"
+    note "Would verify .env ownership and remove group/other access before deployment."
   fi
 
   local bind

@@ -211,19 +211,14 @@ reaches nothing until Compose publishes the port, and Compose publishes it to
 `127.0.0.1` — but running that image with `--network host` removes that
 boundary and makes the wildcard real.
 
-**The health endpoint answers in two tiers.** `/api/v1/health` is deliberately
-unauthenticated, which in the HTTPS deployment makes it the one management path
-the reverse proxy publishes to the internet. Every caller gets `{"status":"ok"}`
-and nothing else — not the version, not the uptime, not the size of the threat
-index, not whether a configuration reload has failed. An entitled caller gets
-all of that: entitled means authenticated, or a peer address that is loopback,
-which is how `dnsdaddy doctor` and the container's own health check read the
-live index without a credential.
-
-Entitlement is decided from the address that opened the socket and never from a
-forwarding header, so `X-Forwarded-For: 127.0.0.1` buys nothing — including
-from the reverse proxy itself, whose forwarded requests all originate on the
-internet.
+**Health detail requires authentication, including on loopback.** `/api/v1/health`
+returns only `{"status":"ok"}` without a valid session or API token. Version,
+uptime, live index and ACL-reload state require explicit management authentication.
+A reverse proxy can connect from localhost with or without forwarding headers;
+neither those headers nor its address grants access. Docker's container health
+check continues to check liveness without credentials. `dnsdaddy doctor` accepts
+`--api-token-file` for authenticated local detail; without it, live index and ACL
+state remain explicitly unknown. See [monitoring](docs/deploy.md#9-monitoring).
 
 **Server-address discovery is authenticated.** `/api/v1/server-addresses`
 reports a bounded local interface inventory and configured DNS listener

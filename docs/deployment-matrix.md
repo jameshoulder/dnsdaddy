@@ -286,7 +286,7 @@ base image PR #41 moved to — and run against a named volume:
 | Login and a write | password login succeeds; creating a network returns 201 |
 | `docker restart` | the network and its CIDR survive; the effective ACL comes back as the union of the configured defaults and the added range |
 | Session across a restart | the cookie stays valid — sessions live in the database, not in memory |
-| `GET /api/v1/health` over the published port | `{"status":"ok"}` and nothing else, because the peer is the bridge rather than loopback |
+| `GET /api/v1/health` over the published port | `{"status":"ok"}` and nothing else, because no management credential was supplied |
 | Dashboard route walk against the container | all 11 routes, no console errors — which is the check that the `go:embed` assets actually ship |
 
 Not verified here: `apk` cannot reach the Alpine CDN from this sandbox, so the
@@ -309,22 +309,21 @@ loopback only, queried over UDP from a second address on this host.
 | `PATCH allowResolver:false`, no restart | `REFUSED` again |
 | Re-grant, no restart | permitted again |
 
-### Health detail, from a genuinely remote peer
+### Health detail: explicit authentication on every topology
 
-Earlier rounds tested this with `httptest`, which serves on loopback, so the
-peer was always entitled and the assertion could not fail. Repeated against a
-listener bound to `0.0.0.0` and reached from a non-loopback address:
+The earlier recorded Docker bridge test did not cover native/host-network
+loopback proxies. The current rule no longer relies on identifying a proxy:
+unauthenticated callers receive `{"status":"ok"}` on every peer address, with or
+without forwarding headers. Valid management authentication grants the detailed
+fields. Earlier loopback/full-detail results describe the old implementation.
 
-| Request | Response |
-| --- | --- |
-| From loopback | full detail |
-| From a non-loopback peer | `{"status":"ok"}` |
-| Non-loopback peer sending `X-Forwarded-For: 127.0.0.1` | `{"status":"ok"}` |
-| Non-loopback peer sending `X-Real-IP: 127.0.0.1` | `{"status":"ok"}` |
-| A *trusted* proxy sending `X-Forwarded-For: 127.0.0.1` | `{"status":"ok"}` |
-
-The last row is the design: entitlement is decided by the socket peer, never by
-a header, so no proxy configuration can unlock it.
+`TestHeaderlessLoopbackProxyCannotReadHealthDetail` exercises a real loopback HTTP
+reverse proxy which adds no forwarding headers. Other tests cover IPv4/IPv6 peer
+values, forged credentials and authenticated requests. These are automated local
+regressions, not a claim of a live customer native/Docker acceptance test.
+`doctor --api-token-file` supplies optional explicit authentication; missing live
+fields remain unknown. Repeat the deployment-specific acceptance tests after
+upgrading; the container's liveness-only health check is unchanged.
 
 ### Raw-IP HTTPS: what was verified, and what was not
 

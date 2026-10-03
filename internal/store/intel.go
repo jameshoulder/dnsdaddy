@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/retention"
 )
 
 // Disposition is a provider's judgement, normalised.
@@ -295,28 +297,36 @@ func (s *Store) IntelEnrichments(ctx context.Context, subject string) ([]IntelEn
 // tables are the only unbounded growth in the database, because every new
 // domain the network resolves adds a row that nothing else removes.
 func (s *Store) PruneIntel(ctx context.Context, cutoff time.Time) (int64, error) {
-	// Written out rather than looped over a slice of table names. The names
-	// were never attacker-controlled either way, but a constant query string
-	// is something a reader — and a static analyser — can check at a glance,
-	// and the loop saved four lines at the cost of that.
-	const (
-		pruneVerdicts   = `DELETE FROM intel_verdicts WHERE expires_at < ?`
-		pruneEnrichment = `DELETE FROM intel_enrichment WHERE expires_at < ?`
-	)
-
 	var total int64
-	for _, q := range []string{pruneVerdicts, pruneEnrichment} {
-		res, err := s.db.ExecContext(ctx, q, unixMilli(cutoff))
-		if err != nil {
-			return total, err
+	var errs []error
+	for _, result := range retention.Run(ctx, retention.StepTimeout, s.IntelRetentionSteps(cutoff)) {
+		total += result.Removed
+		if result.Err != nil {
+			errs = append(errs, result.Err)
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return total, err
-		}
-		total += n
 	}
-	return total, nil
+	return total, errors.Join(errs...)
+}
+
+// IntelRetentionSteps keeps a failed verdict-table cleanup from starving the
+// independently expiring enrichment cache. SQL remains literal, not input-built.
+func (s *Store) IntelRetentionSteps(cutoff time.Time) []retention.Step {
+	return []retention.Step{
+		{Name: "intel_verdicts", Prune: func(ctx context.Context) (int64, error) {
+			res, err := s.db.ExecContext(ctx, "DELETE FROM intel_verdicts WHERE expires_at < ?", unixMilli(cutoff))
+			if err != nil {
+				return 0, err
+			}
+			return res.RowsAffected()
+		}},
+		{Name: "intel_enrichment", Prune: func(ctx context.Context) (int64, error) {
+			res, err := s.db.ExecContext(ctx, "DELETE FROM intel_enrichment WHERE expires_at < ?", unixMilli(cutoff))
+			if err != nil {
+				return 0, err
+			}
+			return res.RowsAffected()
+		}},
+	}
 }
 
 // CountIntelRows reports how many verdicts and enrichments are cached, for the

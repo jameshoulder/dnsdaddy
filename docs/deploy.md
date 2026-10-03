@@ -675,13 +675,38 @@ sudo systemctl restart docker && sleep 20 && ./deploy/healthcheck.sh   # daemon 
 monitor at:
 
 ```json
-{"status": "ok", "version": "v1.0.0", "uptimeSeconds": 84210, "blocklistSize": 412887}
+{"status": "ok"}
 ```
 
-The public health response's `status=ok` reports process liveness. Its private
-`protecting` and `blocklistSize` fields are available to an authenticated caller
-or a loopback peer and show whether a threat index is loaded. A non-empty index
-does not prove that every client's policy enforces it.
+The public response reports process liveness only. Detailed health, including
+`protecting`, `blocklistSize` and `clientAclStale`, requires a valid session or API
+token even on loopback. A loaded index still does not prove that every client's
+policy enforces it. A headerless local proxy receives no more than any other
+unauthenticated caller.
+
+`dnsdaddy doctor` keeps its read-only local/database and DNS checks. To also read
+live index and ACL state, create a management API token in the dashboard, store it
+in an owner-only regular file in a trusted directory, and run:
+
+```bash
+dnsdaddy doctor --api-token-file /path/to/private-token
+```
+
+Normal API authentication updates the token's last-used timestamp; DNS probes can
+also appear in resolver telemetry. Doctor does not change configuration or prune
+history, but it is not a promise of zero observable activity.
+
+The token value is not an argument, is never printed by doctor, and is sent only
+to the configured, verified-local management address; HTTP proxies and redirects
+are disabled. File symlinks and group/other-readable token files are refused.
+`DNSDADDY_DOCTOR_TOKEN_FILE` can supply the path. Inside Docker, mount an owner-only
+file readable by the container's service user and use that container path. Do not
+copy a token into an image or commit it. Management tokens are not read-only roles;
+protect and revoke this credential accordingly.
+
+Without authenticated detail, doctor and `healthcheck.sh` explicitly report
+incomplete readiness; absent fields are not interpreted as an empty index or a
+healthy ACL. Docker's built-in HEALTHCHECK remains a credential-free liveness check.
 
 **HTTP 200 is not proof the service is working.** The dashboard can be perfectly
 healthy while DNS answers `REFUSED` to every real client, because the client ACL
@@ -725,7 +750,31 @@ Prometheus metrics at `/metrics` (authenticated). The ones worth alerting on:
 | `dnsdaddy_upstream_failures_total` | Rising means every upstream is failing — resolution is broken. |
 | `dnsdaddy_blocklist_domains` | A sudden drop means a feed refresh went wrong. |
 | `dnsdaddy_querylog_dropped_total` | Non-zero means logging cannot keep up with query volume. |
+| `dnsdaddy_retention_last_success_timestamp_seconds` | Age over two hours means no recent fully successful sweep was observed. Absent until the first success; absence requires a separate alert. |
+| `dnsdaddy_retention_sweep_failures_total` | Rising means a retention step is failing; the log names it. |
 | `dnsdaddy_memory_bytes` | Should be flat. Growth means something is wrong. |
+
+Sample retention rules and their limits are in
+[deploy/monitoring/README.md](../deploy/monitoring/README.md). They detect missing
+metrics per instance, no first success after startup grace, failures and stalled
+sweeps. Importing metrics alone does not install alerts or a notification receiver.
+
+### Secret-file permissions on install and upgrade
+
+The Docker installer validates existing `.env` files on both installation and
+upgrade, creates new ones privately and stops before changing Compose services if
+permissions cannot be protected and verified. It does not stop an already-running
+resolver on that failure. Symlinks, multiple hard links and unexpected ownership
+are refused. Use a trusted, non-shared writable deployment directory.
+
+The native installer removes permissions above directory `0750` and config `0640`,
+accepts root/service ownership and sets the intended service group. Stricter
+service-owned `0700`/`0600` remains unchanged. It refuses to silently broaden a
+root-owned configuration that the service cannot read: explicitly review/grant
+service access first. It does not take ownership from an unrelated account.
+POSIX mode checks are not a universal filesystem/ACL audit. Restrict parent paths,
+backups and host access separately; change an exposed bootstrap password after
+assessing any earlier permissive copy.
 
 ## 10. Backups
 

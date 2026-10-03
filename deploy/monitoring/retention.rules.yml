@@ -1,0 +1,48 @@
+groups:
+- name: dnsdaddy-retention
+  rules:
+  - alert: DNSDaddyRetentionMetricsMissing
+    expr: (up{job="dnsdaddy"} == 1) unless on(job, instance) dnsdaddy_retention_sweeps_total{job="dnsdaddy"}
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Retention metrics are missing for this instance
+  - alert: DNSDaddyRetentionNeverSucceeded
+    expr: (dnsdaddy_uptime_seconds{job="dnsdaddy"} > 600) and on(job, instance) dnsdaddy_retention_sweeps_total{job="dnsdaddy"}
+      unless on(job, instance) dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy"}
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: No first successful retention sweep has been observed
+  - alert: DNSDaddyRetentionFailed
+    expr: dnsdaddy_retention_last_failed_steps{job="dnsdaddy"} > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: The last retention sweep had failed steps
+  - alert: DNSDaddyRetentionStalled
+    expr: time() - dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy"} >
+      7200
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: No completed retention sweep has been observed for two hours
+  - alert: DNSDaddyRetentionSuccessStale
+    expr: time() - dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy"}
+      > 7200
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: No fully successful retention sweep has been observed for two hours
+  - alert: DNSDaddyScrapeUnavailable
+    expr: up{job="dnsdaddy"} == 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: DNS Daddy metrics cannot be scraped

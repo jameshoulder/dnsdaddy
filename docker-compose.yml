@@ -156,9 +156,10 @@ services:
       DNSDADDY_FEED_REFRESH_INTERVAL:
 
       # ---- Threat feeds ---------------------------------------------------
-      # Our own DNS Daddy Threat Observatory ships in the catalog DISABLED, so
-      # nothing here fetches from a server we run until you turn it on from the
-      # Threat feeds page. docs/threat-intel.md says what that exposes.
+      # The built-in feeds are third-party lists, downloaded on first start and
+      # every 12 hours; docs/privacy.md names the hosts and what they see.
+      # Nothing here fetches from a server the DNS Daddy project runs: the
+      # Threat Observatory connector is retired and cannot be enabled.
 
       DNSDADDY_LOG_LEVEL: "${DNSDADDY_LOG_LEVEL:-info}"
       # Set your own IANA timezone (e.g. UTC) so report timestamps

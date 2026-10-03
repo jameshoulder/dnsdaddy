@@ -5,13 +5,14 @@ import (
 	"strings"
 )
 
-// The DNS Daddy Threat Observatory is our own threat-intelligence platform.
-// Unlike every other source in this catalog it is operated by us, which is
-// exactly why it ships disabled: a self-hosted install must keep working, and
-// keep blocking, with no runtime dependency on anything DNS Daddy runs. An
-// operator who wants our intelligence turns it on deliberately.
+// The DNS Daddy Threat Observatory was the project's own threat-intelligence
+// feed. The connector is retired: it is not in DefaultFeeds, the management API
+// refuses to enable or refresh it, and an upgrade disables the row an older
+// install seeded. Nothing in this binary contacts the address below.
 //
-// See docs/threat-intel.md for the endpoint contract these constants target.
+// The constants stay because that upgrade path has to recognise the old row,
+// and because "observatory" survives as a format name for an operator's own
+// JSON feed. See docs/threat-intel.md.
 const (
 	// ObservatoryBaseURL is the root of the Observatory's public API.
 	ObservatoryBaseURL = "https://threats.dnsdaddy.dev"

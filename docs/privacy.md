@@ -29,6 +29,39 @@ in Forward mode. Native Learn/Live are deliberate choices that add direct
 authoritative DNS traffic; an encrypted profile uses its approved endpoints
 instead. See [encrypted DNS](encrypted-dns.md).
 
+Threat-feed downloads are **on** by default. A fresh installation schedules its
+enabled built-in feeds shortly after startup and again every 12 hours by default
+(`feeds.refresh_interval`). These are bulk downloads, not uploads of client DNS
+histories. The initial recipients are `urlhaus.abuse.ch`, `raw.githubusercontent.com`,
+`phishing.army` and `blocklistproject.github.io`.
+
+<!-- default-feed-disclosure:start -->
+Default-enabled feeds: **6**. Initial receiving hosts: **4**. Disabled built-in feeds: **4**.
+
+| Feed ID | Name | Initial download URL | Category |
+|---|---|---|---|
+| `urlhaus` | abuse.ch URLhaus | `https://urlhaus.abuse.ch/downloads/hostfile/` | `malware` |
+| `hagezi-tif-mini` | HaGeZi Threat Intelligence Feeds (mini) | `https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/tif.mini.txt` | `malware` |
+| `phishing-army` | Phishing Army (extended) | `https://phishing.army/download/phishing_army_blocklist_extended.txt` | `phishing` |
+| `blocklistproject-phishing` | The Block List Project — Phishing | `https://blocklistproject.github.io/Lists/phishing.txt` | `phishing` |
+| `botnet-c2` | The Block List Project — Malware & C2 | `https://blocklistproject.github.io/Lists/malware.txt` | `c2` |
+| `coinblocker` | CoinBlockerLists | `https://raw.githubusercontent.com/ZeroDot1/CoinBlockerLists/master/list.txt` | `cryptomining` |
+<!-- default-feed-disclosure:end -->
+
+The Malware & C2 entry is **one feed**, not separate malware and C2 downloads.
+These services receive the resolver host's connection IP, request URL, timing and
+`dnsdaddy/<version>` user agent. Bulk feed requests do not include DNS clients'
+addresses or query logs. Network infrastructure and any permitted redirects can
+add recipients; this list describes the catalogue's initial URLs, not a guarantee
+about each external service's hosting. Existing installations may have different
+saved feeds. Disable unwanted feeds and review configured URLs before enabling
+traffic; disabling a feed cannot recall a request already transmitted.
+
+The block above is checked exactly against `DefaultFeeds` in
+[`internal/catalog/catalog.go`](../internal/catalog/catalog.go), including IDs,
+names, URLs, categories, enabled count and host count. The default-disabled feeds
+are not fetched unless enabled. No runtime discovery request is made by this test.
+
 External reputation, investigation enrichment and webhook delivery start off.
 Every installation supplies its own external accounts and credentials. A newly
 saved provider is disabled unless deliberately enabled. There is no shared
@@ -140,8 +173,42 @@ account. Credentials have separate field encryption, described below.
 | `export_sequences` | Three non-identifying insertion counters that preserve export boundaries and prevent new query-ID reuse after pruning or restart. They contain no names, client identities or per-query ledger. |
 
 The normal retention sweep runs shortly after startup and hourly thereafter.
-Bounded asynchronous queues can drop records under load; counters report these
-losses. Retained data is not a guaranteed complete reconstruction of traffic.
+Each table or atomic lifecycle operation receives its own 20-second cooperative
+timeout. A failed or timed-out step is reported and does not consume another
+step's timeout; shutdown still cancels the whole sweep. A shared database outage
+can fail several steps, so completion is evidence of attempted cleanup, not a
+promise of physical erasure. Bounded asynchronous queues
+can drop records under load; counters report these losses. Retained data is not
+a guaranteed complete reconstruction of traffic.
+
+To check that the sweep is running rather than assume it, read the
+authenticated `/metrics` endpoint.
+`dnsdaddy_retention_last_success_timestamp_seconds` is when a sweep last
+finished with nothing failed, and `dnsdaddy_retention_sweep_failures_total`
+counts sweeps in which at least one step failed. Counters reset when the process restarts; success/run timestamps are absent until
+such an event occurs. The first sweep runs about a minute after startup. A timestamp
+that has never existed cannot be tested for age: the
+[monitoring rules](../deploy/monitoring/README.md) also cover missing per-instance
+metrics, no first success after a grace period, failed and stalled sweeps.
+
+### What a zero means
+
+The retention settings do not treat `0` alike, and none of them reads it as
+"keep nothing":
+
+| Setting | `0` |
+|---|---|
+| `log.retention_days` | The 7-day default applies. To store no query rows, set `log.query_log: false`. |
+| `log.rollup_days` | The 90-day default applies. A negative value does the same. |
+| `detection.retention_days` | Expiry is **off**: findings are kept until you delete them. |
+| `log.decision_retention_days` | Expiry is **off**: decision records are kept until you delete them. A negative value does the same. |
+
+DNS Daddy logs a warning at startup for each of these that is in effect, so an
+unbounded window is a visible choice and not a side effect of a `0`. Warnings also
+apply when collection is disabled: old records may still be present, and disabling
+collection does not erase them. Positive expiry continues to apply to historic
+records even when their collector is off. A successful sweep with expiry disabled
+is not evidence that those records have been deleted.
 
 ### Files outside SQLite
 

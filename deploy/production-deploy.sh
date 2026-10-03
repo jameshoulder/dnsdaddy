@@ -434,14 +434,13 @@ if [[ $DRY_RUN -eq 0 ]]; then
   [[ -n "$BODY" ]] || die "health endpoint did not respond"
   echo "  $BODY"
 
-  # The published port translates the source address, so this request is not a
-  # loopback peer and gets liveness only. Ask from inside the container, where
-  # it is. If that is unavailable, say the size is unknown rather than reading
-  # a missing field as zero and declaring the blocklist destroyed.
-  DETAIL=$(docker exec "$CONTAINER" wget -qO- http://127.0.0.1:8080/api/v1/health 2>/dev/null || true)
+  # Unauthenticated health is liveness-only, even inside a container. Older
+  # releases may still supply detail; missing fields remain unknown. Do not
+  # attempt to gain entitlement merely by moving the request to loopback.
+  DETAIL="$BODY"
   SIZE=$(sed -n 's/.*"blocklistSize":\([0-9]*\).*/\1/p' <<<"$DETAIL")
   if [[ -z "$SIZE" ]]; then
-    warn "could not read the blocklist size from inside the container; verify with: docker exec $CONTAINER dnsdaddy doctor"
+    warn "live blocklist size is unknown without authenticated detail; use dnsdaddy doctor --api-token-file with an owner-only token file readable by the service"
   elif (( SIZE > 0 )); then
     ok "blocklist loaded ($SIZE domains)"
   else

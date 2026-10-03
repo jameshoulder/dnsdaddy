@@ -138,7 +138,7 @@ func TestTheUnauthenticatedRouteSetIsExactlyThis(t *testing.T) {
 	//
 	//   health   liveness for a container runtime and a load balancer, which
 	//            have no credential; it answers {"status":"ok"} and adds
-	//            detail only for a loopback peer or an authenticated caller.
+	//            detail only for an authenticated caller, regardless of peer.
 	//   login    the endpoint that issues the credential.
 	//   logout   revoking a session must work even from one already expired.
 	//   session  the dashboard asks "am I signed in?" before rendering, and

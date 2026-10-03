@@ -22,6 +22,36 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Privacy review: health access, retention and secret-file protection
+
+- Integrated the four supplied Claude patches, with a follow-up review of their
+  remaining gaps. This is AI-assisted maintenance, not independent certification.
+- Health detail now requires a valid session/API token even on loopback. Source
+  addresses and forwarding-header presence grant no privilege, including through
+  a headerless local proxy. Public liveness and the container HEALTHCHECK remain
+  available. **Migration:** doctor can use `--api-token-file`; without a credential,
+  live index/ACL detail is unknown. `healthcheck.sh` reports incomplete readiness
+  instead of inferring a passing result from absent fields.
+- Independent cleanup steps get fresh 20-second cooperative deadlines. Failed
+  steps do not consume sibling timeouts; shutdown cancels all remaining work.
+  Query, presence, aggregate and intelligence-cache tables are independently
+  attempted; atomic decision/capture lifecycle rules remain intact. A database
+  outage can still fail multiple steps. No physical-erasure guarantee is added.
+- Retention outcomes/timestamps are exposed in authenticated metrics. Sample
+  Prometheus rules include first-success, missing-per-instance, failure and stalled
+  cases, with executable rule tests and an explicit startup grace period.
+- Existing zero-retention semantics are preserved and warned about even if new
+  collection is disabled. Disabled collection does not imply historic erasure.
+- Docker `.env` protection is verified on install **and upgrade**. Failed/no-op
+  permission changes stop before Compose changes. New files are created privately;
+  symlinks, multiple hard links and unexpected owners are refused.
+- Native configuration protection never silently adds permissions or takes over
+  an unrelated owner. Stricter service-owned modes remain; root-owned settings
+  that deny service access require an explicit operator decision.
+- The privacy disclosure is checked exactly against default feed IDs, names,
+  categories, initial URLs and counts. There are six enabled feeds on four initial
+  hosts; Malware & C2 is one feed. Retired Observatory comments are corrected.
+
 ### Basic forwarding, clearer modes and immediate activity
 
 - Fresh installations start in **Forward**, the existing `off` mode, with

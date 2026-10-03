@@ -262,6 +262,9 @@ log:
 
   # How long individual query rows are kept. At roughly 100 bytes per row,
   # 1,000,000 queries a day for 7 days is about 700 MB.
+  #
+  # 0 applies this 7-day default. It does not mean "keep nothing" and it does
+  # not mean "keep everything": to store no query rows, set query_log: false.
   retention_days: 7
 
   # Keep a record of WHY each blocked query was blocked: which rule fired,
@@ -282,10 +285,16 @@ log:
   # How long those records are kept. Longer than the query log by default: the
   # log answers "what happened", and this answers "why", which is the question
   # asked weeks after the fact.
+  #
+  # 0 or less switches expiry OFF: decision records, which hold domains and
+  # client addresses, are then kept until you delete them. This is the opposite
+  # of what 0 does to retention_days above, and DNS Daddy warns at startup when
+  # it is in effect. To stop creating them, set decision_records: false.
   decision_retention_days: 30
 
   # How long the hourly statistics used by the dashboard and reports are kept.
   # These survive the query-log prune, so charts keep their history.
+  # 0 or less applies this 90-day default.
   rollup_days: 90
 
   # Events are batched before being written so the DNS hot path never waits on
@@ -374,6 +383,10 @@ detection:
   # Findings outlive the raw query log, because "has this host done this
   # before?" is a months-scale question and a finding is a few kilobytes where
   # the traffic behind it was thousands of rows.
+  #
+  # 0 switches expiry OFF: findings, which hold domains and client addresses,
+  # are then kept until you delete them, and DNS Daddy warns at startup when
+  # that is in effect. To stop creating them, set enabled: false above.
   retention_days: 30
 
   # Write findings as newline-delimited JSON for a log shipper to tail. A

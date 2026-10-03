@@ -1,0 +1,57 @@
+name: Privacy regression evidence
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      # Prometheus image digest below is the v3.5.0 image used for these fixtures.
+      - name: Identify tested source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/privacy-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/privacy-evidence/commit.txt"
+          go version | tee "$RUNNER_TEMP/privacy-evidence/toolchain.txt"
+      - name: Permission fault injection and shell syntax
+        run: |
+          set -euo pipefail
+          bash -n deploy/install.sh
+          bash -n deploy/install-docker.sh
+          bash -n deploy/healthcheck.sh
+          python3 -m unittest discover -s scripts/security -p 'test_*.py' -v 2>&1 | tee "$RUNNER_TEMP/privacy-evidence/permissions.log"
+      - name: API, doctor, retention and installer regressions with race detection
+        run: |
+          set -euo pipefail
+          go test -race -count=1 -timeout=1m ./internal/retention 2>&1 | tee "$RUNNER_TEMP/privacy-evidence/retention-runner.log"
+          go test -race -count=1 -timeout=8m ./internal/api ./internal/store ./internal/catalog ./cmd/dnsdaddy ./deploy -run 'Health|Retention|Prune|Permission|NativeInstaller|Disclosure|FeedDisclosure|DoctorToken|EnvIsNotLeft' 2>&1 | tee "$RUNNER_TEMP/privacy-evidence/go-tests.log"
+      - name: Validate monitoring rules with a versioned Prometheus tool
+        run: |
+          set -euo pipefail
+          docker pull prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+          docker image inspect prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 --format '{{json .RepoDigests}}' > "$RUNNER_TEMP/privacy-evidence/prometheus-image.txt"
+          for operation in 'check rules retention.rules.yml' 'test rules retention.test.yml'; do
+            docker run --rm --network=none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m --cap-drop=ALL --security-opt=no-new-privileges --entrypoint /bin/promtool -v "$PWD/deploy/monitoring:/work:ro" -w /work prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 $operation
+          done 2>&1 | tee "$RUNNER_TEMP/privacy-evidence/promtool.log"
+      - name: Retain outcomes, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: privacy-regression-evidence
+          path: ${{ runner.temp }}/privacy-evidence/
+          retention-days: 30
+          if-no-files-found: error

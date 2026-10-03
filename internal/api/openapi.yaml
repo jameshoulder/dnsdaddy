@@ -228,26 +228,19 @@ paths:
         protection state of this instance.
 
 
-        **An entitled caller** additionally gets `version`, `uptimeSeconds`,
+        **An authenticated caller** additionally gets `version`, `uptimeSeconds`,
 
-        `blocklistSize`, `protecting` and `clientAclStale`. Two things count as
+        `blocklistSize`, `protecting` and `clientAclStale`. A valid session cookie
 
-        entitled: an authenticated request (session cookie or bearer token),
+        or management bearer token is required, including from loopback.
 
-        and a request whose peer address is loopback — which is how
+        Neither peer addresses nor forwarding headers grant this access.
 
-        `dnsdaddy doctor` and the container''s own health check read the live
+        Container liveness probes need no credential. `dnsdaddy doctor` can use
 
-        index without a credential.
+        `--api-token-file` for local detail and otherwise reports unavailable
 
-
-        The loopback tier is decided from the address that opened the socket
-
-        and never from a forwarding header, so `X-Forwarded-For: 127.0.0.1`
-
-        does not reach it. Behind a reverse proxy the peer is the proxy, not
-
-        loopback.
+        live index and ACL state as unknown, not false or healthy.
 
         '
       responses:

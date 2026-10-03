@@ -25,10 +25,12 @@ case "$1" in
       *RestartCount*) echo 0 ;;
     esac ;;
   exec)
-    if [[ -v STUB_HEALTH_DETAIL ]]; then printf '%s' "$STUB_HEALTH_DETAIL"
-    else printf '{"status":"ok","protecting":true,"blocklistSize":100}\n'; fi ;;
+    echo unexpected-private-probe >> "$STUB_LOG"
+    exit 99 ;;
 esac`)
-	in.stub("curl", `printf '{"status":"ok"}\n'`)
+	in.stub("curl", `
+if [[ -v STUB_HEALTH_DETAIL ]]; then printf '%s' "$STUB_HEALTH_DETAIL"
+else printf '{"status":"ok"}\n'; fi`)
 	in.stub("dig", `
 printf '%s\n' "$*" >> "$STUB_LOG"
 rcode="${STUB_UDP_RCODE:-NOERROR}"
@@ -66,7 +68,8 @@ func TestHealthcheckRequiresBothDNSProtocolsAndBlocklistEvidence(t *testing.T) {
 		code       int
 		want       string
 	}{
-		{name: "complete", want: "RESULT: ready — UDP/TCP DNS answering and blocklist loaded"},
+		{name: "public health is incomplete", code: 1, want: "could not read the blocklist state"},
+		{name: "legacy complete response", env: []string{`STUB_HEALTH_DETAIL={"status":"ok","protecting":true,"blocklistSize":100}`}, want: "RESULT: ready — UDP/TCP DNS answering and blocklist loaded"},
 		{name: "dig missing", missingDig: true, code: 1, want: "DNS readiness was not checked"},
 		{name: "private health fields unavailable", env: []string{`STUB_HEALTH_DETAIL={"status":"ok"}`}, code: 1, want: "could not read the blocklist state"},
 		{name: "cold feeds", env: []string{`STUB_HEALTH_DETAIL={"status":"ok","protecting":false,"blocklistSize":0}`}, code: 1, want: "blocklist is empty"},
@@ -100,19 +103,28 @@ func TestHealthcheckRequiresBothDNSProtocolsAndBlocklistEvidence(t *testing.T) {
 	}
 }
 
-func TestHealthcheckUsesTheChosenContainerForPrivateHealth(t *testing.T) {
+func TestHealthcheckUsesChosenContainerWithoutImplicitPrivateProbe(t *testing.T) {
 	in := newHealthcheck(t)
 	in.setenv("DNSDADDY_CONTAINER=custom-resolver", "STUB_EXPECT_CONTAINER=custom-resolver")
 	out, code := runHealthcheck(t, in)
-	if code != 0 {
-		t.Fatalf("custom container's private health was not checked: exit=%d\n%s", code, out)
+	if code != 1 {
+		t.Fatalf("public health should leave readiness incomplete: exit=%d\n%s", code, out)
 	}
-	contains(t, out, "blocklist loaded (100 domains)")
+	contains(t, out, "could not read the blocklist state")
+	contains(t, out, "--api-token-file")
+	notContains(t, in.composeLog(), "unexpected-private-probe")
 }
 
 func TestHealthcheckQuietOnlySuppressesVerifiedReadiness(t *testing.T) {
 	in := newHealthcheck(t)
 	out, code := runHealthcheck(t, in, "--quiet")
+	if code != 1 || !strings.Contains(out, "could not read the blocklist state") {
+		t.Fatalf("quiet mode hid unavailable private evidence: code=%d out=%q", code, out)
+	}
+	// Older releases may still supply detail; retain that parser coverage without
+	// making a fresh public response look like authenticated readiness.
+	in.setenv(`STUB_HEALTH_DETAIL={"status":"ok","protecting":true,"blocklistSize":100}`)
+	out, code = runHealthcheck(t, in, "--quiet")
 	if code != 0 || out != "" {
 		t.Fatalf("healthy quiet output: code=%d out=%q", code, out)
 	}

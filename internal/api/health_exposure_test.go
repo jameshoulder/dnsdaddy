@@ -51,8 +51,7 @@ func TestHealthDetailIgnoresForwardedLoopbackClaims(t *testing.T) {
 	// internet asserting that it came from 127.0.0.1.
 	//
 	// The peer here is a public address, so the only way any of these could
-	// work is if entitlement were decided from a header. It is decided from
-	// the address that opened the socket, which no client can choose.
+	// work is if entitlement were decided from a header. Only a valid management credential grants access.
 	//
 	// A trusted proxy is configured deliberately, because that is the
 	// deployment where this is reachable at all: in HTTPS mode Caddy's own
@@ -106,7 +105,7 @@ func TestHealthDetailIgnoresForwardedLoopbackClaims(t *testing.T) {
 	viaProxy.Header.Set("X-Real-IP", "127.0.0.1")
 	if hh.api.healthDetailPermitted(viaProxy) {
 		t.Error("a request forwarded by the trusted proxy claimed loopback and was believed; " +
-			"entitlement must come from the peer address, not from httpx.ClientAddr")
+			"entitlement must come from authentication, not a peer address")
 	}
 	for name := range recordHealth(hh.api, viaProxy) {
 		if !publicHealthFields[name] {
@@ -114,13 +113,110 @@ func TestHealthDetailIgnoresForwardedLoopbackClaims(t *testing.T) {
 		}
 	}
 
-	// And the same request from a peer that really is loopback still gets the
-	// detail, so the control is the peer address and not the absence of
-	// headers.
+	// Loopback without authentication is also public: a headerless local
+	// reverse proxy is indistinguishable from a direct local TCP client.
 	local := httptest.NewRequest("GET", "/api/v1/health", nil)
 	local.RemoteAddr = "127.0.0.1:44321"
-	if !hh.api.healthDetailPermitted(local) {
-		t.Error("a genuine loopback peer was refused the detail; doctor would stop working")
+	if hh.api.healthDetailPermitted(local) {
+		t.Fatal("loopback must not grant health detail without authentication")
+	}
+}
+
+func TestHealthDetailWithheldBehindALoopbackProxy(t *testing.T) {
+	// The native HTTPS deployment in docs/deploy.md: Caddy on the same host,
+	// reverse-proxying to 127.0.0.1:8080. Every request from the internet then
+	// reaches this process with a loopback peer, so "the peer is loopback"
+	// cannot by itself mean "this is the operator at the console" — and while
+	// it did, that deployment published the version, the uptime and whether
+	// filtering was on to anyone who asked.
+	//
+	// The earlier Docker test topology used a bridge gateway. Host-network
+	// containers and headerless loopback proxies need their own coverage.
+	//
+	// Both proxy configurations are exercised: listed in trusted_proxy_cidrs as
+	// the documentation asks, and not listed at all. An operator who forgets
+	// that setting must not be the one whose health detail is public.
+	loopbackTrusted, err := httpx.ParseTrustedProxies([]string{"127.0.0.1/32", "::1/128"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tp := range []struct {
+		name    string
+		trusted *httpx.TrustedProxies
+	}{
+		{"proxy listed in trusted_proxy_cidrs", loopbackTrusted},
+		{"proxy not listed", &httpx.TrustedProxies{}},
+	} {
+		hh := newHarness(t)
+		hh.api.TrustedProxies = tp.trusted
+
+		for _, peer := range []string{"127.0.0.1:44321", "[::1]:44321"} {
+			for _, hdr := range []struct{ k, v string }{
+				// What Caddy sends for a browser on the internet.
+				{"X-Forwarded-For", "203.0.113.9"},
+				{"X-Forwarded-Proto", "https"},
+				{"X-Forwarded-Host", "dns.example.co.uk"},
+				{"X-Real-IP", "203.0.113.9"},
+				{"Forwarded", "for=203.0.113.9;proto=https"},
+				{"Via", "1.1 Caddy"},
+				// And the claims a stranger might add in the hope that the value
+				// is what gets read. It is not: presence is.
+				{"X-Forwarded-For", "127.0.0.1"},
+				{"X-Real-IP", "::1"},
+				{"X-Forwarded-For", ""},
+			} {
+				req := httptest.NewRequest("GET", "/api/v1/health", nil)
+				req.RemoteAddr = peer
+				req.Header.Set(hdr.k, hdr.v)
+
+				if hh.api.healthDetailPermitted(req) {
+					t.Errorf("%s, peer %s: a request relayed with %s: %q was entitled to internal state",
+						tp.name, peer, hdr.k, hdr.v)
+				}
+				for name := range recordHealth(hh.api, req) {
+					if !publicHealthFields[name] {
+						t.Errorf("%s, peer %s: a request relayed with %s: %q was disclosed %q",
+							tp.name, peer, hdr.k, hdr.v, name)
+					}
+				}
+			}
+
+			// Headerless relays and direct local probes get the same minimal
+			// response; liveness must not depend on a proxy adding a header.
+			direct := httptest.NewRequest("GET", "/api/v1/health", nil)
+			direct.RemoteAddr = peer
+			if hh.api.healthDetailPermitted(direct) {
+				t.Errorf("%s: unauthenticated peer %s got detail", tp.name, peer)
+			}
+			for name := range recordHealth(hh.api, direct) {
+				if !publicHealthFields[name] {
+					t.Errorf("%s: unauthenticated peer %s got %s", tp.name, peer, name)
+				}
+			}
+		}
+	}
+
+	// A session still entitles a caller who arrives through that proxy, which
+	// is how the dashboard itself reads this in the HTTPS deployment.
+	hh := newHarness(t)
+	hh.api.TrustedProxies = loopbackTrusted
+	hh.login()
+	var cookie *http.Cookie
+	for _, c := range hh.client.Jar.Cookies(nil) {
+		if c.Name == sessionCookie {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("no session cookie after login")
+	}
+	signedIn := httptest.NewRequest("GET", "/api/v1/health", nil)
+	signedIn.RemoteAddr = "127.0.0.1:44321"
+	signedIn.Header.Set("X-Forwarded-For", "203.0.113.9")
+	signedIn.AddCookie(cookie)
+	if !hh.api.healthDetailPermitted(signedIn) {
+		t.Error("an authenticated operator behind the proxy was refused the detail")
 	}
 }
 
@@ -159,10 +255,7 @@ func TestHealthDetailFollowsAuthenticationForRemoteCallers(t *testing.T) {
 }
 
 func TestHealthGivesAStrangerNothingButLiveness(t *testing.T) {
-	// The harness serves on loopback, so a plain request is entitled. To test
-	// the stranger's view the peer must not be loopback, which is what
-	// healthDetailPermitted is asked directly here — the alternative is
-	// binding a non-loopback socket in a unit test, which is not portable.
+	// Public requests get the same minimal response regardless of peer address.
 	api, req := unentitledHealthRequest(t)
 	if api.healthDetailPermitted(req) {
 		t.Fatal("a non-loopback unauthenticated request was treated as entitled")
@@ -171,7 +264,7 @@ func TestHealthGivesAStrangerNothingButLiveness(t *testing.T) {
 
 func TestHealthDetailForAnEntitledCaller(t *testing.T) {
 	h := h(t)
-	body := getHealth(t, h, nil) // loopback peer
+	body := authenticatedHealth(t, h)
 
 	for _, want := range []string{"version", "uptimeSeconds", "blocklistSize", "protecting", "clientAclStale"} {
 		if _, ok := body[want]; !ok {
@@ -190,7 +283,7 @@ func TestHealthStatusIsLivenessNotAProtectionVerdict(t *testing.T) {
 	h := h(t)
 	h.lists.Store(emptyIndex())
 
-	body := getHealth(t, h, nil)
+	body := authenticatedHealth(t, h)
 	if body["status"] != "ok" {
 		t.Errorf("status = %v, want ok — status is liveness", body["status"])
 	}
