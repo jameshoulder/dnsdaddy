@@ -49,17 +49,8 @@ func TestDiagnosticsRequireAuthentication(t *testing.T) {
 	}
 }
 
-// A stock install serves the private ranges, so a network inside them is
-// reachable and the endpoint should say so without inventing a problem.
-// A stock install is a fresh database and the shipped configuration. Nothing
-// about it is a misconfiguration, so nothing in it may be reported as one —
-// the whole point of this check is that the product does not greet a working
-// deployment with a page of warnings.
-//
-// "Stock" no longer includes an unpermitted network. Since the Default row
-// became a real ad-hoc access switch, seeded off, a network nobody permitted
-// genuinely is refused; the case below pins that it is reported, with advice
-// naming both ways out.
+// A stock install honours the configured private ranges. Closing ad-hoc
+// access remains an explicit operator choice, exercised separately below.
 func TestDiagnosticsPassOnAStockInstall(t *testing.T) {
 	h := newHarness(t)
 	h.login()
@@ -89,13 +80,27 @@ func TestDiagnosticsPassWithAdHocAccessAndANetwork(t *testing.T) {
 	}
 }
 
-// A fresh install refuses unmatched clients, so a network the operator added
-// but never permitted really is being refused. Reporting that, with advice
-// naming both remedies, is the product working — silently refusing the
-// clients and passing the diagnostic would not be.
+// These tests require the gate closed, independently of first-run defaults.
+// Reload the real controller too: diagnostics must describe the live ACL,
+// not merely the value just written to the database.
+func closeAdHocAccessForDiagnostics(t *testing.T, h *harness) {
+	t.Helper()
+	ctx := context.Background()
+	off := false
+	if _, err := h.store.UpdateNetwork(ctx, "n_default", store.NetworkInput{AllowResolver: &off}); err != nil {
+		t.Fatalf("disable ad-hoc access: %v", err)
+	}
+	if err := h.acl.Reload(ctx); err != nil {
+		t.Fatalf("reload client ACL: %v", err)
+	}
+}
+
+// With ad-hoc access explicitly off, a network that was added but never
+// permitted really is refused. Preserve both the failure and recovery advice.
 func TestDiagnosticsReportAnUnpermittedNetworkWhileAdHocAccessIsOff(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+	closeAdHocAccessForDiagnostics(t, h)
 
 	if _, err := h.store.CreateNetwork(context.Background(), store.NetworkInput{
 		Name: strPtr("Home"), CIDRs: &[]string{"192.168.1.0/24"},
@@ -132,6 +137,7 @@ func TestDiagnosticsReportAnUnpermittedNetworkWhileAdHocAccessIsOff(t *testing.T
 func TestTheACLSummarySaysWhenAdHocAccessIsWithholdingThePool(t *testing.T) {
 	h := newHarness(t)
 	h.login()
+	closeAdHocAccessForDiagnostics(t, h)
 
 	got := h.diagnostics(t)
 	for _, c := range got.Checks {
