@@ -188,7 +188,8 @@ type ReputationVerdict struct {
 	Score     float64
 	Category  string
 	// ProviderName is written into the block reason, because an operator
-	// looking at a blocked query needs to know which third party decided it.
+	// looking at a blocked query has to be able to tell a curated-feed block
+	// from a third-party API's opinion.
 	ProviderName string
 }
 
@@ -309,7 +310,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 
 	for _, p := range policies {
-		cp := &compiledPolicy{
+		cp := compiledPolicy{
 			id:         p.ID,
 			name:       p.Name,
 			categories: toSet(p.Categories),
@@ -321,9 +322,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 		if !cp.blockMode.Valid() {
 			cp.blockMode = store.BlockNXDOMAIN
 		}
-		snap.policies[p.ID] = cp
+		snap.policies[p.ID] = &cp
 		if p.IsDefault {
-			snap.defaultPolicy = cp
+			snap.defaultPolicy = &cp
 		}
 	}
 
@@ -347,16 +348,15 @@ func (e *Engine) Reload(ctx context.Context) error {
 		snap.networks = append(snap.networks, cn)
 	}
 
-	// The network order decides only which row is the catch-all below; it
-	// does not decide attribution. ListNetworks returns rows by name, and the
-	// stable sort keeps that order among equal lengths, so the choice of
-	// fallback is the same on every reload.
+	// The network order decides only the legacy catch-all below; it does
+	// not decide prefix attribution. The seeded Default row, when eligible,
+	// takes precedence independently of its display name.
 	sort.SliceStable(snap.networks, func(i, j int) bool {
 		return snap.networks[i].maxBits > snap.networks[j].maxBits
 	})
 
-	// A network with no CIDRs is the catch-all for unmatched clients. If more
-	// than one exists we take the first by name for determinism.
+	// Without an eligible seeded Default, preserve the legacy deterministic
+	// choice: the first enabled CIDR-less network by name.
 	for i := range snap.networks {
 		if len(snap.networks[i].prefixes) == 0 && snap.networks[i].enabled {
 			snap.fallback = &snap.networks[i]
@@ -366,6 +366,8 @@ func (e *Engine) Reload(ctx context.Context) error {
 	if snap.fallback == nil && len(snap.networks) > 0 {
 		snap.fallback = &snap.networks[len(snap.networks)-1]
 	}
+	// A token-only row must not steal Default because its name sorts first.
+	preferDefaultNetwork(snap)
 
 	// The routing table: one entry per CIDR, most specific prefix first.
 	//
