@@ -1,166 +1,237 @@
-/* Guided setup is a separate dashboard extension; no framework or build step.
- * It uses the existing authenticated API and network-write safety checks. */
+/* Post-install setup. Technical configuration stays behind Advanced; the
+ * normal path saves the displayed DNS address and a reviewed client grant. */
 'use strict';
 (() => {
-  const encode = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const options = (rows, value, label, selected = '') => rows.map(r => `<option value="${encode(r[value])}"${r[value] === selected ? ' selected' : ''}>${encode(r[label])}</option>`).join('');
+  const encode = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const options = (rows, selected) => rows.map(r => `<option value="${encode(r.id)}"${r.id === selected ? ' selected' : ''}>${encode(r.name)}</option>`).join('');
+  const connections = [
+    {id:'lan', name:'At home or work', hint:'Enter the device’s local IP. For a whole network, use a range such as 192.168.1.0/24.'},
+    {id:'vps', name:'On a cloud server', hint:'Enter your home or office’s public internet IP — not the cloud server’s IP or a 192.168 address.'},
+    {id:'vpn', name:'Through a VPN', hint:'Enter the device’s VPN IP. Your VPN must already be connected.'},
+    {id:'roaming', name:'Roaming device (encrypted DNS)', hint:'No client IP is needed. Use the network’s private HTTPS link after saving. HTTPS must already be set up.'},
+    {id:'local', name:'Only on the server itself', hint:'Use 127.0.0.1 or ::1. Other devices cannot connect to those addresses.'},
+  ];
   function networkWrite(plan, name, policyId, reviewed, publicAck) {
-    if (!plan || !reviewed) throw new Error('Preview and review the source addresses before applying access.');
-    if (plan.publicAckRequired && !publicAck) throw new Error('Confirm the displayed public client ranges before granting access.');
-    if (!name.trim() || !policyId) throw new Error('Choose a network name and policy.');
-    return {name: name.trim(), policyId, cidrs: plan.cidrs, enabled: true, allowResolver: plan.grantSourceAccess, publicAck: !!publicAck};
+    if (!plan || !reviewed) throw new Error('Review the addresses before allowing access.');
+    if (plan.publicAckRequired && !publicAck) throw new Error('Confirm that you intend to allow the displayed public IPs.');
+    if (!name.trim() || !policyId) throw new Error('Choose a name and a filtering policy under More options.');
+    return {name:name.trim(), policyId, cidrs:plan.cidrs, enabled:true, allowResolver:plan.grantSourceAccess, publicAck:!!publicAck};
+  }
+  function needsConfirmation(plan, editing) {
+    return !!editing || plan.publicAckRequired || plan.addresses.some(a => !a.single) || plan.cidrs.length > 1;
+  }
+  // This is a suggestion for an explicitly clicked control, not an automatic
+  // permission or a claim that the browser and DNS client share a route.
+  function connectionSuggestion(value) {
+    const ip = String(value || '');
+    if (!/^[0-9a-fA-F:.]+$/.test(ip)) return '';
+    if (/^(127\.|169\.254\.|0\.|224\.|ff|fe[89ab])/i.test(ip) || ['::','::1','0:0:0:0:0:0:0:1'].includes(ip)) return '';
+    if (/^::ffff:/i.test(ip)) return connectionSuggestion(ip.slice(7));
+    return ip;
+  }
+  function suggestedServer(data, addresses) {
+    if (data.serverIp || addresses?.runtime !== 'host') return data;
+    const candidate = addresses.addresses?.find(a => a.address === addresses.preferredAddress && ['private','public'].includes(a.type));
+    const udp = candidate?.dns?.find(e => e.transport === 'udp');
+    const tcp = candidate?.dns?.find(e => e.transport === 'tcp');
+    if (!udp || !tcp || udp.port !== tcp.port) return data;
+    return {...data, serverIp:candidate.address, dnsPort:udp.port, suggested:true};
+  }
+  function connectionsMarkup(networks) {
+    const named = networks.filter(n => n.id !== 'n_default');
+    return `<h2>Your connections</h2>${named.length ? named.map(n => `<div class="rec"><div><strong>${encode(n.name)}</strong><p class="small muted">${encode((n.cidrs || []).join(', ') || 'Encrypted link')} · ${!n.enabled ? 'Disabled; other access rules may still apply' : !(n.cidrs || []).length ? 'Link enabled' : n.coverage === 'full' ? 'Allowed to query' : n.coverage === 'partial' ? 'Some addresses allowed' : n.coverage === 'none' ? 'Not allowed yet' : 'Check access status'}</p></div><button type="button" class="btn btn-ghost btn-sm" data-connect-edit="${encode(n.id)}">Edit</button></div>`).join('') : '<p class="small muted">No named connections added yet.</p>'}`;
   }
   function guideMarkup(data, networks, policies) {
-    const editable = networks.filter(n => n.id !== 'n_default');
-    const preferredPolicy = policies.find(p => p.isDefault) || policies[0];
+    const policy = policies.find(p => p.isDefault) || policies[0];
     return `<section class="card section" id="setup-guide" aria-labelledby="setup-guide-title">
-      <div class="card-head"><div><div class="card-eyebrow">Start here</div><h2 id="setup-guide-title">Connect a device or network</h2><p>Choose where your clients connect from. Preview first; apply only the access you intend.</p></div></div>
-      <p><strong>Server address = where queries go. Client addresses = who may send them.</strong> The dashboard URL and Docker-internal IP are not automatically either of these.</p>
+      <div class="card-head"><div><h2 id="setup-guide-title">Connect to DNS Daddy</h2><p>Allow your device, then copy the DNS address into its network settings.</p></div></div>
       <form id="setup-guide-form">
-        <div class="field"><label for="setup-preset">Connection preset</label><select id="setup-preset">${options(data.presets, 'id', 'name')}</select></div>
-        <div class="grid grid-2">
-          <div class="field"><label for="setup-server">Client-facing DNS server IP</label><input id="setup-server" value="${encode(data.serverIp)}" maxlength="64" autocomplete="off" required><p id="setup-server-help" class="small muted"></p></div>
-          <div class="field"><label for="setup-port">Published DNS port</label><input id="setup-port" type="number" min="1" max="65535" value="${encode(data.dnsPort || 53)}" required><p class="small muted">Normally 53. Docker's internal 5353 is not necessarily the published port.</p></div>
-        </div>
-        <p class="small muted">${data.addressLocked ? 'Display address is controlled by DNSDADDY_ADVERTISED_DNS / YAML. Remove that setting and restart to edit it here.' : 'Save this address to correct the Overview card. This does not alter ports or grant access.'}</p>
-        <button type="button" class="btn btn-ghost btn-sm" id="setup-save-address"${data.addressLocked ? ' disabled' : ''}>Save display address</button>
-        <div class="field"><label for="setup-existing">Create or update a network</label><select id="setup-existing"><option value="">Create a new network</option>${options(editable, 'id', 'name')}</select></div>
-        <div class="grid grid-2">
-          <div class="field"><label for="setup-name">Network name</label><input id="setup-name" value="" placeholder="Home office" maxlength="100" required></div>
-          <div class="field"><label for="setup-policy">Filtering policy</label><select id="setup-policy" required>${options(policies, 'id', 'name', preferredPolicy?.id)}</select></div>
-        </div>
-        <div class="field"><label for="setup-clients">Client source IPs or subnets</label><textarea id="setup-clients" rows="3" maxlength="4096" aria-describedby="setup-client-help"></textarea><p id="setup-client-help" class="small muted"></p></div>
-        <details><summary>Single IP, subnet, NAT and IPv6 examples</summary>
-          <p><code>192.168.1.50</code> means one IPv4 address (<code>/32</code>). <code>192.168.1.0/24</code> means that subnet. <code>2001:db8::50</code> means one IPv6 address (<code>/128</code>). Enter only a prefix you actually own or administer; <code>/64</code> is not a universal IPv6 setting.</p>
-          <p>Separate multiple entries with commas or new lines. Host bits in a subnet are normalised in the preview. URLs, DNS names, ports, dash ranges and wildcard routes are not accepted by this guide.</p>
-          <p>For a public VPS, use your site's public egress address. An IPv4 public /32 may represent everyone behind its NAT router. For VPN clients, use the VPN source address. A router forwarding DNS may hide individual client IPs.</p>
-          <p>For changing ISP addresses or roaming devices, prefer a private VPN or the tokenised DoH setup. Do not automatically allow whatever address visits the dashboard.</p>
+        <div class="field"><label for="setup-preset">Where is DNS Daddy?</label><select id="setup-preset">${options(connections, 'lan')}</select></div>
+        <div class="field"><label for="setup-server" id="setup-server-label">DNS server IP</label><input id="setup-server" value="${encode(data.serverIp)}" maxlength="64" autocomplete="off" required${data.addressLocked ? ' readonly' : ''}><p class="small muted" id="setup-server-help">${data.serverIp ? (data.suggested ? 'Detected on this server. Confirm that your device can reach this address.' : 'The saved address is filled in. Connecting also saves any change here.') : 'Enter the server’s LAN, VPN or public IP once. Do not use its Docker-internal IP.'}${data.addressLocked ? ' This address is managed by your installation settings.' : ''}</p></div>
+        <div class="field" id="setup-client-field"><label for="setup-clients" id="setup-client-label">Device or network IP</label><input id="setup-clients" autocomplete="off" maxlength="4096" required aria-describedby="setup-client-help"><p id="setup-client-help" class="small muted">${encode(connections[0].hint)}</p>${connectionSuggestion(data.dashboardClientIp) ? `<button type="button" class="btn btn-ghost btn-sm" id="setup-use-connection">Use this connection (${encode(connectionSuggestion(data.dashboardClientIp))})</button>` : ''}</div>
+        <p class="small muted">Filtering policy: <strong id="setup-policy-label">${encode(policy?.name || 'Unavailable')}</strong>. Your resolver mode stays unchanged.</p>
+        <details id="setup-options"><summary>More options</summary>
+          <div class="field"><label for="setup-existing">Update an existing connection</label><select id="setup-existing"><option value="">Create a new connection</option>${options(networks.filter(n => n.id !== 'n_default'), '')}</select></div>
+          <div class="field"><label for="setup-name">Name (optional)</label><input id="setup-name" maxlength="100" placeholder="Named automatically"></div>
+          <div class="field"><label for="setup-policy">Filtering policy</label><select id="setup-policy">${options(policies, policy?.id)}</select></div>
+          <div class="field"><label for="setup-port">DNS port</label><input id="setup-port" type="number" min="1" max="65535" value="${encode(data.dnsPort || 53)}"${data.addressLocked ? ' readonly' : ''}><p class="small muted">Normally 53. This describes the published port; it does not change the server’s listeners.</p></div>
+          <p class="small muted">One IP is enough: IPv4 becomes /32 and IPv6 becomes /128 automatically. Separate multiple IPs with commas. A subnet permits its whole range, not one device. Existing permissions remain in place.</p>
         </details>
-        <p class="small muted">Management connection source: <code>${encode(data.dashboardClientIp)}</code>. ${encode(data.dashboardClientNote)}</p>
-        <details><summary>Optional starter files for a new installation</summary>
-          <label for="setup-mode">Resolution mode in exported files only</label><select id="setup-mode"><option value="off"${data.mode === 'off' ? ' selected' : ''}>Forward — Cloudflare HTTPS starter</option><option value="observe"${data.mode === 'observe' ? ' selected' : ''}>Learn — forwarding plus separate native observations</option><option value="enforce"${data.mode === 'enforce' ? ' selected' : ''}>Live — experimental native DNSSEC enforcement</option></select>
-          <p class="small muted">Preview generates .env, a Compose port override and native YAML. Applying a network here never changes this server's resolution mode, upstream provider, TLS, privacy or firewall. Existing transport controls remain below.</p>
-        </details>
-        <button class="btn btn-primary" type="submit" id="setup-preview">Preview configuration and access</button>
+        <p><button class="btn btn-primary" type="submit" id="setup-connect">Connect</button></p>
       </form>
       <div id="setup-result" aria-live="polite"></div><p id="setup-message" role="status"></p>
     </section>`;
   }
   function previewMarkup(plan, editing) {
-    return `<div class="section"><h3>Review before applying</h3>
-      <p><strong>DNS destination:</strong> <code>${encode(plan.endpoint)}</code></p>
-      <p><strong>${editing ? 'Replace this network’s source ranges with' : 'Permit these client source ranges'}:</strong> ${plan.addresses.length ? plan.addresses.map(a => `<code>${encode(a.cidr)}</code> (${encode(a.scope)}, ${a.single ? 'one address' : 'subnet'})`).join(', ') : 'None — tokenised encrypted DNS only.'}</p>
-      <p>Existing permissions are additive and remain unchanged. Updating a network preserves its token, replaces its ranges and enables it. This does not remove access granted by other networks or Default.</p>
-      ${plan.warnings.map(w => `<p class="small muted">${encode(w)}</p>`).join('')}
-      <p><label><input type="checkbox" id="setup-reviewed"> I have reviewed these source addresses and the selected policy.</label></p>
-      ${plan.publicAckRequired ? '<p><label><input type="checkbox" id="setup-public-ack"> I control these public client ranges and intend to grant them resolver access. I will restrict the host/cloud firewall as well.</label></p>' : ''}
-      <button class="btn btn-primary" type="button" id="setup-apply">Apply network access</button>
-      <h3>Test from a permitted client</h3><pre>${encode(plan.udpTest)}\n${encode(plan.tcpTest)}</pre>
-      <p class="small muted">For tokenised DoH, use the encrypted client instructions below instead of these plaintext tests. NOERROR with an answer is a successful lookup; REFUSED, SERVFAIL and timeout need different diagnoses. Check the live activity and query reason.</p>
-      <details><summary>Generated starter files — review before installing</summary>
-        <p>These files have not been deployed. Keep your existing .env, configuration and data when upgrading. The files deliberately keep bootstrap access loopback-only: Apply network access creates the reviewed named grant.</p>
-        <p>Docker: use the generated environment with the repository’s docker-compose.yml and the generated port override. The override requires Compose 2.24.4+. LAN/VPN addresses must exist on the host; a public VPS may use NAT. Existing TLS/proxy settings are not included or overwritten.</p>
-        <pre>docker compose --env-file .env.ready -f docker-compose.yml -f compose.ready.yaml config\ndocker compose --env-file .env.ready -f docker-compose.yml -f compose.ready.yaml up -d --build</pre>
-        ${[['environment','.env.ready'],['composeOverride','compose.ready.yaml'],['nativeYaml','dnsdaddy.ready.yaml']].map(([key,name]) => `<h4>${encode(name)}</h4><button type="button" class="btn btn-ghost btn-sm" data-setup-download="${key}">Download ${encode(name)}</button><pre>${encode(plan[key])}</pre>`).join('')}
-      </details></div>`;
+    return `<div class="section"><h3>${editing ? 'Replace this connection’s addresses?' : 'Allow these addresses?'}</h3><p>${plan.addresses.map(a => `<code>${encode(a.cidr)}</code>${a.single ? '' : ' (whole subnet)'}`).join(', ') || 'Encrypted network link only.'}</p>
+      <p>${editing ? 'This replaces the selected connection’s ranges and enables it. Its private link is kept. ' : ''}Other connections and existing access stay unchanged.</p>
+      ${plan.publicAckRequired ? '<p><label><input type="checkbox" id="setup-public-ack"> I control these public IPs and want to allow them. An internet IP may represent every device sharing that connection; restrict the firewall too.</label></p>' : ''}
+      <button class="btn btn-primary" type="button" id="setup-apply">Allow connection</button>
+      <details><summary>Technical details</summary>${plan.warnings.map(w => `<p class="small muted">${encode(w)}</p>`).join('')}</details></div>`;
+  }
+  function successMarkup(plan, input, warning) {
+    const roaming = input.preset === 'roaming';
+    return `<div class="section"><h3>${warning ? 'Saved — needs attention' : 'Access saved'}</h3>
+      ${warning ? `<p role="alert">${encode(warning)}</p>` : ''}
+      ${roaming ? '<p><a class="btn btn-primary" href="#/setup?advanced=1">Open encrypted connection instructions</a></p><p>Copy this network’s private HTTPS link. Do not share it publicly.</p>' : `<p>Set your device or router’s DNS server to:</p><div class="copy-row"><strong class="mono">${encode(input.serverIp)}</strong><button type="button" class="btn btn-primary btn-sm" id="setup-copy">Copy DNS IP</button></div>${input.dnsPort !== 53 ? `<p>Port ${encode(input.dnsPort)}: your device must support a custom DNS port. Most ordinary DNS settings require port 53.</p>` : ''}<p>Then open a website on that device and check <a href="#/dashboard">Overview</a> for DNS activity. Access is saved; the device’s connection has not been tested yet.</p>`}
+      <p><button type="button" class="btn btn-ghost btn-sm" id="setup-another">Add another device or network</button></p><details><summary>Troubleshooting and configuration files</summary><pre>${encode(plan.udpTest)}\n${encode(plan.tcpTest)}</pre><p>These are optional starters for a new installation, not updates to this running server. They use Forward mode, keep the dashboard on loopback, and need a named client grant on the target installation. VPN and HTTPS prerequisites are separate. The port override requires Compose 2.24.4+.</p>${[['environment','Environment file'],['composeOverride','Compose port override'],['nativeYaml','Native YAML']].map(([key,label]) => `<details><summary>${label}</summary><pre>${encode(plan[key])}</pre></details>`).join('')}</details>
+    </div>`;
+  }
+  // Two existing audited operations, not a pretend transaction. Remember each
+  // completed step and block blind retries when the network response is lost.
+  async function saveConnection(draft, data, state, send) {
+    if (state.ambiguous) throw new Error('The previous save could not be confirmed. Refresh and check existing connections before retrying.');
+    if (data.addressLocked && draft.plan.endpoint !== data.endpoint) throw new Error('This DNS address is managed by your installation settings.');
+    if (!data.addressLocked && draft.plan.endpoint !== data.endpoint) {
+      const saved = await send('PUT','/setup/address',{serverIp:draft.input.serverIp,dnsPort:draft.input.dnsPort,previous:data.endpoint});
+      data.endpoint = saved.endpoint;
+    }
+    try {
+      const saved = await send(state.target ? 'PATCH' : 'POST', state.target ? '/networks/'+encodeURIComponent(state.target) : '/networks', draft.body);
+      const network = saved.network || saved;
+      if (!network.id) throw new Error('The server did not return the saved connection.');
+      state.target = network.id;
+      return {network, warning:saved.warning || ''};
+    } catch (error) {
+      state.ambiguous = true;
+      throw new Error('The network save could not be confirmed. The displayed DNS address may already be saved. Refresh and check existing connections before retrying. '+error.message);
+    }
   }
   async function mountGuide(data, networks, context = {}) {
-    const el = id => document.getElementById(id);
+    const root = document.getElementById('setup-guide');
+    if (!root) return;
+    const el = id => root.querySelector('#'+id);
     const form = el('setup-guide-form');
-    if (!form) return;
-    const active = () => !context.signal?.aborted && (!context.isCurrent || context.isCurrent());
-    let plan = null, revision = 0, writing = false;
-    const say = message => { if (active()) el('setup-message').textContent = message; };
-    const invalidate = () => { revision++; plan = null; el('setup-result').replaceChildren(); };
-    const freeze = busy => {
-      for (const control of form.querySelectorAll('input, select, textarea, button')) control.disabled = busy;
-      if (!busy) { help(); el('setup-save-address').disabled = !!data.addressLocked; }
-    };
-    const input = () => ({preset:el('setup-preset').value,serverIp:el('setup-server').value.trim(),dnsPort:Number(el('setup-port').value),clients:el('setup-clients').value,mode:el('setup-mode').value});
+    const active = () => root.isConnected && !context.signal?.aborted && (!context.isCurrent || context.isCurrent());
+    const state = {target:'', ambiguous:false};
+    let revision = 0, busy = false;
+    const say = text => { if (active()) el('setup-message').textContent = text; };
+    const invalidate = () => { revision++; el('setup-result').replaceChildren(); say(''); };
+    const input = () => ({preset:el('setup-preset').value,serverIp:el('setup-server').value.trim(),dnsPort:Number(el('setup-port').value),clients:el('setup-clients').value.trim(),mode:'off'});
     const help = () => {
-      const p = data.presets.find(p => p.id === el('setup-preset').value);
-      el('setup-server-help').textContent = p.serverHelp;
-      el('setup-client-help').textContent = p.clientHelp;
-      el('setup-clients').placeholder = p.example;
-      el('setup-clients').disabled = p.id === 'roaming';
-      if (p.id === 'roaming') el('setup-clients').value = '';
+      const kind = el('setup-preset').value;
+      el('setup-client-help').textContent = connections.find(c => c.id === kind).hint;
+      el('setup-server-label').textContent = kind === 'vps' ? 'Cloud server’s public IP' : kind === 'vpn' ? 'Server’s VPN IP' : 'DNS server IP';
+      el('setup-client-label').textContent = kind === 'vps' ? 'Your home or office’s internet IP' : kind === 'vpn' ? 'Device’s VPN IP' : 'Device or network IP';
+      el('setup-client-field').hidden = kind === 'roaming';
+      el('setup-clients').required = kind !== 'roaming';
+      el('setup-clients').disabled = kind === 'roaming';
+      if (kind === 'roaming') el('setup-clients').value = '';
+      el('setup-policy-label').textContent = el('setup-policy').selectedOptions[0]?.textContent || 'Unavailable';
     };
-    form.addEventListener('input', invalidate);
-    el('setup-preset').addEventListener('change', () => { invalidate(); help(); });
+    const freeze = value => {
+      busy = value;
+      for (const control of root.querySelectorAll('input,select,button')) control.disabled = value;
+      if (!value) { help(); el('setup-connect').disabled = state.ambiguous; }
+    };
+    form.addEventListener('input', () => { invalidate(); help(); });
+    form.addEventListener('change', invalidate);
+    el('setup-preset').addEventListener('change', () => {
+      if (el('setup-preset').value === 'local') {
+        if (!data.addressLocked) { el('setup-server').value='127.0.0.1'; el('setup-port').value='5353'; }
+        el('setup-clients').value='127.0.0.1';
+      }
+      help();
+    });
     el('setup-existing').addEventListener('change', () => {
-      const n = networks.find(n => n.id === el('setup-existing').value);
-      if (n) { el('setup-name').value=n.name; el('setup-clients').value=(n.cidrs || []).join('\n'); el('setup-policy').value=n.policyId; }
-      invalidate(); help();
+      state.target = el('setup-existing').value;
+      const n = networks.find(n => n.id === state.target);
+      el('setup-name').value = n?.name || '';
+      el('setup-clients').value = (n?.cidrs || []).join(', ');
+      if (n) el('setup-policy').value = n.policyId;
+      help();
+    });
+    el('setup-use-connection')?.addEventListener('click', () => {
+      invalidate(); el('setup-clients').value = connectionSuggestion(data.dashboardClientIp);
+      say('Filled from this dashboard connection. Use it only when your DNS device connects the same way — not through a different proxy, tunnel or VPN.');
+    });
+    async function apply(plan, values, ticket) {
+      if (busy || !active() || ticket !== revision) return;
+      let body;
+      try { body = networkWrite(plan,el('setup-name').value || 'Connection '+(plan.cidrs[0] || 'roaming'),el('setup-policy').value,true,!!el('setup-public-ack')?.checked); }
+      catch (error) { say(error.message); return; }
+      freeze(true); say('Saving connection…');
+      try {
+        const result = await saveConnection({plan,input:values,body},data,state,apiSend);
+        if (!active()) return;
+        const n = result.network;
+        const index = networks.findIndex(item => item.id === n.id);
+        if (index >= 0) networks[index] = n;
+        else {
+          networks.push(n);
+          const option = document.createElement('option'); option.value=n.id; option.textContent=n.name;
+          el('setup-existing').append(option);
+        }
+        el('setup-existing').value = n.id;
+        el('setup-result').innerHTML = sanitize(successMarkup(plan,values,result.warning));
+        form.hidden = true;
+        el('setup-another').addEventListener('click', () => {
+          state.target=''; el('setup-existing').value=''; el('setup-name').value=''; el('setup-clients').value='';
+          form.hidden=false; invalidate(); el('setup-clients').focus();
+        });
+        el('setup-copy')?.addEventListener('click', async () => {
+          try { await copyPlainText(values.serverIp); if (active()) el('setup-copy').textContent='Copied'; }
+          catch { say('Copy was unavailable. Select the DNS IP above and copy it.'); }
+        });
+        say(result.warning || 'DNS address and connection saved.');
+        try {
+          const current = await apiGet('/networks');
+          if (active()) document.getElementById('setup-connections').innerHTML = sanitize(connectionsMarkup(current.networks));
+        } catch { /* The successful write remains true; do not invent a live coverage reading. */ }
+      } catch (error) { say(error.message); }
+      finally { if (active()) freeze(false); }
+    }
+    form.addEventListener('submit', async event => {
+      event.preventDefault(); if (busy || state.ambiguous) return;
+      invalidate(); const ticket=revision, values=input(); freeze(true); say('Checking addresses…');
+      try {
+        const plan=await apiSend('POST','/setup/preview',values);
+        if (!active() || ticket !== revision) return;
+        freeze(false); say('');
+        if (needsConfirmation(plan,state.target)) {
+          el('setup-result').innerHTML=sanitize(previewMarkup(plan,!!state.target));
+          el('setup-apply').addEventListener('click',()=>apply(plan,values,ticket));
+        } else await apply(plan,values,ticket);
+      } catch(error) { say(error.message); }
+      finally { if (active()) freeze(false); }
+    });
+    document.getElementById('setup-connections')?.addEventListener('click', event => {
+      const edit = event.target.closest('[data-connect-edit]');
+      if (!edit || busy || state.ambiguous) return;
+      form.hidden = false;
+      el('setup-existing').value = edit.dataset.connectEdit;
+      el('setup-existing').dispatchEvent(new Event('change', {bubbles:true}));
+      el('setup-options').open = true;
+      el('setup-clients').focus();
     });
     help();
-    el('setup-save-address').addEventListener('click', async () => {
-      if (writing) return;
-      writing=true; freeze(true);
-      try {
-        const v=input();
-        const saved=await apiSend('PUT','/setup/address',{serverIp:v.serverIp,dnsPort:v.dnsPort,previous:data.endpoint});
-        data.endpoint=saved.endpoint;
-        say('Display address saved. Overview will show '+saved.endpoint+'. No listener or client access was changed.');
-      } catch(e) {say(e.message);} finally {writing=false;if(active())freeze(false);}
-    });
-    form.addEventListener('submit', async event => {
-      event.preventDefault(); invalidate(); const ticket=revision;
-      el('setup-preview').disabled=true;
-      try {
-        const result=await apiSend('POST','/setup/preview',input());
-        if(!active() || ticket!==revision) return;
-        plan=result; el('setup-result').innerHTML=sanitize(previewMarkup(plan,!!el('setup-existing').value));
-        el('setup-apply').addEventListener('click', async () => {
-          if(writing || !plan) return;
-          let body;
-          try {body=networkWrite(plan,el('setup-name').value,el('setup-policy').value,el('setup-reviewed').checked,!!el('setup-public-ack')?.checked);} catch(e){say(e.message);return;}
-          writing=true; freeze(true); el('setup-apply').disabled=true;
-          const target=el('setup-existing').value;
-          try {
-            const saved=await apiSend(target?'PATCH':'POST',target?'/networks/'+encodeURIComponent(target):'/networks',body);
-            // A retry must not create a second network after a saved grant or
-            // reload warning. Keep the returned ID, even when a warning exists.
-            if(!active()) return;
-            const n=saved.network || saved;
-            if(!target && n.id){
-              const option=document.createElement('option');option.value=n.id;option.textContent=n.name || body.name;el('setup-existing').append(option);el('setup-existing').value=n.id;
-              networks.push(n);
-            }
-            say(saved.warning || 'Network saved and reload reported successful. Test from your device now; this is not a reachability test. Save the display address separately to update Overview.');
-          } catch(e) {say(e.message+' Inspect Networks before retrying: a failed response can follow a persisted change.');}
-          finally {writing=false; if(active()){freeze(false);if(el('setup-apply'))el('setup-apply').disabled=false;}}
-        });
-        document.querySelectorAll('[data-setup-download]').forEach(button=>button.addEventListener('click',()=>{
-          if(!plan)return;const key=button.dataset.setupDownload;
-          const names={environment:'.env.ready',composeOverride:'compose.ready.yaml',nativeYaml:'dnsdaddy.ready.yaml'};
-          if(!names[key])return;
-          const url=URL.createObjectURL(new Blob([plan[key]],{type:'text/plain'}));const a=document.createElement('a');a.href=url;a.download=names[key];a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
-        }));
-      } catch(e){say(e.message);} finally {if(active())el('setup-preview').disabled=false;}
-    });
+  }
+  function advancedMarkup(original, open = false) {
+    return `<details class="card section" id="setup-advanced-tools"${open ? ' open' : ''}><summary>Advanced settings</summary>${original}</details>`;
   }
   function install() {
     for (const route of ['setup','networks']) {
       const previous=pages[route];
       pages[route]={...previous,
-        async render(context){
+        async render(context) {
           const original=await previous.render.call(this,context);
           try {
-            const [data,ns,ps]=await Promise.all([apiGet('/setup'),apiGet('/networks'),apiGet('/policies')]);
+            const [settings,ns,ps,addresses]=await Promise.all([apiGet('/setup'),apiGet('/networks'),apiGet('/policies'),apiGet('/server-addresses').catch(() => null)]);
+            const data = suggestedServer(settings,addresses);
             this.setupGuide={data,networks:ns.networks || []};
-            return guideMarkup(data,ns.networks || [],ps.policies || [])+original;
-          } catch(e){this.setupGuide=null;return '<section class="card section"><h2>Guided setup unavailable</h2><p>'+encode(e.message)+'</p><p>Existing controls remain available below. Retry after checking the API.</p></section>'+original;}
+            return guideMarkup(data,ns.networks || [],ps.policies || [])+'<section class="card section" id="setup-connections">'+connectionsMarkup(ns.networks || [])+'</section>'+advancedMarkup(original, context?.hash?.includes('advanced=1'));
+          } catch(error) {
+            this.setupGuide=null;
+            return '<section class="card section"><h2>Connection setup unavailable</h2><p>'+encode(error.message)+'</p></section>'+original;
+          }
         },
-        async mounted(context){
-          if(previous.mounted)await previous.mounted.call(this,context);
-          if(this.setupGuide)await mountGuide(this.setupGuide.data,this.setupGuide.networks,context);
+        async mounted(context) {
+          if (previous.mounted) await previous.mounted.call(this,context);
+          if (this.setupGuide) await mountGuide(this.setupGuide.data,this.setupGuide.networks,context);
         }
       };
     }
   }
-  // Assembled after app.js in the same script response, before boot's first
-  // awaited session request completes. Both share helpers and the page registry.
-  // Setup is not a separate authentication surface.
-  if(typeof pages!=='undefined' && typeof document!=='undefined')install();
-  if(typeof module!=='undefined' && module.exports)module.exports={guideMarkup,previewMarkup,networkWrite};
+  if (typeof pages !== 'undefined' && typeof document !== 'undefined') install();
+  if (typeof module !== 'undefined' && module.exports) module.exports={guideMarkup,previewMarkup,networkWrite,needsConfirmation,connectionSuggestion,saveConnection,successMarkup,advancedMarkup,suggestedServer,connectionsMarkup};
 })();
