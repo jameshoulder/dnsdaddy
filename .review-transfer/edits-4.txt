@@ -1,0 +1,579 @@
+FILE {"path":"docs/security/privacy-review-followup-2026-10-03.md","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"d526766476cf8a0a871beb2e193830e59389491799c227a74aeb270ef7cdb79c","mode":"0o644"}
+REPLACE 0 0 59
+# Privacy review follow-up, 3 October 2026
+
+Baseline: `91ae60740e9ace5b9761920beefed9d30f2285f9`. This integrates the four
+Claude patches supplied by the maintainer and addresses the subsequent review.
+AI-assisted development and automated tests are not an independent audit or human
+sign-off. The larger privacy lifecycle in issue #81 is not closed by this change.
+
+| Concern | Change and regression evidence |
+|---|---|
+| A failed/no-op chmod could be accepted | Both Docker install and upgrade call the verified permission helper before Compose changes. Failure-injection tests check nonzero exit and no restart/up/down/build. New files are private at creation. |
+| Native helper broadened stricter modes or accepted arbitrary owners | Only bits are removed; root/service ownership, service access and group changes are checked. Stricter service-owned modes survive. Root-owned inaccessible modes fail for explicit operator review. Links are refused. |
+| Disabled collectors hid historic indefinite retention | Warnings are independent of collection switches. Seeded historical findings/decisions tests check both zero (preserved, warned) and positive (expired) policies. |
+| Headerless local proxy remained privileged | Only real API/session authentication grants health detail. A real loopback HTTP reverse-proxy test sends no forwarding headers. Minimal public liveness remains accessible. |
+| Doctor could interpret missing health fields as false/zero | Pointer fields preserve unknown state; an optional owner-only token file enables local authenticated checks. Redirects/proxies stay disabled. Token use has normal authentication metadata effects, disclosed in deployment docs. |
+| One exhausted cleanup deadline starved other steps | Each sequential table/atomic lifecycle step gets a fresh cooperative timeout. Deadline and shutdown tests check isolation and cancellation. Shared DB outages and oversized deletes can still fail; failure is not hidden. |
+| Monitoring omitted no-first-success/missing-instance cases | Sample Prometheus rules and eight scenarios cover those cases, startup, failures, stalls, recovery, restart and scrape failure. Operators must install/reroute rules themselves. |
+| Hostname-only disclosure test missed a counting error | A bounded documentation table is compared exactly to feed membership, names, initial URLs, categories and counts. Six enabled feeds/four hosts are confirmed from the baseline catalogue. Malware & C2 is one feed. |
+
+## Validation scope
+
+Nine permission helper tests were executed against the supplied Claude versions:
+six fail, with zero test errors. All nine pass against the follow-up helpers.
+These run only on synthetic temporary files and never install a service. The
+complete local Python suite passes (26 tests, including existing assurance tests).
+The standalone cleanup-runner tests pass with the race detector, and the exact
+catalogue/disclosure tests pass locally using Go 1.23.2 in standalone-file mode.
+That is **not** the project's full Go 1.27.1 build or complete regression suite.
+
+The `Privacy regression evidence` workflow builds/tests the affected packages
+with the repository's toolchain and runs the Prometheus rule tests. Its artifacts
+record the actual tested commit, outcomes and tool/image identity. Consult the
+PR's exact-commit Actions results; a workflow definition or earlier successful
+commit is not proof that a later revision passed. Full CI/security/deployment
+workflows remain separate and are not weakened by these changes.
+
+## Operator migration and limits
+
+Unauthenticated health is now liveness-only on every topology. Doctor can use
+`--api-token-file`; without private detail, doctor/healthcheck report incomplete
+readiness rather than asserting that a live ACL is healthy. The container's
+built-in liveness check needs no credentials. Existing authenticated dashboard
+health reads retain the same fields.
+
+Permission errors stop installation/upgrade rather than stopping an existing
+resolver. Rerun the relevant installer after upgrading to apply host-file
+permissions. Rebuilding a binary/image alone does not fix an old host `.env` or
+native configuration. Review any earlier exposed bootstrap credential and rotate
+it where appropriate. Parent-directory trust, ACLs, snapshots and external copies
+need separate review; POSIX mode checks are not a universal storage audit.
+
+Expiry-disabled data stays retained. Every step has a 20-second cooperative
+budget; a very large dataset may need additional bounded-batch maintenance work.
+No new subject-erasure endpoint, retrospective remote deletion, database-wide
+encryption, enterprise RBAC, independent certification or guarantee of physical
+erasure is introduced. DNS enforcement and anomaly thresholds are unchanged.
+
+References: [Go context](https://pkg.go.dev/context),
+[Prometheus rule tests](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/),
+[OWASP authorisation guidance](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html).
+END
+FILE {"path":"docs/trust/data-inventory.json","before":"f095d73f9594c7f8bd655db2af4a3b26641c64d431befacebca486cb8ab12b3c","after":"6b3d11a89acfa97ba8667779fef9c5561d809a1364031fe40dcdb81156f261a1","mode":"0o644"}
+REPLACE 8 10 2
+    {"id":"decisions","storage":"decisions, capture manifests, evidence snapshots","contents":"Policy outcomes, original evidence and optional attributed context","retention":"30 days by default; log.decision_retention_days, 0 or less disables expiry","limits":"Capture lifetime follows decision; logging admission controls new records","evidence":"docs/privacy.md"},
+    {"id":"findings","storage":"findings, finding_reviews, finding_review_history","contents":"Measured signals, example names, device/network context and review notes/actor labels","retention":"30-day finding default; detection.retention_days 0 disables expiry; review rows cascade with findings","limits":"Detection and logging controls; historical findings are not retroactively reclassified","evidence":"docs/privacy.md"},
+REPLACE 22 23 1
+    "Enabled threat-feed HTTP downloads (fresh default: urlhaus.abuse.ch, raw.githubusercontent.com, phishing.army, blocklistproject.github.io)",
+END
+FILE {"path":"internal/api/handlers_dashboard.go","before":"897bade1826a1eec07c9b13f11bc0e9d4ee8c33c17a624048e71bd6ccb1cd663","after":"e4557b99bc78968921a0a6101211625d1b4d71301da83ce85b62defefbaf5991","mode":"0o644"}
+REPLACE 58 59 1
+	// `dnsdaddy doctor` needs it and can request it with an API token:
+REPLACE 68 85 4
+// healthDetailPermitted requires explicit management authentication. A local
+// TCP peer may be a reverse proxy, even if it forwards no identifying headers.
+// Neither source addresses nor forwarding headers are credentials. Public
+// health checks remain liveness-only; doctor can optionally use a token file.
+REPLACE 86 90 2
+	_, ok := a.Auth.authenticate(r)
+	return ok
+END
+FILE {"path":"internal/api/health_auth_followup_test.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"f8337f0715252fd53c7da15887bb43dfe3a4a508fe1510889bd6a82f30f2e63b","mode":"0o644"}
+REPLACE 0 0 69
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"sync/atomic"
+	"testing"
+)
+
+func authenticatedHealth(t *testing.T, h *harness) map[string]any {
+	t.Helper()
+	token, err := h.store.CreateAPIToken(context.Background(), "health-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return getHealth(t, h, func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+token.Secret) })
+}
+
+func TestHeaderlessLoopbackProxyCannotReadHealthDetail(t *testing.T) {
+	h := newHarness(t)
+	var relayed atomic.Bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		relayed.Store(true)
+		for _, name := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded", "Via"} {
+			if len(r.Header.Values(name)) != 0 {
+				t.Errorf("test relay unexpectedly sent %s", name)
+			}
+		}
+		h.api.handleHealth(w, r)
+	}))
+	defer backend.Close()
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(&httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
+		r.SetURL(target) // Deliberately no SetXForwarded.
+	}})
+	defer proxy.Close()
+	resp, err := proxy.Client().Get(proxy.URL + "/api/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !relayed.Load() || resp.StatusCode != http.StatusOK || len(body) != 1 || body["status"] != "ok" {
+		t.Fatalf("unauthenticated proxy got non-minimal health: status=%d body=%v", resp.StatusCode, body)
+	}
+}
+
+func TestLocalInvalidCredentialCannotReadHealthDetail(t *testing.T) {
+	h := newHarness(t)
+	for _, peer := range []string{"127.0.0.1:1234", "[::1]:1234", "172.18.0.1:1234"} {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+		r.RemoteAddr = peer
+		r.Header.Set("Authorization", "Bearer dnsd_invalid")
+		body := recordHealth(h.api, r)
+		if len(body) != 1 || body["status"] != "ok" {
+			t.Fatalf("peer %s got %v", peer, body)
+		}
+	}
+}
+END
+FILE {"path":"internal/api/health_exposure_test.go","before":"9bfcc1156fe3050777d7c3aea0100208231692268f3691d6c4117bc2cd3111ca","after":"3426b33b484e4210841633c4d2953bbbee8cb00e3177943e4a24d517b20cbbd4","mode":"0o644"}
+REPLACE 53 55 1
+	// work is if entitlement were decided from a header. Only a valid management credential grants access.
+REPLACE 108 109 1
+			"entitlement must come from authentication, not a peer address")
+REPLACE 116 119 2
+	// Loopback without authentication is also public: a headerless local
+	// reverse proxy is indistinguishable from a direct local TCP client.
+REPLACE 121 123 100
+	if hh.api.healthDetailPermitted(local) {
+		t.Fatal("loopback must not grant health detail without authentication")
+	}
+}
+
+func TestHealthDetailWithheldBehindALoopbackProxy(t *testing.T) {
+	// The native HTTPS deployment in docs/deploy.md: Caddy on the same host,
+	// reverse-proxying to 127.0.0.1:8080. Every request from the internet then
+	// reaches this process with a loopback peer, so "the peer is loopback"
+	// cannot by itself mean "this is the operator at the console" — and while
+	// it did, that deployment published the version, the uptime and whether
+	// filtering was on to anyone who asked.
+	//
+	// The earlier Docker test topology used a bridge gateway. Host-network
+	// containers and headerless loopback proxies need their own coverage.
+	//
+	// Both proxy configurations are exercised: listed in trusted_proxy_cidrs as
+	// the documentation asks, and not listed at all. An operator who forgets
+	// that setting must not be the one whose health detail is public.
+	loopbackTrusted, err := httpx.ParseTrustedProxies([]string{"127.0.0.1/32", "::1/128"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tp := range []struct {
+		name    string
+		trusted *httpx.TrustedProxies
+	}{
+		{"proxy listed in trusted_proxy_cidrs", loopbackTrusted},
+		{"proxy not listed", &httpx.TrustedProxies{}},
+	} {
+		hh := newHarness(t)
+		hh.api.TrustedProxies = tp.trusted
+
+		for _, peer := range []string{"127.0.0.1:44321", "[::1]:44321"} {
+			for _, hdr := range []struct{ k, v string }{
+				// What Caddy sends for a browser on the internet.
+				{"X-Forwarded-For", "203.0.113.9"},
+				{"X-Forwarded-Proto", "https"},
+				{"X-Forwarded-Host", "dns.example.co.uk"},
+				{"X-Real-IP", "203.0.113.9"},
+				{"Forwarded", "for=203.0.113.9;proto=https"},
+				{"Via", "1.1 Caddy"},
+				// And the claims a stranger might add in the hope that the value
+				// is what gets read. It is not: presence is.
+				{"X-Forwarded-For", "127.0.0.1"},
+				{"X-Real-IP", "::1"},
+				{"X-Forwarded-For", ""},
+			} {
+				req := httptest.NewRequest("GET", "/api/v1/health", nil)
+				req.RemoteAddr = peer
+				req.Header.Set(hdr.k, hdr.v)
+
+				if hh.api.healthDetailPermitted(req) {
+					t.Errorf("%s, peer %s: a request relayed with %s: %q was entitled to internal state",
+						tp.name, peer, hdr.k, hdr.v)
+				}
+				for name := range recordHealth(hh.api, req) {
+					if !publicHealthFields[name] {
+						t.Errorf("%s, peer %s: a request relayed with %s: %q was disclosed %q",
+							tp.name, peer, hdr.k, hdr.v, name)
+					}
+				}
+			}
+
+			// Headerless relays and direct local probes get the same minimal
+			// response; liveness must not depend on a proxy adding a header.
+			direct := httptest.NewRequest("GET", "/api/v1/health", nil)
+			direct.RemoteAddr = peer
+			if hh.api.healthDetailPermitted(direct) {
+				t.Errorf("%s: unauthenticated peer %s got detail", tp.name, peer)
+			}
+			for name := range recordHealth(hh.api, direct) {
+				if !publicHealthFields[name] {
+					t.Errorf("%s: unauthenticated peer %s got %s", tp.name, peer, name)
+				}
+			}
+		}
+	}
+
+	// A session still entitles a caller who arrives through that proxy, which
+	// is how the dashboard itself reads this in the HTTPS deployment.
+	hh := newHarness(t)
+	hh.api.TrustedProxies = loopbackTrusted
+	hh.login()
+	var cookie *http.Cookie
+	for _, c := range hh.client.Jar.Cookies(nil) {
+		if c.Name == sessionCookie {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("no session cookie after login")
+	}
+	signedIn := httptest.NewRequest("GET", "/api/v1/health", nil)
+	signedIn.RemoteAddr = "127.0.0.1:44321"
+	signedIn.Header.Set("X-Forwarded-For", "203.0.113.9")
+	signedIn.AddCookie(cookie)
+	if !hh.api.healthDetailPermitted(signedIn) {
+		t.Error("an authenticated operator behind the proxy was refused the detail")
+REPLACE 161 165 1
+	// Public requests get the same minimal response regardless of peer address.
+REPLACE 173 174 1
+	body := authenticatedHealth(t, h)
+REPLACE 192 193 1
+	body := authenticatedHealth(t, h)
+END
+FILE {"path":"internal/api/metrics.go","before":"af549a97e9c585117e2f6948ae27004c38d47f26e2077151f4d31fcd3b0f7d43","after":"4810a07d02325f5e76ac5cd75a89d24d84cfd139dd76509421242167a18fa3ca","mode":"0o644"}
+REPLACE 61 61 1
+	a.writeRetentionMetrics(&b)
+END
+FILE {"path":"internal/api/metrics_retention.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"8520349e68f18afcb0754f5ed3486b5a4fd4a61f18130f89a9d7411c39cb0725","mode":"0o644"}
+REPLACE 0 0 64
+package api
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// RetentionStats is the reporting face of the retention job.
+//
+// Read-only: the API reports what the job did and never triggers a pass.
+type RetentionStats interface {
+	RetentionSnapshot() RetentionSnapshot
+}
+
+// RetentionSnapshot is what the retention job has done since the process
+// started. Counts and times only — nothing here names a table's contents.
+type RetentionSnapshot struct {
+	// Sweeps counts finished passes, clean or not.
+	Sweeps uint64
+	// FailedSweeps counts passes in which at least one step failed. The other
+	// steps of such a pass still ran.
+	FailedSweeps uint64
+	// LastRun is when the most recent pass finished. Zero until the first one,
+	// which runs about a minute after startup.
+	LastRun time.Time
+	// LastSuccess is when a pass last finished with no failed step.
+	LastSuccess time.Time
+	// LastFailedSteps is how many steps failed in the most recent pass.
+	LastFailedSteps int
+}
+
+// writeRetentionMetrics exports whether the retention job is running and
+// whether it is succeeding.
+//
+// docs/privacy.md states how long each kind of record is kept. These series
+// are how an operator checks that statement against the running process
+// instead of taking it on trust: alert when the last success is more than a
+// couple of hours old, or when the failure counter moves.
+//
+// The two timestamps are omitted until they have a value. A gauge reading 0
+// would say the job last succeeded in 1970, and every "seconds since last
+// success" alert would fire for the first minute after each restart.
+func (a *API) writeRetentionMetrics(b *strings.Builder) {
+	if a.Retention == nil {
+		return
+	}
+	s := a.Retention.RetentionSnapshot()
+
+	metric(b, "dnsdaddy_retention_sweeps_total", "Retention passes finished since process start", "counter",
+		fmt.Sprintf("dnsdaddy_retention_sweeps_total %d", s.Sweeps))
+	metric(b, "dnsdaddy_retention_sweep_failures_total", "Retention passes in which at least one step failed; expired data may still be stored", "counter",
+		fmt.Sprintf("dnsdaddy_retention_sweep_failures_total %d", s.FailedSweeps))
+	metric(b, "dnsdaddy_retention_last_failed_steps", "Steps that failed in the most recent retention pass", "gauge",
+		fmt.Sprintf("dnsdaddy_retention_last_failed_steps %d", s.LastFailedSteps))
+	if !s.LastRun.IsZero() {
+		metric(b, "dnsdaddy_retention_last_run_timestamp_seconds", "When the most recent retention pass finished", "gauge",
+			fmt.Sprintf("dnsdaddy_retention_last_run_timestamp_seconds %d", s.LastRun.Unix()))
+	}
+	if !s.LastSuccess.IsZero() {
+		metric(b, "dnsdaddy_retention_last_success_timestamp_seconds", "When a retention pass last finished with no failed step", "gauge",
+			fmt.Sprintf("dnsdaddy_retention_last_success_timestamp_seconds %d", s.LastSuccess.Unix()))
+	}
+}
+END
+FILE {"path":"internal/api/metrics_retention_test.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"1654a1c94a6a939825aa935dac34f467b4f25c1258433476b14577fd5b780306","mode":"0o644"}
+REPLACE 0 0 68
+package api
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+type fixedRetention struct{ snap RetentionSnapshot }
+
+func (f fixedRetention) RetentionSnapshot() api.RetentionSnapshot { return f.snap }
+
+// The retention windows in docs/privacy.md are a statement about a background
+// job, and these series are the only way to check that statement against a
+// running process without reading its log.
+func TestRetentionMetricsReportWhetherTheJobRanAndSucceeded(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+
+	// No job wired in: no series. A retention counter reading zero on a
+	// process that has no retention job would be a false reassurance.
+	if body := h.getMetrics(); strings.Contains(body, "dnsdaddy_retention_") {
+		t.Fatal("retention series were exported with no retention job to report on")
+	}
+
+	// Started, first pass not finished yet. The counters exist; the two
+	// timestamps do not, because 0 would read as "last succeeded in 1970" and
+	// fire every staleness alert for the first minute after a restart.
+	h.api.Retention = fixedRetention{}
+	body := h.getMetrics()
+	for _, want := range []string{
+		"dnsdaddy_retention_sweeps_total 0",
+		"dnsdaddy_retention_sweep_failures_total 0",
+		"dnsdaddy_retention_last_failed_steps 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("before the first pass: missing %q", want)
+		}
+	}
+	for _, absent := range []string{
+		"dnsdaddy_retention_last_run_timestamp_seconds",
+		"dnsdaddy_retention_last_success_timestamp_seconds",
+	} {
+		if strings.Contains(body, absent) {
+			t.Errorf("before the first pass: %s was exported with no value to report", absent)
+		}
+	}
+
+	// Three passes, the latest of which failed two steps. The last success is
+	// older than the last run, which is the gap an alert is written against.
+	lastRun := time.Unix(1_790_000_000, 0)
+	lastSuccess := lastRun.Add(-time.Hour)
+	h.api.Retention = fixedRetention{RetentionSnapshot{
+		Sweeps: 3, FailedSweeps: 1, LastRun: lastRun, LastSuccess: lastSuccess, LastFailedSteps: 2,
+	}}
+	body = h.getMetrics()
+	for _, want := range []string{
+		"dnsdaddy_retention_sweeps_total 3",
+		"dnsdaddy_retention_sweep_failures_total 1",
+		"dnsdaddy_retention_last_failed_steps 2",
+		"dnsdaddy_retention_last_run_timestamp_seconds 1790000000",
+		"dnsdaddy_retention_last_success_timestamp_seconds 1789996400",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("after a failed pass: missing %q", want)
+		}
+	}
+}
+END
+FILE {"path":"internal/api/openapi.yaml","before":"06afe9e75b2ca6627e00d00f30aeef4cb7c889d8433b282b787f1cb58fcf2d3a","after":"fe6c6716bb03bfeb54a9ee39e178541795365372166ebd0b8a3c89f2482aea2d","mode":"0o644"}
+REPLACE 230 231 1
+        **An authenticated caller** additionally gets `version`, `uptimeSeconds`,
+REPLACE 232 233 1
+        `blocklistSize`, `protecting` and `clientAclStale`. A valid session cookie
+REPLACE 234 235 1
+        or management bearer token is required, including from loopback.
+REPLACE 236 237 1
+        Neither peer addresses nor forwarding headers grant this access.
+REPLACE 238 239 1
+        Container liveness probes need no credential. `dnsdaddy doctor` can use
+REPLACE 240 241 1
+        `--api-token-file` for local detail and otherwise reports unavailable
+REPLACE 242 250 1
+        live index and ACL state as unknown, not false or healthy.
+END
+FILE {"path":"internal/api/route_auth_test.go","before":"3f40d6ef1dbaa0c5f6673d6e3d833ec6225c8ea3cd99ce48063bb7de530ce7a2","after":"86ec74ccd5902a4ed61b42311b565c697548632ae96e607ef6536bf8688ee482","mode":"0o644"}
+REPLACE 140 141 1
+	//            detail only for an authenticated caller, regardless of peer.
+END
+FILE {"path":"internal/api/server.go","before":"411b882d974e913b845faa5669dc485ed6500a1c1a491a1ecf740a4ee9bb6dde","after":"edab7ad301113e1ff40caa7f43d77cc96142d15d26f552df17f0b677bcb39114","mode":"0o644"}
+REPLACE 96 96 4
+
+	// Retention reports what the retention job has done, or nil when the
+	// process runs without one. Read-only, and only /metrics reads it.
+	Retention RetentionStats
+END
+FILE {"path":"internal/catalog/observatory.go","before":"81bb4a9cc705af5a19aff9a9ccdd9b8826ee433e4a7910106d37282a2926eed8","after":"a5f6739189eef9d7c9589bc980030c98a3b601f3b020712f833525dd58a9e086","mode":"0o644"}
+REPLACE 7 12 4
+// The DNS Daddy Threat Observatory was the project's own threat-intelligence
+// feed. The connector is retired: it is not in DefaultFeeds, the management API
+// refuses to enable or refresh it, and an upgrade disables the row an older
+// install seeded. Nothing in this binary contacts the address below.
+REPLACE 13 14 3
+// The constants stay because that upgrade path has to recognise the old row,
+// and because "observatory" survives as a format name for an operator's own
+// JSON feed. See docs/threat-intel.md.
+END
+FILE {"path":"internal/catalog/privacy_doc_test.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"90722aafb097e2585c7f52d30d49100ea904b03074755118f89e01e9de4e2373","mode":"0o644"}
+REPLACE 0 0 72
+package catalog
+
+import (
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func defaultFeedDisclosure(t *testing.T, feeds []Feed) string {
+	t.Helper()
+	hosts := map[string]bool{}
+	ids := map[string]bool{}
+	count := 0
+	var rows strings.Builder
+	for _, f := range feeds {
+		if !f.Enabled {
+			continue
+		}
+		u, err := url.Parse(f.URL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || ids[f.ID] {
+			t.Fatalf("invalid or duplicate default feed: %s", f.ID)
+		}
+		ids[f.ID] = true
+		hosts[u.Hostname()] = true
+		count++
+		fmt.Fprintf(&rows, "| `%s` | %s | `%s` | `%s` |\n", f.ID, f.Name, f.URL, f.Category)
+	}
+	if count == 0 {
+		t.Fatal("no enabled feeds to disclose")
+	}
+	return fmt.Sprintf("<!-- default-feed-disclosure:start -->\nDefault-enabled feeds: **%d**. Initial receiving hosts: **%d**. Disabled built-in feeds: **%d**.\n\n| Feed ID | Name | Initial download URL | Category |\n|---|---|---|---|\n%s<!-- default-feed-disclosure:end -->", count, len(hosts), len(feeds)-count, rows.String())
+}
+
+func TestPrivacyDisclosureExactlyMatchesDefaultFeeds(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "docs", "privacy.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(b)
+	const start = "<!-- default-feed-disclosure:start -->"
+	const end = "<!-- default-feed-disclosure:end -->"
+	if strings.Count(doc, start) != 1 || strings.Count(doc, end) != 1 {
+		t.Fatal("missing/duplicate feed disclosure boundaries")
+	}
+	a, z := strings.Index(doc, start), strings.Index(doc, end)
+	if z < a {
+		t.Fatal("invalid disclosure boundaries")
+	}
+	want := defaultFeedDisclosure(t, DefaultFeeds)
+	if got := doc[a : z+len(end)]; got != want {
+		t.Fatalf("privacy disclosure drift; replace the bounded block with:\n%s", want)
+	}
+}
+
+func TestFeedDisclosureIncludesMembershipCountsAndURLs(t *testing.T) {
+	original := defaultFeedDisclosure(t, DefaultFeeds)
+	for _, mutation := range []func([]Feed){
+		func(f []Feed) { f[0].Enabled = false },
+		func(f []Feed) { f[0].URL += "changed" },
+		func(f []Feed) { f[0].Name += "changed" },
+		func(f []Feed) { f[0].Category = "changed" },
+	} {
+		copy := append([]Feed(nil), DefaultFeeds...)
+		mutation(copy)
+		if defaultFeedDisclosure(t, copy) == original {
+			t.Fatal("changed feed would not change exact disclosure")
+		}
+	}
+}
+END
+FILE {"path":"internal/retention/steps.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"dc14a58594d9c4311742c039ad3d3888aa14177f9f2ad7ec5a6d82650339c9e7","mode":"0o644"}
+REPLACE 0 0 52
+// Package retention runs independent, bounded cleanup steps sequentially.
+package retention
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// StepTimeout bounds each cooperative database operation, not a shared sweep.
+// A slow table must not consume the next table's budget. Shutdown still cancels
+// every child. Calls are synchronous: a timed-out writer is never abandoned in
+// a goroutine which could overlap the next sweep.
+const StepTimeout = 20 * time.Second
+
+type Step struct {
+	Name  string
+	Prune func(context.Context) (int64, error)
+}
+
+type Result struct {
+	Name    string
+	Removed int64
+	Err     error
+}
+
+// Run attempts every step unless its parent is cancelled. Each receives a fresh
+// timeout. A shared database outage can still fail multiple steps; these results
+// do not guarantee removal or an exact physical-erasure deadline.
+func Run(ctx context.Context, timeout time.Duration, steps []Step) []Result {
+	out := make([]Result, 0, len(steps))
+	for _, step := range steps {
+		result := Result{Name: step.Name}
+		switch {
+		case ctx.Err() != nil:
+			result.Err = ctx.Err()
+		case timeout <= 0 || step.Prune == nil:
+			result.Err = errors.New("invalid retention step or timeout")
+		default:
+			child, cancel := context.WithTimeout(ctx, timeout)
+			result.Removed, result.Err = step.Prune(child)
+			// Do not count completion after its deadline as verified success,
+			// even if a driver returned no error. Preserve any row count.
+			if result.Err == nil {
+				result.Err = child.Err()
+			}
+			cancel()
+		}
+		out = append(out, result)
+	}
+	return out
+}
+END

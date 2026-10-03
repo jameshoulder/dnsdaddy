@@ -1,0 +1,441 @@
+FILE {"path":".env.example","before":"380dbcb1f6b696e54f5c17a75c009ebb8e023cacd0b37810cf617ca5cd3c15b8","after":"39705840efcb2d67e77230d9773f08868fa6a99b856470861126d1db28588f43","mode":"0o644"}
+REPLACE 169 169 1
+# 0 does not mean "keep none": it switches expiry off and keeps them for ever.
+REPLACE 174 180 9
+# The built-in feeds are third-party lists. A stock install downloads the six
+# enabled ones on first start and every 12 hours, from urlhaus.abuse.ch,
+# raw.githubusercontent.com, phishing.army and blocklistproject.github.io.
+# Those hosts see your server's IP, the request time and a dnsdaddy/<version>
+# user agent, never your queries. docs/privacy.md has the detail.
+#
+# Nothing is fetched from a server the DNS Daddy project runs: the Threat
+# Observatory connector is retired and cannot be enabled. There is nothing to
+# configure here; feeds are switched on and off on the Threat feeds page.
+END
+FILE {"path":"CHANGELOG.md","before":"4cc04e7e94e4aa2cf18882d63a88efaf321a2cdc0640fe895ba2e898856c7044","after":"ea91dee2ce1e19f63a8c084b6289c4460ef832a7c4c58545237f7a3e97cfd1c3","mode":"0o644"}
+REPLACE 23 23 30
+
+### Privacy review: health access, retention and secret-file protection
+
+- Integrated the four supplied Claude patches, with a follow-up review of their
+  remaining gaps. This is AI-assisted maintenance, not independent certification.
+- Health detail now requires a valid session/API token even on loopback. Source
+  addresses and forwarding-header presence grant no privilege, including through
+  a headerless local proxy. Public liveness and the container HEALTHCHECK remain
+  available. **Migration:** doctor can use `--api-token-file`; without a credential,
+  live index/ACL detail is unknown. `healthcheck.sh` reports incomplete readiness
+  instead of inferring a passing result from absent fields.
+- Independent cleanup steps get fresh 20-second cooperative deadlines. Failed
+  steps do not consume sibling timeouts; shutdown cancels all remaining work.
+  Query, presence, aggregate and intelligence-cache tables are independently
+  attempted; atomic decision/capture lifecycle rules remain intact. A database
+  outage can still fail multiple steps. No physical-erasure guarantee is added.
+- Retention outcomes/timestamps are exposed in authenticated metrics. Sample
+  Prometheus rules include first-success, missing-per-instance, failure and stalled
+  cases, with executable rule tests and an explicit startup grace period.
+- Existing zero-retention semantics are preserved and warned about even if new
+  collection is disabled. Disabled collection does not imply historic erasure.
+- Docker `.env` protection is verified on install **and upgrade**. Failed/no-op
+  permission changes stop before Compose changes. New files are created privately;
+  symlinks, multiple hard links and unexpected owners are refused.
+- Native configuration protection never silently adds permissions or takes over
+  an unrelated owner. Stricter service-owned modes remain; root-owned settings
+  that deny service access require an explicit operator decision.
+- The privacy disclosure is checked exactly against default feed IDs, names,
+  categories, initial URLs and counts. There are six enabled feeds on four initial
+  hosts; Malware & C2 is one feed. Retired Observatory comments are corrected.
+END
+FILE {"path":"SECURITY.md","before":"c39d3edcd586bc0fe4cb9de7637aba2ccb4e99d4cfa423840149fa86c7fc5399","after":"b27276cd5aa015cee7e77f28b520c70d9ed19ff38b100c569234a52321e1c405","mode":"0o644"}
+REPLACE 213 226 8
+**Health detail requires authentication, including on loopback.** `/api/v1/health`
+returns only `{"status":"ok"}` without a valid session or API token. Version,
+uptime, live index and ACL-reload state require explicit management authentication.
+A reverse proxy can connect from localhost with or without forwarding headers;
+neither those headers nor its address grants access. Docker's container health
+check continues to check liveness without credentials. `dnsdaddy doctor` accepts
+`--api-token-file` for authenticated local detail; without it, live index and ACL
+state remain explicitly unknown. See [monitoring](docs/deploy.md#9-monitoring).
+END
+FILE {"path":"cmd/dnsdaddy/doctor.go","before":"61cb9c7ddd65fe507babe3debd79c3f16462056b66de1d8bec706648d7edbda0","after":"cab84307497bfe3631b0ed1395994af0fa396ea515e8e26e8940c295f8f8e84e","mode":"0o644"}
+REPLACE 37 39 3
+// no configuration or query history. Its local database handle is read-only;
+// optional authenticated HTTP probes record normal token-use metadata in the
+// daemon. DNS probes can also appear in the running resolver's telemetry.
+REPLACE 44 44 1
+	tokenFile := fs.String("api-token-file", envOr("DNSDADDY_DOCTOR_TOKEN_FILE", ""), "optional owner-only file containing a management API token for local health detail")
+REPLACE 53 54 6
+	token, err := readDoctorToken(*tokenFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "doctor:", err)
+		return err
+	}
+	checks := collectDoctorChecksWithToken(ctx, *configPath, *timeout, token)
+REPLACE 75 75 4
+	return collectDoctorChecksWithToken(ctx, configPath, timeout, "")
+}
+
+func collectDoctorChecksWithToken(ctx context.Context, configPath string, timeout time.Duration, token string) []diag.Check {
+REPLACE 113 114 1
+		webChecks, aclStale = doctorWebWithToken(ctx, st, cfg, timeout, token)
+REPLACE 366 366 4
+	return doctorWebWithToken(ctx, st, cfg, timeout, "")
+}
+
+func doctorWebWithToken(ctx context.Context, st *store.Store, cfg config.Config, timeout time.Duration, token string) ([]diag.Check, *bool) {
+REPLACE 388 388 5
+	// The destination was verified local above. Never forward this credential
+	// via HTTP_PROXY or across a redirect, and never log its value.
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+REPLACE 414 416 2
+		BlocklistSize  *int   `json:"blocklistSize"`
+		ClientACLStale *bool  `json:"clientAclStale"`
+REPLACE 424 424 5
+	if health.Status != "ok" {
+		c.Status = diag.StatusWarn
+		c.Summary = "The dashboard did not report expected liveness."
+		return []diag.Check{c, intelUnknown()}, nil
+	}
+REPLACE 425 426 1
+	c.Summary = "The dashboard is responding (liveness only)."
+REPLACE 427 431 9
+	if health.BlocklistSize == nil || health.ClientACLStale == nil {
+		c.Status = diag.StatusWarn
+		c.Action = "Live protection and ACL state are unknown. Supply --api-token-file with an owner-only management token file; absence of detail is not a healthy ACL verdict."
+		return []diag.Check{c, intelUnknown()}, nil
+	}
+	// Only present fields count as measurements. Older servers may also send
+	// these fields to local callers; missing values must never become false/0.
+	c.Summary = "The dashboard responded with live index and ACL state."
+	return []diag.Check{c, doctorIntel(ctx, st, cfg, *health.BlocklistSize)}, health.ClientACLStale
+REPLACE 473 475 1
+		Action:  "The running process did not supply live index detail. Check API reachability and authenticated access — see the WEB INTERFACE check above.",
+END
+FILE {"path":"cmd/dnsdaddy/doctor_health_followup_test.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"a8823571ba798178ca08b3e08a527f260814eeafc1ca77e214dec2f23d7215ff","mode":"0o644"}
+REPLACE 0 0 99
+package main
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/diag"
+)
+
+func TestDoctorMissingHealthFieldsAreUnknown(t *testing.T) {
+	for _, payload := range []string{`{"status":"ok"}`, `{"status":"ok","blocklistSize":0}`, `{"status":"ok","clientAclStale":false}`, `{"status":"unexpected"}`} {
+		t.Run(payload, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, payload) }))
+			defer server.Close()
+			cfg := config.Default()
+			cfg.HTTP.Listen = server.Listener.Addr().String()
+			checks, stale := doctorWeb(context.Background(), nil, cfg, time.Second)
+			if stale != nil || checks[0].Status == diag.StatusPass {
+				t.Fatalf("missing evidence became healthy: %+v, stale=%v", checks, stale)
+			}
+		})
+	}
+}
+
+func TestDoctorTokenIsSentOnlyToTheVerifiedLocalEndpoint(t *testing.T) {
+	const token = "dnsd_fixture"
+	var redirected atomic.Bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { redirected.Store(true) }))
+	defer destination.Close()
+	for _, redirect := range []bool{false, true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				t.Error("missing token")
+			}
+			if redirect {
+				http.Redirect(w, r, destination.URL, http.StatusFound)
+				return
+			}
+			_, _ = io.WriteString(w, `{"status":"ok","blocklistSize":42,"clientAclStale":false}`)
+		}))
+		cfg := config.Default()
+		cfg.HTTP.Listen = server.Listener.Addr().String()
+		checks, stale := doctorWebWithToken(context.Background(), nil, cfg, time.Second, token)
+		if redirect {
+			if stale != nil || checks[0].Status != diag.StatusFail {
+				t.Fatal("redirect was not refused")
+			}
+		} else if stale == nil || *stale || checks[0].Status != diag.StatusPass {
+			t.Fatalf("authenticated detail lost: %+v", checks)
+		}
+		server.Close()
+	}
+	if redirected.Load() {
+		t.Fatal("doctor followed a redirect with a credential")
+	}
+}
+
+func TestDoctorTokenFileSecurity(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(file, []byte("dnsd_fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readDoctorToken(file); err != nil || got != "dnsd_fixture" {
+		t.Fatalf("valid file: %q %v", got, err)
+	}
+	link := file + ".link"
+	if err := os.Symlink(file, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readDoctorToken(link); err == nil {
+		t.Fatal("accepted symlink")
+	}
+	if err := os.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readDoctorToken(file); err == nil {
+		t.Fatal("accepted world-readable token")
+	}
+	if err := os.Chmod(file, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"", "dnsd_", "dnsd_good\nInjected: value", strings.Repeat("x", 4097)} {
+		if err := os.WriteFile(file, []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readDoctorToken(file); err == nil {
+			t.Fatal("accepted invalid token")
+		}
+	}
+}
+END
+FILE {"path":"cmd/dnsdaddy/doctor_token.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"36c237f887c9c35f62c6f513efc3a9698f0c6ed191d0a019ff37ac7975d10cba","mode":"0o644"}
+REPLACE 0 0 45
+package main
+
+import (
+	"errors"
+	"io"
+	"os"
+	"strings"
+)
+
+// readDoctorToken avoids placing credentials in arguments or creating a session.
+// It refuses links/non-regular/over-broad files before reading and limits input.
+// The containing directory and local host remain part of the trust boundary.
+func readDoctorToken(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	bad := errors.New("doctor token must be in a readable, owner-only regular file containing a dnsd_ API token")
+	before, err := os.Lstat(path)
+	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0o077 != 0 {
+		return "", bad
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", bad
+	}
+	defer f.Close()
+	after, err := f.Stat()
+	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || after.Mode().Perm()&0o077 != 0 {
+		return "", bad
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil || len(b) > 4096 {
+		return "", bad
+	}
+	token := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(token, "dnsd_") || len(token) <= len("dnsd_") {
+		return "", bad
+	}
+	for _, c := range token {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return "", bad
+		}
+	}
+	return token, nil
+}
+END
+FILE {"path":"cmd/dnsdaddy/main.go","before":"513adb1ba343d68974d4f305cec4ea78ccbb8905f6d874e083698a9d4874882c","after":"c04d12292062f864a4b9a5565c0629d4049d4980980b3cf61e9628014089a0df","mode":"0o644"}
+REPLACE 46 46 1
+	"github.com/jameshoulder/dnsdaddy/internal/retention"
+REPLACE 116 116 1
+  -api-token-file path      optional owner-only token file for local health detail
+REPLACE 457 457 5
+	// Shared between the retention job, which writes it, and /metrics, which
+	// reports it. Created here because the API is built before the job starts.
+	retention := &retentionStatus{}
+	warnUnboundedRetention(cfg, log)
+
+REPLACE 460 460 1
+		Retention:      retention,
+REPLACE 528 529 1
+	go runRetention(ctx, st, cfg, log, retention)
+REPLACE 805 807 13
+//
+// status may be nil. When it is not, every finished pass is recorded on it,
+// which is what /metrics reports — see retentionStatus.
+func runRetention(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger, status *retentionStatus) {
+	prune := func() {
+		failed := pruneOnce(ctx, st, cfg, log)
+		// A pass cut short by shutdown did not fail; it was interrupted, and
+		// counting it would turn every restart into a retention alert.
+		if ctx.Err() != nil {
+			return
+		}
+		status.record(time.Now(), failed)
+	}
+REPLACE 829 837 6
+// pruneOnce attempts cleanup with a fresh cooperative budget for every table
+// or atomic lifecycle operation. It never detaches cancellation from shutdown.
+// Expiry-disabled datasets remain unchanged and are disclosed at startup.
+func pruneOnce(ctx context.Context, st *store.Store, cfg config.Config, log *slog.Logger) (failed []string) {
+	return pruneSteps(ctx, retention.StepTimeout, retentionSteps(st, cfg, time.Now()), log)
+}
+REPLACE 838 854 2
+func retentionSteps(st *store.Store, cfg config.Config, now time.Time) []retention.Step {
+	steps := st.LogRetentionSteps(cfg.Log.RetentionDays, cfg.Log.RollupDays, now)
+REPLACE 858 863 10
+	steps = append(steps, retention.Step{Name: "dnssec_observations", Prune: func(ctx context.Context) (int64, error) {
+		return st.PruneDNSSECObservations(ctx, now.AddDate(0, 0, -obsDays))
+	}})
+	steps = append(steps, retention.Step{Name: "findings", Prune: func(ctx context.Context) (int64, error) {
+		return st.PruneFindings(ctx, cfg.Detection.RetentionDays)
+	}})
+	if days := cfg.Log.DecisionRetentionDays; days > 0 {
+		steps = append(steps, retention.Step{Name: "decisions", Prune: func(ctx context.Context) (int64, error) {
+			return st.PruneDecisions(ctx, now.AddDate(0, 0, -days))
+		}})
+REPLACE 864 864 7
+	steps = append(steps, retention.Step{Name: "evidence", Prune: func(ctx context.Context) (int64, error) {
+		return st.PruneEvidence(ctx, now)
+	}})
+	steps = append(steps, st.IntelRetentionSteps(now)...)
+	steps = append(steps, retention.Step{Name: "sessions", Prune: st.PurgeExpiredSessions})
+	return steps
+}
+REPLACE 865 885 8
+func pruneSteps(ctx context.Context, budget time.Duration, steps []retention.Step, log *slog.Logger) (failed []string) {
+	for _, result := range retention.Run(ctx, budget, steps) {
+		if result.Err != nil {
+			failed = append(failed, result.Name)
+			log.Error("retention step incomplete", "step", result.Name, "error", result.Err)
+		}
+		if result.Removed > 0 {
+			log.Info("pruned expired records", "step", result.Name, "rows", result.Removed)
+REPLACE 887 896 2
+	if len(failed) > 0 {
+		log.Error("retention pass incomplete; expired data may remain", "failed_steps", failed)
+REPLACE 897 918 1
+	return failed
+END
+FILE {"path":"cmd/dnsdaddy/retention.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"e37de18bb53dbf3eef290420b7ef9f1a0c8d2750b66a48ec857e6d5917d88bc6","mode":"0o644"}
+REPLACE 0 0 101
+package main
+
+import (
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/api"
+	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/store"
+)
+
+// retentionStatus records what the retention job last did, so that "is the
+// data I said I would delete actually being deleted?" has an answer that does
+// not depend on reading the log.
+//
+// The job used to be observable only through what it removed: a pass that
+// deleted nothing logged nothing, which is also exactly what a job that had
+// stopped running looked like. A privacy document that states retention windows
+// is making a promise about this goroutine, and a promise nobody can check is
+// the kind that gets broken quietly.
+//
+// In memory, deliberately. It answers "since this process started", restarts
+// reset it, and the first pass runs a minute after boot — so a scrape always
+// has a recent answer without a write to the database every hour.
+type retentionStatus struct {
+	mu   sync.Mutex
+	snap api.RetentionSnapshot
+}
+
+// record notes one finished pass and the steps that failed in it.
+func (r *retentionStatus) record(at time.Time, failed []string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.snap.Sweeps++
+	r.snap.LastRun = at
+	r.snap.LastFailedSteps = len(failed)
+	if len(failed) > 0 {
+		r.snap.FailedSweeps++
+		return
+	}
+	r.snap.LastSuccess = at
+}
+
+// RetentionSnapshot implements api.RetentionStats.
+func (r *retentionStatus) RetentionSnapshot() api.RetentionSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.snap
+}
+
+// warnUnboundedRetention says, once at startup, which retained data this
+// configuration never deletes or deletes on a window the operator did not
+// write.
+//
+// The four retention settings do not read a zero the same way, and none of
+// these behaviours was written down:
+//
+//	log.retention_days            0 or less → the 7-day default
+//	log.rollup_days               0 or less → the 90-day default
+//	detection.retention_days      0         → findings are never deleted
+//	log.decision_retention_days   0 or less → decisions are never deleted
+//
+// Someone who writes 0 meaning "keep nothing" therefore gets a week of query
+// history and findings and decisions kept for ever, with nothing to tell them
+// so. This does not change what any value does — a configuration that worked
+// keeps working, and deleting data an operator believed they were keeping is
+// not a thing to do in a patch release. It makes the effective behaviour
+// visible, which is the part that was missing.
+func warnUnboundedRetention(cfg config.Config, log *slog.Logger) {
+	if cfg.Log.RetentionDays <= 0 {
+		log.Warn("log.retention_days is non-positive, which applies the default window rather than keeping nothing or keeping everything",
+			"configured", cfg.Log.RetentionDays,
+			"effective_days", store.DefaultRetentionDays,
+			"to_stop_storing_queries", "set log.query_log: false")
+	}
+	if cfg.Log.RollupDays <= 0 {
+		log.Warn("log.rollup_days is not a positive number, so the default applies",
+			"configured", cfg.Log.RollupDays,
+			"effective_days", store.DefaultRollupDays)
+	}
+	if cfg.Detection.RetentionDays <= 0 {
+		log.Warn("detection.retention_days is non-positive, so findings are never deleted; they hold domains and client addresses",
+			"configured", cfg.Detection.RetentionDays,
+			"collection_enabled", cfg.Detection.Enabled,
+			"historical_data", "disabling collection does not erase previously stored findings",
+			"to_expire_them", "set detection.retention_days to a positive number of days",
+			"to_stop_creating_them", "set detection.enabled: false")
+	}
+	if cfg.Log.DecisionRetentionDays <= 0 {
+		log.Warn("log.decision_retention_days is not a positive number, so decision records are never deleted; they hold domains and client addresses",
+			"configured", cfg.Log.DecisionRetentionDays,
+			"collection_enabled", cfg.Log.DecisionRecords,
+			"historical_data", "disabling collection does not erase previously stored decisions",
+			"to_expire_them", "set log.decision_retention_days to a positive number of days",
+			"to_stop_creating_them", "set log.decision_records: false")
+	}
+}
+END

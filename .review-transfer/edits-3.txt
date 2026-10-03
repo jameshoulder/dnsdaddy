@@ -1,0 +1,550 @@
+FILE {"path":"deploy/monitoring/retention.test.yml","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"a08b5b159a0dced839edf1af21dd8db5110228e6fdcb21457d5b04dbcf3c5d2d","mode":"0o644"}
+REPLACE 0 0 233
+rule_files:
+- retention.rules.yml
+evaluation_interval: 1m
+tests:
+- name: startup grace does not page
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="starting"}
+    values: 1+0x30
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="starting"}
+    values: 0+60x30
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="starting"}
+    values: 0+0x30
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="starting"}
+    values: 0+0x30
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionMetricsMissing
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionNeverSucceeded
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionStalled
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyRetentionSuccessStale
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: DNSDaddyScrapeUnavailable
+    exp_alerts: []
+- name: never succeeded is per instance even with healthy sibling
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="never"}
+    values: 1+0x30
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="never"}
+    values: 0+60x30
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="never"}
+    values: 0+0x30
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="never"}
+    values: 0+0x30
+  - series: up{job="dnsdaddy",instance="healthy"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="healthy"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="healthy"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="healthy"}
+    values: 0+0x200
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="healthy"}
+    values: _ 60+60x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="healthy"}
+    values: _ 60+60x199
+  alert_rule_test:
+  - eval_time: 16m
+    alertname: DNSDaddyRetentionNeverSucceeded
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: never
+        severity: warning
+      exp_annotations:
+        summary: No first successful retention sweep has been observed
+  - eval_time: 16m
+    alertname: DNSDaddyRetentionMetricsMissing
+    exp_alerts: []
+- name: missing metrics are per instance
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="missing"}
+    values: 1+0x30
+  - series: up{job="dnsdaddy",instance="healthy"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="healthy"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="healthy"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="healthy"}
+    values: 0+0x200
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="healthy"}
+    values: _ 60+60x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="healthy"}
+    values: _ 60+60x199
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: DNSDaddyRetentionMetricsMissing
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: missing
+        severity: warning
+      exp_annotations:
+        summary: Retention metrics are missing for this instance
+- name: failed sweep is visible
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="failed"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="failed"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="failed"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="failed"}
+    values: 0 1+0x30
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="failed"}
+    values: _ 60+60x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="failed"}
+    values: _ 60+60x199
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: failed
+        severity: warning
+      exp_annotations:
+        summary: The last retention sweep had failed steps
+- name: stalled and stale success are visible
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="stalled"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="stalled"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="stalled"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="stalled"}
+    values: 0+0x200
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="stalled"}
+    values: _ 60+0x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="stalled"}
+    values: _ 60+0x199
+  alert_rule_test:
+  - eval_time: 130m
+    alertname: DNSDaddyRetentionStalled
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: stalled
+        severity: warning
+      exp_annotations:
+        summary: No completed retention sweep has been observed for two hours
+  - eval_time: 130m
+    alertname: DNSDaddyRetentionSuccessStale
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: stalled
+        severity: warning
+      exp_annotations:
+        summary: No fully successful retention sweep has been observed for two hours
+- name: successful recovery clears failed state
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="recovered"}
+    values: 1+0x200
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="recovered"}
+    values: 0+60x200
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="recovered"}
+    values: 0+1x200
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="recovered"}
+    values: 1+0x9 0+0x30
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="recovered"}
+    values: _ 60+60x199
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="recovered"}
+    values: _ 60+60x199
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: recovered
+        severity: warning
+      exp_annotations:
+        summary: The last retention sweep had failed steps
+  - eval_time: 11m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts: []
+- name: restart clears timestamps and starts grace again
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="restart"}
+    values: 1+0x160
+  - series: dnsdaddy_uptime_seconds{job="dnsdaddy",instance="restart"}
+    values: 0+60x129 0+60x30
+  - series: dnsdaddy_retention_sweeps_total{job="dnsdaddy",instance="restart"}
+    values: 1+0x129 0+0x30
+  - series: dnsdaddy_retention_last_failed_steps{job="dnsdaddy",instance="restart"}
+    values: 0+0x160
+  - series: dnsdaddy_retention_last_run_timestamp_seconds{job="dnsdaddy",instance="restart"}
+    values: 60+0x129 stale _x30
+  - series: dnsdaddy_retention_last_success_timestamp_seconds{job="dnsdaddy",instance="restart"}
+    values: 60+0x129 stale _x30
+  alert_rule_test:
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionMetricsMissing
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionNeverSucceeded
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionFailed
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionStalled
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyRetentionSuccessStale
+    exp_alerts: []
+  - eval_time: 135m
+    alertname: DNSDaddyScrapeUnavailable
+    exp_alerts: []
+- name: scrape failure is not a retention success
+  interval: 1m
+  input_series:
+  - series: up{job="dnsdaddy",instance="down"}
+    values: 0+0x20
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: DNSDaddyScrapeUnavailable
+    exp_alerts:
+    - exp_labels:
+        job: dnsdaddy
+        instance: down
+        severity: warning
+      exp_annotations:
+        summary: DNS Daddy metrics cannot be scraped
+END
+FILE {"path":"deploy/native_config_test.go","before":"759c07bca3ec333de8515b1d6dbd164e70a53a6e0aaf946a1132b78938857d77","after":"3e7052cf99dc09c73adaaccd724ac20f57bc45e8a781c235a25c40c1f4a705f2","mode":"0o644"}
+REPLACE 94 94 86
+
+// The native installer left /etc/dnsdaddy at 0755 and config.yaml at 0644.
+// That file is where http.admin_password goes, and the binary applies it as
+// the live admin password on every start, so every account on the host could
+// read the dashboard password. Runs the installer's own restrict_config rather
+// than a copy of it.
+func TestNativeInstallerRestrictsConfigToTheServiceAccount(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "install.sh"))
+	must(t, err)
+	script := string(b)
+
+	start := strings.Index(script, "restrict_config() {")
+	if start < 0 {
+		t.Fatal("cannot locate restrict_config in the native installer")
+	}
+	end := strings.Index(script[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("cannot locate the end of restrict_config")
+	}
+	fn := script[start : start+end+3]
+
+	// The caller's own group stands in for the service account's: chgrp to a
+	// group you belong to needs no privilege, so this runs anywhere.
+	group, err := exec.Command("id", "-un").Output()
+	must(t, err)
+
+	for _, tc := range []struct {
+		name       string
+		withConfig bool
+	}{
+		{name: "config present", withConfig: true},
+		{name: "no config yet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "dnsdaddy")
+			must(t, os.Mkdir(dir, 0o755))
+			must(t, os.Chmod(dir, 0o755)) // not left to the umask
+			file := filepath.Join(dir, "config.yaml")
+			const content = "http:\n  admin_password: \"correct-horse-battery\"\n"
+			if tc.withConfig {
+				must(t, os.WriteFile(file, []byte(content), 0o644))
+				must(t, os.Chmod(file, 0o644))
+			}
+
+			cmd := exec.Command("bash", "-c", "set -euo pipefail\n"+fn+"\nrestrict_config \"$1\" \"$2\" \"$3\"",
+				"bash", dir, file, strings.TrimSpace(string(group)))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("restrict_config: %v\n%s", err, out)
+			}
+
+			info, err := os.Stat(dir)
+			must(t, err)
+			if perm := info.Mode().Perm(); perm != 0o750 {
+				t.Errorf("config directory has mode %04o, want 0750", perm)
+			}
+			if !tc.withConfig {
+				if _, err := os.Stat(file); !os.IsNotExist(err) {
+					t.Errorf("restrict_config created a config file that was not there: %v", err)
+				}
+				return
+			}
+			info, err = os.Stat(file)
+			must(t, err)
+			if perm := info.Mode().Perm(); perm != 0o640 {
+				t.Errorf("config.yaml has mode %04o, want 0640", perm)
+			}
+			got, err := os.ReadFile(file)
+			must(t, err)
+			if string(got) != content {
+				t.Error("restricting the configuration changed its contents")
+			}
+		})
+	}
+
+	// And it has to actually be reached, before the service reads the file. A
+	// function that exists and is never called looks exactly like one that
+	// works.
+	call := strings.Index(script, `restrict_config "$CONFIG_DIR" "${CONFIG_DIR}/config.yaml" "$SERVICE_USER"`)
+	restart := strings.Index(script, "systemctl restart dnsdaddy")
+	if call < 0 || restart < 0 || call > restart {
+		t.Error("the installer does not restrict the configuration before starting the service")
+	}
+	if strings.Contains(script, `install -d -m 0755 "$CONFIG_DIR"`) {
+		t.Error("the installer creates the configuration directory world-readable")
+	}
+}
+END
+FILE {"path":"deploy/permission_failure_test.go","before":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","after":"c006222d3346df0fce7e2fd9b0e083b2531bca65d70a8aa6bfb9b3cfcbdc06f3","mode":"0o644"}
+REPLACE 0 0 39
+package deploy
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestPermissionFailureStopsInstallAndUpgradeBeforeComposeChanges(t *testing.T) {
+	for _, upgrade := range []bool{false, true} {
+		for _, noOp := range []bool{false, true} {
+			in := newInstall(t)
+			in.writeEnv("DNSDADDY_ADMIN_PASSWORD=fixture-only\n")
+			body := "exit 1"
+			if noOp {
+				body = "exit 0"
+			}
+			in.stub("chmod", body)
+			args := []string{"--yes"}
+			if upgrade {
+				args = append(args, "--upgrade")
+			}
+			out, code := in.run(args...)
+			if code == 0 {
+				t.Fatalf("upgrade=%v noop=%v accepted unprotected file:\n%s", upgrade, noOp, out)
+			}
+			if strings.Contains(out, "fixture-only") {
+				t.Fatal("failure output leaked the secret")
+			}
+			log, err := os.ReadFile(in.root + "/compose.log")
+			must(t, err)
+			for _, forbidden := range []string{"compose up", "compose down", "compose restart", "compose build"} {
+				if strings.Contains(string(log), forbidden) {
+					t.Fatalf("permission failure reached %s", forbidden)
+				}
+			}
+		}
+	}
+}
+END
+FILE {"path":"dnsdaddy.example.yaml","before":"1325260b43d7803cfe1890e33604af6f87bed50b734b11b8d306428a6f577d7f","after":"e43ea1fd2981432acbdb5b172fbc152de437e22faf125920458a435442547a93","mode":"0o644"}
+REPLACE 264 264 3
+  #
+  # 0 applies this 7-day default. It does not mean "keep nothing" and it does
+  # not mean "keep everything": to store no query rows, set query_log: false.
+REPLACE 284 284 5
+  #
+  # 0 or less switches expiry OFF: decision records, which hold domains and
+  # client addresses, are then kept until you delete them. This is the opposite
+  # of what 0 does to retention_days above, and DNS Daddy warns at startup when
+  # it is in effect. To stop creating them, set decision_records: false.
+REPLACE 288 288 1
+  # 0 or less applies this 90-day default.
+REPLACE 376 376 4
+  #
+  # 0 switches expiry OFF: findings, which hold domains and client addresses,
+  # are then kept until you delete them, and DNS Daddy warns at startup when
+  # that is in effect. To stop creating them, set enabled: false above.
+END
+FILE {"path":"docker-compose.yml","before":"c17b81d7d0676e8fe02568385d82bbb959ededad91b932994863ca7dc6711e70","after":"8a6e5d1f5d8e65f8c31b0b041446067d9aac480d8345ac9c44e669d2235fcf6c","mode":"0o644"}
+REPLACE 158 161 4
+      # The built-in feeds are third-party lists, downloaded on first start and
+      # every 12 hours; docs/privacy.md names the hosts and what they see.
+      # Nothing here fetches from a server the DNS Daddy project runs: the
+      # Threat Observatory connector is retired and cannot be enabled.
+END
+FILE {"path":"docs/capabilities.md","before":"4fcff9638d3539b3b408038e06a59ffb2b5e3662a8318e43d06c2158b6c30a2c","after":"f559bb9a9f52c71b5d5f0ccc4457503d82a1f0eb505f567b7cd408d4e0669b41","mode":"0o644"}
+REPLACE 93 94 1
+| `dnsdaddy doctor` | Reads configuration and the database, and sends real DNS queries at the configured listeners and through each upstream. Reports SYSTEM, DATABASE, DNS LISTENER, CLIENT ACCESS, UPSTREAM, WEB INTERFACE and THREAT INTELLIGENCE as PASS/WARN/FAIL with the evidence behind each verdict. Opens its local database read-only and does not change configuration or prune history. Optional `--api-token-file` obtains authenticated local health detail; normal authentication records token use and DNS probes may appear in telemetry. Without detail, live index/ACL state remains unknown. Exits non-zero on failure. `--json` for machine consumption. |
+END
+FILE {"path":"docs/deploy.md","before":"bbb60b96b4824a9871610942732bc42ce768d454476458bbb50031eec638bc54","after":"ea0254dfb7d4644c99433ac3ac15f69aa0e3558bed10394b18450953b3c65b88","mode":"0o644"}
+REPLACE 677 678 1
+{"status": "ok"}
+REPLACE 680 684 29
+The public response reports process liveness only. Detailed health, including
+`protecting`, `blocklistSize` and `clientAclStale`, requires a valid session or API
+token even on loopback. A loaded index still does not prove that every client's
+policy enforces it. A headerless local proxy receives no more than any other
+unauthenticated caller.
+
+`dnsdaddy doctor` keeps its read-only local/database and DNS checks. To also read
+live index and ACL state, create a management API token in the dashboard, store it
+in an owner-only regular file in a trusted directory, and run:
+
+```bash
+dnsdaddy doctor --api-token-file /path/to/private-token
+```
+
+Normal API authentication updates the token's last-used timestamp; DNS probes can
+also appear in resolver telemetry. Doctor does not change configuration or prune
+history, but it is not a promise of zero observable activity.
+
+The token value is not an argument, is never printed by doctor, and is sent only
+to the configured, verified-local management address; HTTP proxies and redirects
+are disabled. File symlinks and group/other-readable token files are refused.
+`DNSDADDY_DOCTOR_TOKEN_FILE` can supply the path. Inside Docker, mount an owner-only
+file readable by the container's service user and use that container path. Do not
+copy a token into an image or commit it. Management tokens are not read-only roles;
+protect and revoke this credential accordingly.
+
+Without authenticated detail, doctor and `healthcheck.sh` explicitly report
+incomplete readiness; absent fields are not interpreted as an empty index or a
+healthy ACL. Docker's built-in HEALTHCHECK remains a credential-free liveness check.
+REPLACE 727 727 2
+| `dnsdaddy_retention_last_success_timestamp_seconds` | Age over two hours means no recent fully successful sweep was observed. Absent until the first success; absence requires a separate alert. |
+| `dnsdaddy_retention_sweep_failures_total` | Rising means a retention step is failing; the log names it. |
+REPLACE 728 728 22
+
+Sample retention rules and their limits are in
+[deploy/monitoring/README.md](../deploy/monitoring/README.md). They detect missing
+metrics per instance, no first success after startup grace, failures and stalled
+sweeps. Importing metrics alone does not install alerts or a notification receiver.
+
+### Secret-file permissions on install and upgrade
+
+The Docker installer validates existing `.env` files on both installation and
+upgrade, creates new ones privately and stops before changing Compose services if
+permissions cannot be protected and verified. It does not stop an already-running
+resolver on that failure. Symlinks, multiple hard links and unexpected ownership
+are refused. Use a trusted, non-shared writable deployment directory.
+
+The native installer removes permissions above directory `0750` and config `0640`,
+accepts root/service ownership and sets the intended service group. Stricter
+service-owned `0700`/`0600` remains unchanged. It refuses to silently broaden a
+root-owned configuration that the service cannot read: explicitly review/grant
+service access first. It does not take ownership from an unrelated account.
+POSIX mode checks are not a universal filesystem/ACL audit. Restrict parent paths,
+backups and host access separately; change an exposed bootstrap password after
+assessing any earlier permissive copy.
+END
+FILE {"path":"docs/deployment-matrix.md","before":"a52ec0cf69dcdb0ee6b9af0c4424f3edd4c43377ca35e6f9d69ff03c3c6adfc6","after":"4fe79eff6aa883fa799ae8490b7dcc628c1cc4a11b101e83fb9b4ca085de9b0b","mode":"0o644"}
+REPLACE 288 289 1
+| `GET /api/v1/health` over the published port | `{"status":"ok"}` and nothing else, because no management credential was supplied |
+REPLACE 311 312 1
+### Health detail: explicit authentication on every topology
+REPLACE 313 316 5
+The earlier recorded Docker bridge test did not cover native/host-network
+loopback proxies. The current rule no longer relies on identifying a proxy:
+unauthenticated callers receive `{"status":"ok"}` on every peer address, with or
+without forwarding headers. Valid management authentication grants the detailed
+fields. Earlier loopback/full-detail results describe the old implementation.
+REPLACE 317 327 7
+`TestHeaderlessLoopbackProxyCannotReadHealthDetail` exercises a real loopback HTTP
+reverse proxy which adds no forwarding headers. Other tests cover IPv4/IPv6 peer
+values, forged credentials and authenticated requests. These are automated local
+regressions, not a claim of a live customer native/Docker acceptance test.
+`doctor --api-token-file` supplies optional explicit authentication; missing live
+fields remain unknown. Repeat the deployment-specific acceptance tests after
+upgrading; the container's liveness-only health check is unchanged.
+END
+FILE {"path":"docs/privacy.md","before":"2e82001f30c1b8dbf0670ce7c52ff5fc460d2c5a41f34094027c1e982d2b764b","after":"e836c278ba4313199a863cae0f81cdb805ee02b48601feaf77c5f68c81bb2ed9","mode":"0o644"}
+REPLACE 30 30 33
+
+Threat-feed downloads are **on** by default. A fresh installation schedules its
+enabled built-in feeds shortly after startup and again every 12 hours by default
+(`feeds.refresh_interval`). These are bulk downloads, not uploads of client DNS
+histories. The initial recipients are `urlhaus.abuse.ch`, `raw.githubusercontent.com`,
+`phishing.army` and `blocklistproject.github.io`.
+
+<!-- default-feed-disclosure:start -->
+Default-enabled feeds: **6**. Initial receiving hosts: **4**. Disabled built-in feeds: **4**.
+
+| Feed ID | Name | Initial download URL | Category |
+|---|---|---|---|
+| `urlhaus` | abuse.ch URLhaus | `https://urlhaus.abuse.ch/downloads/hostfile/` | `malware` |
+| `hagezi-tif-mini` | HaGeZi Threat Intelligence Feeds (mini) | `https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/tif.mini.txt` | `malware` |
+| `phishing-army` | Phishing Army (extended) | `https://phishing.army/download/phishing_army_blocklist_extended.txt` | `phishing` |
+| `blocklistproject-phishing` | The Block List Project — Phishing | `https://blocklistproject.github.io/Lists/phishing.txt` | `phishing` |
+| `botnet-c2` | The Block List Project — Malware & C2 | `https://blocklistproject.github.io/Lists/malware.txt` | `c2` |
+| `coinblocker` | CoinBlockerLists | `https://raw.githubusercontent.com/ZeroDot1/CoinBlockerLists/master/list.txt` | `cryptomining` |
+<!-- default-feed-disclosure:end -->
+
+The Malware & C2 entry is **one feed**, not separate malware and C2 downloads.
+These services receive the resolver host's connection IP, request URL, timing and
+`dnsdaddy/<version>` user agent. Bulk feed requests do not include DNS clients'
+addresses or query logs. Network infrastructure and any permitted redirects can
+add recipients; this list describes the catalogue's initial URLs, not a guarantee
+about each external service's hosting. Existing installations may have different
+saved feeds. Disable unwanted feeds and review configured URLs before enabling
+traffic; disabling a feed cannot recall a request already transmitted.
+
+The block above is checked exactly against `DefaultFeeds` in
+[`internal/catalog/catalog.go`](../internal/catalog/catalog.go), including IDs,
+names, URLs, categories, enabled count and host count. The default-disabled feeds
+are not fetched unless enabled. No runtime discovery request is made by this test.
+REPLACE 142 144 36
+Each table or atomic lifecycle operation receives its own 20-second cooperative
+timeout. A failed or timed-out step is reported and does not consume another
+step's timeout; shutdown still cancels the whole sweep. A shared database outage
+can fail several steps, so completion is evidence of attempted cleanup, not a
+promise of physical erasure. Bounded asynchronous queues
+can drop records under load; counters report these losses. Retained data is not
+a guaranteed complete reconstruction of traffic.
+
+To check that the sweep is running rather than assume it, read the
+authenticated `/metrics` endpoint.
+`dnsdaddy_retention_last_success_timestamp_seconds` is when a sweep last
+finished with nothing failed, and `dnsdaddy_retention_sweep_failures_total`
+counts sweeps in which at least one step failed. Counters reset when the process restarts; success/run timestamps are absent until
+such an event occurs. The first sweep runs about a minute after startup. A timestamp
+that has never existed cannot be tested for age: the
+[monitoring rules](../deploy/monitoring/README.md) also cover missing per-instance
+metrics, no first success after a grace period, failed and stalled sweeps.
+
+### What a zero means
+
+The retention settings do not treat `0` alike, and none of them reads it as
+"keep nothing":
+
+| Setting | `0` |
+|---|---|
+| `log.retention_days` | The 7-day default applies. To store no query rows, set `log.query_log: false`. |
+| `log.rollup_days` | The 90-day default applies. A negative value does the same. |
+| `detection.retention_days` | Expiry is **off**: findings are kept until you delete them. |
+| `log.decision_retention_days` | Expiry is **off**: decision records are kept until you delete them. A negative value does the same. |
+
+DNS Daddy logs a warning at startup for each of these that is in effect, so an
+unbounded window is a visible choice and not a side effect of a `0`. Warnings also
+apply when collection is disabled: old records may still be present, and disabling
+collection does not erase them. Positive expiry continues to apply to historic
+records even when their collector is off. A successful sweep with expiry disabled
+is not evidence that those records have been deleted.
+END
