@@ -1,0 +1,144 @@
+  /api/v1/setup:
+    get:
+      operationId: getGuidedSetup
+      tags: [Administration]
+      summary: Read deployment presets and saved client-facing DNS address
+      description: >-
+        Authenticated, read-only and offline. Configuration wins over the saved dashboard address.
+        dashboardClientIp is the management connection source using the existing trusted-proxy rules;
+        it is not proof of a DNS client's source and is never granted access automatically.
+      responses:
+        '200':
+          description: Current setup information; no credentials or automatic public-IP discovery
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [presets, endpoint, serverIp, dnsPort, addressLocked, addressSource, dashboardClientIp, dashboardClientNote, mode, modeLocked, listeners]
+                properties:
+                  presets:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, serverHelp, clientHelp, example]
+                      properties:
+                        id: {type: string, enum: [lan, device, vps, vpn, roaming, local]}
+                        name: {type: string}
+                        serverHelp: {type: string}
+                        clientHelp: {type: string}
+                        example: {type: string}
+                  endpoint: {type: string, description: 'Configured IP:port, or empty when unknown'}
+                  serverIp: {type: string}
+                  dnsPort: {type: integer}
+                  addressLocked: {type: boolean}
+                  addressSource: {type: string, enum: [configuration, dashboard]}
+                  dashboardClientIp: {type: string}
+                  dashboardClientNote: {type: string}
+                  mode: {type: string}
+                  modeLocked: {type: boolean}
+                  listeners:
+                    type: object
+                    properties:
+                      udp: {type: string}
+                      tcp: {type: string}
+                      dot: {type: string}
+        '401': {description: Authentication required}
+        '503': {description: Saved address unavailable or invalid; no container-IP substitution}
+  /api/v1/setup/preview:
+    post:
+      operationId: previewGuidedSetup
+      tags: [Administration]
+      summary: Validate addresses and generate an offline deployment plan
+      description: >-
+        Does not persist settings, open listeners, contact providers, change resolution modes or grant access.
+        Session authentication requires same-origin Origin/Referer. Preview normalises bare IPv4 to /32,
+        bare IPv6 to /128 and masks subnet host bits. Public VPS source ranges must be public.
+        The subsequent grant uses POST/PATCH networks with the existing public acknowledgement and
+        aggregate open-resolver guards. Exported starter files require a reviewed named network grant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preset, serverIp]
+              properties:
+                preset: {type: string, enum: [lan, device, vps, vpn, roaming, local]}
+                serverIp: {type: string, description: 'Single destination IP, no URL, CIDR, zone or port'}
+                dnsPort: {type: integer, minimum: 0, maximum: 65535, description: 'Zero or omitted chooses 53, or 5353 for local'}
+                clients: {type: string, maxLength: 4096, description: 'Up to 32 source IPs/prefixes separated by whitespace, commas or semicolons; must be empty for roaming'}
+                mode: {type: string, enum: ['', 'off', observe, enforce], description: 'Exported-file mode only; empty selects Forward'}
+      responses:
+        '200':
+          description: Validated plan and starter file contents, not a deployment or reachability result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [preset, endpoint, addresses, cidrs, publicAckRequired, grantSourceAccess, warnings, environment, nativeYaml, composeOverride, udpTest, tcpTest]
+                properties:
+                  preset: {type: string}
+                  endpoint: {type: string}
+                  addresses:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cidr: {type: string}
+                        scope: {type: string, enum: [loopback, private, shared, public]}
+                        single: {type: boolean}
+                  cidrs: {type: array, items: {type: string}}
+                  publicAckRequired: {type: boolean}
+                  grantSourceAccess: {type: boolean}
+                  warnings: {type: array, items: {type: string}}
+                  environment: {type: string}
+                  nativeYaml: {type: string}
+                  composeOverride: {type: string, description: 'Use with the repository Compose file; !override requires Compose 2.24.4+'}
+                  udpTest: {type: string}
+                  tcpTest: {type: string}
+        '400': {description: Invalid preset, IP, port, mode, prefix, or bounded input limit exceeded}
+        '401': {description: Authentication required}
+        '403': {description: Cross-origin session request rejected}
+  /api/v1/setup/address:
+    put:
+      operationId: saveGuidedSetupAddress
+      tags: [Administration]
+      summary: Save or clear the dashboard's client-facing DNS address
+      description: >-
+        Display-only, persisted and audited. Does not alter listeners, client ACLs, TLS, NAT, firewall,
+        upstreams or resolution modes. The saved address appears in GET server-addresses as operator
+        configuration with verified false. Explicit DNSDADDY_ADVERTISED_DNS / dns.advertised_endpoint
+        configuration takes precedence and locks dashboard edits. Supplying previous adds a stale-write
+        check. A failed audit-completion response can follow a persisted change; refresh before retrying.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                serverIp: {type: string, description: 'Single destination IP; required unless clear is true'}
+                dnsPort: {type: integer, minimum: 1, maximum: 65535, description: 'Required unless clear is true'}
+                clear: {type: boolean, default: false}
+                previous: {type: [string, 'null'], description: 'Previously read endpoint, including empty string; mismatch returns 409'}
+      responses:
+        '200':
+          description: Saved display address; reachability unverified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [endpoint, verified, auditId, note]
+                properties:
+                  endpoint: {type: string}
+                  verified: {type: boolean, const: false}
+                  auditId: {type: integer}
+                  note: {type: string}
+        '400': {description: Invalid address, port or JSON body}
+        '401': {description: Authentication required}
+        '403': {description: Cross-origin session request rejected}
+        '409': {description: Address pinned by configuration or changed in another session}
+        '500': {description: Write failed or resulting history incomplete; inspect persisted state before retrying}
+        '503': {description: Configuration or audit prerequisites unavailable; no write attempted}
