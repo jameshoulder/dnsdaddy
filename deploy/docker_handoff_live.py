@@ -109,7 +109,10 @@ def main():
                         try:
                             api("/api/v1/health")
                             return
-                        except (urllib.error.URLError, TimeoutError):
+                        except (urllib.error.URLError, TimeoutError, ConnectionError):
+                            # Docker can reset a connection while the process
+                            # restarts. Retry only this bounded readiness read;
+                            # all subsequent state and DNS assertions still run.
                             if attempt == 59:
                                 raise
                             time.sleep(0.5)
@@ -123,6 +126,7 @@ def main():
                 assert len(before) == 1 and before[0]["id"] == "n_default" and not before[0]["cidrs"]
                 refused(server, dns_port, False)
                 refused(server, dns_port, True)
+                print("PASS: real host address reached Setup/Overview; unpermitted UDP and TCP queries received REFUSED.", flush=True)
                 api("/api/v1/setup/address", "PUT", {"serverIp": "203.0.113.53", "dnsPort": 53, "previous": expected})
                 run("python3", str(helper), "prepare", "--profile", profile, "--non-interactive")
                 run("docker", "compose", "restart")
@@ -132,7 +136,7 @@ def main():
                 assert after["addressSource"] == "dashboard" and after["endpoint"] == "203.0.113.53:53"
                 networks = api("/api/v1/networks")["networks"]
                 assert len(networks) == 1 and networks[0]["allowResolver"] == before[0]["allowResolver"]
-                print("PASS: real host -> protected .env -> Docker -> Setup/Overview; UDP/TCP refuse unpermitted clients; a saved address and permissions survive restart.")
+                print("PASS: saved address and permissions survive another installer handoff and restart.", flush=True)
             finally:
                 # Only this disposable test project's containers and volume.
                 run("docker", "compose", "down", "--volumes")
