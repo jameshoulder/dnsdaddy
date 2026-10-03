@@ -317,10 +317,10 @@ func TestResolverAccessSurvivesReopen(t *testing.T) {
 	}
 }
 
-// The migration has to leave existing deployments exactly as they were: every
-// network that predates the column is unpermitted, so the bootstrap ACL alone
-// keeps admitting whoever it admitted before.
-func TestSeededNetworkIsNotPermittedByDefault(t *testing.T) {
+// Default activates only the configured bootstrap pool; it must not acquire
+// managed ranges. Ordinary networks still need an explicit access grant.
+// Existing off decisions surviving upgrades are covered in firstrun_test.go.
+func TestSeededDefaultHonoursBootstrapWithoutAddingManagedGrants(t *testing.T) {
 	st := newTestStore(t)
 
 	networks, err := st.ListNetworks(context.Background())
@@ -330,11 +330,28 @@ func TestSeededNetworkIsNotPermittedByDefault(t *testing.T) {
 	if len(networks) == 0 {
 		t.Fatal("expected the seeded catch-all network")
 	}
+	foundDefault := false
 	for _, n := range networks {
-		if n.AllowResolver {
-			t.Errorf("network %q is permitted to resolve out of the box; an upgrade would widen "+
-				"the ACL without anyone asking", n.Name)
+		if n.ID == "n_default" {
+			foundDefault = true
+			if !n.Enabled || !n.AllowResolver {
+				t.Error("the seeded Default gate suppresses configured client access")
+			}
+			if len(n.CIDRs) != 0 {
+				t.Errorf("the seeded Default network adds managed ranges: %v", n.CIDRs)
+			}
+		} else if n.AllowResolver {
+			t.Errorf("network %q received an unrequested managed grant", n.Name)
 		}
+	}
+	if !foundDefault {
+		t.Fatal("the seeded Default network is missing")
+	}
+	n := mustCreateNetwork(t, st, NetworkInput{
+		Name: ptr("Policy only"), CIDRs: ptr([]string{"203.0.113.25/32"}),
+	})
+	if n.AllowResolver {
+		t.Fatal("creating a policy network silently granted resolver access")
 	}
 }
 

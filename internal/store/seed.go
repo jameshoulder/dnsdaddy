@@ -113,15 +113,17 @@ func (s *Store) seed(ctx context.Context) error {
 	freshInstall := networkCount == 0
 
 	if freshInstall {
-		// The catch-all network has no CIDRs: policy.Engine falls back to it
-		// for any client that does not match a more specific network. Its
-		// access bit is intentionally off here, so a fresh install refuses
-		// unmatched clients until someone decides otherwise. Turning it on
-		// admits them only inside dns.allowed_client_cidrs; it never widens
-		// that list.
+		// Honour the configured client boundary on first run. Seeding this
+		// switch off discarded every non-loopback bootstrap grant, so an
+		// installer could configure an allowed LAN or public client, pass its
+		// localhost health check, and still refuse that client's queries.
+		// This grants no CIDRs: clientacl.Compute still restricts admission to
+		// dns.allowed_client_cidrs plus explicit dashboard permissions. The
+		// shipped private/loopback boundary does not admit internet clients.
+		// Existing databases and explicit off decisions are not changed here.
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO networks (id, name, location, policy_id, token, enabled, allow_resolver, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)`,
 			clientacl.DefaultNetworkID, "Default", "All unmatched clients", "p_standard", NewToken(10), now, now)
 		if err != nil {
 			return err

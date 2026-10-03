@@ -24,14 +24,14 @@ func defaultNetwork(t *testing.T, st *Store) Network {
 	return n
 }
 
-// A fresh install refuses unmatched clients. Someone who has just installed
-// DNS Daddy has not yet told it who to serve, and guessing "everyone in the
-// private ranges" is the guess this switch exists to stop making.
-func TestAFreshDatabaseSeedsAdHocAccessOff(t *testing.T) {
+// Fresh installs honour the configured bootstrap boundary rather than silently
+// reducing it to loopback. The DNS handler tests exercise actual answers and
+// prove that addresses outside that boundary are still refused.
+func TestAFreshDatabaseHonoursConfiguredClientAccess(t *testing.T) {
 	st := newTestStore(t)
 
-	if got := defaultNetwork(t, st); got.AllowResolver {
-		t.Fatal("a fresh install seeded the Default network with ad-hoc access on")
+	if got := defaultNetwork(t, st); !got.AllowResolver {
+		t.Fatal("a fresh install disabled configured non-loopback client access")
 	}
 	if got, err := st.GetSetting(context.Background(), SettingLocalDNSSECDefault); err != nil {
 		t.Fatalf("GetSetting(%s): %v", SettingLocalDNSSECDefault, err)
