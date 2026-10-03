@@ -227,9 +227,14 @@ func Build(in Input) (Plan, error) {
 	// Loopback-only bootstrap makes the explicit managed-network grant the
 	// authority on both old and new first-run defaults. No dependence on #84.
 	out.Environment = fmt.Sprintf("# Generated starter: %s\n# Keep your existing .env and data when upgrading.\nDNSDADDY_ADVERTISED_DNS=%s\nDNSDADDY_ALLOWED_CLIENT_CIDRS=127.0.0.0/8,::1/128\nDNSDADDY_ALLOW_PUBLIC_RESOLVER=false\nDNSDADDY_UPSTREAMS=https://1.1.1.1/dns-query,https://1.0.0.1/dns-query\nDNSDADDY_UPSTREAM_MODE=failover\nDNSDADDY_LOCAL_DNSSEC_VALIDATION=%s\nDNSDADDY_DASHBOARD_BIND=127.0.0.1\n", in.Preset, endpoint, in.Mode)
-	listen := ":" + strconv.Itoa(in.DNSPort)
-	if in.Preset == "local" {
-		listen = endpoint
+	listen := endpoint
+	if in.Preset == "vps" {
+		// A public NAT address may not exist on this host.
+		listen = ":" + strconv.Itoa(in.DNSPort)
+	}
+	if in.Preset == "roaming" {
+		// Roaming clients use tokenised HTTPS, not public plaintext DNS.
+		listen = "127.0.0.1:5353"
 	}
 	out.NativeYAML = fmt.Sprintf("# Generated native starter. Keep management behind SSH or HTTPS.\n# Add the reviewed client Network in the dashboard after installation.\ndata_dir: /var/lib/dnsdaddy\ndns:\n  advertised_endpoint: %q\n  listen_udp: %q\n  listen_tcp: %q\n  allowed_client_cidrs: [\"127.0.0.0/8\", \"::1/128\"]\n  allow_public_resolver: false\n  upstreams: [\"https://1.1.1.1/dns-query\", \"https://1.0.0.1/dns-query\"]\n  upstream_mode: failover\n  local_dnssec_validation: %q\nhttp:\n  listen: \"127.0.0.1:8080\"\n  allow_untokenized_doh: false\n", endpoint, listen, listen, in.Mode)
 	bind := server.String()
