@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -15,6 +16,26 @@ import (
 
 //go:embed static
 var static embed.FS
+
+// dashboardAsset assembles the plain-script extension in the same execution
+// task as app.js. Registering pages after a separate script download could
+// race boot's session request and leave the first Setup render unextended.
+// Small MapFS fixtures may omit the extension; the embedded-asset test below
+// separately requires it in the production dashboard.
+func dashboardAsset(sub fs.FS, name string) ([]byte, error) {
+	data, err := fs.ReadFile(sub, name)
+	if err != nil || name != "app.js" {
+		return data, err
+	}
+	extra, err := fs.ReadFile(sub, "setup.js")
+	if errors.Is(err, fs.ErrNotExist) {
+		return data, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return bytes.Join([][]byte{data, extra}, []byte("\n;\n")), nil
+}
 
 // dashboardIndex ties the HTML to the exact script/style bytes in this binary.
 // Stable /app.js names with max-age alone allowed an upgraded server to run an
@@ -28,7 +49,7 @@ func dashboardIndex(sub fs.FS) ([]byte, map[string]string, error) {
 	}
 	etags := make(map[string]string)
 	for _, name := range []string{"app.js", "app.css"} {
-		data, err := fs.ReadFile(sub, name)
+		data, err := dashboardAsset(sub, name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -49,6 +70,10 @@ func Handler() http.Handler {
 	index, etags, err := dashboardIndex(sub)
 	if err != nil {
 		panic("web: embedded dashboard incomplete: " + err.Error())
+	}
+	script, err := dashboardAsset(sub, "app.js")
+	if err != nil {
+		panic("web: embedded script incomplete: " + err.Error())
 	}
 	files := http.FileServer(http.FS(sub))
 	serveIndex := func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +106,11 @@ func Handler() http.Handler {
 		}
 		if etag := etags[clean]; etag != "" {
 			w.Header().Set("ETag", etag)
+		}
+		if clean == "app.js" {
+			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+			http.ServeContent(w, r, "app.js", time.Time{}, bytes.NewReader(script))
+			return
 		}
 		files.ServeHTTP(w, r)
 	})
