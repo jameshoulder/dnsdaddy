@@ -118,9 +118,25 @@ func TestRefusedClientCanRecoverAndProduceHistoryWithoutBlocklists(t *testing.T)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	var refusedRows int
-	if err := h.store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM query_log WHERE domain = ?", "never-persist.example").Scan(&refusedRows); err != nil || refusedRows != 0 {
-		t.Fatalf("refusal persisted a queried domain: %d %v", refusedRows, err)
+	// QueryEvent.Domain is stored as query_log.qname. Check the same column
+	// for both positive and negative evidence so an empty/wrong query cannot
+	// masquerade as successful privacy protection.
+	for _, expected := range []struct {
+		qname string
+		count int
+	}{
+		{"allowed.example", 2},
+		{"local-policy.example", 1},
+		{"never-persist.example", 0},
+		{"other.example", 0},
+	} {
+		var count int
+		if err := h.store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM query_log WHERE qname = ?", expected.qname).Scan(&count); err != nil {
+			t.Fatalf("read query history for %q: %v", expected.qname, err)
+		}
+		if count != expected.count {
+			t.Fatalf("query history rows for %q = %d, want %d", expected.qname, count, expected.count)
+		}
 	}
 	off := false
 	if _, err := h.store.UpdateNetwork(ctx, n.ID, store.NetworkInput{AllowResolver: &off}); err != nil {
