@@ -27,10 +27,10 @@ func (w *accessResponseWriter) WriteMsg(m *dns.Msg) error {
 	return nil
 }
 func (w *accessResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (w *accessResponseWriter) Close() error              { return nil }
-func (w *accessResponseWriter) TsigStatus() error         { return nil }
-func (w *accessResponseWriter) TsigTimersOnly(bool)       {}
-func (w *accessResponseWriter) Hijack()                   {}
+func (w *accessResponseWriter) Close() error                { return nil }
+func (w *accessResponseWriter) TsigStatus() error           { return nil }
+func (w *accessResponseWriter) TsigTimersOnly(bool)         {}
+func (w *accessResponseWriter) Hijack()                     {}
 
 func queryAccessAPI(t *testing.T, h *harness, ip string) *dns.Msg {
 	t.Helper()
