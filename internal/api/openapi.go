@@ -15,7 +15,7 @@ var baseOpenAPISpec []byte
 //go:embed openapi-setup.yaml
 var setupOpenAPIPaths []byte
 
-var openAPISpec = combinedOpenAPISpec(baseOpenAPISpec, setupOpenAPIPaths)
+var openAPISpec = withAccessActivitySchema(combinedOpenAPISpec(baseOpenAPISpec, setupOpenAPIPaths))
 
 func combinedOpenAPISpec(base, extra []byte) []byte {
 	marker := []byte("\npaths:\n")

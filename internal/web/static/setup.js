@@ -235,3 +235,138 @@
   if (typeof pages !== 'undefined' && typeof document !== 'undefined') install();
   if (typeof module !== 'undefined' && module.exports) module.exports={guideMarkup,previewMarkup,networkWrite,needsConfirmation,connectionSuggestion,saveConnection,successMarkup,advancedMarkup,suggestedServer,connectionsMarkup};
 })();
+;
+/* Resolver access diagnostics share the existing Overview and Networks API.
+ * They do not create an unauthenticated enrolment endpoint or auto-trust traffic. */
+(() => {
+  'use strict';
+  const escapeAccess = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function accessSummary(snapshot) {
+    const recent = snapshot?.recent;
+    if (!recent) return 'Current DNS activity is unavailable.';
+    const good = Number(recent.answered || 0) + Number(recent.blocked || 0);
+    if (good && recent.refused) return 'DNS responses are being produced. Other source addresses are being refused.';
+    if (good) return 'DNS responses are being produced.';
+    if (recent.errors) return 'Resolution errors need attention; allowing more addresses will not fix an upstream or DNSSEC failure.';
+    if (recent.refused) return 'Queries are arriving, but the source addresses are not permitted.';
+    return 'Waiting for a device query. A historical refusal is not a current outage.';
+  }
+  function accessGrant(entry, confirmed, networks) {
+    if (!confirmed) throw new Error('Confirm that this is your device or internet connection.');
+    if (!entry?.canAuthorize || entry.sourceAllowed || !entry.policyId || !entry.cidr) throw new Error('Refresh client access before granting permission.');
+    // CIDR text originates at the server, but the existing Networks endpoint
+    // still performs canonicalisation, public acknowledgement and union checks.
+    const existing = (networks || []).find(n => n.id === entry.networkId && n.id !== 'n_default' && n.enabled && n.policyId === entry.policyId && n.cidrs?.length === 1 && n.cidrs[0] === entry.cidr);
+    if (existing) return {method:'PATCH', path:'/networks/'+encodeURIComponent(existing.id), body:{allowResolver:true, publicAck:!!entry.public}};
+    return {method:'POST', path:'/networks', body:{name:'DNS client '+entry.address, policyId:entry.policyId, cidrs:[entry.cidr], enabled:true, allowResolver:true, publicAck:!!entry.public}};
+  }
+  async function applyAccess(entry, confirmed, read, send) {
+    if (!confirmed) throw new Error('Confirm that this is your device or internet connection.');
+    const latest = await read('/activity/live');
+    if (!latest?.clientAccess?.enabled || latest.clientAccess.aclStale) throw new Error('The live permission state could not be confirmed. No grant was sent.');
+    const fresh = latest.clientAccess.entries.find(e => e.address === entry.address && e.cidr === entry.cidr);
+    if (!fresh) throw new Error('That observation has expired. Send another DNS query, then review its address.');
+    if (fresh.sourceAllowed) return {alreadyAllowed:true};
+    if (fresh.policyId !== entry.policyId || fresh.networkId !== entry.networkId || fresh.public !== entry.public || !fresh.canAuthorize) throw new Error('The policy or address classification changed. Review it again before allowing access.');
+    const configured = await read('/networks');
+    const grant = accessGrant(fresh, confirmed, configured.networks);
+    try {
+      const saved = await send(grant.method,grant.path,grant.body);
+      return {saved, warning:saved?.warning || ''};
+    } catch (error) {
+      // A lost response may follow a committed grant. The caller must not
+      // blindly retry a POST and duplicate networks; require a fresh review.
+      error.accessWriteUncertain = true;
+      throw error;
+    }
+  }
+  function accessPanel() {
+    return '<section id="resolver-access" class="card section" aria-labelledby="resolver-access-title"><div class="card-head"><div><h2 id="resolver-access-title">Client access</h2><p data-access-summary role="status">Reading current DNS outcomes…</p></div><a class="btn btn-ghost btn-sm" href="#/setup">Encrypted client setup</a></div><p class="small muted" data-access-privacy></p><div data-access-rows></div><div data-access-review></div><p data-access-message role="status"></p><details><summary>What these results mean</summary><p class="small muted">These are actual source addresses seen by DNS Daddy, not device identities. A router or Docker gateway can represent several devices; UDP source addresses can also be spoofed. Allow only an address you recognise and control. Tokenised HTTPS clients authenticate separately, without a public-IP grant.</p><p class="small muted">Source refusals are not malware blocks and never train the detectors. This diagnostic keeps at most 64 sources, expires them five minutes after their last refusal, and stores no queried names or tokens. Samples can be dropped under load. Resolution and local policies do not require a downloaded blocklist.</p><p class="small muted">A produced answer is not proof of remote delivery. Check the device itself before changing an entire network.</p></details></section>';
+  }
+  function accessRows(data) {
+    if (!data?.enabled) return '';
+    if (!data.entries?.length) return '<p class="small muted">No source refusals are retained in this five-minute window. Detailed history includes admitted queries, not rejected requests.</p>';
+    const labels = {needs_permission:'Needs permission', permitted_waiting:'Permitted — waiting for retry', answered:'Answer produced after refusal', policy_blocked:'Policy block after admission', resolution_error:'Resolution error after admission'};
+    return '<div class="table-wrap"><table><thead><tr><th>Source address</th><th>Latest result</th><th>Refused samples</th><th>Action</th></tr></thead><tbody>'+data.entries.map(e => '<tr><td><code>'+escapeAccess(e.address)+'</code><div class="small muted">'+escapeAccess((e.protocols || []).join(' / '))+'</div></td><td>'+escapeAccess(labels[e.status] || 'Unknown')+'<div class="small muted">'+escapeAccess(e.reason)+'</div></td><td>'+escapeAccess(e.refused)+'</td><td>'+(!e.sourceAllowed && e.canAuthorize && !data.aclStale ? '<button type="button" class="btn btn-primary btn-sm" data-review-access="'+escapeAccess(e.address)+'">Review access</button>' : '<span class="small muted">'+(data.aclStale ? 'Reload needs attention' : e.sourceAllowed ? 'Permission in force' : 'Use advanced setup')+'</span>')+'</td></tr>').join('')+'</tbody></table></div>';
+  }
+  function mountAccess(initial, context = {}) {
+    const host = document.getElementById('resolver-access');
+    if (!host) return;
+    let snapshot=initial, unavailable=false, reviewing=null, writing=false, uncertain=false;
+    const pause = document.getElementById('auto-refresh-btn');
+    const paused=()=>pause?.getAttribute('aria-pressed')==='true';
+    const current=()=>host.isConnected && !context.signal?.aborted && (!context.isCurrent || context.isCurrent());
+    const canRead=()=>current() && !paused() && !document.hidden && !document.getElementById('app')?.hidden;
+    const q=s=>host.querySelector(s);
+    const message=s=>{if(current())q('[data-access-message]').textContent=s;};
+    let rendered='';
+    function paint() {
+      if (!current()) return;
+      q('[data-access-summary]').textContent=unavailable ? 'Current access data is unavailable; the last sample may be stale.' : paused() ? 'Updates paused. Results below are from the last sample.' : accessSummary(snapshot);
+      const data=snapshot?.clientAccess;
+      q('[data-access-privacy]').textContent=data ? (!data.queryLogging ? 'Detailed query history is disabled by your privacy settings. Anonymous counts still update.' : !data.clientAddressLogging ? 'Client address recording is disabled. No addresses are collected for this diagnostic.' : data.aclStale ? 'A permission reload failed. Check Diagnostics before changing access.' : 'Review the source DNS Daddy actually sees, rather than guessing the device’s public, private or Docker address.')+(data.dropped || data.evicted ? ' Some source samples were dropped or replaced; these are not exact totals.' : '') : 'Source diagnostics are unavailable on this server build.';
+      // Never destroy a focused action or an in-progress confirmation on a
+      // polling tick. Authorisation always re-reads fresh evidence separately.
+      if (!reviewing && !writing && !host.contains(document.activeElement)) {
+        const markup=accessRows(data);
+        if (markup!==rendered) {q('[data-access-rows]').innerHTML=sanitize(markup);rendered=markup;}
+      }
+      for (const button of host.querySelectorAll('[data-review-access]')) button.disabled=unavailable || paused() || uncertain || writing;
+      const submit=q('[data-allow-access]');if(submit)submit.disabled=unavailable || paused() || uncertain || writing;
+    }
+    const poller=createLiveActivityPoller({initial,signal:context.signal,intervalMs:5000,canRead,read:options=>apiGet('/activity/live',options),onUpdate:update=>{snapshot=update.snapshot;unavailable=update.unavailable;paint();}});
+    host.addEventListener('click',async event=>{
+      const review=event.target.closest('[data-review-access]');
+      if(review && !unavailable && !writing && !uncertain && !paused()) {
+        reviewing=snapshot?.clientAccess?.entries.find(e=>e.address===review.dataset.reviewAccess);
+        if(!reviewing)return;
+        const e=reviewing;
+        q('[data-access-review]').innerHTML=sanitize('<form data-access-form><h3>Allow '+escapeAccess(e.address)+'?</h3><p>Only <code>'+escapeAccess(e.cidr)+'</code> will be granted source access, using <strong>'+escapeAccess(e.policyName)+'</strong>. Existing wider permissions remain unchanged.</p><p>'+escapeAccess(e.public ? 'This is a public source address. Every device behind the same NAT router may share it. Keep your provider or Docker-aware firewall restricted too.' : 'A private or Docker address is not proof that a device is trusted. A gateway may represent more than one device.')+'</p><p><label><input type="checkbox" data-access-confirm required> This is my device or internet connection, and I intend to permit this address.</label></p><button type="submit" class="btn btn-primary" data-allow-access>Allow this address</button> <button type="button" class="btn btn-ghost" data-cancel-access>Cancel</button></form>');
+        q('[data-access-confirm]').focus();
+      }
+      if(event.target.closest('[data-cancel-access]') && !writing){reviewing=null;q('[data-access-review]').replaceChildren();paint();}
+    });
+    host.addEventListener('submit',async event=>{
+      if(!event.target.matches('[data-access-form]'))return;
+      event.preventDefault();if(writing || uncertain || unavailable || paused() || !reviewing)return;
+      const confirmed=!!q('[data-access-confirm]')?.checked;
+      if(!confirmed){message('Confirm that the displayed address belongs to a device or connection you control.');return;}
+      writing=true;paint();
+      try {
+        const result=await applyAccess(reviewing,confirmed,path=>apiGet(path), (method,path,body)=>apiSend(method,path,body));
+        if(!current())return;
+        message(result.warning || (result.alreadyAllowed ? 'This source is already permitted. Retry a DNS lookup from the device.' : 'Permission saved. Retry a DNS lookup from this device; the result will appear here.'));
+        reviewing=null;q('[data-access-review]').replaceChildren();rendered='';await poller.refresh();
+      } catch(error) {
+        if(error.accessWriteUncertain)uncertain=true;
+        message(error.message+(uncertain ? ' The grant may have been saved. Reload this page and inspect Connections before retrying.' : ''));
+      } finally {writing=false;paint();}
+    });
+    const changed=()=>{paint();if(canRead())poller.refresh();};
+    pause?.addEventListener('click',changed);document.addEventListener('visibilitychange',changed);
+    context.signal?.addEventListener('abort',()=>{poller.stop();pause?.removeEventListener('click',changed);document.removeEventListener('visibilitychange',changed);},{once:true});
+    paint();
+  }
+  function installAccess() {
+    const previous=pages.dashboard;
+    pages.dashboard={...previous,
+      async render(context={}) {
+        const markup=await previous.render.call(this,context);
+        const template=document.createElement('template');template.innerHTML=sanitize(markup);
+        // Replace the obsolete lifetime-refusal onboarding card, not the
+        // main counters, query history, resolver settings or failure panels.
+        template.content.querySelectorAll('.first-client').forEach(node=>node.remove());
+        const slot=document.createElement('template');slot.innerHTML=sanitize(accessPanel());
+        const live=template.content.querySelector('#resolver-live');
+        if(live)live.after(slot.content);else template.content.prepend(slot.content);
+        return template.innerHTML;
+      },
+      async mounted(context={}) {
+        if(previous.mounted)await previous.mounted.call(this,context);
+        mountAccess(this.liveSnapshot,context);
+      }
+    };
+  }
+  if(typeof pages!=='undefined' && typeof document!=='undefined')installAccess();
+  if(typeof module!=='undefined' && module.exports)module.exports.resolverAccess={accessSummary,accessGrant,applyAccess,accessPanel,accessRows};
+})();
