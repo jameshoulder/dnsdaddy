@@ -10,22 +10,24 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go/http3"
-	"golang.org/x/net/http2"
 )
+
+const encryptedH2ALPN = "h2"
 
 type encryptedHTTP struct {
 	endpoint     *encryptedEndpoint
 	client       *http.Client
-	h2           *http2.Transport
+	h2           *http.Transport
 	h3           *http3.Transport
 	connection   *http3.ClientConn // guarded by endpoint.connMu
-	h2Connection *http2.ClientConn // guarded by endpoint.connMu
+	h2Connection *http.ClientConn  // guarded by endpoint.connMu
 	h2Socket     *encryptedTLSConn // guarded by endpoint.connMu
 }
 
@@ -42,16 +44,20 @@ func newEncryptedHTTP(endpoint *encryptedEndpoint) *encryptedHTTP {
 		// retry path may remove an errored connection without closing it;
 		// repeated malicious replies must not accumulate idle connections.
 	} else {
-		h.h2 = &http2.Transport{
-			TLSClientConfig:            endpoint.tlsConfig.Clone(),
-			DialTLSContext:             h.dialTLS,
-			DisableCompression:         true,
-			MaxHeaderListSize:          maxEncryptedHeaderBytes,
-			StrictMaxConcurrentStreams: true,
-			IdleConnTimeout:            30 * time.Second,
-			ReadIdleTimeout:            15 * time.Second,
-			PingTimeout:                5 * time.Second,
-			WriteByteTimeout:           5 * time.Second,
+		protocols := new(http.Protocols)
+		protocols.SetHTTP2(true) // Neither HTTP/1 nor cleartext HTTP/2 is permitted.
+		h.h2 = &http.Transport{
+			TLSClientConfig:        endpoint.tlsConfig.Clone(),
+			Protocols:              protocols,
+			DisableCompression:     true,
+			MaxResponseHeaderBytes: int64(maxEncryptedHeaderBytes),
+			IdleConnTimeout:        30 * time.Second,
+			HTTP2: &http.HTTP2Config{
+				StrictMaxConcurrentRequests: true,
+				SendPingTimeout:             15 * time.Second,
+				PingTimeout:                 5 * time.Second,
+				WriteByteTimeout:            5 * time.Second,
+			},
 		}
 	}
 	h.client = &http.Client{
@@ -98,7 +104,7 @@ func (h *encryptedHTTP) RoundTrip(request *http.Request) (*http.Response, error)
 // http2Conn owns exactly one reusable HTTP/2 connection per endpoint. Using
 // ClientConn directly avoids automatic pool retries and concurrent cold dials.
 // Endpoint admission bounds requests waiting for the peer's stream limit.
-func (h *encryptedHTTP) http2Conn(ctx context.Context) (*http2.ClientConn, *encryptedTLSConn, error) {
+func (h *encryptedHTTP) http2Conn(ctx context.Context) (*http.ClientConn, *encryptedTLSConn, error) {
 	ep := h.endpoint
 	for {
 		if err := ctx.Err(); err != nil {
@@ -110,9 +116,9 @@ func (h *encryptedHTTP) http2Conn(ctx context.Context) (*http2.ClientConn, *encr
 			return nil, nil, ErrEncryptedClosed
 		}
 		if client, socket := h.h2Connection, h.h2Socket; client != nil {
-			// Legacy ClientConn.State acquires its network write mutex. An
-			// unrelated stalled writer must not block this request's context
-			// before RoundTrip performs its own stream admission.
+			// Do not query a protocol implementation's state while holding
+			// our mutex. An unrelated stalled writer must not delay this
+			// request's context before RoundTrip handles stream admission.
 			if !socket.closed.Load() {
 				ep.connMu.Unlock()
 				return client, socket, nil
@@ -162,7 +168,11 @@ func (h *encryptedHTTP) http2Conn(ctx context.Context) (*http2.ClientConn, *encr
 	}
 }
 
-func (h *encryptedHTTP) openHTTP2(ctx context.Context) (*http2.ClientConn, *encryptedTLSConn, error) {
+func (h *encryptedHTTP) openHTTP2(ctx context.Context) (*http.ClientConn, *encryptedTLSConn, error) {
+	target, err := url.Parse(h.endpoint.config.Address)
+	if err != nil || target.Scheme != "https" || target.Host == "" {
+		return nil, nil, errors.New("invalid encrypted HTTP/2 endpoint")
+	}
 	conn, err := h.dialTLS(ctx, "tcp", "", h.endpoint.tlsConfig)
 	if err != nil {
 		return nil, nil, err
@@ -173,8 +183,23 @@ func (h *encryptedHTTP) openHTTP2(ctx context.Context) (*http2.ClientConn, *encr
 			return nil, socket, err
 		}
 	}
+	// Go's supported ClientConn API creates its connection through the
+	// transport. Give it this already authenticated, literal-IP-dialled
+	// socket exactly once, never an opportunity to dial an unapproved host,
+	// use an environment proxy, or silently retry through a connection pool.
+	transport := h.h2.Clone()
+	var handedOff atomic.Bool
+	transport.DialTLSContext = func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+		if err := dialCtx.Err(); err != nil {
+			return nil, err
+		}
+		if handedOff.Swap(true) {
+			return nil, errors.New("encrypted HTTP/2 socket already handed off")
+		}
+		return socket, nil
+	}
 	stop := context.AfterFunc(ctx, func() { _ = socket.Close() })
-	client, err := h.h2.NewClientConn(socket)
+	client, err := transport.NewClientConn(ctx, "https", target.Host)
 	stop()
 	if ctx.Err() != nil {
 		return nil, socket, ctx.Err()
@@ -199,9 +224,10 @@ type encryptedTLSConn struct {
 func (c *encryptedTLSConn) Close() error {
 	c.closed.Store(true)
 	c.once.Do(func() {
-		// HTTP/2's forced close only unwraps an exact *tls.Conn. This owned
-		// wrapper must provide the same bound itself: an unresponsive peer
-		// must not stall cancellation while TLS sends its close_notify.
+		// This owned wrapper must provide its own close bound: an
+		// unresponsive peer must not stall cancellation while TLS sends
+		// its close_notify. ConnectionState is promoted for standard HTTP/2
+		// ALPN support on wrapped TLS connections (Go 1.27).
 		forceClose := time.AfterFunc(250*time.Millisecond, func() { _ = c.Conn.NetConn().Close() })
 		c.closeErr = c.Conn.Close()
 		forceClose.Stop()
@@ -234,7 +260,7 @@ func (h *encryptedHTTP) dialTLS(ctx context.Context, _, _ string, config *tls.Co
 		cfg := config.Clone()
 		cfg.MinVersion = tls.VersionTLS13
 		cfg.ServerName = h.endpoint.config.ServerName
-		cfg.NextProtos = []string{http2.NextProtoTLS}
+		cfg.NextProtos = []string{encryptedH2ALPN}
 		dialer := &tls.Dialer{NetDialer: &net.Dialer{}, Config: cfg}
 		conn, err := dialer.DialContext(attemptCtx, "tcp", target)
 		cancel()
@@ -251,7 +277,7 @@ func (h *encryptedHTTP) dialTLS(ctx context.Context, _, _ string, config *tls.Co
 			continue
 		}
 		state := tlsConn.ConnectionState()
-		if !state.HandshakeComplete || state.Version < tls.VersionTLS13 || len(state.VerifiedChains) == 0 || state.NegotiatedProtocol != http2.NextProtoTLS {
+		if !state.HandshakeComplete || state.Version < tls.VersionTLS13 || len(state.VerifiedChains) == 0 || state.NegotiatedProtocol != encryptedH2ALPN {
 			// A rejected peer has no reusable application session. Abort the
 			// socket before TLS close_notify can wait on an unresponsive peer.
 			_ = tlsConn.NetConn().Close()
@@ -312,8 +338,7 @@ func (h *encryptedHTTP) exchange(ctx context.Context, query *dns.Msg, wire []byt
 		return nil, fmt.Errorf("%w: oversized DNS body", ErrEncryptedResponse)
 	}
 	// DNS wire responses are complete bodies. Trailers add no DNS semantics.
-	// Reject them rather than depend on legacy HTTP/2's truncation behavior
-	// for oversized decoded trailer fields (Go 1.26 compatibility).
+	// Reject them rather than relying on transport-specific truncation.
 	if len(response.Trailer) != 0 || response.Header.Get("Trailer") != "" {
 		return nil, fmt.Errorf("%w: DoH trailers are not accepted", ErrEncryptedResponse)
 	}
