@@ -62,6 +62,12 @@ func readAccessAPI(t *testing.T, h *harness) ClientAccessActivity {
 
 func TestAccessAPIRequiresAuthAndDistinguishesPermissionFromResolution(t *testing.T) {
 	h := newHarness(t)
+	// The general API harness omits LogClientIP. This source-diagnostics
+	// fixture explicitly opts in rather than changing all existing tests or
+	// weakening the handler's privacy gate. DoH is not used by this test.
+	h.api.DNS = dnsserver.NewHandler(h.api.Engine, h.api.Resolver, h.api.Lists, h.api.QueryLog, h.api.Log, dnsserver.HandlerOptions{
+		QueryLogEnabled: true, LogClientIP: true, ClientACL: h.acl,
+	})
 	if got := queryAccessAPI(t, h, "203.0.113.9"); got.Rcode != dns.RcodeRefused {
 		t.Fatal("fixture source should be refused")
 	}
