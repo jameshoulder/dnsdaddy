@@ -65,6 +65,7 @@ type Handler struct {
 	errors   atomic.Uint64
 	refused  atomic.Uint64
 	activity activityTracker
+	access   accessTracker
 	// dnssecPanics counts panics contained at the observer seam. Should be
 	// zero; a non-zero value is a bug report rather than an operational
 	// statistic, which is why it is exposed rather than only logged.
@@ -79,9 +80,8 @@ type Handler struct {
 	//
 	// Deliberately typed as an interface with one method that returns a bool
 	// and cannot fail. There is no error path back into resolution because
-	// there is nothing resolution could do with one: the answer has been
-	// decided by the time this is called, and a validator's opinion of it is
-	// not permitted to matter. See
+	// the answer has been decided by the time this is called, and a
+	// validator's opinion of it is not permitted to matter. See
 	// docs/decisions/0002-daddybound-observe-mode.md.
 	dnssec DNSSECObserver
 }
@@ -259,7 +259,11 @@ type networkIdentified interface {
 func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (response *dns.Msg) {
 	h.activity.begin(time.Now())
 	outcome, cached := activityInvalid, false
-	defer func() { h.activity.finish(time.Now(), outcome, cached, response) }()
+	defer func() {
+		now := time.Now()
+		h.activity.finish(now, outcome, cached, response)
+		h.observeClientAccess(now, meta, outcome)
+	}()
 
 	if req == nil || len(req.Question) == 0 {
 		return errorResponse(req, dns.RcodeFormatError)
@@ -279,14 +283,14 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		return errorResponse(req, dns.RcodeNotImplemented)
 	}
 
-	// The client ACL is checked before any other work, and deliberately does
-	// not write a query-log row: an unauthorised source could otherwise fill
-	// the log (and the disk) with entries the operator never asked for. The
-	// refusal is counted for /metrics instead.
+	// The client ACL is checked before resolution. Refusals never write query
+	// rows or enter learning: an unauthorised source must not fill the disk
+	// or train the detector. Bounded, privacy-aware source evidence is kept
+	// separately, and EDNS clients receive a reason without internal details.
 	if meta.networkID == "" && !h.clientAllowed(meta.clientAddr) {
 		h.refused.Add(1)
 		outcome = activityRefused
-		return errorResponse(req, dns.RcodeRefused)
+		return protectedResponse(req, dns.ExtendedErrorCodeProhibited, "Client source address is not permitted")
 	}
 	if h.protection != nil && !h.protection.Allow(meta.clientAddr, meta.networkID, time.Now()) {
 		// No per-query disk writes on the flood rejection path.
