@@ -370,3 +370,30 @@
   if(typeof pages!=='undefined' && typeof document!=='undefined')installAccess();
   if(typeof module!=='undefined' && module.exports)module.exports.resolverAccess={accessSummary,accessGrant,applyAccess,accessPanel,accessRows};
 })();
+;
+/* Read-only product disclosures. This adds no policy control, request, storage
+ * write or DNS behaviour. It shares the existing fingerprinted script/CSP. */
+(() => {
+  'use strict';
+  const defaultModeFact = 'Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.';
+  const safeSearchFact = 'Safe Search is not enforced. The deprecated safeSearch API field is stored for compatibility only; even true does not rewrite DNS answers or restrict results for any search engine.';
+  const installed = Symbol('productClaims');
+  function installProductClaims(registry) {
+    for (const route of ['assurance', 'policies']) {
+      const previous = registry[route];
+      if (!previous || previous[installed]) continue;
+      const notice = route === 'assurance'
+        ? '<section class="card section" data-product-claims="assurance"><h2>Resolver default and limits</h2><p>' + defaultModeFact + '</p><p>This describes the installation default, not this server’s current mode. Daddybound Live remains experimental; behavioural detectors remain alert-only.</p></section>'
+        : '<p class="small muted" data-product-claims="policies">' + safeSearchFact + '</p>';
+      registry[route] = {...previous, [installed]: true,
+        async render(context) {
+          // Existing renderers retain their escaping, state and handlers.
+          // The only inserted content is the fixed text above, never DNS data.
+          return notice + await previous.render.call(this, context);
+        }
+      };
+    }
+  }
+  if (typeof pages !== 'undefined' && typeof document !== 'undefined') installProductClaims(pages);
+  if (typeof module !== 'undefined' && module.exports) module.exports.productClaims = {defaultModeFact, safeSearchFact, installProductClaims};
+})();

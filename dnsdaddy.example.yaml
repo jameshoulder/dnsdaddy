@@ -5,6 +5,7 @@
 # precedence — see .env.example for the Docker settings.
 #
 # Defaults are tuned for a 1 GB / 1 vCPU VPS.
+# Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.
 
 # Where the database, session key, and cached feed files live.
 data_dir: /var/lib/dnsdaddy

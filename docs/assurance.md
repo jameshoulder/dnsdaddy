@@ -39,12 +39,22 @@ Tests and documentation support these properties but cannot establish every
 possible execution or deployment. Expand adversarial and protocol-conformance
 coverage as the project matures.
 
+Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.
+
 **Local DNSSEC validation is implemented in experimental Daddybound Live.**
 Forward/Learn client answers use the selected upstream path; separate Learn
 observations do not validate an already-returned answer. Native Live and encrypted
-Live have different transport/privacy properties. Fresh installations start in
-Forward; saved choices and explicit pins are preserved. See
-[encrypted DNS](encrypted-dns.md) and [capabilities](capabilities.md).
+Live have different transport/privacy properties. The default statement above is
+not the current mode of every installation. See [encrypted DNS](encrypted-dns.md)
+and [capabilities](capabilities.md).
+
+**Safe Search is not enforced.** `safeSearch` remains a deprecated compatibility
+field in both policy API schemas. Its stored value, including `true`, is not
+an enforcement result. No engine's search results are restricted by this flag;
+no answer rewriting was introduced in this pass. The dashboard exposes a
+read-only disclaimer, not a switch. Existing API contract tests and the Phase 1
+UI/round-trip regressions prevent a stored compatibility value being presented
+as a functioning control.
 
 **Behavioural findings remain hypotheses.** ATT&CK mapping rationales now distinguish
 measurement from adversarial interpretation, including tunnelling and DGA-like

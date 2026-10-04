@@ -196,7 +196,9 @@ Use `--dry-run` first if you want to see what the installer would do without cha
 
 > `./deploy/install-docker.sh` configures and launches DNS Daddy. It does **not** install Git, Docker Engine or Docker Compose for you.
 
-**A new installation starts in Forward mode.** Allowed queries are filtered
+Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.
+
+Allowed queries are filtered
 locally, then forwarded to Cloudflare over HTTPS on TCP 443 using
 `https://1.1.1.1/dns-query` and `https://1.0.0.1/dns-query`. These literal IP
 endpoints do not need another DNS resolver to find the upstream. Learn and
@@ -406,7 +408,7 @@ Start with:
 
 - **[docs/assurance.md](docs/assurance.md)** — what is checked, by what, and what none of it proves
 - **[docs/security-testing.md](docs/security-testing.md)** — security-testing methodology and evidence
-- **[docs/threat-model.md](docs/threat-model.md)** — assets, trust boundaries, threats and mitigations
+- **[docs/threat-model.md](docs/threat-model.md)** — assets, boundaries, threats and mitigations
 - **[docs/audit-2026-08.md](docs/audit-2026-08.md)** — latest documented audit and reviewer guide
 - **[SECURITY.md](SECURITY.md)** — responsible vulnerability disclosure
 
@@ -415,6 +417,7 @@ Start with:
 Worth knowing before you rely on DNS Daddy:
 
 - **No independent professional security review.** Automated testing and implementation evidence are not an independent audit.
+- **Safe Search is not enforced.** The deprecated `safeSearch` API field only preserves a stored compatibility value; even `true` does not restrict any search engine or rewrite answers. There is no actionable dashboard toggle.
 - **Native Live is experimental.** Fresh installations start in Forward. Select Live deliberately after verifying real answers; production reliability, constrained-hardware performance and long-running key-rollover behavior are not established. Saved selections survive upgrades.
 - **Native authoritative traffic is plaintext.** With the native profile, Live uses UDP/TCP 53 and Learn adds independent native observation traffic. The optional encrypted profile instead forwards to explicitly approved recursive resolvers; it does not make native authoritative recursion encrypted.
 - **Encryption has boundaries.** An approved encrypted resolver receives the DNS names. Client-to-DNS-Daddy traffic and the provider's onward resolution are separate connections. Daemon background hostname lookups use the encrypted profile when selected, but do not receive Daddybound's independent Live validation.
