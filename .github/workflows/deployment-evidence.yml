@@ -40,6 +40,7 @@ jobs:
           go test ./deploy -run '^TestUpgrade' -count=1
           go test ./internal/web ./internal/config ./internal/api -run 'DashboardFingerprints|DashboardServes|Advertised|ConfiguredEndpoint|ProxyDiagnostic' -count=1
           make test-ui
+          node --test internal/web/resolver_access.test.js
       - name: Install a pinned development-only browser driver
         run: |
           npm install --prefix "$RUNNER_TEMP/ui" --ignore-scripts --no-audit --no-fund playwright@1.57.0
@@ -47,6 +48,8 @@ jobs:
           echo "NODE_PATH=$RUNNER_TEMP/ui/node_modules" >> "$GITHUB_ENV"
           echo "DNSDADDY_UI_BROWSER=$(node -e "console.log(require('$RUNNER_TEMP/ui/node_modules/playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
           echo "DNSDADDY_UI_BINARY=$RUNNER_TEMP/dnsdaddy-ui" >> "$GITHUB_ENV"
+      - name: Source approval must produce real answers and reporting without feeds
+        run: node internal/web/access.browser.test.cjs | tee "$RUNNER_TEMP/evidence/access-recovery.log"
       - name: A discarded refresh must retain live polling and form focus
         run: node internal/web/refresh.browser.test.cjs | tee "$RUNNER_TEMP/evidence/refresh.log"
       - name: Existing transport controls and actual DNS activity must still work

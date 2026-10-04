@@ -33,7 +33,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # being in the image that answers a real network's DNS.
 FROM alpine:3.21 AS lab
 
-RUN addgroup -g 10001 -S dnsdaddy \
+RUN apk upgrade --no-cache \
+    && addgroup -g 10001 -S dnsdaddy \
     && adduser -u 10001 -S -G dnsdaddy dnsdaddy
 
 COPY --from=build /out/dnsdaddy-lab /usr/local/bin/dnsdaddy-lab
@@ -47,9 +48,14 @@ ENTRYPOINT ["/usr/local/bin/dnsdaddy-lab"]
 # `docker build .` produces the resolver image and never the lab one.
 FROM alpine:3.21 AS runtime
 
+# Apply security updates within this Alpine release before adding runtime
+# tools. apk add alone can retain vulnerable libraries inherited from the
+# base image. Release builds still need fresh layers and the existing scan;
+# this is not a suppression or an in-container self-update mechanism.
 # ca-certificates for HTTPS feed downloads and DNS-over-TLS upstream
 # verification; tzdata so report timestamps render in the operator's timezone.
-RUN apk add --no-cache ca-certificates tzdata wget \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates tzdata wget \
     && addgroup -g 10001 -S dnsdaddy \
     && adduser -u 10001 -S -G dnsdaddy dnsdaddy \
     && mkdir -p /var/lib/dnsdaddy \
