@@ -1,0 +1,50 @@
+type: object
+required: [clientAccess]
+properties:
+  clientAccess:
+    type: object
+    description: >-
+      Authenticated, bounded in-memory source-address diagnostics. No queried names,
+      tokens or request bodies. Global query-log and client-address privacy settings
+      gate collection; current per-policy privacy also gates disclosure. Entries are
+      not authenticated identities and do not authorise clients. GET never changes
+      permissions. Counters are samples, not durable query history. A response means
+      the handler produced an answer, not that the remote client received it.
+    required: [enabled, windowSeconds, capacity, dropped, evicted, aclStale, queryLogging, clientAddressLogging, entries, note]
+    properties:
+      enabled: {type: boolean}
+      windowSeconds: {type: integer, description: '300 seconds since each source last refused; successful traffic does not extend retention'}
+      capacity: {type: integer, description: 'At most 64 source records per process'}
+      dropped: {type: integer, minimum: 0, description: 'Observations dropped due to contention since process start'}
+      evicted: {type: integer, minimum: 0, description: 'Records replaced at capacity since process start'}
+      aclStale: {type: boolean, description: 'Last ACL reload failed; do not infer saved permissions are in force'}
+      queryLogging: {type: boolean}
+      clientAddressLogging: {type: boolean}
+      note: {type: string}
+      entries:
+        type: array
+        maxItems: 64
+        items:
+          type: object
+          required: [address, cidr, firstRefusedAt, lastRefusedAt, lastResponseAt, lastOutcome, refused, answered, blocked, errors, protocols, sourceAllowed, canAuthorize, public, networkId, networkName, policyId, policyName, status, reason]
+          properties:
+            address: {type: string, description: 'Observed source IP, not proof of identity; UDP addresses may be spoofed'}
+            cidr: {type: string, description: 'One canonical IPv4 /32 or IPv6 /128'}
+            firstRefusedAt: {type: string, format: date-time}
+            lastRefusedAt: {type: string, format: date-time}
+            lastResponseAt: {type: string, format: date-time}
+            lastOutcome: {type: string, enum: [refused, answered, blocked, error]}
+            refused: {type: integer, minimum: 0}
+            answered: {type: integer, minimum: 0}
+            blocked: {type: integer, minimum: 0}
+            errors: {type: integer, minimum: 0}
+            protocols: {type: array, items: {type: string, enum: [udp, tcp, dot, doh, other]}}
+            sourceAllowed: {type: boolean, description: 'Current live source ACL allows this address; independent of token authentication'}
+            canAuthorize: {type: boolean, description: 'The UI may offer a reviewed single-source grant; this is not a permission'}
+            public: {type: boolean, description: 'Existing Networks API public-address acknowledgement is required'}
+            networkId: {type: string}
+            networkName: {type: string}
+            policyId: {type: string}
+            policyName: {type: string}
+            status: {type: string, enum: [needs_permission, permitted_waiting, answered, policy_blocked, resolution_error]}
+            reason: {type: string}
