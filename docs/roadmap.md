@@ -1,293 +1,153 @@
 # Roadmap
 
-What might come next, why, and what would have to be true first.
-
-**No dates and no promises.** This is a solo side project. Items are ordered
-within each section by how much they would improve the project against how
-likely they are to actually happen. Anything here is **not implemented** — see
-[capabilities.md](capabilities.md) for what is.
-
-A recurring theme: most of these are blocked on *evidence* rather than on code.
-The interesting problems in this project are "how would we know this works",
-not "how would we build it".
-
----
-
-## Near — clear value, understood scope
-
-### Measure the detectors against real traffic
-
-The single most valuable thing that could happen to this project, and it is not
-a code change.
-
-Every detector is marked **experimental** because its thresholds are calibrated
-against synthetic corpora written from the same understanding of the problem
-that produced the detectors. That tests internal consistency; it says nothing
-about the false-positive rate on a real network with a mail server, an
-endpoint agent and four hundred laptops.
-
-**What it would take:** several deployments willing to run the detectors and
-report what fired and whether it was real. Even a handful of "this fires
-constantly on X" reports would be worth more than any amount of further tuning
-in the dark. That is the most useful contribution anyone could make right now —
-see [CONTRIBUTING.md](../CONTRIBUTING.md).
-
-**What it unlocks:** promoting a detector from experimental to available, which
-in turn is the precondition for everything in the enforcement section below.
-
-### Per-client query rate limiting
-
-The clearest gap in the [threat model](threat-model.md#t18--denial-of-service-and-resource-exhaustion).
-A single authorised client can saturate the resolver, and on a 1 GB box that is
-not a high bar.
-
-**Why it is not done:** the interesting part is the failure mode. Refusing
-queries from an over-limit client breaks that client's network access, which is
-an outage caused by a threshold — the same objection that keeps behavioural
-detections from blocking. Needs a considered answer on defaults, per-network
-overrides, and what happens to a busy-but-legitimate host.
-
-### A persistent first-seen index
-
-"This domain has never been resolved on this network before" is one of the more
-useful signals in DNS security, and
-[hunt 5](threat-hunting/README.md#hunt-5--newly-observed-domains) currently
-approximates it from the query log — which means it is only as good as your
-retention, and at the 7-day default it is close to useless on a general network.
-
-A small separate table of (registered domain, first seen) kept independently of
-query-log retention would fix it properly, and would cost very little: it is one
-row per domain ever seen, not one per query.
-
-### Webhook sink
-
-The one integration genuinely missing from [siem.md](siem.md). A POST per
-finding to a configured URL covers Slack, Teams, PagerDuty and anything with an
-inbound webhook, without a client per vendor.
-
-**Needs:** retry policy, a bounded queue, and a considered answer to a slow
-endpoint — the same "never block, drop and count" discipline the rest of the
-detection path has.
-
-### `safeSearch` enforcement
-
-Accepted by the API and stored on the policy since the first release; the
-resolver does not act on it. A known gap, documented in the README and in
-[capabilities.md](capabilities.md).
-
-Enforcement means CNAME-rewriting search engine hostnames to their safe-search
-variants, which is straightforward but touches the answer path — the one place
-where a bug is a visible outage. It has stayed on the list because the risk is
-not zero and the benefit is modest.
-
-**Why the field is still there.** Carrying a property that looks like a control
-and is not one is a real hazard: somebody reads the API, sets it, and believes a
-protection is in place. Three ways out were considered.
-
-*Implement it now.* Rejected for this change. It is a resolution-path change
-that needs its own review, its own tests and a decision about what to do for
-engines with no safe-search variant. That is a feature, not a tidy-up.
-
-*Remove the field.* Rejected. `/api/v1` promises fields are added and never
-removed within v1, and the migration story promises a downgrade is a binary
-swap — dropping the column breaks the second, and dropping the JSON property
-breaks the first. Breaking two published promises to delete a boolean is a worse
-trade than the boolean.
-
-*Say clearly that it does nothing.* Taken. The field stays, and the OpenAPI
-schema now marks it `deprecated` with a description that states the resolver
-does not act on it — so a generated client shows it struck through, and anyone
-reading only the specification is told. `TestSafeSearchIsMarkedNotEnforcedInTheSpec`
-in `internal/api` fails if that wording is dropped, and a second test pins the
-value still round-tripping so an existing operator's setting is not silently
-discarded. When enforcement lands, both tests are the reminder that the
-documentation changes with it.
-
----
-
-## Medium — worth doing, needs design
-
-### Local DNSSEC enforcement
-
-The most significant capability gap in the project, and one that has narrowed.
-[dnssec.md](dns-security/dnssec.md) describes what exists now: Daddybound
-validates the same names clients ask for in **Learn** mode, resolving them
-itself from the root and following [RFC 5011] trust-anchor rollover, and
-records what it concludes. What it still does not do is act: every client
-answer is the upstream's, the AD bit is the upstream's, and
-[T11 — compromised upstream](threat-model.md#t11--compromised-upstream-infrastructure)
-stays mitigated only by observation.
-
-**What enforcement needs:** the evidence and the decisions listed in
-[issue #67](https://github.com/jameshoulder/dnsdaddy/issues/67) — a
-disagreement rate over real traffic and real time with every
-local-bogus-upstream-validated case investigated individually, a considered
-answer to what a client receives when validation cannot complete, resource
-measurements on the 1 vCPU target with the answer waiting on validation, and
-decided AD/CD/DO semantics. The Assurance page reports the measurements it
-can and says the evidence is insufficient; it applies no threshold.
-
-**Why it is genuinely hard:** the failure mode is the difficult part, not the
-cryptography. Fail-closed on validation failure means a broken signature at a
-supplier takes them offline for your whole network — and expired signatures are
-the most common DNSSEC event by a wide margin, someone else's mistake becoming
-your outage. Fail-open means the validation was decorative. Neither is right as
-a blanket default, and getting this wrong is worse than not claiming it.
-
-Realistically this is either a substantial piece of work or a decision to
-integrate a library that already does it correctly.
-
-### DNS rebinding protection
-
-Filtering private addresses out of upstream answers.
-[T8](threat-model.md#t8--dns-rebinding) currently says, honestly, that this is
-not mitigated.
-
-**Needs:** configurable ranges, per-policy exemptions (plenty of legitimate
-internal services resolve to RFC 1918 space through a public zone), and care
-not to break split-horizon deployments.
-
-### Response-content telemetry
-
-Only the question is logged today, not the answer. That closes off
-fast-flux detection, answer-based tunnelling analysis, and any
-"resolved-to-what" hunting.
-
-**Needs:** a considered answer to storage — answers are much larger than
-questions — and to privacy, since answer records reveal more, not less.
-
-### Behavioural baselining
-
-Everything today uses fixed thresholds. "Unusual *for this network*" is a
-better question than "above 200".
-
-**Needs, and this is the blocker:** an answer to poisoning during the learning
-window. An attacker present while the baseline is learned teaches the system
-that their behaviour is normal — and a baseline that learns continuously
-un-learns an ongoing attack. This is a real research problem, not a
-configuration option.
-
-### Sigma rules / detection-as-code
-
-The finding schema was designed with this in mind. Exporting the detection
-logic as [Sigma](https://sigmahq.io/) rules would let the same detections run
-in a SIEM against DNS logs from any source.
-
-**Question worth answering first:** whether the scoring model translates
-usefully. Sigma expresses matching conditions; DNS Daddy's detectors express
-weighted signals with bands. A Sigma rule for "unique_subdomains > 200" loses
-the multi-signal gate, which is the thing that makes the detector usable.
-
----
-
-## Far — research, or a different project
-
-### Enforcement from behavioural findings
-
-Blocking on a detection, opt-in and per-detector.
-
-**Hard precondition: a published false-positive rate.** Not an intention to
-measure one — a measurement. Until the first item on this page has happened,
-this cannot responsibly follow.
-
-Even then it should be opt-in, per-detector, severity-gated, and loud about
-what it did. The [design principle](detection/README.md#observe-score-explain-alert--never-block)
-is not a stepping stone to automatic blocking; it is the position, and moving
-off it requires evidence rather than confidence.
-
-### Word-list DGA detection
-
-The current heuristic measures surface statistics and **misses dictionary-word
-generators completely** — `silverhorse.com` scores near zero on all four
-properties. This is stated wherever the detector is described rather than
-quietly omitted.
-
-Detecting these well probably does need a model — n-gram likelihood against a
-domain corpus, or a small classifier. Which leads directly to:
-
-### Machine learning, and the conditions for it
-
-**ML stays on this list until three things exist**, and they are not
-negotiable:
-
-1. **A defensible dataset.** Labelled DNS traffic, from real networks, with
-   known ground truth. Not synthetic, because a model trained on traffic
-   generated from your own assumptions learns your assumptions.
-2. **A baseline to beat.** The current heuristics, measured on that dataset. A
-   model that does not beat four arithmetic measurements is not worth its
-   opacity.
-3. **An evaluation methodology.** Held-out data, precision and recall reported
-   honestly, and a stated position on drift.
-
-Without those, adding ML would make the output *less* trustworthy, not more —
-because nobody, including the author, could check it. Four measurements
-combined with equal weights can be verified on paper. A model cannot.
-
-**It will not be called AI for marketing reasons under any circumstances.**
-Entropy is entropy. If a model is ever added it will be described as what it
-is, with its evaluation published, and the heuristics will stay available for
-anyone who prefers something they can audit.
-
-### Encrypted-DNS visibility
-
-Identifying clients bypassing DNS Daddy via external DoH. Today the only signal
-is *absence* — a host that is clearly online and resolving nothing.
-
-Doing this properly needs flow data or endpoint telemetry, which is a different
-class of product. What is realistic here is a *correlation input*: making DNS
-Daddy's "hosts seen resolving" list easy to diff against an inventory from
-somewhere else.
-
-### Clustering and high availability
-
-One server is one server. Run two and give clients both addresses.
-
-Real HA — shared state, coordinated feed refresh, consistent policy — is a
-substantial change to an architecture deliberately built around one process and
-one SQLite file. Distributed detection state alone would be a project.
-
-### SSO, RBAC, multi-tenancy
-
-A single admin password and API tokens. Real multi-tenancy would change the
-data model throughout.
-
-Worth being honest about scope: DNS Daddy is a self-hosted tool for one
-network. An MSP managing forty customers wants something else, and building
-towards that would compromise what this is good at.
-
----
-
-## Things that will not happen
-
-Not "unlikely" — decided.
-
-**A hosted service, a paid tier, or a commercial edition.** Free,
-self-hosted, Apache-2.0, permanently. There is no supporter-only build and no
-private feature branch.
-
-**Telemetry or phone-home.** No usage statistics, no licence check, no account.
-
-**Blocking on unvalidated heuristics.** See above.
-
-**Threat feeds you cannot inspect.** Every default feed is a public URL listed
-in [`internal/catalog`](../internal/catalog/catalog.go). No proprietary
-intelligence, no black-box scoring service.
-
-**Statistics labelled as AI.**
-
----
-
-## Influencing this
-
-The most useful contributions, in order:
-
-1. **Tell me a detector is wrong on your network.** Which one, what fired, and
-   why it was benign. This is worth more than any feature request.
-2. **Find a flaw in the design.** [SECURITY.md](../SECURITY.md) for anything
-   sensitive; an issue otherwise.
-3. **Say which of these you would actually use.** The ordering above is one
-   person's guess.
-
-[CONTRIBUTING.md](../CONTRIBUTING.md) has the practicalities.
-
-[RFC 5011]: https://www.rfc-editor.org/rfc/rfc5011
+[Capabilities](capabilities.md) is the authoritative inventory of available,
+experimental and planned functionality. This roadmap separates the implemented
+baseline from future work; it does not turn a proposal into a capability.
+
+**No dates or delivery promises.** This is a single-maintainer, free,
+self-hosted Apache-2.0 project. Each pass should remain reviewable, with tests
+before changes to the DNS answer path. A clean scanner result is not a review.
+
+## Implemented baseline — do not rebuild these
+
+These items were incorrectly listed as future work in the old roadmap. The
+roadmap was stale; the features already existed in the code and capabilities map.
+
+| Status | Existing capability | Scope and evidence |
+|---|---|---|
+| Available | Per-client query rate limiting | Bounded attributed-client buckets, limiting and overflow counters; see [capabilities](capabilities.md). This is resource protection, not heuristic threat blocking. |
+| Available | DNS rebinding protection | Forwarded/native answer checks with explicit internal and split-DNS exceptions; see [capabilities](capabilities.md). |
+| Available | Optional signed HTTPS webhooks | User-owned receiver/signing secret, persistent bounded outbox and retries; see [webhooks](webhooks.md). |
+| Available | Encrypted backup and offline restore | Consistent snapshot, key/configuration material, verified restore into a new directory; see [recovery](recovery.md). |
+| Available | Finding review and domain/client investigation | Versioned review beside original findings, recorded history and read-only current-policy preview; see [capabilities](capabilities.md). |
+| Available | Optional external API providers | Deliberate configuration/consent, encrypted credentials and SSRF controls; see [external APIs](external-apis.md). No provider is required for basic resolution. |
+| Available | Optional encrypted outbound profile | Approved DoQ, HTTP/3 DoH and HTTP/2 DoH with TLS 1.3 and no plaintext fallback; see [encrypted DNS](encrypted-dns.md). These are outbound transports, not new inbound listeners. |
+| Available | OpenAPI, Prometheus and NDJSON exports | Existing management/measurement surfaces and bounded paginated exports; see [exports](exports.md). |
+| Experimental | Daddybound Live local DNSSEC enforcement | Implemented with native recursion or approved encrypted forwarding. Production reliability is not established; see [Daddybound](daddybound/README.md). |
+| Experimental, alert-only | Behavioural detectors and local learned baselines | Implemented measurements and fitted local state; no published real-traffic false-positive rate and no heuristic blocking. See [detection](detection/README.md) and [learning](learning.md). |
+
+Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.
+
+## Phase 1 decision — claims match the binary
+
+`SECURITY.md` previously claimed fresh installations selected Live and used DoT
+forwarders. The binary instead records Forward (`off`) for a fresh database and
+ships Cloudflare HTTPS forwarding URLs. This pass corrects the documentation,
+not the resolver default or an operator's stored settings.
+
+**Safe Search is not enforced.** Keep `safeSearch` stored and round-tripping
+for v1 compatibility, explicitly deprecated in both OpenAPI schemas and never
+presented as an actionable dashboard control. The UI/API already omitted the
+toggle and documented the no-op; this pass strengthens the read-only notice and
+regression tests. `true` does not restrict results for any search engine.
+
+CNAME-based Safe Search enforcement is **not implemented** by this pass. A future
+proposal would need documented provider hostnames, unsupported-engine behaviour,
+DNSSEC/cache/alias semantics, answer-path tests and separate review. Do not make
+a stored boolean look like enforcement while that work is absent.
+
+## Planned — subsequent scoped passes
+
+The following are planned work, not current capabilities. Stop after each phase,
+report what changed and what remains experimental, and update the capability map
+only when implementation and tests justify changing an item's status.
+
+### Phase 2 — release assurance artefacts
+
+Plan a release checklist with revision/toolchain records, scanner outputs, SPDX
+SBOM, container digest and a documented signing/verification step. Existing CI,
+CycloneDX generation and release checksums are inputs, not proof that the proposed
+release bundle already exists. Separate tested, scanned and independently reviewed
+evidence; never add an audit badge on the strength of automation. Extend bounded
+fuzz coverage for DNS wire messages, DoH bodies, feed lines and backup archives.
+
+### Phase 3 — feed supply chain and management history
+
+Extend feed refresh evidence with source URL, checksum, parser rejects and
+last-success age, preserving the last good snapshot when verification fails.
+Existing cached-feed fallback is not a claim of signed publisher provenance.
+
+Extend the existing durable intent/outcome management journal with a hash chain
+and redacted values. Specify what tampering can be detected and which trusted
+checkpoint is needed; do not describe a local hash chain as protection against
+a compromised host. Preserve refusal of a management write when its initial
+journal entry cannot be saved.
+
+### Phase 4 — investigation depth
+
+Plan a registered-domain first-seen index independent of query-log retention,
+one row per domain, explicitly local observation rather than threat intelligence.
+Extend existing decision records rather than replace them, including versioned
+allowed/blocked evidence, selected policy, category, feed and block mode.
+
+Plan minimal, confidence-labelled device identity from observed source addresses,
+configured networks and operator names, with optional deliberately configured
+lease-file/reverse-DNS input. Unknown must remain a valid result. No active
+network discovery, MAC-OUI inference, ARP/NDP sweeps or new raw-socket privileges.
+
+Plan opt-in, bounded answer telemetry for record type, address, TTL and a hash.
+Full TXT contents would require a separate explicit setting and documented privacy
+trade-off. Do not silently collect more browsing data to populate a dashboard.
+
+### Phase 5 — deployment and authentication guidance
+
+Document Daddybound graduation evidence without promoting Live: comparison with
+a known-good validator, investigation of disagreements/local-bogus cases, and
+latency/resource measurements on the 1 vCPU target. Per-network validation modes
+are proposed work, not a present control.
+
+Document browser/firewall DoH-bypass controls and a clients-seen-resolving export
+for inventory comparison. Do not build a flow collector or infer identity merely
+from the absence of DNS queries. Existing network DoH tokens are the roaming
+primitive; a signed Windows/macOS stub is a separate later project.
+
+Design a read-only export token scope and optional TOTP unless each is demonstrably
+a small additive change compatible with current authentication. Preserve bcrypt
+and login rate limiting. No mandatory SSO or enterprise tenancy model.
+
+## Planned — coherent stateful DNS lifecycle
+
+The resolver already has cached answers, in-flight work and reusable encrypted
+connections. Do not rebuild those merely to call the product stateful.
+
+A subsequent scoped implementation should connect admission, policy revision,
+cache/resolution, validation, response production and transport-write outcomes.
+Separate client identity, connection state and DNS transaction state. Bound both
+waiting and active work; define cancellation, cleanup, revocation and overload.
+A produced answer is not proof of remote receipt. Diagnostic sampling must not
+become the authority for a security decision. This lifecycle is **planned**, not
+implemented by the Phase 1 claims pass.
+
+## Evidence before promotion
+
+The most valuable missing input is measured behaviour on real traffic, with
+labelled ground truth, denominators, false alerts, misses and drift reported.
+Synthetic tests establish internal behaviour, not a production false-positive
+rate. Independent adversarial review and constrained-hardware measurements are
+separate requirements, not scanner results under another name.
+
+**Behavioural detectors remain alert-only.** A published real-traffic false-positive
+rate is a hard precondition for even considering enforcement and does not exist
+yet. This roadmap is not permission to add blocking from a heuristic. Stronger
+DGA models and general threat classifiers also remain research proposals; the
+existing local baseline is not a calibrated maliciousness probability.
+
+## Scope that stays small
+
+Run **two independent resolvers and give clients both addresses** for the documented
+availability approach. Maintain their policies deliberately; do not share a live
+SQLite file or promise clustering, replicated detection state or seamless failover.
+Multi-tenancy and mandatory SSO are outside this pass.
+
+No hosted service, paid tier, supporter-only feature, account requirement, licence
+check, usage telemetry or phone-home. Default feeds remain public and inspectable
+in [the catalogue](../internal/catalog/catalog.go). No proprietary default threat
+feed or required black-box scoring service. Optional operator-configured external
+integrations retain their existing explicit-consent and disclosure boundaries.
+
+## Contributing evidence
+
+Reproducible failures, well-described benign detector alerts and independent code
+review are more useful than another unmeasured feature. Use
+[SECURITY.md](../SECURITY.md) for sensitive reports and
+[CONTRIBUTING.md](../CONTRIBUTING.md) for development guidance.

@@ -31,12 +31,20 @@ receivers receive their configured data. See the privacy guide for each path.
 
 ## Current resolution disclosure
 
-Fresh installations start in **Forward**, internally `off`, with Cloudflare DoH
-forwarders. Forward, Learn and Live are distinct from the native/encrypted transport
-selection. Native Live uses plaintext authoritative DNS; encrypted forwarding
-protects the configured transport leg, not secrecy from the chosen provider.
-Daddybound Live's local DNSSEC validation exists but remains experimental.
-Existing saved choices and explicit configuration pins are preserved.
+Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.
+
+The built-in Forward upstreams are Cloudflare DoH. Forward, Learn and Live are
+distinct from the native/encrypted transport selection. Native Live uses plaintext
+authoritative DNS; encrypted forwarding protects the configured transport leg,
+not secrecy from the chosen provider. Daddybound Live's local DNSSEC validation
+exists but remains experimental. The default fact above is not a report of a
+particular running installation's current mode; inspect its effective settings.
+
+**Safe Search is not enforced.** The deprecated `safeSearch` policy field is
+stored and returned for API compatibility only. It does not rewrite answers or
+restrict search results, even when its stored value is `true`. There is no
+supported engine under that flag and no actionable dashboard toggle. See
+[capabilities](docs/capabilities.md) and the served `/openapi.yaml` contract.
 
 ## How to evaluate a particular version
 
@@ -48,3 +56,5 @@ are different kinds of evidence and must not be substituted for each other.
 
 This baseline was prepared against `e397bb503ce8e93cdb419c3e432269a61c7bc181` on
 1 October 2026. It is not a continuous assessment of every subsequent release.
+The Phase 1 claims reconciliation corrects documentation against the binary;
+it is not a new security review or a promotion of experimental functionality.

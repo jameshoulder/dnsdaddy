@@ -5,6 +5,8 @@
 set -uo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 cd -- "$ROOT" || exit 1
+# Informational only: do not pin or rewrite the operator's actual mode here.
+DEFAULT_MODE_NOTICE='Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.'
 profile=vps
 server_ip=""
 dry_run=0
@@ -31,7 +33,8 @@ while (($#)); do
         '  ./install.sh --server-ip IP          Explicit LAN/public NAT destination' \
         '  ./install.sh --dry-run               Preview without changing files' '' \
         'Requires Linux, Python 3 and local Docker Engine 28+. No external IP lookup.' \
-        'The low-level installer options --yes, --uninstall and --purge are retained.'
+        'The low-level installer options --yes, --uninstall and --purge are retained.' '' \
+        "$DEFAULT_MODE_NOTICE"
       exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -39,6 +42,7 @@ done
 if ((uninstall)); then
   exec bash "$ROOT/deploy/install-docker.sh" "${args[@]}"
 fi
+printf '%s\n' "$DEFAULT_MODE_NOTICE"
 command -v python3 >/dev/null 2>&1 || { echo 'Python 3 is required for host checks. Install it with your Linux package manager.' >&2; exit 1; }
 prep=(prepare --profile "$profile")
 [[ -n "$server_ip" ]] && prep+=(--server-ip "$server_ip")

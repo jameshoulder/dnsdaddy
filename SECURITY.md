@@ -145,11 +145,24 @@ parsing, and query names are normalised before they reach any lookup.
 
 ## Design decisions that carry security weight
 
-**Native resolution is the default; its authoritative traffic is plaintext.**
-Fresh installations select experimental Daddybound Live using UDP/TCP port 53
-to root and authoritative servers. Existing explicit choices are preserved.
-The default legacy forwarding URLs use certificate-verified DoT, but apply to
-Off/Learn client answers under the native profile, not native Live recursion.
+Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.
+
+**Resolver mode and transport profile are separate choices.** The default native
+profile uses the built-in certificate-verified Cloudflare HTTPS forwarding URLs
+(`https://1.1.1.1/dns-query` and `https://1.0.0.1/dns-query`) for Forward/Learn
+client answers. Forward starts no Daddybound local-validation runtime or anchor
+refresh. Native Learn adds separate authoritative observations; deliberately
+selected native Live uses plaintext UDP/TCP 53 to root and authoritative servers
+and performs experimental local DNSSEC validation. Daemon background hostname
+lookups under this profile still use system DNS. The earlier claim that fresh
+installs select Live with DoT forwarders was stale documentation, not the binary's
+behaviour. See [capabilities](docs/capabilities.md).
+
+**Safe Search is not enforced.** `safeSearch` is a deprecated, stored policy
+compatibility field, not an active protection. `true` does not rewrite answers
+or restrict results for any engine. The dashboard has no actionable toggle;
+both policy OpenAPI schemas explicitly disclose the no-op. This pass preserves
+v1 round-tripping rather than introducing CNAME rewriting in the answer path.
 
 **The optional encrypted profile uses only operator-approved endpoints.**
 Outbound DoQ, HTTP/3 DoH and HTTP/2 DoH require authenticated TLS 1.3 and literal

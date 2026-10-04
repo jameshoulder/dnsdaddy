@@ -23,6 +23,8 @@ AI-assisted personal project. "Available" means the feature exists and its
 tests pass. It does not mean the feature has survived adversarial review by
 anyone qualified. See [SECURITY.md](../SECURITY.md).
 
+Fresh installations without an explicit resolver-mode override start in Forward (off); upgrades preserve saved mode choices, and explicit configuration takes precedence.
+
 ---
 
 ## Available
@@ -56,6 +58,14 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Immediate allow-listing | The answer cache is purged on a policy change, so a fix applies on the next query. |
 | DNS rebinding protection | Enabled by default on both forwarding and native answers. Checks IPv4/IPv6 addresses, alias records and SVCB/HTTPS address hints. Explicit domain/CIDR exceptions support internal and split-DNS deployments; a domain exception applies to the original question rather than a target name supplied by an alias. Exceptions do not disable policy filtering or client admission. |
 
+**Safe Search is not enforced.** The deprecated `safeSearch` policy field is
+stored and returned for compatibility, including when its value is `true`.
+No search engine is supported for enforcement under this flag; it does not
+rewrite answers or restrict search results. The policy editor shows a read-only
+disclaimer, not an actionable control. Both served OpenAPI schemas mark the field
+deprecated and not enforced. Future CNAME rewriting remains planned and would
+require a separate answer-path change and review.
+
 ### Telemetry
 
 | Capability | Notes |
@@ -63,7 +73,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Per-query logging with plain-English reasons | Non-blocking and batched; drops rather than delaying a lookup. |
 | Hourly and daily rollups | Survive query-log pruning, so reporting history outlives browsing history. Failed resolutions are counted in the same hourly rows as the queries they are a fraction of. |
 | Overview measurements | `GET /api/v1/overview` carries a `measured` block stating each count separately with its window and scope: configured, enabled, permitted and traffic-bearing networks; attributed clients in the window or the reason there is no count; feeds enabled, loaded, failing and never downloaded; blocking policies and whether any enabled network uses one; blocked queries split into security, precaution, preference, custom and unclassified; and an error rate derived from one window, or the reason it cannot be. No field combines two scopes and none is a verdict about protection. |
-| Immediate DNS activity | Authenticated `GET /api/v1/activity/live` and `overview.live` count arrivals, completed answers, cache hits, blocks, failures, ACL refusals, rate limits and invalid messages reaching the DNS handler, including health probes. In-memory process totals, pending queries, last arrival/completion and a rolling 60-second window remain visible with query logging disabled. No names, client addresses, query-history reads or DNS probes are involved; normal API authentication still uses its store. Totals reset on restart; completed means the handler produced a response, not proof a remote client received it. |
+| Immediate DNS activity | The anonymous core of authenticated `GET /api/v1/activity/live` and `overview.live` counts arrivals, completed answers, cache hits, blocks, failures, ACL refusals, rate limits and invalid messages reaching the DNS handler, including health probes. In-memory process totals, pending queries, last arrival/completion and a rolling 60-second window remain visible with query logging disabled. The counters contain no names or client addresses and perform no DNS probes or query-history reads; normal API authentication still uses its store. The live endpoint also carries the separate privacy-gated `clientAccess` diagnostic described below. Totals reset on restart; completed means the handler produced a response, not proof a remote client received it. |
 | DNSSEC status per query | Records the original source: `upstream` for Forward/Learn client answers, `native` for native Live, and `encrypted_forwarded` for locally validated encrypted Live. A blank legacy value means unknown. Native/encrypted Learn observations are separate from the already-decided client answer; changing today's transport never relabels stored evidence. |
 | Prometheus metrics | Hand-rolled, no client library. |
 | Markdown reports | A period summary written for someone who does not run the network. |
@@ -96,6 +106,7 @@ anyone qualified. See [SECURITY.md](../SECURITY.md).
 | Dashboard-managed resolver access | A network can be permitted to query the resolver from the dashboard, in force on the next query with no restart. Enforced server-side: a default route is refused outright, and a publicly routable range needs an explicit acknowledgement recorded per range. See [docs/deploy.md](deploy.md#who-may-use-the-resolver) for the precedence rules and the properties that can surprise — an empty bootstrap ACL stays unrestricted, there are no deny rules, and permitting a catch-all you created grants nothing because it has no ranges of its own. The built-in **Default** row is the exception: its control is *Ad-hoc DNS access*, which decides whether unmatched clients already inside `dns.allowed_client_cidrs` are served. Off on a new installation, turned on once when upgrading an installation that was already serving them, and never able to widen that list. |
 | Public-exposure warning | Names each permitted range that is reachable from the internet, every time diagnostics run, from **both** sources — a range permitted through `DNSDADDY_ALLOWED_CLIENT_CIDRS` exposes a resolver exactly as much as one permitted in the dashboard. Each is labelled with the setting responsible. It never resolves itself and never claims a firewall state: DNS Daddy cannot see a cloud security group and does not change one. |
 | First-run guidance | The dashboard uses measured refusals and the effective ACL, including the Default network's ad-hoc access setting. Being inside a private address range does not by itself prove a client is admitted; inspect the effective permissions. |
+| Recent refused-source diagnostics | The live endpoint's `clientAccess` block and Overview show at most 64 source records in memory, expiring five minutes after the last refusal and erased on a later read/observation. Query/IP and policy privacy apply; no queried names or tokens are stored. Review grants one observed /32 or /128 through the existing Networks API, never automatic trust. Saved permission, subsequent answer production, policy block and resolution error are distinct. Counters can drop samples under contention; source IP is not authenticated device identity. This was implemented before the Phase 1 claims pass; see [recovery guidance](resolver-access-recovery.md). |
 | Port-conflict attribution | When nothing answers, distinguishes "nothing is listening" from "another process holds the port" and names that process by reading `/proc` socket inodes. Naming a process owned by another user needs root; without it the check says so rather than guessing. |
 | Management-exposure detection | Records management requests arriving over plain HTTP from a public address and raises them as a failure. Evidence, not inference: the process cannot see its own port publishing, so this fires only on traffic that has actually arrived. Silent for private, loopback and carrier-grade-NAT sources, for TLS, and for `/dns-query`. |
 | `dnsdaddy_client_refused_total` | Queries rejected on their source address, in `/metrics`. Deliberately unlabelled by address: the refusal path writes no query-log row so an unauthorised source cannot fill the disk, and a metric label would reintroduce that. |
@@ -259,12 +270,13 @@ how likely it is to happen — see [roadmap.md](roadmap.md) for the reasoning.
 | | Why it is not done |
 |---|---|
 | **Policy enforcement from behavioural findings** | Needs a measured false-positive rate first. Blocking on a heuristic with an unknown FP rate is not a feature. |
-| **`safeSearch` enforcement** | The flag is accepted by the API and stored on the policy. The resolver does not act on it, and setting it changes nothing about how queries are answered. A known gap since the first release; the field is marked `deprecated` in the OpenAPI schema with that stated in the description, so a generated client cannot present it as a working control. |
+| **`safeSearch` enforcement** | Not enforced for any engine. The stored compatibility boolean remains deprecated in both policy OpenAPI schemas, with an explicit no-op description. The dashboard has a read-only disclaimer, not a toggle. CNAME rewriting requires separate answer-path tests and review; it is not added in Phase 1. |
 | **Native syslog sink and vendor-specific notification adapters** | Generic signed HTTPS webhooks and versioned NDJSON exports are implemented; bespoke syslog, Slack, Teams and other adapters are not. |
 | **Sigma rule export / detection-as-code** | Research. The finding schema was designed with it in mind. |
 | **Word-list DGA detection** | The current heuristic measures surface statistics and misses dictionary-word generators completely. This is a research problem. |
-| **Clustering, anycast, HA** | One server is one server. Run two and give clients both addresses. |
-| **SSO, RBAC, multi-tenancy** | A single admin password plus API tokens. |
+| **Unified stateful DNS request lifecycle** | Existing caching, in-flight work and encrypted connections are stateful already. A unified admission-to-transport-completion model and additional queue/identity controls are proposed, not implemented by the claims pass. |
+| **Clustering, anycast, HA** | Outside this scoped pass. Run two independent resolvers and give clients both addresses; do not share live SQLite state. |
+| **SSO, RBAC, multi-tenancy** | Not requirements of this self-hosted product or additions in this pass. Current authentication remains an admin password plus API tokens. |
 | **Blocking encrypted-DNS bypass** | DNS Daddy cannot stop a device resolving elsewhere. That needs a network control. See [dns-security/encrypted-dns.md](dns-security/encrypted-dns.md). |
 
 ---
