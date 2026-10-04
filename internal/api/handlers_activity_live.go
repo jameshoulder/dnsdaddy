@@ -1,15 +1,23 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
 
-// Live traffic must remain visible when a rollup read fails or query logging
-// is disabled. After normal session/token authentication, this endpoint reads
-// only DNS handler counters, with no query-history reads or DNS probes.
+	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
+)
+
+// Live traffic remains available independently of historical rollups. The
+// additive clientAccess block contains bounded, privacy-gated source evidence;
+// anonymous counters retain their existing fields and meanings. This route
+// reads in-memory snapshots only and never probes DNS or grants permission.
 func (a *API) handleLiveActivity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if a.DNS == nil {
 		writeError(w, http.StatusServiceUnavailable, "live DNS activity is unavailable in this process")
 		return
 	}
-	writeJSON(w, http.StatusOK, a.DNS.LiveActivity())
+	writeJSON(w, http.StatusOK, struct {
+		dnsserver.LiveActivity
+		ClientAccess ClientAccessActivity `json:"clientAccess"`
+	}{a.DNS.LiveActivity(), a.clientAccessActivity()})
 }
