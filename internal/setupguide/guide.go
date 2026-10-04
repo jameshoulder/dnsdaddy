@@ -198,7 +198,7 @@ func Build(in Input) (Plan, error) {
 			out.Warnings = append(out.Warnings, "This prefix is not wholly private/shared. Use it only when it is your assigned source prefix; public-address confirmation is required.")
 		}
 		if in.Preset == "device" && p.Bits() != p.Addr().BitLen() {
-			return out, fmt.Errorf("One device requires an IPv4 /32 or IPv6 /128; choose LAN or VPN for a subnet")
+			return out, fmt.Errorf("one device requires an IPv4 /32 or IPv6 /128; choose LAN or VPN for a subnet")
 		}
 		if seen[p.String()] {
 			continue
