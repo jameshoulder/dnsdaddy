@@ -43,10 +43,26 @@ func withAccessActivitySchema(base []byte) []byte {
 	media["schema"] = schema
 	operation["summary"] = "Immediate DNS activity and bounded client-access diagnostics"
 	operation["description"] = "Reads anonymous handler counters and privacy-gated, bounded refusal-source diagnostics. Normal session/token authentication still uses the store. No DNS probes, query persistence or client grants occur. Source addresses are observations, not authenticated device identities. Counters exclude wire parsing and DoH authentication failures before the DNS handler. Responses use Cache-Control: no-store; completion does not prove remote delivery."
+	// Keep the version header first for existing consumers which recognise
+	// the served document by its opening line. Map serialization sorts keys
+	// and otherwise moves components ahead of openapi. Move the node pair,
+	// rather than rewriting a string or dropping any part of the document.
+	var node yaml.Node
+	if err := node.Encode(doc); err != nil {
+		panic(err)
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == "openapi" {
+			key, value := node.Content[i], node.Content[i+1]
+			copy(node.Content[2:i+2], node.Content[:i])
+			node.Content[0], node.Content[1] = key, value
+			break
+		}
+	}
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)
 	encoder.SetIndent(2)
-	if err := encoder.Encode(doc); err != nil {
+	if err := encoder.Encode(&node); err != nil {
 		panic(err)
 	}
 	if err := encoder.Close(); err != nil {
