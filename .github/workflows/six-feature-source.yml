@@ -1,0 +1,44 @@
+name: Six feature source snapshot
+on:
+  push:
+    branches: [feat/six-product-controls-20261005]
+    paths: [.github/workflows/six-feature-source.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: e0b4581f4448578f6d2917c0a7ef98f9b338a230
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Archive identified source and public build dependencies
+        env:
+          GOTOOLCHAIN: local
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/six-source"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/six-source/current.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/six-source/current-commit.txt"
+          git fetch --no-tags origin 9309db5807242f56ff1ae27e00551ae9b75b25cd 91ae60740e9ace5b9761920beefed9d30f2285f9
+          git archive --format=tar.gz 9309db5807242f56ff1ae27e00551ae9b75b25cd > "$RUNNER_TEMP/six-source/privacy-proposal.tar.gz"
+          git archive --format=tar.gz 91ae60740e9ace5b9761920beefed9d30f2285f9 > "$RUNNER_TEMP/six-source/privacy-base.tar.gz"
+          go version > "$RUNNER_TEMP/six-source/toolchain.txt"
+          go mod download
+          go mod verify > "$RUNNER_TEMP/six-source/module-verification.txt"
+          tar -czf "$RUNNER_TEMP/six-source/go-toolchain.tar.gz" -C "$(go env GOROOT)" .
+          tar -czf "$RUNNER_TEMP/six-source/go-modules.tar.gz" -C "$(go env GOMODCACHE)" .
+          (cd "$RUNNER_TEMP/six-source" && sha256sum *.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: six-feature-source
+          path: ${{ runner.temp }}/six-source/
+          retention-days: 3
+          if-no-files-found: error
