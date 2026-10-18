@@ -176,6 +176,8 @@ func (p *Policy) CheckRedirect(req *http.Request, via []*http.Request) error {
 	_, previous, _ := endpoint(via[len(via)-1].URL.String())
 	if to != previous {
 		// Do not inherit authentication or endpoint-specific conditional headers.
+		// #nosec G119 -- Replacing the entire map drops all inherited headers;
+		// TestRedirectOriginsAndHeaders verifies cross-origin credential removal.
 		req.Header = make(http.Header)
 		req.Header.Set("Accept", "text/plain, application/json")
 	}

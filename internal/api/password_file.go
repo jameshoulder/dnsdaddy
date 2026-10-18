@@ -36,7 +36,7 @@ func privateOwnedFile(info os.FileInfo, directory bool) bool {
 		return false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Getuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Getuid()) {
 		return false
 	}
 	if directory {
