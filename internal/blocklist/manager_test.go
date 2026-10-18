@@ -2,10 +2,12 @@ package blocklist
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -64,11 +66,37 @@ func newManagerHarness(t *testing.T, opts ...func(*config.Feeds)) *managerHarnes
 		t.Fatalf("NewManager: %v", err)
 	}
 
+	t.Cleanup(func() { mgr.Close() })
+
+	// All legacy content/cache tests use an explicit synthetic HTTPS origin.
+	// This test-only adapter maps it to the fixture server, never external DNS.
+	transport := &http.Transport{Proxy: nil}
+	t.Cleanup(transport.CloseIdleConnections)
+	mgr.client.Transport = stage1RoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Scheme != "https" || r.URL.Hostname() != "feed-fixture.example" {
+			return nil, fmt.Errorf("unregistered fixture endpoint")
+		}
+		copied := r.Clone(r.Context())
+		u := *r.URL
+		u.Scheme = "http"
+		u.Host = "127.0.0.1:" + r.URL.Port()
+		copied.URL = &u
+		response, err := transport.RoundTrip(copied)
+		if response != nil {
+			response.Request = r
+		}
+		return response, err
+	})
 	return &managerHarness{mgr: mgr, store: st, holder: holder, dir: dir}
 }
 
 func (h *managerHarness) addFeed(t *testing.T, name, url, category, format string) store.Feed {
 	t.Helper()
+	if u, err := neturl.Parse(url); err == nil && u.Scheme == "http" && u.Hostname() == "127.0.0.1" {
+		u.Scheme = "https"
+		u.Host = "feed-fixture.example:" + u.Port()
+		url = u.String()
+	}
 	f, err := h.store.CreateFeed(context.Background(), store.FeedInput{
 		Name: &name, URL: &url, Category: &category, Format: &format, Enabled: ptr(true),
 	})
@@ -147,6 +175,7 @@ func TestRefreshCachesToDiskForOfflineRestart(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
+	t.Cleanup(func() { mgr2.Close() })
 	if err := mgr2.LoadFromCache(context.Background()); err != nil {
 		t.Fatalf("LoadFromCache: %v", err)
 	}
@@ -177,8 +206,8 @@ func TestRefreshFallsBackToCacheOnFailure(t *testing.T) {
 	}
 
 	fail.Store(true)
-	if err := h.mgr.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh should not fail outright when one feed is down: %v", err)
+	if err := h.mgr.Refresh(context.Background()); err == nil {
+		t.Fatal("failed refresh must report failure while retaining previous protection")
 	}
 
 	// One unreachable provider must degrade one category, not the whole index.
@@ -235,12 +264,11 @@ func TestRefreshRejectsOversizedFeed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := newManagerHarness(t)
-	h.mgr.cfg.MaxFeedBytes = 1024
+	h := newManagerHarness(t, func(c *config.Feeds) { c.MaxFeedBytes = 1024 })
 	f := h.addFeed(t, "Huge", srv.URL, "malware", "hosts")
 
-	if err := h.mgr.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
+	if err := h.mgr.Refresh(context.Background()); err == nil {
+		t.Fatal("failed refresh must report failure while retaining previous protection")
 	}
 
 	stored, err := h.store.GetFeed(context.Background(), f.ID)
@@ -578,8 +606,8 @@ func TestTruncatedObservatoryNeverReplacesLastKnownGood(t *testing.T) {
 
 	// The provider now serves a truncated body with a perfectly good HTTP 200.
 	serveTruncated.Store(true)
-	if err := h.mgr.Refresh(ctx); err != nil {
-		t.Fatalf("Refresh: %v", err)
+	if err := h.mgr.Refresh(ctx); err == nil {
+		t.Fatal("failed refresh must report failure while retaining previous protection")
 	}
 
 	// Every domain from the last known good dataset is still blocking.
@@ -637,8 +665,8 @@ func TestObservatoryRejectsNonFeedBodyServedAs200(t *testing.T) {
 		t.Fatalf("Refresh: %v", err)
 	}
 	serveHTML.Store(true)
-	if err := h.mgr.Refresh(ctx); err != nil {
-		t.Fatalf("Refresh: %v", err)
+	if err := h.mgr.Refresh(ctx); err == nil {
+		t.Fatal("failed refresh must report failure while retaining previous protection")
 	}
 
 	if _, ok := h.holder.Load().Lookup("evil.example"); !ok {
@@ -948,8 +976,8 @@ func TestStructurallyInvalidObservatoryNeverReplacesLastKnownGood(t *testing.T) 
 		`{"generated_at":"2026-08-26T09:15:00Z"}`,
 	} {
 		serve.Store(bad)
-		if err := h.mgr.Refresh(context.Background()); err != nil {
-			t.Fatalf("Refresh with %s: %v", bad, err)
+		if err := h.mgr.Refresh(context.Background()); err == nil {
+			t.Fatal("failed refresh must report failure while retaining previous protection")
 		}
 
 		if _, ok := h.holder.Load().Lookup("known-bad.example"); !ok {
@@ -998,8 +1026,8 @@ func TestInvalidLocalObservatoryFeedNeverReplacesLastKnownGood(t *testing.T) {
 		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
 			t.Fatalf("write %s feed: %v", name, err)
 		}
-		if err := h.mgr.Refresh(context.Background()); err != nil {
-			t.Fatalf("Refresh with %s local feed: %v", name, err)
+		if err := h.mgr.Refresh(context.Background()); err == nil {
+			t.Fatal("failed refresh must report failure while retaining previous protection")
 		}
 
 		if _, ok := h.holder.Load().Lookup("known-bad.example"); !ok {

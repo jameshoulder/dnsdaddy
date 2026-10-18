@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/feedimport"
+	"github.com/jameshoulder/dnsdaddy/internal/feedpolicy"
 	"github.com/jameshoulder/dnsdaddy/internal/protection"
 )
 
@@ -276,7 +278,8 @@ type Detection struct {
 
 // HTTP holds the management API and dashboard settings.
 type HTTP struct {
-	Listen        string `yaml:"listen"`
+	Listen string `yaml:"listen"`
+	// AdminPassword is first-run bootstrap only; the persisted hash is authoritative.
 	AdminPassword string `yaml:"admin_password"`
 	BaseURL       string `yaml:"base_url"`
 
@@ -357,10 +360,13 @@ type Cache struct {
 
 // Feeds controls threat-intelligence feed refreshes.
 type Feeds struct {
-	RefreshInterval Duration `yaml:"refresh_interval"`
-	RefreshOnStart  bool     `yaml:"refresh_on_start"`
-	HTTPTimeout     Duration `yaml:"http_timeout"`
-	MaxFeedBytes    int64    `yaml:"max_feed_bytes"`
+	ImportLimits feedimport.Limits `yaml:"import_limits"`
+	// NetworkRules are exact-origin private CIDR/HTTPS redirect permissions.
+	NetworkRules    []feedpolicy.Rule `yaml:"network_rules"`
+	RefreshInterval Duration          `yaml:"refresh_interval"`
+	RefreshOnStart  bool              `yaml:"refresh_on_start"`
+	HTTPTimeout     Duration          `yaml:"http_timeout"`
+	MaxFeedBytes    int64             `yaml:"max_feed_bytes"`
 
 	// LocalFeedDir is the only directory a file:// feed may read from. Empty
 	// (the default) rejects file:// feeds outright.
@@ -706,6 +712,13 @@ func envDur(key string, dst *Duration) error {
 }
 
 func (c *Config) validate() error {
+	if _, _, _, err := c.Feeds.ImportLimits.Normalize(c.Feeds.MaxFeedBytes); err != nil {
+		return err
+	}
+	if _, err := feedpolicy.New(c.Feeds.NetworkRules); err != nil {
+		return err
+	}
+
 	if c.DataDir == "" {
 		return fmt.Errorf("data_dir must not be empty")
 	}

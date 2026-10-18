@@ -137,6 +137,7 @@ services:
 
       # Set this in .env to supply the first-run password. Leave it unset and
       # DNS Daddy writes a generated password to the data volume.
+      # Existing database credentials take precedence; changing this is not a reset.
       DNSDADDY_ADMIN_PASSWORD:
 
       # Query logging. Retention is in days; statistics outlive the raw log so

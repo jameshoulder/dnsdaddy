@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jameshoulder/dnsdaddy/internal/store"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestRecoveryCLIRoundTripAndNeverOverwrites(t *testing.T) {
@@ -22,6 +23,10 @@ func TestRecoveryCLIRoundTripAndNeverOverwrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	hash, _ := bcrypt.GenerateFromPassword([]byte("synthetic-backup-admin-password"), bcrypt.MinCost)
+	if _, err := st.InitializeAdminCredential(context.Background(), string(hash), false); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.SetSetting(context.Background(), "recovery-cli-fixture", "present"); err != nil {
 		t.Fatal(err)
 	}

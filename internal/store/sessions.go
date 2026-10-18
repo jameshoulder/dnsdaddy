@@ -45,6 +45,15 @@ func hashSessionToken(token string) string {
 // CreateSession issues a new session and returns the secret to put in the
 // cookie. The secret is not recoverable afterwards.
 func (s *Store) CreateSession(ctx context.Context, ttl time.Duration, label string) (string, error) {
+	credential, err := s.ReadAdminCredential(ctx)
+	if err != nil {
+		return "", err
+	}
+	return s.CreateSessionAtRevision(ctx, credential.Revision, ttl, label)
+}
+
+// CreateSessionAtRevision binds issuance to the credential actually verified.
+func (s *Store) CreateSessionAtRevision(ctx context.Context, revision int64, ttl time.Duration, label string) (string, error) {
 	raw := make([]byte, SessionTokenBytes)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generate session token: %w", err)
@@ -52,12 +61,20 @@ func (s *Store) CreateSession(ctx context.Context, ttl time.Duration, label stri
 	token := base64.RawURLEncoding.EncodeToString(raw)
 
 	now := time.Now()
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (token_hash, created_at, expires_at, last_seen, label)
-		 VALUES (?, ?, ?, ?, ?)`,
-		hashSessionToken(token), now.Unix(), now.Add(ttl).Unix(), now.Unix(), label)
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (token_hash, created_at, expires_at, last_seen, label, credential_revision)
+		 SELECT ?, ?, ?, ?, ?, revision FROM admin_auth_state
+		 WHERE id=1 AND state='active' AND revision=?`,
+		hashSessionToken(token), now.Unix(), now.Add(ttl).Unix(), now.Unix(), label, revision)
 	if err != nil {
-		return "", fmt.Errorf("create session: %w", err)
+		return "", ErrAdminStorage
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", ErrAdminStorage
+	}
+	if n != 1 {
+		return "", ErrAdminConflict
 	}
 	return token, nil
 }
@@ -74,7 +91,9 @@ func (s *Store) LookupSession(ctx context.Context, token string) (bool, error) {
 	}
 	var label string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT label FROM sessions WHERE token_hash = ? AND expires_at > ?`,
+		`SELECT s.label FROM sessions s JOIN admin_auth_state a
+ ON a.id=1 AND a.state='active' AND a.revision=s.credential_revision
+ WHERE s.token_hash = ? AND s.expires_at > ?`,
 		hashSessionToken(token), time.Now().Unix()).Scan(&label)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

@@ -38,6 +38,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
+	"github.com/jameshoulder/dnsdaddy/internal/feedimport"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/learning"
@@ -74,6 +75,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "recover-admin":
+			if err := runRecoverAdmin(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "dnsdaddy:", err)
+				os.Exit(1)
+			}
+			return
 		case "restore":
 			if err := runRestore(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
@@ -102,6 +109,7 @@ Usage:
   dnsdaddy daddybound ...    the experimental DNSSEC validation engine
   dnsdaddy backup [flags]    create an encrypted recovery package
   dnsdaddy restore [flags]   restore offline into a new directory
+  dnsdaddy recover-admin ... activate pending credentials using existing password proof (offline)
   dnsdaddy help              show this message
 
 Run flags:
@@ -226,12 +234,18 @@ func run() error {
 		return err
 	}
 
+	defer feeds.Close()
+
 	// Load whatever is already on disk before opening any listener. A restart
 	// must not leave a window where the resolver is answering but filtering
 	// nothing.
 	loadCtx, cancelLoad := context.WithTimeout(context.Background(), 2*time.Minute)
 	if err := feeds.LoadFromCache(loadCtx); err != nil {
-		log.Warn("could not load cached feeds", "error", err)
+		cancelLoad()
+		if errors.Is(err, feedimport.ErrLimit) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return fmt.Errorf("cached feeds exceed import policy; inspect feed budgets before starting: %w", err)
+		}
+		log.Warn("could not load cached feeds", "error", "cache unavailable")
 	}
 	cancelLoad()
 	log.Info("blocklist loaded from cache", "domains", lists.Load().Len())

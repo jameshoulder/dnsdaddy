@@ -117,6 +117,10 @@ func runRestore(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Recovery files verified: %s\nLaunch configuration: %s\nDashboard sessions revoked: %d\n\nThe service has not been started. Review the recovered configuration, network\nbindings, TLS, ACLs and API tokens, then deliberately switch the service over.\n", result.Destination, result.ConfigPath, result.SessionsRevoked)
+	fmt.Fprintf(os.Stdout, "Administrator status: %s\n", result.AdminStatus)
+	if result.AdminStatus != "active" {
+		fmt.Fprintln(os.Stdout, "Administrator recovery is required. Do not start the service until existing-password proof recovery is completed; see docs/recovery.md.")
+	}
 	return nil
 }
 

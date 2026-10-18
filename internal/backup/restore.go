@@ -17,10 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
 type RestoreResult struct {
+	AdminStatus        string    `json:"adminStatus"`
 	Destination        string    `json:"destination"`
 	ConfigPath         string    `json:"configPath"`
 	Files              int       `json:"files"`
@@ -191,6 +193,10 @@ func Restore(ctx context.Context, src io.Reader, passphrase []byte, destination 
 	if err := validateRestoredKey(ctx, filepath.Join(abs, "data/dnsdaddy.db"), root, expected); err != nil {
 		return result, err
 	}
+	adminStatus, err := snapshotAdminStatus(ctx, filepath.Join(abs, "data/dnsdaddy.db"))
+	if err != nil {
+		return result, err
+	}
 	if err := rewriteConfiguration(root, abs, manifest); err != nil {
 		return result, err
 	}
@@ -202,7 +208,15 @@ func Restore(ctx context.Context, src io.Reader, passphrase []byte, destination 
 	if err := writeRootFile(root, "backup-manifest.json", b); err != nil {
 		return result, err
 	}
-	note := fmt.Sprintf("DNS Daddy recovery completed at %s.\nSource backup created: %s\nSource application: %s\nActive dashboard sessions revoked: %d\n\nThe restored service has NOT been started. Review config.yaml, network bindings,\nACLs and external credentials. Preserve source-config.yaml for reference; it may\ncontain old passwords or host paths and is not the launch configuration.\n", time.Now().UTC().Format(time.RFC3339), manifest.CreatedAt.Format(time.RFC3339), manifest.ApplicationVersion, revoked)
+	note := fmt.Sprintf("DNS Daddy recovery completed at %s.\nSource backup created: %s\nSource application: %s\nActive dashboard sessions revoked: %d\n\nThe restored service has NOT been started. Review config.yaml, network bindings,\nACLs and external credentials. Preserve source-config.yaml as a sensitive reference; old archives may contain credentials or host paths. It is not the launch configuration.\n", time.Now().UTC().Format(time.RFC3339), manifest.CreatedAt.Format(time.RFC3339), manifest.ApplicationVersion, revoked)
+	note += "\nAdministrator status: " + adminStatus + "\n"
+	if adminStatus != "active" {
+		note += "Administrator recovery is required. Do not start the service. For pending_password_proof, use recover-admin with the existing password and the service stopped. No password reset is performed.\n"
+		marker, _ := json.Marshal(map[string]string{"version": "1", "adminStatus": adminStatus})
+		if err := writeRootFile(root, "data/"+AdminRecoveryNoticeName, marker); err != nil {
+			return result, err
+		}
+	}
 	if err := writeRootFile(root, "RESTORE.txt", []byte(note)); err != nil {
 		return result, err
 	}
@@ -210,7 +224,7 @@ func Restore(ctx context.Context, src io.Reader, passphrase []byte, destination 
 		return result, err
 	}
 	ok = true
-	return RestoreResult{Destination: abs, ConfigPath: filepath.Join(abs, "config.yaml"), Files: len(seen), SessionsRevoked: revoked, CreatedAt: manifest.CreatedAt, ApplicationVersion: manifest.ApplicationVersion}, nil
+	return RestoreResult{AdminStatus: adminStatus, Destination: abs, ConfigPath: filepath.Join(abs, "config.yaml"), Files: len(seen), SessionsRevoked: revoked, CreatedAt: manifest.CreatedAt, ApplicationVersion: manifest.ApplicationVersion}, nil
 }
 
 func allowedFile(name string) bool {
@@ -367,6 +381,15 @@ func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest)
 		return 0, err
 	}
 	defer tx.Rollback()
+	var hasAuth int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='admin_auth_state'").Scan(&hasAuth); err != nil {
+		return 0, err
+	}
+	if hasAuth == 1 {
+		if _, err := tx.ExecContext(ctx, `UPDATE admin_auth_state SET state=? WHERE id=1 AND state=? AND NOT EXISTS(SELECT 1 FROM settings WHERE key=? AND length(value)>0)`, store.AuthRecoveryRequired, store.AuthBootstrapPending, store.AdminPasswordHashKey); err != nil {
+			return 0, err
+		}
+	}
 	deleted, err := tx.ExecContext(ctx, "DELETE FROM sessions")
 	if err != nil {
 		return 0, err

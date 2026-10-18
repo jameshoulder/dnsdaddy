@@ -4,12 +4,9 @@
 // and feed that contributed it, consulted with a suffix walk so that blocking
 // "evil.com" also blocks "login.evil.com".
 //
-// An exact map rather than a Bloom filter or hash-only set is a deliberate
-// trade. Roughly 55 bytes per domain means a 500,000-domain index costs about
-// 30 MB — comfortable on a 1 GB box — and in exchange there is no possibility
-// of a hash collision silently blocking a legitimate domain. For NEO, one
-// unexplained block of the MD's supplier costs more trust than 30 MB costs
-// money.
+// Exact domain maps avoid probabilistic false positives. Ingestion separately
+// accounts for old, candidate and staged indexes; domain counts alone are not a
+// bound on Go heap usage. See feedimport.Limits and the import capacity tests.
 package blocklist
 
 import (
@@ -235,6 +232,9 @@ type Builder struct {
 
 // NewBuilder returns a Builder with capacity hinted for n domains.
 func NewBuilder(n int) *Builder {
+	if n > 65536 {
+		n = 65536
+	}
 	if n < 1024 {
 		n = 1024
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +16,8 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/feedimport"
+	"github.com/jameshoulder/dnsdaddy/internal/feedpolicy"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 	"github.com/jameshoulder/dnsdaddy/internal/version"
 )
@@ -30,20 +31,53 @@ import (
 // HTTP request goes out, and a provider being down never leaves a booting
 // server with an empty blocklist.
 type Manager struct {
-	store  *store.Store
-	holder *Holder
-	cfg    config.Feeds
-	dir    string
-	log    *slog.Logger
-	client *http.Client
+	store           *store.Store
+	holder          *Holder
+	cfg             config.Feeds
+	dir             string
+	log             *slog.Logger
+	client          *http.Client
+	policy          *feedpolicy.Policy
+	limits          feedimport.Limits
+	maxBytes        int64
+	localTimeout    time.Duration
+	cacheRoot       cacheFilesystem
+	localMu         sync.Mutex
+	localRoot       *os.Root
+	closed          bool
+	localRecords    int
+	lifecycle       sync.RWMutex
+	closing         atomic.Bool
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
 
+	outcome     atomic.Pointer[FeedOutcome]
 	refreshing  atomic.Bool
 	lastRefresh atomic.Int64 // unix milli
 	mu          sync.Mutex
+	ingestMu    sync.Mutex // bounds validation/build overlap, including cache loads
 
 	// loads is what the live index is actually made of, keyed by feed ID and
 	// replaced wholesale on every rebuild. See FeedLoads.
 	loads atomic.Pointer[map[string]FeedLoad]
+}
+
+// FeedOutcome is runtime evidence for the latest completed feed operation.
+// It remains truthful when SQLite cannot persist refresh history.
+type FeedOutcome struct {
+	FeedID    string `json:"feedId"`
+	Status    string `json:"status"`
+	Committed bool   `json:"committed"`
+	Error     string `json:"error,omitempty"`
+}
+
+func (m *Manager) LastFeedOutcome() *FeedOutcome {
+	p := m.outcome.Load()
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // FeedLoad says whether a feed's cached copy made it into the index that is
@@ -88,11 +122,20 @@ func describeLoadError(err error) string {
 	if errors.Is(err, os.ErrNotExist) {
 		return "its cached copy is missing"
 	}
-	return err.Error()
+	// Parser and filesystem errors may contain publisher-controlled field names,
+	// response text, or paths. Only emit application-controlled classifications.
+	if errors.Is(err, os.ErrPermission) {
+		return "its cached copy cannot be read (permission denied)"
+	}
+	return "its cached copy is unreadable or invalid"
 }
 
 // NewManager constructs a feed manager writing its cache under dataDir/feeds.
 func NewManager(st *store.Store, holder *Holder, cfg config.Feeds, dataDir string, log *slog.Logger) (*Manager, error) {
+	limits, maxBytes, localTimeout, err := cfg.ImportLimits.Normalize(cfg.MaxFeedBytes)
+	if err != nil {
+		return nil, err
+	}
 	dir := filepath.Join(dataDir, "feeds")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create feed cache dir: %w", err)
@@ -101,64 +144,92 @@ func NewManager(st *store.Store, holder *Holder, cfg config.Feeds, dataDir strin
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
-	return &Manager{
-		store:  st,
-		holder: holder,
-		cfg:    cfg,
-		dir:    dir,
-		log:    log,
-		client: &http.Client{Timeout: timeout, Transport: &http.Transport{
-			// Use the process DNS route directly. An implicit environment
-			// proxy could resolve feed hostnames outside the encrypted profile.
-			Proxy: nil, ForceAttemptHTTP2: true,
-			MaxIdleConns: 8, MaxIdleConnsPerHost: 2, MaxConnsPerHost: 4,
-			IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: timeout,
-		}},
-	}, nil
+	policy, err := feedpolicy.New(cfg.NetworkRules)
+	if err != nil {
+		return nil, err
+	}
+	cacheRoot, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, errors.New("cannot open feed cache root")
+	}
+	info, err := cacheRoot.Stat(".")
+	if err != nil || info.Mode().Perm()&0022 != 0 || !ownedByService(info) {
+		cacheRoot.Close()
+		return nil, errors.New("feed cache directory must be service-owned and not group/world writable")
+	}
+	st.SetFeedPolicy(policy)
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	return &Manager{store: st, holder: holder, cfg: cfg, dir: dir, log: log, policy: policy, client: policy.NewClient(timeout), limits: limits, maxBytes: maxBytes, localTimeout: localTimeout, cacheRoot: cacheRoot, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel}, nil
 }
 
 // LoadFromCache rebuilds the index from disk without any network access.
 // Feeds with no cached copy are skipped.
 func (m *Manager) LoadFromCache(ctx context.Context) error {
-	return m.rebuild(ctx, nil)
+	opCtx, done, err := m.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	ctx = opCtx
+	defer done()
+	m.ingestMu.Lock()
+	defer m.ingestMu.Unlock()
+	return m.rebuild(ctx)
 }
 
 // Refresh downloads every enabled feed and rebuilds the index. Feeds that fail
 // to download fall back to their cached copy, so a single unreachable provider
 // degrades one category rather than the whole blocklist.
 func (m *Manager) Refresh(ctx context.Context) error {
+	opCtx, done, err := m.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	ctx = opCtx
+	defer done()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	release, err := m.beginRefresh()
 	if err != nil {
 		return err
 	}
 	defer release()
+	m.ingestMu.Lock()
+	defer m.ingestMu.Unlock()
+	m.localRecords = 0
 
 	feeds, err := m.store.ListFeeds(ctx)
 	if err != nil {
 		return err
 	}
 
-	results := make(map[string]store.FeedResult, len(feeds))
+	failures, committed := 0, 0
 	for _, f := range feeds {
 		if !f.Enabled {
 			continue
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return fmt.Errorf("feed refresh interrupted (%d feeds committed): %w", committed, ctx.Err())
 		}
 		res := m.download(ctx, f)
-		results[f.ID] = res
-		if err := m.store.RecordFeedRefresh(ctx, f.ID, res); err != nil {
-			m.log.Warn("record feed refresh", "feed", f.ID, "error", err)
+		res = m.finishRefresh(ctx, f, res)
+		if res.Committed {
+			committed++
 		}
 		if res.Error != "" {
-			m.log.Warn("feed download failed, using cached copy if present",
-				"feed", f.ID, "url", f.URL, "error", res.Error)
+			failures++
+			m.log.Warn("feed refresh outcome", "feed", f.ID, "committed", res.Committed, "error", res.Error)
 		}
 	}
-
+	if failures != 0 {
+		return fmt.Errorf("feed refresh incomplete: %d failed or warned; %d feeds committed; previous published protection retained for failures", failures, committed)
+	}
+	if committed == 0 {
+		if err := m.rebuild(ctx); err != nil {
+			return err
+		}
+	}
 	m.lastRefresh.Store(time.Now().UnixMilli())
-	return m.rebuild(ctx, results)
+	return nil
 }
 
 // beginRefresh claims the single refresh slot, returning the function that
@@ -206,6 +277,7 @@ func (m *Manager) BeginRefreshFeed(feedID string) (func(context.Context) error, 
 	}
 	return func(ctx context.Context) error {
 		defer release()
+		m.localRecords = 0
 		return m.refreshOne(ctx, feedID)
 	}, nil
 }
@@ -213,6 +285,16 @@ func (m *Manager) BeginRefreshFeed(feedID string) (func(context.Context) error, 
 // refreshOne downloads feedID and rebuilds the index. The caller holds the
 // refresh slot.
 func (m *Manager) refreshOne(ctx context.Context, feedID string) error {
+	opCtx, done, err := m.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	ctx = opCtx
+	defer done()
+	m.ingestMu.Lock()
+	defer m.ingestMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	feeds, err := m.store.ListFeeds(ctx)
 	if err != nil {
 		return err
@@ -232,30 +314,64 @@ func (m *Manager) refreshOne(ctx context.Context, feedID string) error {
 		return fmt.Errorf("feed %q is disabled", feedID)
 	}
 
-	res := m.download(ctx, *target)
-	if err := m.store.RecordFeedRefresh(ctx, target.ID, res); err != nil {
-		m.log.Warn("record feed refresh", "feed", target.ID, "error", err)
-	}
+	res := m.finishRefresh(ctx, *target, m.download(ctx, *target))
 	if res.Error != "" {
-		m.log.Warn("feed download failed, using cached copy if present",
-			"feed", target.ID, "url", target.URL, "error", res.Error)
-	}
-
-	// The rebuild reads every enabled feed's cached file, so the other feeds
-	// keep contributing exactly what they contributed before. Only this feed's
-	// cache changed, and only if the download succeeded.
-	//
-	// Deliberately not touching m.lastRefresh: that is "when were the feeds
-	// refreshed", and one feed is not the feeds. Reporting a full refresh on
-	// the dashboard because a single feed was fetched would be a lie of
-	// exactly the kind the freshness figure exists to prevent.
-	if err := m.rebuild(ctx, map[string]store.FeedResult{target.ID: res}); err != nil {
-		return err
-	}
-	if res.Error != "" {
-		return fmt.Errorf("refresh %s: %s", target.ID, res.Error)
+		m.log.Warn("feed refresh outcome", "feed", target.ID, "committed", res.Committed, "error", res.Error)
+		return fmt.Errorf("refresh %s (committed=%t): %s", target.ID, res.Committed, res.Error)
 	}
 	return nil
+}
+
+// finishRefresh never rebuilds after a committed snapshot or over a live index
+// following a failed download. A cold manager may load its previous cache.
+// A 304 needs a complete cached candidate before it can be reported successful.
+func (m *Manager) finishRefresh(ctx context.Context, f store.Feed, res store.FeedResult) store.FeedResult {
+	defer func() {
+		m.outcome.Store(&FeedOutcome{FeedID: f.ID, Status: res.Status, Committed: res.Committed, Error: res.Error})
+	}()
+
+	// A manager not yet initialized may recover existing cached protection even
+	// when its first provider request fails. Never rebuild away a live index.
+	if res.Error != "" && m.holder.Generation() == 0 {
+		if err := m.rebuildRequired(ctx, f.ID); err != nil {
+			m.log.Warn("initial cached fallback unavailable")
+		}
+	}
+
+	if res.Status == "not-modified" {
+		if err := m.rebuildRequired(ctx, f.ID); err != nil {
+			res = failedImport(err)
+		} else {
+			res.Committed = true
+		}
+	}
+	recordCtx := ctx
+	if res.Committed {
+		// Rename/publication is authoritative even if the caller cancels now.
+		var cancel context.CancelFunc
+		recordCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		counts := m.holder.Load().CountsByFeed()
+		res.DomainCount = counts[f.ID]
+		for id, load := range m.FeedLoads() {
+			if load.Loaded {
+				if err := m.store.SetFeedDomainCount(recordCtx, id, counts[id]); err != nil {
+					res.Status = "committed-warning"
+					res.Error = "feed cache/index committed; feed counts could not be recorded"
+				}
+			}
+		}
+	}
+	if err := m.store.RecordFeedRefresh(recordCtx, f.ID, res); err != nil {
+		if res.Committed {
+			res.Status = "committed-warning"
+			res.Error = "feed cache/index committed; refresh history could not be recorded"
+		} else {
+			res.Status = "error"
+			res.Error = "feed not committed; refresh history could not be recorded"
+		}
+	}
+	return res
 }
 
 // Refreshing reports whether a refresh is currently running.
@@ -309,12 +425,16 @@ func (m *Manager) cachePath(feedID string) string {
 // unchanged content.
 func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
 	if strings.HasPrefix(f.URL, "file://") {
-		return m.copyLocal(f)
+		return m.copyLocal(ctx, f)
+	}
+
+	if err := m.policy.ValidateURL(f.URL); err != nil {
+		return store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
 	if err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
+		return store.FeedResult{Status: "error", Error: "feed content or cache operation failed"}
 	}
 	req.Header.Set("User-Agent", "dnsdaddy/"+version.String()+" (+https://github.com/jameshoulder/dnsdaddy)")
 	if Format(f.Format) == FormatObservatory {
@@ -328,7 +448,7 @@ func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
+		return store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)}
 	}
 	defer resp.Body.Close()
 
@@ -338,303 +458,41 @@ func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
 	if resp.StatusCode != http.StatusOK {
 		return store.FeedResult{
 			Status: "error",
-			Error:  fmt.Sprintf("HTTP %d from %s", resp.StatusCode, f.URL),
+			Error:  fmt.Sprintf("feed server returned HTTP %d", resp.StatusCode),
 		}
 	}
 
-	maxBytes := m.cfg.MaxFeedBytes
-	if maxBytes <= 0 {
-		maxBytes = 128 << 20
-	}
-
-	// Write to a temp file and rename, so a download interrupted halfway
-	// cannot leave a truncated cache file that we would happily parse.
-	tmp, err := os.CreateTemp(m.dir, ".download-*")
-	if err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	written, err := io.Copy(tmp, io.LimitReader(resp.Body, maxBytes+1))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-	if written > maxBytes {
-		return store.FeedResult{
-			Status: "error",
-			Error:  fmt.Sprintf("feed exceeds max_feed_bytes (%d)", maxBytes),
-		}
-	}
-	if written == 0 {
-		return store.FeedResult{Status: "error", Error: "feed returned an empty body"}
-	}
-
-	if err := m.verifyDownload(f, tmpName); err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-
-	if err := os.Rename(tmpName, m.cachePath(f.ID)); err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-	return store.FeedResult{Status: "ok", ETag: resp.Header.Get("ETag")}
+	return m.snapshot(ctx, f, resp.Body, nil, resp.Header.Get("ETag"))
 }
 
-// verifyDownload checks a freshly downloaded file before it is allowed to
-// replace the cached copy.
-//
-// The rename is atomic, so the cache is never half-written — but atomic is not
-// the same as correct. A response can arrive complete as far as HTTP is
-// concerned and still be a truncated document or an HTML error page served
-// with status 200, and renaming that over a good feed would silently unblock
-// everything the old copy carried. Refusing it here leaves the previous copy
-// in place and surfaces the error against that one feed, which is exactly what
-// happens when a provider is unreachable.
-//
-// Only formats that can actually be checked are checked. There is no way to
-// tell a truncated hosts file from a short one — every prefix of a hosts file
-// is a valid hosts file — so those keep the behaviour they have always had.
-func (m *Manager) verifyDownload(f store.Feed, path string) error {
-	if Format(f.Format) != FormatObservatory {
-		return nil
-	}
-
-	// #nosec G304 -- path is the temp file this manager just created inside its
-	// own cache directory.
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	if err := ValidateObservatory(file); err != nil {
-		return fmt.Errorf("rejected download, keeping the previous copy: %w", err)
-	}
-	return nil
+// rebuild publishes only a complete bounded candidate. Ordinary corrupt feeds
+// contribute nothing; resource/cancellation failures retain the entire old index.
+func (m *Manager) rebuild(ctx context.Context) error {
+	return m.rebuildRequired(ctx, "")
 }
-
-func (m *Manager) copyLocal(f store.Feed) store.FeedResult {
-	// Re-checked here rather than trusting the row: the URL was validated when
-	// the feed was created, but local_feed_dir may have been tightened since,
-	// and a symlink inside the directory can be repointed at any time.
-	path, err := store.LocalFeedPath(m.cfg.LocalFeedDir, f.URL)
-	if err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-
-	// #nosec G304 -- LocalFeedPath confines path to feeds.local_feed_dir,
-	// lexically and after symlink resolution.
-	src, err := os.Open(path)
-	if err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-	defer src.Close()
-
-	dst, err := os.CreateTemp(m.dir, ".download-*")
-	if err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-	tmpName := dst.Name()
-	defer os.Remove(tmpName)
-
-	_, err = io.Copy(dst, src)
-	if cerr := dst.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-
-	// The same gate as an HTTP download, for the same reason. A file:// feed
-	// is not more trustworthy for being local: it can be half-written by
-	// whatever produces it, truncated by a full disk, or repointed through a
-	// symlink, and renaming any of those over a good cache would silently
-	// unblock everything the old copy carried.
-	if err := m.verifyDownload(f, tmpName); err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-
-	if err := os.Rename(tmpName, m.cachePath(f.ID)); err != nil {
-		return store.FeedResult{Status: "error", Error: err.Error()}
-	}
-	return store.FeedResult{Status: "ok"}
-}
-
-// rebuild constructs a fresh index from the cached feed files and swaps it in.
-//
-// The feed list is read here, inside the lock, rather than taken from the
-// caller. That is the whole point: a refresh reads the feed list, then spends
-// minutes downloading, and the operator can disable a feed in the meantime.
-// Rebuilding from the list the refresh started with would put that feed's
-// domains back into the index after the database and the dashboard both said
-// it was off — blocking traffic nobody could account for, and nothing would
-// correct it until the next refresh. Rebuilds are serialised on m.mu, so
-// whichever one runs last reads the current configuration and has the final
-// say.
-func (m *Manager) rebuild(ctx context.Context, results map[string]store.FeedResult) error {
+func (m *Manager) rebuildRequired(ctx context.Context, required string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	feeds, err := m.store.ListFeeds(ctx)
+	ix, loads, err := m.candidate(ctx, "", nil, required != "")
 	if err != nil {
 		return err
 	}
-
-	enabled := make([]store.Feed, 0, len(feeds))
-	for _, f := range feeds {
-		if f.Enabled {
-			enabled = append(enabled, f)
-		}
+	if required != "" && !loads[required].Loaded {
+		return errors.New("feed has no usable cached content")
 	}
-	sortByCategoryPriority(enabled)
-
-	// Size the map from the last known counts to avoid repeated rehashing of a
-	// map that will hold hundreds of thousands of keys.
-	var hint int
-	for _, f := range enabled {
-		hint += f.DomainCount
-	}
-	b := NewBuilder(hint)
-
-	// What actually went into this index, feed by feed. A feed can be enabled,
-	// have downloaded successfully last week, and still contribute nothing
-	// today because its cached file went missing or was damaged on disk. The
-	// database cannot tell that story — it only remembers the download — so it
-	// is recorded here, by the rebuild that either used the file or could not.
-	loads := make(map[string]FeedLoad, len(enabled))
-	loaded := make([]string, 0, len(enabled))
-	for _, f := range enabled {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if _, err := m.loadInto(b, f); err != nil {
-			m.log.Warn("skipping feed with no usable cached copy", "feed", f.ID, "error", err)
-			loads[f.ID] = FeedLoad{Error: describeLoadError(err)}
-			continue
-		}
-		loads[f.ID] = FeedLoad{Loaded: true}
-		loaded = append(loaded, f.ID)
-	}
-
-	ix := b.Build()
 	m.holder.Store(ix)
 	m.loads.Store(&loads)
-	m.log.Info("blocklist index rebuilt",
-		"domains", ix.Len(),
-		"feeds", len(enabled),
-		"categories", len(ix.CountsByCategory()))
-
-	// Persist the deduplicated per-feed contribution so the dashboard shows
-	// what each feed actually adds, not what it claims to contain.
-	//
-	// Read back off the finished index rather than tallied while loading: a
-	// later feed can take a domain off an earlier one by claiming it under a
-	// more severe category, and a count taken as that earlier feed was read
-	// would not know it.
 	byFeed := ix.CountsByFeed()
-	for _, id := range loaded {
-		if results != nil {
-			if r, ok := results[id]; ok && r.Error != "" {
-				continue // keep the previous count alongside the error
-			}
+	for id, load := range loads {
+		if !load.Loaded {
+			continue
 		}
 		if err := m.store.SetFeedDomainCount(ctx, id, byFeed[id]); err != nil {
-			m.log.Warn("record feed count", "feed", id, "error", err)
+			m.log.Warn("record feed count failed", "feed", id)
 		}
 	}
+	m.log.Info("blocklist index rebuilt", "domains", ix.Len(), "feeds", len(loads))
 	return nil
-}
-
-func (m *Manager) loadInto(b *Builder, f store.Feed) (int, error) {
-	// #nosec G304 -- cachePath sanitises the feed ID to [A-Za-z0-9_-] and roots
-	// the result under the managed feed cache directory.
-	file, err := os.Open(m.cachePath(f.ID))
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
-	if Format(f.Format) == FormatObservatory {
-		return m.loadObservatoryInto(b, f, file)
-	}
-
-	entry := Entry{Category: f.Category, FeedID: f.ID, FeedName: f.Name}
-	added := 0
-	accepted, skipped, err := Parse(file, Format(f.Format), func(domain string) {
-		if b.Add(domain, entry) {
-			added++
-		}
-	})
-	if err != nil {
-		return added, err
-	}
-	if skipped > 0 {
-		m.log.Debug("feed had unparseable lines",
-			"feed", f.ID, "accepted", accepted, "skipped", skipped)
-	}
-	return added, nil
-}
-
-// loadObservatoryInto indexes a Threat Observatory document.
-//
-// Unlike a line-based feed, every indicator carries its own categories, so a
-// single Observatory feed contributes to malware, phishing, C2 and
-// cryptomining at once — and one indicator tagged twice is filed under both,
-// so a policy enabling either category blocks it. Indicators whose labels we
-// do not recognise fall back to the feed's configured category: the
-// Observatory lists a domain because it wants it blocked, and dropping one
-// over an unfamiliar label would lose protection to a vocabulary mismatch.
-//
-// The document is validated before a single domain is indexed. A cached copy
-// should already be complete — download refuses to replace the cache with
-// anything else — so this is the second line of that same guarantee, covering
-// a file damaged on disk. A partial document contributes nothing rather than
-// silently indexing half a feed.
-func (m *Manager) loadObservatoryInto(b *Builder, f store.Feed, r io.ReadSeeker) (int, error) {
-	if err := ValidateObservatory(r); err != nil {
-		return 0, err
-	}
-	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return 0, err
-	}
-
-	fallback := f.Category
-	if !catalog.ValidCategory(fallback) {
-		fallback = "malware"
-	}
-
-	added := 0
-	res, err := ParseObservatory(r, func(rec ObservatoryRecord) {
-		categories := rec.Categories
-		if len(categories) == 0 {
-			categories = []string{fallback}
-		}
-		for _, category := range categories {
-			if b.Add(rec.Domain, Entry{Category: category, FeedID: f.ID, FeedName: f.Name}) {
-				added++
-			}
-		}
-	})
-	if err != nil {
-		// Validation passed, so reaching here means the document changed under
-		// us mid-read. Report it rather than keeping a partial index.
-		return added, err
-	}
-
-	if res.Skipped > 0 {
-		m.log.Debug("observatory feed had unusable indicators",
-			"feed", f.ID, "accepted", res.Accepted, "skipped", res.Skipped)
-	}
-	m.log.Info("observatory feed indexed",
-		"feed", f.ID,
-		"indicators", res.Accepted,
-		"domains", added,
-		"generated_at", res.GeneratedAt,
-		"source", res.Source)
-	return added, nil
 }
 
 // sortByCategoryPriority orders feeds so higher-severity categories claim a

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/feedpolicy"
 	_ "modernc.org/sqlite" // pure-Go driver: no cgo, so the binary stays static
 )
 
@@ -29,6 +30,8 @@ var ErrNotFound = errors.New("not found")
 
 // Store owns the database handle.
 type Store struct {
+	feedPolicy *feedpolicy.Policy // immutable; set before serving
+
 	db *sql.DB
 
 	// localFeedDir is the only directory a file:// feed may read from. Empty
@@ -87,7 +90,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 
-	if _, err := db.Exec(schemaSQL); err != nil {
+	if err := applySchemaAndAdminAuth(context.Background(), db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
@@ -305,3 +308,6 @@ func decodeStrings(raw string) []string {
 	}
 	return out
 }
+
+// SetFeedPolicy installs trusted feed permissions before any request is served.
+func (s *Store) SetFeedPolicy(p *feedpolicy.Policy) { s.feedPolicy = p }

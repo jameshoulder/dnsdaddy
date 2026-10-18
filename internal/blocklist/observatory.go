@@ -1,8 +1,8 @@
 package blocklist
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -27,7 +27,8 @@ type ObservatoryRecord struct {
 type ObservatoryResult struct {
 	// GeneratedAt is when the Observatory built the document, if it said.
 	GeneratedAt time.Time
-	// Source is the document's self-declared origin. It is logged, not trusted:
+	// Source is the document's self-declared origin, not an authenticated identity.
+	// It is retained for callers but must not be logged: it may contain secrets.
 	// TLS is what establishes who served the file.
 	Source string
 	// Accepted counts indicators emitted; Skipped counts those rejected as
@@ -71,7 +72,7 @@ func ParseObservatory(r io.Reader, emit func(ObservatoryRecord)) (ObservatoryRes
 }
 
 // ValidateObservatory reports whether r holds a complete, well-formed
-// Observatory document. It streams the whole thing and buffers none of it.
+// Observatory document. It streams the document and buffers at most one bounded JSON value.
 //
 // This is what stands between a bad response and the operator's blocklist. A
 // feed download is replacing a dataset that is currently blocking traffic, and
@@ -94,123 +95,15 @@ func ValidateObservatory(r io.Reader) error {
 
 // parseObservatory is the single implementation behind both ParseObservatory
 // and ValidateObservatory. emit may be nil, which makes it a validating pass
-// that still walks every byte and buffers none of them.
+// that still walks every byte with bounded per-value buffering.
 func parseObservatory(r io.Reader, emit func(ObservatoryRecord)) (ObservatoryResult, error) {
-	var res ObservatoryResult
-
-	dec := json.NewDecoder(r)
-	tok, err := dec.Token()
-	if err != nil {
-		return res, fmt.Errorf("observatory feed is not JSON: %w", err)
-	}
-
-	delim, _ := tok.(json.Delim)
-	switch delim {
-	case '[':
-		// A bare array of indicators, with no envelope. Not the documented
-		// shape, but cheap to accept and it keeps a hand-rolled test fixture or
-		// a trimmed-down mirror working.
-		if err := parseIndicatorArray(dec, &res, emit); err != nil {
-			return res, err
-		}
-		return res, endOfDocument(dec)
-	case '{':
-	default:
-		return res, fmt.Errorf("observatory feed is not a JSON object or array")
-	}
-
-	// A feed has to actually carry an indicator list. Without this, any JSON
-	// object at all — an API error, a status page, a config file — reads as a
-	// valid feed containing nothing, and replaces a working cache with it.
-	seenIndicators := false
-
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return res, fmt.Errorf("read observatory feed: %w", err)
-		}
-		key, _ := keyTok.(string)
-		switch key {
-		case "indicators":
-			t, err := dec.Token()
-			if err != nil {
-				return res, fmt.Errorf("read observatory indicators: %w", err)
-			}
-			if d, ok := t.(json.Delim); !ok || d != '[' {
-				return res, fmt.Errorf(`observatory feed field "indicators" is not an array`)
-			}
-			if err := parseIndicatorArray(dec, &res, emit); err != nil {
-				return res, err
-			}
-			seenIndicators = true
-		case "generated_at":
-			if s, ok := decodeString(dec); ok {
-				if ts, err := time.Parse(time.RFC3339, s); err == nil {
-					res.GeneratedAt = ts.UTC()
-				}
-			}
-		case "source":
-			if s, ok := decodeString(dec); ok {
-				res.Source = s
-			}
-		default:
-			// Skip the value of any field we do not use, so the Observatory can
-			// add metadata without every deployed resolver rejecting the file.
-			var skip json.RawMessage
-			if err := dec.Decode(&skip); err != nil {
-				return res, fmt.Errorf("read observatory feed field %q: %w", key, err)
-			}
-		}
-	}
-
-	// Consume the closing brace. On a truncated document dec.More() above
-	// returns false rather than surfacing the read error, so this is where a
-	// body that stopped halfway is caught.
-	if _, err := dec.Token(); err != nil {
-		return res, fmt.Errorf("observatory feed ends mid-document: it is truncated")
-	}
-	if !seenIndicators {
-		return res, fmt.Errorf(`observatory feed has no "indicators" array; it is not a feed document`)
-	}
-	return res, endOfDocument(dec)
-}
-
-// endOfDocument reports an error if anything follows the top-level value —
-// two responses concatenated, or a body with a trailer appended.
-func endOfDocument(dec *json.Decoder) error {
-	if dec.More() {
-		return fmt.Errorf("observatory feed has trailing content after the document")
-	}
-	return nil
-}
-
-// parseIndicatorArray consumes indicators until the closing bracket. The
-// opening bracket has already been read.
-func parseIndicatorArray(dec *json.Decoder, res *ObservatoryResult, emit func(ObservatoryRecord)) error {
-	for dec.More() {
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			// A decode failure here is structural — the stream position is no
-			// longer trustworthy — so it stops the parse. Whatever was emitted
-			// before this point stands.
-			return fmt.Errorf("read observatory indicator: %w", err)
-		}
-		rec, ok := decodeIndicator(raw)
-		if !ok {
-			res.Skipped++
-			continue
-		}
+	ctx := context.Background()
+	return parseObservatoryLimited(ctx, &countedReader{ctx: ctx, r: r, left: 128 << 20}, 1000000, func(rec ObservatoryRecord) error {
 		if emit != nil {
 			emit(rec)
 		}
-		res.Accepted++
-	}
-	// Consume the closing bracket so a caller reading further fields resumes
-	// in the right place.
-	if _, err := dec.Token(); err != nil {
-		return fmt.Errorf("read observatory indicators: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 // decodeIndicator turns one raw indicator into a record, reporting whether it
@@ -292,19 +185,6 @@ func decodeStringList(raw json.RawMessage) []string {
 		return out
 	}
 	return nil
-}
-
-// decodeString reads the next value as a string, consuming it either way.
-func decodeString(dec *json.Decoder) (string, bool) {
-	var raw json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
-		return "", false
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", false
-	}
-	return s, true
 }
 
 // normaliseToken lowercases and trims a feed-supplied token so that "Domain",
