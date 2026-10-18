@@ -89,7 +89,7 @@ type Status struct {
 func (m *Manager) Status() Status {
 	return Status{Available: m != nil && m.opts.Database != nil, FormatVersion: FormatVersion, Encrypted: true,
 		RestoreMode: "offline_new_directory", Running: m != nil && m.running.Load(),
-		Included:        []string{"consistent SQLite snapshot (configuration, history, retained evidence, webhook outbox and API tokens)", "provider and webhook credential encryption key when present", "effective runtime configuration and original YAML when available", "native trust anchors and local learning checkpoint when present", "referenced TLS keys, certificates, custom anchors, local feeds and feed caches"},
+		Included:        []string{"consistent SQLite snapshot (configuration, history, retained evidence, webhook outbox and API tokens)", "provider and webhook credential encryption key when present", "effective runtime configuration and sanitized YAML reference when available", "native trust anchors and local learning checkpoint when present", "referenced TLS keys, certificates, custom anchors, local feeds and feed caches"},
 		Excluded:        []string{"running process memory and unflushed query/observation queues", "active dashboard sessions (revoked during restore)", "retired session.key and initial-password.txt", "external log files, service units, firewall rules and reverse-proxy configuration"},
 		Limitations:     []string{"Database and auxiliary files are separate committed snapshots, not one global transaction.", "Use a stopped service for an exact cross-file recovery point; live backup may omit in-flight observations.", "Restore never starts DNS or contacts external services. Review bind addresses, ACLs, TLS and API tokens before activating the recovered instance."},
 		MaxArchiveBytes: MaxArchiveBytes}
@@ -140,6 +140,13 @@ func (m *Manager) Create(ctx context.Context, passphrase []byte, dst io.Writer) 
 	}
 	if err := os.Chmod(dbPath, 0o600); err != nil {
 		return Manifest{}, err
+	}
+	status, err := snapshotAdminStatus(ctx, dbPath)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if status != "active" {
+		return Manifest{}, ErrAdminNotReady
 	}
 	items := []*inputFile{}
 	defer func() {
@@ -194,10 +201,16 @@ func (m *Manager) Create(ctx context.Context, passphrase []byte, dst io.Writer) 
 		manifest.Limitations = append(manifest.Limitations, "No managed native anchor state was present; configured trust anchors are the recovery starting point.")
 	}
 	if m.opts.ConfigPath != "" {
-		if err := add("source-config.yaml", m.opts.ConfigPath, maxConfigBytes, true); err != nil {
+		sourcePath := filepath.Join(dir, "source-config.yaml")
+		if err := stageSanitizedSource(m.opts.ConfigPath, sourcePath); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return Manifest{}, err
+			}
+		} else if err := add("source-config.yaml", sourcePath, maxConfigBytes, false); err != nil {
 			return Manifest{}, err
 		}
 	}
+
 	// All paths originate in effective server configuration, never the request.
 	for _, f := range []struct{ key, name, source string }{
 		{"dns.tls_cert_file", "refs/dns-tls-cert.pem", m.opts.Config.DNS.TLSCertFile},
@@ -229,7 +242,9 @@ func (m *Manager) Create(ctx context.Context, passphrase []byte, dst io.Writer) 
 	// yaml.v3 treats custom integer durations as integers when marshaling.
 	// Convert from the schema by reflection so every duration stays loadable
 	// as a string and new configuration fields are preserved automatically.
-	cfgBytes, err := yaml.Marshal(configValue(reflect.ValueOf(m.opts.Config)))
+	archiveConfig := m.opts.Config
+	archiveConfig.HTTP.AdminPassword = ""
+	cfgBytes, err := yaml.Marshal(configValue(reflect.ValueOf(archiveConfig)))
 	if err != nil {
 		return Manifest{}, err
 	}

@@ -282,6 +282,9 @@ func newTestStore(t *testing.T) *store.Store {
 // attributes rather than session lifecycle.
 func mustSession(t *testing.T, auth *Auth) string {
 	t.Helper()
+	if _, err := auth.EnsureAdminPassword(context.Background(), testPassword, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
 	token, err := auth.issueSession(context.Background(), "test")
 	if err != nil {
 		t.Fatalf("issueSession: %v", err)

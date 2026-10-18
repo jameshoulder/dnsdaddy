@@ -279,3 +279,59 @@ terms you cannot meet.
 These projects are maintained by volunteers doing unglamorous work that a lot
 of security tooling quietly depends on. If you rely on them, consider
 supporting them.
+
+## Consistent index capacity and refresh outcomes
+
+Feed ingestion uses one deterministic publication envelope at startup, first import
+and refresh. With `feeds.import_limits.memory_bytes = M`, 32 MiB remains reserved
+for parser/runtime overhead and each published index is limited to
+`floor((M - 32 MiB) / 3)` accounting bytes. The other two shares allow the old index,
+new candidate and per-feed parsing contribution to coexist. The old-index share
+is reserved even on a cold start, so acceptance does not depend on whether an
+index is already loaded. If a caller supplies an oversized old index, its actual
+charge is retained rather than undercounted.
+
+Each claim costs 512 bytes plus domain/category/feed-ID/feed-name lengths. Existing
+byte, record, unique-domain, claim, temporary-storage and timeout limits also apply;
+the first bound reached wins. This is conservative application accounting, not a
+hard Go heap/RSS quota. GC lag, readers retaining older generations, maps, other
+services and kernel I/O still need host headroom. See the Stage 5B security report.
+
+This deliberately tightens cold-start acceptance compared with the earlier code,
+which could load a cache too large to refresh safely. Before upgrading, preflight
+a representative copy of the complete enabled corpus against these limits on the
+intended platform. Do not assume a successfully loaded old cache will pass the new
+policy. An over-budget cold load stops startup before listeners open, preserving the
+existing fail-closed startup policy. Reduce
+claims/feeds or approve an appropriately sized finite budget with measured host
+headroom. Splitting one feed does not evade the aggregate published-index cap.
+No data, cache or configured limit is silently deleted, increased or rewritten.
+
+A validated download commits its cache and complete index once. It is not rebuilt
+again after publication. Failed download/parse/capacity/cancellation/rename work
+preserves the last successfully published index. A refresh cannot drop a previously
+loaded enabled feed merely because its cache becomes unreadable or corrupt. Cold
+cache loading still reports missing/corrupt independent feeds as not loaded; it does
+not publish a partially parsed contribution from them.
+
+Full refresh remains a sequence of per-feed commits, not one transaction spanning
+all feeds. Some feeds can commit while others fail; the returned/logged outcome
+reports failures/warnings and the number committed. `lastRefresh` advances only
+when a whole refresh succeeds. Single-feed refresh does not claim a full refresh.
+New data is not called rolled back after publication if directory sync or refresh
+history fails: a `committed-warning` explicitly distinguishes that result from a
+pre-commit error. Review such warnings; disk durability is not guaranteed by an
+in-memory publication. SQLite, filesystem rename and the live index do not share
+one transaction, and crash-consistent recovery across them is not claimed.
+
+The authenticated feeds response includes `lastFeedOutcome` (or null), the latest
+completed feed operation's feed ID, status, `committed` boolean and safe error when
+present. It survives a history-write failure in process memory and is not persisted
+across restarts. It describes one feed, not a whole batch. `loaded` and
+`indexedDomains` describe current protection, while per-feed history describes
+attempts. HTTP 202 means work was accepted, not that content has committed.
+
+Cache reloads and refresh ingestion are serialized to bound overlapping builds;
+DNS lookups continue reading immutable snapshots without the ingestion lock.
+Cancellation is cooperative, including while waiting for another ingestion to
+finish; a stalled filesystem can still delay completion or shutdown.

@@ -93,6 +93,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("blocklist.NewManager: %v", err)
 	}
 
+	t.Cleanup(func() { feeds.Close() })
 	res, err := resolver.New(cfg.DNS, cfg.Cache, log)
 	if err != nil {
 		t.Fatalf("resolver.New: %v", err)

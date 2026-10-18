@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/catalog"
+	"github.com/jameshoulder/dnsdaddy/internal/feedpolicy"
 )
 
 // ListFeeds returns every configured threat-intelligence feed.
@@ -185,6 +186,9 @@ func (s *Store) DeleteFeed(ctx context.Context, id string) error {
 
 // FeedResult records the outcome of a refresh attempt.
 type FeedResult struct {
+	// Committed means the complete candidate was published. Durability/history
+	// warnings remain separate; this is not a cross-filesystem/DB transaction.
+	Committed   bool
 	DomainCount int
 	Status      string
 	Error       string
@@ -206,6 +210,10 @@ func (s *Store) RecordFeedRefresh(ctx context.Context, id string, r FeedResult) 
 			UPDATE feeds SET last_refreshed_at = ?, last_success_at = ?, last_status = ?,
 			                 last_error = '', updated_at = ? WHERE id = ?`,
 			now, now, r.Status, now, id)
+		return err
+	}
+	if r.Committed && r.Error != "" {
+		_, err := s.db.ExecContext(ctx, `UPDATE feeds SET domain_count=?,last_refreshed_at=?,last_success_at=?,last_status='committed-warning',last_error=?,etag=?,updated_at=? WHERE id=?`, r.DomainCount, now, now, truncate(r.Error, 500), r.ETag, now, id)
 		return err
 	}
 	if r.Error != "" {
@@ -238,23 +246,21 @@ func (s *Store) SetFeedDomainCount(ctx context.Context, id string, n int) error 
 func (s *Store) validateFeedURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return fmt.Errorf("invalid feed URL: %w", err)
+		return feedpolicy.ErrURL
 	}
-	switch u.Scheme {
-	case "http", "https":
-		if u.Host == "" {
-			return fmt.Errorf("feed URL is missing a host")
+	if u.Scheme == "file" {
+		if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("invalid local feed URL")
+		}
+		if _, err := LocalFeedPath(s.localFeedDir, raw); err != nil {
+			return fmt.Errorf("local feed is unavailable or outside feeds.local_feed_dir")
 		}
 		return nil
-	case "file":
-		// Rejected here as well as at download time so the operator gets the
-		// error while they are still looking at the form, not silently in a
-		// refresh log twelve hours later.
-		_, err := LocalFeedPath(s.localFeedDir, raw)
-		return err
-	default:
-		return fmt.Errorf("feed URL must be http, https, or file, got %q", u.Scheme)
 	}
+	if s.feedPolicy != nil {
+		return s.feedPolicy.ValidateURL(raw)
+	}
+	return feedpolicy.ValidatePublicURL(raw)
 }
 
 func validateFeedFormat(f string) error {

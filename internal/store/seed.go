@@ -205,6 +205,10 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
 
 // SetSetting writes a key to the settings table.
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	if key == AdminPasswordHashKey {
+		return ErrAdminRecovery
+	} // use atomic credential APIs
+
 	_, err := s.db.ExecContext(ctx,
 		"INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
 		key, value)

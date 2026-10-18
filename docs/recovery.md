@@ -71,8 +71,10 @@ automatic pruning; include its growth in database storage monitoring.
 
 Active dashboard sessions are revoked **in the restored database only**. The
 running source is unchanged. The restored runtime configuration clears
-`http.admin_password` so an obsolete YAML bootstrap password cannot overwrite
-the current password hash preserved in SQLite. Existing management API tokens
+`http.admin_password` as defense in depth. Startup now treats the persisted
+password hash as authoritative; retained bootstrap configuration cannot overwrite
+it. Credential revision is preserved, and older auth schemas migrate safely on
+opening. See [dashboard password migration](security/dashboard-password-persistence.md). Existing management API tokens
 are retained; rotate them explicitly if recovery follows credential exposure.
 
 The pending webhook outbox is part of the database. After a recovered service
@@ -205,3 +207,88 @@ These controls and the isolated tests describe implemented behavior. They are
 not an independent audit of the recovery format. Changing cryptographic or
 archive behavior requires retaining the existing tampering, truncation,
 round-trip and path-safety tests and a format-version decision.
+
+## Pending administrator activation recovery (Stage 5A)
+
+New backups require an active administrator with a valid stored bcrypt hash.
+The check uses the committed SQLite snapshot. Complete initial activation before
+creating a recovery package. The database hash remains authoritative: backup,
+restore and recovery never replace it from YAML or environment configuration.
+Neither archived YAML copy includes `http.admin_password`; `source-config.yaml`
+is a normalized reference, with comments removed. Ambiguous YAML, anchors,
+aliases, multiple documents and unknown fields are refused. Keep the original
+configuration privately; it is never rewritten by backup creation.
+
+Old format-1 archives can contain a generated hash still awaiting activation.
+Restore preserves that hash and reports `pending_password_proof`, writes a
+private `ADMIN_RECOVERY_REQUIRED.json` note, and does not start the service.
+The note is informational; deleting or creating it cannot authorize recovery.
+`recovery_required` means proof-based activation is unavailable (for example,
+a missing or damaged hash). Do not edit the database to mark it fresh or use
+bootstrap settings to reset it. Retain the verified data and find an earlier
+usable backup or seek a separately authorized recovery procedure.
+
+For `pending_password_proof` only:
+
+1. Stop the service and keep it stopped. Work on the restored private data tree
+   as its owner, using trusted owner-controlled parent directories. Review the
+   restored configuration, API tokens and integration credentials before use.
+2. Supply the **existing administrator password** to the offline command through
+   stdin. Do not put passwords in command arguments, environment variables,
+   shell history or files in the backup tree. For example, in Bash with shell
+   tracing disabled, use a silent prompt (the command below is operator guidance):
+
+   ```bash
+   set +x
+   IFS= read -r -s -p 'Existing administrator password: ' recovery_proof
+   printf '\n' >&2
+   printf '%s' "$recovery_proof" | dnsdaddy recover-admin \
+     -data-dir /private/restored/data -password-stdin -service-stopped
+   unset recovery_proof
+   ```
+
+3. On success, the identical hash becomes active, revision advances, all dashboard
+   sessions are revoked and a non-secret event is committed atomically. No new
+   password, session or recovery token is issued. Review and deliberately start
+   the service; sign in with that same password. Stale bootstrap settings cannot
+   override it. Recovery is offline only; there is no HTTP recovery endpoint.
+
+Missing/incorrect proof, unsupported state or database failures fail closed.
+A pre-commit failure rolls back activation, session changes and the recovery event.
+Repeat the command with correct proof after an interruption: an already active
+account is proof-checked and reported without changing credentials or sessions.
+If note cleanup or status output fails after commit, the message explicitly says
+credentials are active. The database, not a recovery note, determines authority.
+
+The command requires an existing owner-held regular mode-0600 single-link database,
+a directory not writable by group/others, safe existing SQLite sidecars, and an
+explicit stopped-service assertion. It never creates a missing database or runs
+startup migrations. A nonblocking advisory directory lock serializes cooperating
+recovery commands; it does not stop an uncooperative daemon. Same-user/root changes,
+untrusted parent-directory replacement and hostile filesystems are outside this
+local administrator trust boundary. Bounded input is read before the 30-second DB
+operation deadline; a stalled stdin producer or kernel I/O can still block.
+
+Losing the existing pending password cannot be repaired securely from its bcrypt
+hash or the archive passphrase alone. Keep any separately escrowed initial delivery
+credential in an independent encrypted operator vault, never in this archive.
+Older archives may retain bootstrap plaintext in their encrypted reference YAML;
+they are not rewritten automatically and must be handled as sensitive material.
+Backups restore the password and API tokens valid at snapshot time: restoring an
+older backup can restore an older password. Review external credentials and API
+tokens deliberately after recovery. This command is not an anti-rollback mechanism.
+
+### Recovery notice location
+
+New restores write the non-secret `ADMIN_RECOVERY_REQUIRED.json` notice inside the
+restored **data directory** (`<destination>/data/`), which is the directory supplied
+to `recover-admin -data-dir`. After correct existing-password proof, the command
+removes that notice through its pinned data root; it never opens a parent root or
+traverses `..` to clean up notices. Incorrect proof leaves the notice, credential
+state and session rows unchanged. A notice symlink is unlinked as a leaf, without
+following its target. The database remains authoritative, not the notice.
+
+Older restores may have written the notice one level above `data/`. Recovery will
+not automatically remove that historical parent notice. After verifying successful
+activation, an operator may review that informational leftover separately. Neither
+a leftover notice nor its removal authorizes a password reset or overrides DB state.

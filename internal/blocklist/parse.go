@@ -2,11 +2,14 @@ package blocklist
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
+	"github.com/jameshoulder/dnsdaddy/internal/feedimport"
 )
 
 // Format identifies how a feed's lines are laid out.
@@ -44,6 +47,11 @@ var sinkAddrs = map[string]bool{
 //
 // The returned counts are (accepted, skipped).
 func Parse(r io.Reader, format Format, emit func(domain string)) (int, int, error) {
+	ctx := context.Background()
+	return parseLines(ctx, &countedReader{ctx: ctx, r: r, left: 128 << 20}, format, 1000000, func(d string) error { emit(d); return nil })
+}
+
+func parseLines(ctx context.Context, r io.Reader, format Format, maxRecords int, emit func(string) error) (int, int, error) {
 	if format == FormatObservatory {
 		// Guarded rather than silently sniffed: line-parsing a JSON document
 		// would quietly extract nonsense from it instead of failing.
@@ -54,8 +62,15 @@ func Parse(r io.Reader, format Format, emit func(domain string)) (int, int, erro
 	// Some feeds ship very long comment banners; 1 MiB is generous but bounded.
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	var accepted, skipped int
+	var accepted, skipped, records int
 	for sc.Scan() {
+		if err := ctx.Err(); err != nil {
+			return accepted, skipped, err
+		}
+		records++
+		if records > maxRecords {
+			return accepted, skipped, feedimport.Limit("records per feed")
+		}
 		line := sc.Text()
 		domain, ok := parseLine(line, format)
 		if !ok {
@@ -65,10 +80,15 @@ func Parse(r io.Reader, format Format, emit func(domain string)) (int, int, erro
 			skipped++
 			continue
 		}
-		emit(domain)
+		if err := emit(domain); err != nil {
+			return accepted, skipped, err
+		}
 		accepted++
 	}
 	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return accepted, skipped, feedimport.Limit("line bytes")
+		}
 		return accepted, skipped, err
 	}
 	return accepted, skipped, nil

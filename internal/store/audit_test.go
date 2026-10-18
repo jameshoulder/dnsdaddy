@@ -122,14 +122,20 @@ func TestConfigAuditSecretSettingsHaveNoHashOrValue(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	scope := AuditScope{Kind: "settings", ID: "admin_password_hash"}
-	if err := st.SetSetting(ctx, scope.ID, "old-secret-hash"); err != nil {
+	if err := func() error {
+		_, err := st.DB().ExecContext(ctx, "INSERT INTO settings(key,value) VALUES(?,?)", scope.ID, "old-secret-hash")
+		return err
+	}(); err != nil {
 		t.Fatal(err)
 	}
 	before, err := st.CaptureConfig(ctx, scope)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetSetting(ctx, scope.ID, "new-secret-hash"); err != nil {
+	if err := func() error {
+		_, err := st.DB().ExecContext(ctx, "UPDATE settings SET value=? WHERE key=?", "new-secret-hash", scope.ID)
+		return err
+	}(); err != nil {
 		t.Fatal(err)
 	}
 	after, err := st.CaptureConfig(ctx, scope)

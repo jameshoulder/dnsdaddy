@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"slices"
@@ -524,6 +525,7 @@ func (a *API) handleListFeeds(w http.ResponseWriter, r *http.Request) {
 		"feeds":               out,
 		"refreshing":          a.Feeds.Refreshing(),
 		"totalIndexedDomains": a.Lists.Load().Len(),
+		"lastFeedOutcome":     a.Feeds.LastFeedOutcome(),
 	})
 }
 
@@ -771,23 +773,17 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts; try again later")
 		return
 	}
-	if !a.Auth.CheckPassword(r.Context(), body.Password) {
-		writeError(w, http.StatusUnauthorized, "incorrect password")
-		return
-	}
-
-	a.Auth.limiter.reset(key)
-
-	token, err := a.Auth.issueSession(r.Context(), "dashboard")
+	token, err := a.Auth.Login(r.Context(), body.Password, "dashboard")
 	if err != nil {
-		// The password was right, but no session could be recorded. Failing
-		// the login is the only honest answer: issuing a cookie the server
-		// cannot recognise would produce a browser that believes it is signed
-		// in and is refused on every subsequent request.
-		a.Log.Error("create session", "error", err)
-		writeError(w, http.StatusInternalServerError, "could not start a session")
+		if errors.Is(err, ErrPasswordIncorrect) || errors.Is(err, store.ErrAdminConflict) {
+			writeError(w, http.StatusUnauthorized, "incorrect password or credentials changed; sign in again")
+		} else {
+			a.Log.Error("dashboard login unavailable", "reason", "credential or session storage unavailable")
+			writeError(w, http.StatusServiceUnavailable, "dashboard login is unavailable")
+		}
 		return
 	}
+	a.Auth.limiter.reset(key)
 	a.Auth.SetSessionCookie(w, r, token)
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true})
 }
@@ -836,7 +832,17 @@ func (a *API) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.Auth.SetPassword(r.Context(), body.CurrentPassword, body.NewPassword); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		switch {
+		case errors.Is(err, ErrPasswordIncorrect):
+			writeError(w, http.StatusBadRequest, ErrPasswordIncorrect.Error())
+		case errors.Is(err, ErrPasswordPolicy):
+			writeError(w, http.StatusBadRequest, ErrPasswordPolicy.Error())
+		case errors.Is(err, store.ErrAdminConflict):
+			writeError(w, http.StatusConflict, store.ErrAdminConflict.Error())
+		default:
+			a.Log.Error("dashboard password change unavailable", "reason", "credential storage unavailable")
+			writeError(w, http.StatusServiceUnavailable, "password change could not be completed")
+		}
 		return
 	}
 

@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/jameshoulder/dnsdaddy/internal/config"
 	"github.com/jameshoulder/dnsdaddy/internal/secrets"
 	"github.com/jameshoulder/dnsdaddy/internal/store"
@@ -99,7 +101,11 @@ func recoveryFixture(t *testing.T) (*Manager, *store.Store, string, string) {
 	if err := st.EnsureAuditSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetSetting(ctx, "admin_password_hash", "current-dashboard-password-hash"); err != nil {
+	hash, err := bcrypt.GenerateFromPassword([]byte("synthetic-backup-password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InitializeAdminCredential(ctx, string(hash), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.SetSetting(ctx, "protection.settings.v1", `{"version":3,"rateLimit":{"enabled":true}}`); err != nil {
@@ -214,7 +220,8 @@ func TestBackupRestorePreservesRecoveryStateAndRevokesSessions(t *testing.T) {
 		t.Fatalf("restored provider credential: %v", err)
 	}
 	hash, err := recovered.GetSetting(ctx, "admin_password_hash")
-	if err != nil || hash != "current-dashboard-password-hash" {
+	wantHash, wantErr := st.GetSetting(ctx, "admin_password_hash")
+	if err != nil || wantErr != nil || hash != wantHash {
 		t.Fatal("current admin password was not preserved")
 	}
 	var feedURL string
@@ -408,6 +415,10 @@ func TestBackupRecoversWebhookOnlyCredentialAndRefusesMissingKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	hash, _ := bcrypt.GenerateFromPassword([]byte("synthetic-backup-admin-password"), bcrypt.MinCost)
+	if _, err := st.InitializeAdminCredential(ctx, string(hash), false); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.InitWebhooks(ctx); err != nil {
 		t.Fatal(err)
 	}

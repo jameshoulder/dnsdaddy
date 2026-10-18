@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -87,93 +87,120 @@ func retireLegacySessionKey(path string) {
 	_ = os.Remove(path)
 }
 
-// EnsureAdminPassword sets the admin password from configuration, or generates
-// one on first run.
-//
-// The generated password is written to dataDir/initial-password.txt with 0600
-// and returned so the caller can print it once. Writing it to a file rather
-// than only logging it means an operator who missed the boot output is not
-// locked out of their own resolver.
-func (a *Auth) EnsureAdminPassword(ctx context.Context, configured, dataDir string) (generated string, err error) {
-	if configured != "" {
-		hash, err := bcrypt.GenerateFromPassword([]byte(configured), bcrypt.DefaultCost)
-		if err != nil {
-			return "", err
-		}
-		return "", a.store.SetSetting(ctx, settingAdminHash, string(hash))
-	}
+var (
+	ErrPasswordIncorrect = errors.New("current password is incorrect")
+	ErrPasswordPolicy    = errors.New("new password must contain at least 12 characters and at most 72 UTF-8 bytes")
+	ErrPasswordBootstrap = errors.New("initial administrator password delivery requires recovery; no credential was activated")
+)
 
-	if _, err := a.store.GetSetting(ctx, settingAdminHash); err == nil {
-		return "", nil // already configured
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return "", err
-	}
-
-	password := generatePassword()
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+// EnsureAdminPassword consumes bootstrap configuration only for an uninitialized
+// fresh database. Existing persisted credentials are authoritative, even when
+// bootstrap configuration is invalid. Never return plaintext on failure.
+func (a *Auth) EnsureAdminPassword(ctx context.Context, configured, dataDir string) (string, error) {
+	c, err := a.store.ReadAdminCredential(ctx)
 	if err != nil {
 		return "", err
 	}
-	if err := a.store.SetSetting(ctx, settingAdminHash, string(hash)); err != nil {
+	if c.State == store.AuthActive {
+		return "", nil
+	}
+	if c.Hash != "" {
+		// Interrupted generated initialization: configuration is not a reset path.
+		password, err := readInitialPassword(dataDir)
+		if err != nil || bcrypt.CompareHashAndPassword([]byte(c.Hash), []byte(password)) != nil {
+			return "", ErrPasswordBootstrap
+		}
+		if err := a.store.ActivateGeneratedAdminCredential(ctx, c.Hash); err != nil {
+			return "", err
+		}
+		return password, nil
+	}
+	password := configured
+	generated := configured == ""
+	if generated {
+		password, err = generatePassword()
+		if err != nil {
+			return "", ErrPasswordBootstrap
+		}
+	}
+	if err := validateNewPassword(password); err != nil {
 		return "", err
 	}
-
-	path := filepath.Join(dataDir, "initial-password.txt")
-	content := fmt.Sprintf("DNS Daddy initial admin password: %s\n\nChange it from Settings, then delete this file.\n", password)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return password, fmt.Errorf("write %s: %w", path, err)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", store.ErrAdminStorage
+	}
+	if _, err := a.store.InitializeAdminCredential(ctx, string(hash), generated); err != nil {
+		if errors.Is(err, store.ErrAdminConflict) {
+			winner, readErr := a.store.ReadAdminCredential(ctx)
+			if readErr == nil && winner.State == store.AuthActive {
+				return "", nil
+			}
+		}
+		return "", err
+	}
+	if !generated {
+		return "", nil
+	}
+	if err := writeInitialPassword(dataDir, password); err != nil {
+		return "", ErrPasswordBootstrap
+	}
+	if err := a.store.ActivateGeneratedAdminCredential(ctx, string(hash)); err != nil {
+		return "", err
 	}
 	return password, nil
 }
-
-func generatePassword() string {
+func validateNewPassword(password string) error {
+	if !utf8.ValidString(password) || utf8.RuneCountInString(password) < 12 || len(password) > 72 {
+		return ErrPasswordPolicy
+	}
+	return nil
+}
+func generatePassword() (string, error) {
 	b := make([]byte, 18)
 	if _, err := rand.Read(b); err != nil {
-		panic("dnsdaddy: crypto/rand unavailable: " + err.Error())
+		return "", ErrPasswordBootstrap
 	}
-	return base64.RawURLEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
-
-// CheckPassword verifies the admin password.
-func (a *Auth) CheckPassword(ctx context.Context, password string) bool {
-	hash, err := a.store.GetSetting(ctx, settingAdminHash)
+func (a *Auth) verifyPassword(ctx context.Context, password string) (store.AdminCredential, error) {
+	c, err := a.store.ReadAdminCredential(ctx)
 	if err != nil {
-		return false
+		return store.AdminCredential{}, err
 	}
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+	if c.State != store.AuthActive || bcrypt.CompareHashAndPassword([]byte(c.Hash), []byte(password)) != nil {
+		return store.AdminCredential{}, ErrPasswordIncorrect
+	}
+	return c, nil
 }
 
-// SetPassword replaces the admin password after verifying the current one.
-func (a *Auth) SetPassword(ctx context.Context, current, next string) error {
-	if !a.CheckPassword(ctx, current) {
-		return errors.New("current password is incorrect")
+// CheckPassword is a fail-closed check; session issuance also binds the revision.
+func (a *Auth) CheckPassword(ctx context.Context, password string) bool {
+	_, err := a.verifyPassword(ctx, password)
+	return err == nil
+}
+func (a *Auth) Login(ctx context.Context, password, label string) (string, error) {
+	c, err := a.verifyPassword(ctx, password)
+	if err != nil {
+		return "", err
 	}
-	if len(next) < 12 {
-		return errors.New("new password must be at least 12 characters")
+	return a.store.CreateSessionAtRevision(ctx, c.Revision, sessionTTL, label)
+}
+
+// SetPassword changes the hash, revision and all sessions in one transaction.
+func (a *Auth) SetPassword(ctx context.Context, current, next string) error {
+	c, err := a.verifyPassword(ctx, current)
+	if err != nil {
+		return err
+	}
+	if err := validateNewPassword(next); err != nil {
+		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(next), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return store.ErrAdminStorage
 	}
-	if err := a.store.SetSetting(ctx, settingAdminHash, string(hash)); err != nil {
-		return err
-	}
-
-	// Every session, including this one.
-	//
-	// Changing the admin password is the thing an operator does when they
-	// think somebody else has been in. If that left the intruder's session
-	// working it would be a change that accomplished nothing, and the operator
-	// would believe otherwise — which is worse than not offering it. Signing
-	// the operator out of their own browser is a small price and an honest
-	// signal that it took effect.
-	//
-	// Ordered after the hash is stored: revoking first and then failing to
-	// write would log everybody out and leave the old password in place.
-	if _, err := a.store.DeleteAllSessions(ctx); err != nil {
-		return fmt.Errorf("password changed, but existing sessions could not be revoked: %w", err)
-	}
-	return nil
+	return a.store.ReplaceAdminCredential(ctx, c, string(hash))
 }
 
 // issueSession creates a server-side session and returns the opaque secret to
@@ -436,3 +463,34 @@ func (l *attemptLimiter) reset(key string) {
 	defer l.mu.Unlock()
 	delete(l.windows, key)
 }
+
+// RecoverPendingAdmin activates only a generated pending hash after password
+// proof. It is an offline Go API, with no HTTP route and no password replacement.
+var ErrRecoveryAlreadyActive = errors.New("administrator credentials are already active; no recovery change was made")
+
+func (a *Auth) RecoverPendingAdmin(ctx context.Context, password []byte) error {
+	if len(password) == 0 || len(password) > 72 {
+		return ErrPasswordIncorrect
+	}
+	c, err := a.store.ReadAdminCredential(ctx)
+	if err != nil {
+		return err
+	}
+	if c.State == store.AuthActive {
+		if bcrypt.CompareHashAndPassword([]byte(c.Hash), password) != nil {
+			return ErrPasswordIncorrect
+		}
+		return ErrRecoveryAlreadyActive
+	}
+	if c.State != store.AuthBootstrapPending || c.Source != "generated" || c.Hash == "" || c.Revision != 0 {
+		return store.ErrAdminRecovery
+	}
+	if bcrypt.CompareHashAndPassword([]byte(c.Hash), password) != nil {
+		return ErrPasswordIncorrect
+	}
+	return a.store.RecoverGeneratedAdminCredential(ctx, c)
+}
+
+// NewOfflineRecoveryAuth avoids normal startup side effects (including legacy
+// session-key cleanup). It exposes no HTTP routes or session issuance.
+func NewOfflineRecoveryAuth(st *store.Store) *Auth { return &Auth{store: st} }
