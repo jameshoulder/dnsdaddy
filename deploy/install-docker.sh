@@ -1584,7 +1584,16 @@ configure_https() {
     note "Test it:       curl -v https://${HTTPS_TARGET}/api/v1/health"
     note "When it answers, re-run with --https to switch the dashboard over."
     note "Until then the dashboard is reachable through the SSH tunnel below."
-    unwind_https_env
+    # The public Caddy site remains active. Preserve its trusted-proxy
+    # configuration and allow auto cookie selection: HTTPS requests get
+    # Secure cookies, while the SSH tunnel remains usable over localhost.
+    # Reverting to tunnel settings here would silently expose session cookies
+    # if ACME finishes issuance after this installer run.
+    env_set DNSDADDY_SECURE_COOKIES "auto"
+    if ! "${COMPOSE[@]}" up -d >/dev/null 2>&1; then
+      warn "Could not apply automatic cookie security while HTTPS is pending."
+      return 1
+    fi
     return 0
   fi
 
@@ -1875,10 +1884,9 @@ EOF
 		-Server
 	}
 
-	# Access logs go to the journal:  journalctl -u caddy -f
-	log {
-		output stderr
-	}
+	# Do not enable request access logs here. DoH credentials live in
+	# /dns-query/{token} and must not be persisted to systemd's journal.
+	# Caddy's own certificate-management/error logs remain available there.
 }
 EOF
   } > "$out"
