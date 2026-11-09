@@ -340,6 +340,13 @@ func (e *Engine) Reload(ctx context.Context) error {
 			if err != nil {
 				continue // stored CIDRs are validated on write; skip anything stale
 			}
+			if p.Addr().Is4In6() {
+				if p.Bits() < 96 {
+					continue
+				}
+				p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+			}
+			p = p.Masked()
 			cn.prefixes = append(cn.prefixes, p)
 			if p.Bits() > cn.maxBits {
 				cn.maxBits = p.Bits()
@@ -363,9 +370,8 @@ func (e *Engine) Reload(ctx context.Context) error {
 			break
 		}
 	}
-	if snap.fallback == nil && len(snap.networks) > 0 {
-		snap.fallback = &snap.networks[len(snap.networks)-1]
-	}
+	// No eligible catch-all: an arbitrary (possibly disabled) row must
+	// never become the effective policy for unrelated clients.
 	// A token-only row must not steal Default because its name sorts first.
 	preferDefaultNetwork(snap)
 
@@ -421,6 +427,9 @@ func (e *Engine) MatchClient(addr netip.Addr) Match {
 	}
 	if snap.fallback != nil {
 		return e.matchFor(snap, snap.fallback)
+	}
+	if snap.defaultPolicy != nil {
+		return Match{PolicyID: snap.defaultPolicy.id, PolicyName: snap.defaultPolicy.name}
 	}
 	return Match{}
 }
