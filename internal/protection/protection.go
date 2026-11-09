@@ -154,7 +154,7 @@ func compile(cfg Config) (*snapshot, error) {
 		if _, err := netip.ParseAddr(name); err == nil {
 			return nil, errors.New("use allowCIDRs for address exceptions")
 		}
-		if suffix, icann := publicsuffix.PublicSuffix(name); icann && suffix == name {
+		if suffix, icann := publicsuffix.PublicSuffix(name); suffix == name && (icann || strings.Contains(name, ".")) {
 			return nil, fmt.Errorf("a public suffix such as %q is too broad; use a domain you control", name)
 		}
 		cfg.Rebinding.AllowDomains[i] = name
