@@ -5979,8 +5979,14 @@ function showLogin() {
   router.invalidate();
   sidebarGate.cancel();
   setNavigation(false, { restoreFocus: false });
+  // Hiding an authenticated view leaves API tokens and private DoH URLs in
+  // its DOM, including copy-to-clipboard attributes. Remove those nodes.
+  $('#view').replaceChildren();
+  const tokenSecret = $('#token-secret');
+  if (tokenSecret) tokenSecret.replaceChildren();
   $('#app').hidden = true;
   $('#login').hidden = false;
+  $('#password').value = '';
   $('#password').focus();
 }
 
@@ -6036,8 +6042,11 @@ async function boot() {
   $('#logout-btn').addEventListener('click', async () => {
     try {
       await apiSend('POST', '/auth/logout');
-    } catch {
-      /* logging out locally is what matters */
+    } catch (err) {
+      // A failed revocation leaves the server-side session and cookie live.
+      // Never present sign-out as complete until the server confirms it.
+      toast('Sign out could not be confirmed. Your session may still be active; please retry.', 'error');
+      return;
     }
     showLogin();
   });
