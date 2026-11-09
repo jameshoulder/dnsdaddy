@@ -521,7 +521,7 @@ func (e *Engine) Consult(ctx context.Context, policyID, domain string) (Verdict,
 		}
 		if hit, ok := e.cache.Get(subject.Value, inst.ID, now); ok {
 			e.cacheHits.Add(1)
-			if !haveHit || hit.Verdict.Score > worst.Score {
+			if !haveHit || preferCachedVerdict(hit.Verdict, worst) {
 				worst, haveHit = hit.Verdict, true
 			}
 			continue
@@ -549,6 +549,18 @@ func (e *Engine) Consult(ctx context.Context, policyID, domain string) (Verdict,
 	// Blocking mode, and something is not cached. Wait, but only for the
 	// budget, and only for the first answer that would change the outcome.
 	return e.waitForFirst(ctx, subject, misses, worst, haveHit)
+}
+
+// preferCachedVerdict gives explicit malicious dispositions precedence over
+// adapter-specific scores, which are not comparable between providers.
+func preferCachedVerdict(candidate, current Verdict) bool {
+	if candidate.Disposition == DispositionMalicious {
+		return current.Disposition != DispositionMalicious || candidate.Score > current.Score
+	}
+	if current.Disposition == DispositionMalicious {
+		return false
+	}
+	return candidate.Score > current.Score
 }
 
 // CacheOutcome says what CachedVerdict found.
@@ -602,7 +614,7 @@ func (e *Engine) CachedVerdict(policyID, domain string) (Verdict, CacheOutcome) 
 			misses++
 			continue
 		}
-		if !haveHit || hit.Verdict.Score > worst.Score {
+		if !haveHit || preferCachedVerdict(hit.Verdict, worst) {
 			worst, haveHit = hit.Verdict, true
 		}
 	}
