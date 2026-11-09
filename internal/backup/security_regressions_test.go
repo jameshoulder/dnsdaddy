@@ -9,6 +9,7 @@ import (
 	"testing"
 )
 
+// TestSecurityRestoreRejectsUnknownEmptyManifestMapping checks that unknown empty-valued archive mappings cannot override protected settings.
 func TestSecurityRestoreRejectsUnknownEmptyManifestMapping(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("data_dir: /elsewhere\nhttp:\n  admin_password: old\n"), 0o600); err != nil {
@@ -28,6 +29,7 @@ func TestSecurityRestoreRejectsUnknownEmptyManifestMapping(t *testing.T) {
 	}
 }
 
+// TestSecurityRestoreForcesCredentialAndDataLocation checks restored launch settings force the recovered database and clear bootstrap secrets.
 func TestSecurityRestoreForcesCredentialAndDataLocation(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("data_dir: /old\nhttp:\n  admin_password: old\n"), 0o600); err != nil {
@@ -53,6 +55,7 @@ func TestSecurityRestoreForcesCredentialAndDataLocation(t *testing.T) {
 	}
 }
 
+// TestSecurityRestoreRefusesTriggerBypassingSessionRevocation verifies an archive trigger cannot silently preserve administrator sessions.
 func TestSecurityRestoreRefusesTriggerBypassingSessionRevocation(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "restore.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -74,6 +77,7 @@ func TestSecurityRestoreRefusesTriggerBypassingSessionRevocation(t *testing.T) {
 	}
 }
 
+// TestSecurityCredentialInspectionRejectsComputedView prevents unbounded computed credential views during restore.
 func TestSecurityCredentialInspectionRejectsComputedView(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "provider.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -89,6 +93,7 @@ func TestSecurityCredentialInspectionRejectsComputedView(t *testing.T) {
 	}
 }
 
+// TestSecurityRestoreRejectsUppercaseSessionTrigger ensures trigger detection is case-insensitive for restored SESSIONS tables.
 func TestSecurityRestoreRejectsUppercaseSessionTrigger(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "uppercase-sessions.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -110,6 +115,7 @@ func TestSecurityRestoreRejectsUppercaseSessionTrigger(t *testing.T) {
 	}
 }
 
+// TestSecurityUppercaseSessionsWithoutTriggerCanBeRevoked allows a safe uppercase session table to be fully revoked.
 func TestSecurityUppercaseSessionsWithoutTriggerCanBeRevoked(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "uppercase-no-trigger.db")
 	db, err := sql.Open("sqlite", dbPath)
