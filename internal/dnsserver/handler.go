@@ -255,7 +255,10 @@ type networkIdentified interface {
 	NetworkID() string
 }
 
-// Handle resolves one message and returns the response to send.
+// Handle resolves one message and returns the response to send. Resolution
+// errors become DNS failure responses. For questions proceeding to policy, it
+// rejects names that normalization would alter and refuses unavailable
+// authenticated networks rather than selecting a fallback policy.
 func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (response *dns.Msg) {
 	h.activity.begin(time.Now())
 	outcome, cached := activityInvalid, false

@@ -193,7 +193,8 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, generation uint64)
 }
 
 // forwardOnce performs the upstream query, collapsing duplicate concurrent
-// questions onto a single flight.
+// questions onto a single flight. Responses sent to the cache have EDNS client
+// subnet options removed; upstream and context errors are returned.
 func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, generation uint64, route *ForwardRoute) (*dns.Msg, string, error) {
 	// A feed generation change also needs its own flight. Otherwise a caller
 	// admitted after a refresh could join a request started under old policy.
@@ -246,6 +247,9 @@ func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, ge
 	return msg.Copy(), upstream, nil
 }
 
+// forward sends a copy of req without EDNS client subnet options, using the
+// selected route or configured upstreams. It returns exchange, timeout, and
+// concurrency limit errors to the caller.
 func (r *Resolver) forward(ctx context.Context, req *dns.Msg, route *ForwardRoute) (*dns.Msg, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
@@ -394,7 +398,8 @@ func (r *Resolver) InflightStats() (current, peak int64, limitTimeouts uint64) {
 	return r.inflightNow.Load(), r.inflightPeak.Load(), r.limitTimeouts.get()
 }
 
-// reattach copies a response onto the client's question and message ID.
+// reattach copies a response onto the client's question and message ID,
+// removing EDNS client subnet options from the copy.
 func reattach(msg *dns.Msg, req *dns.Msg) *dns.Msg {
 	out := msg.Copy()
 	stripEDNSClientSubnet(out)

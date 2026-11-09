@@ -789,6 +789,9 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLogout revokes the session server-side, then clears the cookie.
+// With a session cookie, Origin, or Referer if Origin is absent, must match the
+// request host; requests without either are accepted. A failed origin check or
+// revocation returns an error without clearing the cookie.
 //
 // Both halves matter and in this order. Clearing the cookie alone is what this
 // used to do, and it only asked the browser to forget a credential that stayed

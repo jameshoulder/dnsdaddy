@@ -1256,11 +1256,9 @@ https_port_conflict() {
 
 # configure_https puts Caddy in front of the loopback dashboard.
 #
-# It sets HTTPS_STATE to active or failed, and never to active on the strength
-# of having run the commands: the last thing it does is ask the URL whether it
-# answers. Announcing a working HTTPS dashboard that does not exist is worse
-# than saying plainly that the proxy step did not finish, because the operator
-# would stop looking.
+# It records the outcome in HTTPS_STATE and marks it active only after the URL
+# answers. When hostname certificate issuance is pending, it keeps proxy trust
+# configured and attempts to apply automatic cookie security for tunnel access.
 configure_https() {
   [[ "$CHOICE" == "3" ]] || return 0
 
@@ -1794,7 +1792,8 @@ restore_caddyfile() { # path
   note "The generated Caddyfile was removed; Caddy is serving nothing for DNS Daddy."
 }
 
-# write_caddyfile generates the reverse-proxy configuration.
+# write_caddyfile generates the reverse-proxy configuration without request
+# access logs. Its optional second argument enables HSTS when set to 1.
 #
 # The site address is the only operator-supplied value in the file, and it has
 # already been through valid_hostname, valid_ipv4 or valid_ipv6 — an anchored

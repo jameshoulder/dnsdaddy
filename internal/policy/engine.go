@@ -289,7 +289,9 @@ func NewEngine(st *store.Store, holder *blocklist.Holder) *Engine {
 }
 
 // Reload rebuilds the compiled snapshot from the database. It is called at
-// startup and after any configuration change through the API.
+// startup and after any configuration change through the API. Invalid stored
+// CIDRs and mapped IPv4 prefixes shorter than /96 are skipped. Database errors
+// leave the previous snapshot in place.
 func (e *Engine) Reload(ctx context.Context) error {
 	policies, err := e.store.ListPolicies(ctx)
 	if err != nil {
@@ -411,8 +413,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 // Equal-length prefixes from different networks are broken by network name and
 // then ID, so the answer is the same on every reload — see sortRoutes.
 //
-// A client inside no enabled prefix lands on the catch-all, whose policy is the
-// deployment's default for unmatched clients.
+// A client inside no enabled prefix uses the eligible catch-all network. If
+// none exists, the default policy is returned without a network, or an empty
+// match if there is no default policy.
 func (e *Engine) MatchClient(addr netip.Addr) Match {
 	snap := e.snap.Load()
 	if addr.Is4In6() {
@@ -459,6 +462,7 @@ func sortRoutes(routes []route) {
 
 // MatchNetworkID resolves an explicitly identified network, used by DoH and DoT
 // clients that present a per-network token rather than arriving from a known IP.
+// It returns false for missing or disabled networks.
 func (e *Engine) MatchNetworkID(id string) (Match, bool) {
 	snap := e.snap.Load()
 	for i := range snap.networks {

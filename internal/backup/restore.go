@@ -268,6 +268,9 @@ func writeRootFile(root *os.Root, name string, b []byte) error {
 	return f.Close()
 }
 
+// rewriteConfiguration rewrites the restored config under root for destination,
+// clears the bootstrap password, and rejects unsupported manifest path mappings.
+// It returns errors for invalid or oversized configuration and file operations.
 func rewriteConfiguration(root *os.Root, destination string, m Manifest) error {
 	f, err := root.Open("config.yaml")
 	if err != nil {
@@ -365,6 +368,10 @@ func validateRestoredKey(ctx context.Context, dbPath string, root *os.Root, file
 	return validateCredentials(ctx, dbPath, items)
 }
 
+// finishDatabase validates the restored database, revokes its sessions and
+// relocates local feed URLs when the manifest specifies a feed root. It returns
+// the number of sessions deleted or an error from validation or database work.
+// A database error after the transaction commits can still leave changes saved.
 func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest) (int64, error) {
 	u := url.URL{Scheme: "file", Path: dbPath}
 	q := u.Query()

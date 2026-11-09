@@ -26,7 +26,9 @@ type TrustedProxies struct {
 }
 
 // ParseTrustedProxies compiles a list of CIDRs (or bare addresses, treated as
-// single-host prefixes).
+// single-host prefixes). Blank entries are ignored. IPv4-mapped addresses and
+// prefixes are converted to IPv4; mapped prefixes shorter than /96 and invalid
+// entries return an error.
 func ParseTrustedProxies(cidrs []string) (*TrustedProxies, error) {
 	t := &TrustedProxies{}
 	for _, raw := range cidrs {

@@ -496,6 +496,9 @@ func (e *Engine) WarmCache(ctx context.Context) (int, error) {
 //     unknown never blocks a name.
 //  3. In ModeBlocking the wait is bounded by the budget and by ctx, whichever
 //     is shorter. There is no path through this function that waits longer.
+//
+// Cached malicious verdicts take precedence over other dispositions; among
+// verdicts with the same precedence, the higher score wins.
 func (e *Engine) Consult(ctx context.Context, policyID, domain string) (Verdict, bool) {
 	mode := *e.mode.Load()
 	if mode == ModeOff {
@@ -552,7 +555,8 @@ func (e *Engine) Consult(ctx context.Context, policyID, domain string) (Verdict,
 }
 
 // preferCachedVerdict gives explicit malicious dispositions precedence over
-// adapter-specific scores, which are not comparable between providers.
+// adapter-specific scores, which are not comparable between providers. Within
+// the same precedence group, a higher score wins; ties keep the current verdict.
 func preferCachedVerdict(candidate, current Verdict) bool {
 	if candidate.Disposition == DispositionMalicious {
 		return current.Disposition != DispositionMalicious || candidate.Score > current.Score
@@ -582,8 +586,9 @@ const (
 // CachedVerdict answers from memory and nothing else.
 //
 // The read-only twin of Consult, for the policy preview. It applies the same
-// merge — the worst cached verdict wins, and a malicious one is decisive
-// without waiting for the others — and then stops where Consult would start
+// merge — a malicious cached verdict takes precedence, otherwise the highest
+// score wins. A malicious verdict is decisive without waiting for the others.
+// It stops where Consult would start
 // spending: no lookup is queued, no cache is warmed, no budget is waited on.
 // A caller that wants those calls Consult, and says so.
 func (e *Engine) CachedVerdict(policyID, domain string) (Verdict, CacheOutcome) {

@@ -912,7 +912,8 @@ func isSharedAddressSpace(addr netip.Addr) bool {
 var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
 
 // validateManagementBind refuses to publish the management interface to the
-// internet by accident.
+// internet by accident. Public, wildcard, and unclassified binds require
+// allow_public_bind; private and loopback binds do not.
 //
 // The dashboard and API can repoint a whole network's DNS, read every query
 // this resolver has answered, and rotate the credentials that let a device use
@@ -946,7 +947,8 @@ func (c *Config) validateManagementBind() error {
 }
 
 // validateNotAnOpenResolver refuses to start a resolver that is reachable from
-// anywhere with no client ACL.
+// anywhere with no client ACL. Blank ACL entries are ignored, and malformed
+// entries return a parsing error unless public resolver access is allowed.
 //
 // Failing closed here is the whole point: an open resolver is discovered and
 // conscripted into amplification attacks within days, and by then it is the

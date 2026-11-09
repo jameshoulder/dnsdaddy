@@ -149,7 +149,8 @@ func strongest(es []Evidence) Confidence {
 }
 
 // distinctSources lists the distinct sources, in first-seen order so the
-// output is stable for a given input.
+// output is stable for a given input. It deduplicates by Source, falling back
+// to SourceName when Source is empty, and displays the first name for each ID.
 func distinctSources(es []Evidence) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(es))

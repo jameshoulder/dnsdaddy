@@ -92,6 +92,9 @@ func CoversEntireFamily(prefixes []netip.Prefix) bool {
 	return coversFamily(prefixes, true) || coversFamily(prefixes, false)
 }
 
+// coversFamily reports whether prefixes for the selected family merge to a
+// default route. It ignores invalid prefixes and IPv4-mapped prefixes shorter
+// than /96; other mapped prefixes are treated as IPv4.
 func coversFamily(prefixes []netip.Prefix, v4 bool) bool {
 	// Merge siblings as they arrive. Each merge shortens a prefix by one bit,
 	// so even an adversarial list takes O(n * addressBits), not repeated

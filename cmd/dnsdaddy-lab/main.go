@@ -156,7 +156,8 @@ const defaultLabResolver = "127.0.0.1:5354"
 var productionDNSPorts = map[string]bool{"53": true, "853": true}
 
 // checkTarget refuses to generate traffic against something that looks like a
-// live resolver, unless the operator has said so explicitly.
+// live resolver, unless the operator has said so explicitly. The target must
+// have a numeric port from 1 through 65535, even when production is allowed.
 //
 // This refuses rather than warns, and the distinction is deliberate. A warning
 // on stderr is advisory: it is missed under -quiet, missed in a script, and

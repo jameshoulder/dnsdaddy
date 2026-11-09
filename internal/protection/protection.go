@@ -125,6 +125,9 @@ func (c *Controller) Update(ctx context.Context, next Config) (Config, error) {
 	return copyConfig(s.cfg), nil
 }
 
+// compile validates and normalizes protection settings for a new snapshot.
+// It rejects invalid rate limits and rebinding exceptions, including public
+// suffixes, and returns the validation error to the caller.
 func compile(cfg Config) (*snapshot, error) {
 	r := cfg.RateLimit
 	if math.IsNaN(r.QPS) || math.IsInf(r.QPS, 0) || r.QPS < 1 || r.QPS > 100000 {

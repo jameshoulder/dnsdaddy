@@ -337,7 +337,9 @@ func (c *contextReader) Read(p []byte) (int, error) {
 
 // openRegular rejects symbolic links and devices. OpenRoot confines a racing
 // path replacement to its already-opened parent, and SameFile ensures it is
-// the regular inode inspected before opening, not a replacement.
+// the regular inode inspected before opening, not a replacement. It returns
+// ErrLimit if the inspected file exceeds limit bytes or has a negative size.
+// The caller must close the returned file. Filesystem errors are returned.
 func openRegular(name string, limit int64) (*os.File, error) {
 	parent, err := os.OpenRoot(filepath.Dir(name))
 	if err != nil {
@@ -470,6 +472,8 @@ func validArchiveName(name string) bool {
 	return true
 }
 
+// sqliteReadOnly opens and checks an existing SQLite database without trusting
+// its schema. It returns open or ping errors; the caller must close the database.
 func sqliteReadOnly(p string) (*sql.DB, error) {
 	u := url.URL{Scheme: "file", Path: p}
 	q := u.Query()
@@ -500,6 +504,10 @@ func OpenSource(p string) (*sql.DB, error) {
 	return sqliteReadOnly(p)
 }
 
+// validateCredentials checks that stored provider and webhook credentials can
+// be decrypted with the key in items. It rejects unsupported provider schemas,
+// oversized provider records, and invalid or missing keys, and returns database
+// and file errors encountered during inspection.
 func validateCredentials(ctx context.Context, dbPath string, items []*inputFile) error {
 	db, err := sqliteReadOnly(dbPath)
 	if err != nil {

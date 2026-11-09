@@ -5980,6 +5980,7 @@ const router = {
 
 let authenticatedViewEpoch = 0;
 
+/** Show the login screen, clear authenticated view data, and invalidate pending renders. */
 function showLogin() {
   authenticatedViewEpoch++;
   router.invalidate();
