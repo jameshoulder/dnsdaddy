@@ -290,10 +290,10 @@ func rewriteConfiguration(root *os.Root, destination string, m Manifest) error {
 		return errors.New("runtime configuration must be a YAML mapping")
 	}
 	validPaths := map[string]string{
-		"dns.tls_cert_file":                 "refs/dns-tls-cert.pem",
-		"dns.tls_key_file":                  "refs/dns-tls-key.pem",
+		"dns.tls_cert_file":                  "refs/dns-tls-cert.pem",
+		"dns.tls_key_file":                   "refs/dns-tls-key.pem",
 		"dns.local_dnssec_trust_anchor_file": "refs/custom-trust-anchors.txt",
-		"feeds.local_feed_dir":              "refs/local-feeds",
+		"feeds.local_feed_dir":               "refs/local-feeds",
 	}
 	for key, name := range m.Paths {
 		expected, allowed := validPaths[key]
