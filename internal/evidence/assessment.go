@@ -154,12 +154,18 @@ func distinctSources(es []Evidence) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(es))
 	for _, e := range es {
+		// Source is the stable feed/provider identifier. A display-name
+		// change must never turn one source into two independent witnesses.
+		id := e.Source
+		if id == "" {
+			id = e.SourceName
+		}
 		name := e.SourceName
 		if name == "" {
-			name = e.Source
+			name = id
 		}
-		if !seen[name] {
-			seen[name] = true
+		if !seen[id] {
+			seen[id] = true
 			out = append(out, name)
 		}
 	}
