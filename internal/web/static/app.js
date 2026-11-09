@@ -5681,8 +5681,11 @@ pages.settings = {
     $('#token-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const form = new FormData(e.target);
+      const viewEpoch = authenticatedViewEpoch;
       try {
         const token = await apiSend('POST', '/tokens', { name: form.get('name') });
+        // Responses that complete after sign-out must not reinsert secrets.
+        if (viewEpoch !== authenticatedViewEpoch || $('#app').hidden || !$('#token-secret')) return;
         $('#token-secret').innerHTML = sanitize(html`
           <div class="card token-reveal">
             <p class="small reveal-lead"><strong>Copy this now — it is not shown again.</strong></p>
@@ -5975,7 +5978,10 @@ const router = {
 
 /* ---------- auth & bootstrap -------------------------------------------- */
 
+let authenticatedViewEpoch = 0;
+
 function showLogin() {
+  authenticatedViewEpoch++;
   router.invalidate();
   sidebarGate.cancel();
   setNavigation(false, { restoreFocus: false });
