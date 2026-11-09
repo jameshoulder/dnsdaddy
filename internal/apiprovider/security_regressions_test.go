@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestSecurityMaliciousVerdictBeatsHigherScoredSuspicious verifies explicit malicious dispositions outrank incomparable provider scores.
 func TestSecurityMaliciousVerdictBeatsHigherScoredSuspicious(t *testing.T) {
 	malicious := Verdict{Disposition: DispositionMalicious, Score: 0.1}
 	suspicious := Verdict{Disposition: DispositionSuspicious, Score: 0.99}
@@ -16,6 +17,7 @@ func TestSecurityMaliciousVerdictBeatsHigherScoredSuspicious(t *testing.T) {
 	}
 }
 
+// TestSecurityExcerptRedactsAcrossTruncationBoundary ensures partial credentials cannot leak at evidence truncation boundaries.
 func TestSecurityExcerptRedactsAcrossTruncationBoundary(t *testing.T) {
 	secret := "secret-crosses-excerpt-boundary"
 	cfg := InstanceConfig{Secret: secret}
