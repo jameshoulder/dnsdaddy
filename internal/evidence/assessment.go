@@ -152,22 +152,37 @@ func strongest(es []Evidence) Confidence {
 // output is stable for a given input. It deduplicates by Source, falling back
 // to SourceName when Source is empty, and displays the first name for each ID.
 func distinctSources(es []Evidence) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(es))
+	// Keep one representative label per stable source identity. Display names
+	// are not unique: two different feeds can legitimately share one label.
+	type namedSource struct {
+		id   string
+		name string
+	}
+	unique := make([]namedSource, 0, len(es))
+	seenIDs := make(map[string]bool, len(es))
+	nameCounts := make(map[string]int, len(es))
 	for _, e := range es {
-		// Source is the stable feed/provider identifier. A display-name
-		// change must never turn one source into two independent witnesses.
 		id := e.Source
 		if id == "" {
 			id = e.SourceName
 		}
+		if seenIDs[id] {
+			continue
+		}
+		seenIDs[id] = true
 		name := e.SourceName
 		if name == "" {
 			name = id
 		}
-		if !seen[id] {
-			seen[id] = true
-			out = append(out, name)
+		unique = append(unique, namedSource{id: id, name: name})
+		nameCounts[name]++
+	}
+	out := make([]string, 0, len(unique))
+	for _, source := range unique {
+		if nameCounts[source.name] > 1 {
+			out = append(out, source.name+" ("+source.id+")")
+		} else {
+			out = append(out, source.name)
 		}
 	}
 	return out
