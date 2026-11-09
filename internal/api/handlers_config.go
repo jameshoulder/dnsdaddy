@@ -801,6 +801,10 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 // calling it is end a session they already hold.
 func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
+		if !sameOrigin(r, a.TrustedProxies) {
+			writeError(w, http.StatusForbidden, "cross-origin logout rejected")
+			return
+		}
 		if err := a.Auth.RevokeSession(r.Context(), c.Value); err != nil {
 			// Do not clear the cookie or report success: the session is still
 			// live, and telling the operator otherwise is the failure mode
