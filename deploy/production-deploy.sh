@@ -129,8 +129,12 @@ command -v sqlite3 >/dev/null || act apt-get install -y -qq sqlite3
 NEW_BACKUP="$BACKUP_DIR/dnsdaddy-backup-$STAMP.db"
 if [[ $DRY_RUN -eq 0 ]]; then
   # .backup is consistent against a live WAL database; cp is not.
-  sqlite3 "$DB" ".backup '$NEW_BACKUP'" || die "backup failed — not touching the container"
-  [[ -s "$NEW_BACKUP" ]] || die "backup file is empty"
+  [[ ! -e "$NEW_BACKUP" && ! -L "$NEW_BACKUP" ]] || die "backup destination already exists"
+  # SQLite creates the plaintext database with the process umask. Restrict
+  # access before the first byte is written, not with a later chmod alone.
+  ( umask 077; sqlite3 "$DB" ".backup '$NEW_BACKUP'" ) || die "backup failed — not touching the container"
+  [[ -f "$NEW_BACKUP" && ! -L "$NEW_BACKUP" && -s "$NEW_BACKUP" ]] || die "backup is missing, empty or not a regular file"
+  chmod 0600 "$NEW_BACKUP" || die "cannot secure backup permissions"
   ok "fresh backup: $NEW_BACKUP ($(du -h "$NEW_BACKUP" | cut -f1))"
 else
   act sqlite3 "$DB" ".backup '$NEW_BACKUP'"
