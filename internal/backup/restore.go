@@ -397,11 +397,11 @@ func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest)
 	// Archive-defined views or triggers must not replace the session table or
 	// subvert revocation. This check runs before the DELETE below.
 	var sessionKind string
-	if err := tx.QueryRowContext(ctx, "SELECT type FROM sqlite_master WHERE name='sessions'").Scan(&sessionKind); err != nil || sessionKind != "table" {
+	if err := tx.QueryRowContext(ctx, "SELECT type FROM sqlite_master WHERE type='table' AND name='sessions' COLLATE NOCASE").Scan(&sessionKind); err != nil || sessionKind != "table" {
 		return 0, errors.New("recovered sessions object must be a table")
 	}
 	var sessionTriggers int
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='sessions'").Scan(&sessionTriggers); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='sessions' COLLATE NOCASE").Scan(&sessionTriggers); err != nil {
 		return 0, err
 	}
 	if sessionTriggers != 0 {
