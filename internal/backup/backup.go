@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -354,7 +355,9 @@ func openRegular(name string, limit int64) (*os.File, error) {
 	if before.Size() < 0 || before.Size() > limit {
 		return nil, ErrLimit
 	}
-	f, err := parent.Open(base)
+	// O_NONBLOCK prevents a raced-in FIFO from hanging a privileged backup
+	// before descriptor identity and regular-file checks can run.
+	f, err := parent.OpenFile(base, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
