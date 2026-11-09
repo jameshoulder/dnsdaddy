@@ -7,6 +7,7 @@ import (
 	"github.com/miekg/dns"
 )
 
+// TestSecurityEDNSClientSubnetIsNotForwardedOrReattached checks removal of client ECS data from upstream and shared responses.
 func TestSecurityEDNSClientSubnetIsNotForwardedOrReattached(t *testing.T) {
 	question := new(dns.Msg)
 	question.SetQuestion("example.com.", dns.TypeA)
@@ -38,6 +39,7 @@ func TestSecurityEDNSClientSubnetIsNotForwardedOrReattached(t *testing.T) {
 	}
 }
 
+// TestSecurityECSRemovedFromEveryOPTWhilePreservingOtherRecords checks all OPT records are sanitized without changing other DNS records.
 func TestSecurityECSRemovedFromEveryOPTWhilePreservingOtherRecords(t *testing.T) {
 	msg := new(dns.Msg)
 	msg.SetQuestion("example.com.", dns.TypeA)
