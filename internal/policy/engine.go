@@ -9,6 +9,7 @@ package policy
 
 import (
 	"context"
+	"log/slog"
 	"net/netip"
 	"sort"
 	"sync/atomic"
@@ -344,6 +345,11 @@ func (e *Engine) Reload(ctx context.Context) error {
 			}
 			if p.Addr().Is4In6() {
 				if p.Bits() < 96 {
+					// No instance logger is injected into this snapshot builder.
+					// Warn through the process logger; keep the invalid prefix
+					// out of policy routing rather than risking an ACL bypass.
+					slog.Warn("skipping unrepresentable IPv4-mapped network CIDR",
+						"network_id", n.ID, "cidr", c)
 					continue
 				}
 				p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
