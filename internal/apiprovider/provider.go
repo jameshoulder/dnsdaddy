@@ -303,7 +303,16 @@ func (c InstanceConfig) SafeExcerpt(r *Response, limit int) string {
 	if r == nil {
 		return ""
 	}
-	return c.Redact(r.Excerpt(limit))
+	// Redact the entire bounded response before truncation. Otherwise a
+	// credential crossing the excerpt boundary survives as a plaintext prefix.
+	if limit <= 0 || limit > 4096 {
+		limit = 4096
+	}
+	safe := c.Redact(string(r.Body))
+	if len(safe) > limit {
+		safe = safe[:limit]
+	}
+	return strings.ToValidUTF8(safe, "")
 }
 
 // Clamp01 bounds a score to [0, 1].
