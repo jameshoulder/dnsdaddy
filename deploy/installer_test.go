@@ -2706,6 +2706,22 @@ func TestGeneratedCaddyfileDoesNotDependOnAVarLogDirectory(t *testing.T) {
 	if !strings.Contains(cfg, "output stderr") {
 		t.Errorf("the generated Caddyfile does not log to stderr:\n%s", cfg)
 	}
+	// Runtime and certificate-management logs remain available, but every
+	// request URI is redacted and access logging stays disabled.
+	for _, required := range []string{
+		"format filter {",
+		"request>uri replace \"[redacted]\"",
+		"error regexp",
+	} {
+		if !strings.Contains(cfg, required) {
+			t.Errorf("generated Caddyfile lacks runtime-log safety rule %q:\n%s", required, cfg)
+		}
+	}
+	if site := strings.SplitN(cfg, "dns.example.com {", 2); len(site) != 2 {
+		t.Fatalf("generated Caddyfile has no configured site:\n%s", cfg)
+	} else if strings.Contains(site[1], "\n\tlog {") {
+		t.Fatal("the generated public site must not enable request access logs")
+	}
 	// The fixture has no /var/log/caddy at all, so a clean install completing
 	// is itself the proof that nothing depends on one existing.
 }
