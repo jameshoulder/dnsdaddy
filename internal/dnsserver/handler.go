@@ -322,12 +322,13 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		return errorResponse(req, dns.RcodeFormatError)
 	}
 
+	// A DNS question is not an operator-pasted URL. Do not apply a policy
+	// decision to a truncated/substituted name and then forward the original.
+	// Unsupported escaped wire labels are refused until they can be matched
+	// using their exact DNS label boundaries. The root NS question remains valid.
 	normalized := domainutil.Normalize(name)
-	if normalized == "" {
-		// Names we cannot normalise (root, malformed labels) are forwarded
-		// unfiltered rather than blocked: refusing them would break edge cases
-		// like the root NS query without protecting anyone.
-		normalized = name
+	if name != "" && (normalized == "" || normalized != name) {
+		return errorResponse(req, dns.RcodeFormatError)
 	}
 
 	var match policy.Match
