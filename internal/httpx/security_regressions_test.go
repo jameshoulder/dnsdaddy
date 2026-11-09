@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestSecurityIPv4MappedTrustedProxyMatchesIPv4Peer matches equivalent mapped and canonical proxy addresses without broadening trust.
 func TestSecurityIPv4MappedTrustedProxyMatchesIPv4Peer(t *testing.T) {
 	trusted, err := ParseTrustedProxies([]string{"::ffff:192.0.2.0/120"})
 	if err != nil {
