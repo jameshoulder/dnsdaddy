@@ -462,7 +462,7 @@ func sortRoutes(routes []route) {
 func (e *Engine) MatchNetworkID(id string) (Match, bool) {
 	snap := e.snap.Load()
 	for i := range snap.networks {
-		if snap.networks[i].id == id {
+		if snap.networks[i].id == id && snap.networks[i].enabled {
 			return e.matchFor(snap, &snap.networks[i]), true
 		}
 	}
