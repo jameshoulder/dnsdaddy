@@ -2,6 +2,7 @@ package config
 
 import "testing"
 
+// TestSecurityBlankCIDRsDoNotPermitOpenResolver ensures empty ACL entries never bypass the public-resolver acknowledgement.
 func TestSecurityBlankCIDRsDoNotPermitOpenResolver(t *testing.T) {
 	c := &Config{}
 	c.DNS.ListenUDP = "0.0.0.0:53"
@@ -15,6 +16,7 @@ func TestSecurityBlankCIDRsDoNotPermitOpenResolver(t *testing.T) {
 	}
 }
 
+// TestSecurityUnclassifiedManagementHostRequiresAcknowledgement fails closed for HTTP management listener hostnames with unknown reachability.
 func TestSecurityUnclassifiedManagementHostRequiresAcknowledgement(t *testing.T) {
 	c := &Config{}
 	c.HTTP.Listen = "unclassified.example:8080"
