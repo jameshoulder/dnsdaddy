@@ -2,6 +2,7 @@ package protection
 
 import "testing"
 
+// TestSecuritySharedPrivateSuffixNotRebindingException blocks exemptions for a shared private public suffix.
 func TestSecuritySharedPrivateSuffixNotRebindingException(t *testing.T) {
 	cfg := Default()
 	cfg.Rebinding.AllowDomains = []string{"github.io"}
@@ -10,6 +11,7 @@ func TestSecuritySharedPrivateSuffixNotRebindingException(t *testing.T) {
 	}
 }
 
+// TestSecurityNarrowPrivateDomainCanBeRebindingException allows exceptions confined to a specific tenant-controlled domain.
 func TestSecurityNarrowPrivateDomainCanBeRebindingException(t *testing.T) {
 	cfg := Default()
 	cfg.Rebinding.AllowDomains = []string{"tenant.github.io"}
@@ -18,6 +20,7 @@ func TestSecurityNarrowPrivateDomainCanBeRebindingException(t *testing.T) {
 	}
 }
 
+// TestSecurityUnknownInternalSuffixRemainsEligible keeps deliberate internal names eligible for narrowly scoped exceptions.
 func TestSecurityUnknownInternalSuffixRemainsEligible(t *testing.T) {
 	cfg := Default()
 	cfg.Rebinding.AllowDomains = []string{"internal"}
