@@ -88,3 +88,46 @@ func TestSecurityCredentialInspectionRejectsComputedView(t *testing.T) {
 		t.Fatal("restore queried an attacker-controlled computed credential view")
 	}
 }
+
+func TestSecurityRestoreRejectsUppercaseSessionTrigger(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "uppercase-sessions.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, stmt := range []string{
+		"CREATE TABLE SESSIONS (id TEXT)",
+		"INSERT INTO SESSIONS VALUES ('old-session')",
+		"CREATE TRIGGER preserve_session BEFORE DELETE ON SESSIONS BEGIN SELECT RAISE(IGNORE); END",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := finishDatabase(context.Background(), dbPath, t.TempDir(), Manifest{}); err == nil {
+		t.Fatal("restore accepted a session trigger declared on SESSIONS")
+	}
+}
+
+func TestSecurityUppercaseSessionsWithoutTriggerCanBeRevoked(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "uppercase-no-trigger.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE SESSIONS (id TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO SESSIONS VALUES ('old-session')"); err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := finishDatabase(context.Background(), dbPath, t.TempDir(), Manifest{})
+	if err != nil {
+		t.Fatalf("recovered upper-case table without triggers should be revocable: %v", err)
+	}
+	if revoked != 1 {
+		t.Fatalf("revoked %d sessions, want 1", revoked)
+	}
+}
