@@ -335,7 +335,11 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		if m, ok := h.engine.MatchNetworkID(meta.networkID); ok {
 			match = m
 		} else {
-			match = h.engine.MatchClient(meta.clientAddr)
+			// An explicitly authenticated network must not turn into an IP or
+			// Default-network identity when a concurrent delete removes it.
+			h.refused.Add(1)
+			outcome = activityRefused
+			return protectedResponse(req, dns.ExtendedErrorCodeProhibited, "Authenticated network is unavailable")
 		}
 	} else {
 		match = h.engine.MatchClient(meta.clientAddr)
