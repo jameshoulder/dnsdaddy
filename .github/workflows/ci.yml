@@ -538,6 +538,108 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.27.3"
+
+      # Test the actual installer output with the real Caddy binary. A failed
+      # proxy request must still be diagnosable without persisting its DoH
+      # bearer token in the system journal.
+      - name: Caddy errors must redact DoH tokens without access logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DNSDADDY_CADDY_TEST_OUTPUT="$RUNNER_TEMP/dnsdaddy-Caddyfile"
+          go test ./deploy -run '^TestGeneratedCaddyfileDoesNotDependOnAVarLogDirectory
+      - name: Build the image
+        run: docker build --build-arg VERSION=ci -t dnsdaddy:ci .
+      - name: The binary must start and report a version
+        run: docker run --rm dnsdaddy:ci -version
+
+      # The runtime stage is deliberately last in the Dockerfile so that a
+      # plain `docker build .` produces the resolver. Assert that, because
+      # reordering the stages would silently change what everyone ships.
+      - name: The default build target must be the resolver, not the lab
+        run: |
+          entrypoint=$(docker inspect -f '{{json .Config.Entrypoint}}' dnsdaddy:ci)
+          echo "$entrypoint"
+          echo "$entrypoint" | grep -q '/usr/local/bin/dnsdaddy"' \
+            || { echo "default image entrypoint is not the resolver"; exit 1; }
+
+      # The Dockerfile says USER dnsdaddy. That is a declaration; this is the
+      # measurement. A base image change, or a stage that runs a step after
+      # the USER line, can put the process back to uid 0 without the line
+      # moving.
+      - name: The container must not run as root
+        run: |
+          uid=$(docker run --rm --entrypoint id dnsdaddy:ci -u)
+          echo "uid=$uid"
+          [ "$uid" != "0" ] || { echo "the image runs as root"; exit 1; }
+
+      # Daddybound compares itself against libunbound and BIND delv, and
+      # neither may reach a shipped build: libunbound is behind a cgo build
+      # tag no release sets, and delv is a subprocess a test invokes. If
+      # either ever became a runtime dependency it would show up here as a
+      # package in the image or a dynamic link in the binary.
+      #
+      # Asserted rather than assumed because the failure is silent: an image
+      # that quietly gained libunbound would still pass every other check in
+      # this job.
+      - name: No reference validator may be a runtime dependency
+        run: |
+          packages=$(docker run --rm --entrypoint apk dnsdaddy:ci info 2>/dev/null || true)
+          echo "$packages" | sort | tr '\n' ' '; echo
+          ! echo "$packages" | grep -qiE 'unbound|bind-tools|bind9|libunbound'
+          # CGO_ENABLED=0, so the binary must be static: nothing to link
+          # against at run time, reference validator or otherwise.
+          docker run --rm --entrypoint ldd dnsdaddy:ci /usr/local/bin/dnsdaddy 2>&1 \
+            | tee /tmp/ldd.txt || true
+          grep -qiE 'not a valid dynamic|statically linked|No such file' /tmp/ldd.txt \
+            || { echo "the shipped binary is dynamically linked"; exit 1; }
+
+      - name: The lab image must build and list its scenarios
+        run: |
+          docker build --target lab -t dnsdaddy-lab:ci .
+          docker run --rm dnsdaddy-lab:ci | tee /tmp/scenarios.txt
+          grep -q 'dns-tunnelling' /tmp/scenarios.txt
+          grep -q 'normal-dns' /tmp/scenarios.txt
+ -count=1
+          test -s "$DNSDADDY_CADDY_TEST_OUTPUT"
+          sed -i 's|^dns.example.com {|http://127.0.0.1:18654 {|' "$DNSDADDY_CADDY_TEST_OUTPUT"
+          sed -i 's|reverse_proxy 127.0.0.1:8080 {|reverse_proxy 127.0.0.1:18655 {|' "$DNSDADDY_CADDY_TEST_OUTPUT"
+
+          image=caddy:2-alpine
+          docker run --rm --network host \
+            -v "$DNSDADDY_CADDY_TEST_OUTPUT:/etc/caddy/Caddyfile:ro" "$image" \
+            caddy validate --config /etc/caddy/Caddyfile
+          cid=$(docker run -d --network host \
+            -v "$DNSDADDY_CADDY_TEST_OUTPUT:/etc/caddy/Caddyfile:ro" "$image" \
+            caddy run --config /etc/caddy/Caddyfile)
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+
+          token="sentinel-do-not-log-$(date +%s)"
+          status=""
+          for i in $(seq 1 30); do
+            status=$(curl -sS -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:18654/dns-query/$token" || true)
+            [ "$status" = "502" ] && break
+            sleep 0.5
+          done
+          [ "$status" = "502" ] || { echo "expected upstream failure, got HTTP $status"; exit 1; }
+
+          logs="$RUNNER_TEMP/dnsdaddy-caddy-errors.log"
+          for i in $(seq 1 20); do
+            docker logs "$cid" > "$logs" 2>&1
+            grep -q 'http.log.error' "$logs" && break
+            sleep 0.2
+          done
+          grep -q 'http.log.error' "$logs" || { echo "Caddy error log unavailable"; exit 1; }
+          if grep -Fq "$token" "$logs"; then
+            echo "Caddy runtime error log leaked the DoH bearer token"
+            exit 1
+          fi
+          echo "Caddy emitted a proxy error without retaining the bearer token"
+
       - name: Build the image
         run: docker build --build-arg VERSION=ci -t dnsdaddy:ci .
       - name: The binary must start and report a version
