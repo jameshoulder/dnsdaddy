@@ -37,3 +37,29 @@ func TestSecurityEDNSClientSubnetIsNotForwardedOrReattached(t *testing.T) {
 		t.Fatal("shared response retained another client's ECS")
 	}
 }
+
+func TestSecurityECSRemovedFromEveryOPTWhilePreservingOtherRecords(t *testing.T) {
+	msg := new(dns.Msg)
+	msg.SetQuestion("example.com.", dns.TypeA)
+	makeOPT := func() *dns.OPT {
+		return &dns.OPT{
+			Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT, Class: 1232},
+			Option: []dns.EDNS0{
+				&dns.EDNS0_SUBNET{Code: dns.EDNS0SUBNET, Family: 1, SourceNetmask: 24, Address: net.ParseIP("192.0.2.1").To4()},
+				&dns.EDNS0_NSID{Code: dns.EDNS0NSID, Nsid: "aabb"},
+			},
+		}
+	}
+	other := &dns.TXT{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60}, Txt: []string{"keep"}}
+	msg.Extra = []dns.RR{makeOPT(), other, makeOPT()}
+	stripEDNSClientSubnet(msg)
+	if len(msg.Extra) != 3 || msg.Extra[1] != other {
+		t.Fatal("non-OPT records were modified or removed")
+	}
+	for _, idx := range []int{0, 2} {
+		opt, ok := msg.Extra[idx].(*dns.OPT)
+		if !ok || len(opt.Option) != 1 || opt.Option[0].Option() != dns.EDNS0NSID {
+			t.Fatalf("OPT %d retained ECS or lost the non-sensitive option", idx)
+		}
+	}
+}
