@@ -309,14 +309,19 @@ env_set_failed() { # key
 # reports success for a substitution it did not make.
 env_disable() { # key
   [[ -f "$ENV_FILE" ]] || return 1
-  grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null
+  # Compose accepts leading whitespace, optional export, and spaces around
+  # '='. All active forms must be disabled, not just the canonical KEY=value
+  # spelling, or the dashboard can stay publicly exposed after a loopback
+  # deployment choice.
+  local assignment="^[[:space:]]*(export[[:space:]]+)?${1}[[:space:]]*="
+  grep -qE "$assignment" "$ENV_FILE" 2>/dev/null
   case $? in
     0) ;;
     1) return 1 ;;
     *) return 2 ;;
   esac
-  sed -i -E "s|^${1}=|# disabled by install-docker.sh (dashboard kept on loopback): ${1}=|" "$ENV_FILE" || return 2
-  grep -qE "^${1}=" "$ENV_FILE" 2>/dev/null && return 2
+  sed -i -E "s|${assignment}|# disabled by install-docker.sh (dashboard kept on loopback): ${1}=|" "$ENV_FILE" || return 2
+  grep -qE "$assignment" "$ENV_FILE" 2>/dev/null && return 2
   return 0
 }
 
