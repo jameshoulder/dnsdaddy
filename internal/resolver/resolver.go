@@ -432,17 +432,22 @@ func stripEDNSClientSubnet(msg *dns.Msg) {
 	if msg == nil {
 		return
 	}
-	opt := msg.IsEdns0()
-	if opt == nil {
-		return
-	}
-	filtered := opt.Option[:0]
-	for _, option := range opt.Option {
-		if option.Option() != dns.EDNS0SUBNET {
-			filtered = append(filtered, option)
+	// Malformed messages can contain multiple OPT records. IsEdns0
+	// returns only one, so inspect every extra record before forwarding or
+	// returning a cached answer to a different client.
+	for _, rr := range msg.Extra {
+		opt, ok := rr.(*dns.OPT)
+		if !ok {
+			continue
 		}
+		filtered := opt.Option[:0]
+		for _, option := range opt.Option {
+			if option.Option() != dns.EDNS0SUBNET {
+				filtered = append(filtered, option)
+			}
+		}
+		opt.Option = filtered
 	}
-	opt.Option = filtered
 }
 
 // clientWantsAD reports whether the client signalled interest in the AD bit,
