@@ -153,7 +153,7 @@ const defaultLabResolver = "127.0.0.1:5354"
 
 // productionDNSPorts are the ports a live resolver serves on: 53 for plain DNS
 // and 853 for DNS-over-TLS.
-var productionDNSPorts = map[int]bool{53: true, 853: true}
+var productionDNSPorts = map[string]bool{"53": true, "853": true}
 
 // checkTarget refuses to generate traffic against something that looks like a
 // live resolver, unless the operator has said so explicitly.
@@ -179,7 +179,7 @@ func checkTarget(server string, allowProduction bool) error {
 	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return fmt.Errorf("invalid numeric -server port %q", port)
 	}
-	if productionDNSPorts[portNumber] && !allowProduction {
+	if productionDNSPorts[strconv.Itoa(portNumber)] && !allowProduction {
 		return fmt.Errorf(
 			"refusing to send synthetic attack traffic to %s: port %s is a standard DNS port,\n"+
 				"and if that is a live DNS Daddy it will write synthetic findings into a real\n"+
