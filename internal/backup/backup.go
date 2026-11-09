@@ -472,6 +472,7 @@ func sqliteReadOnly(p string) (*sql.DB, error) {
 	q := u.Query()
 	q.Set("mode", "ro")
 	q.Add("_pragma", "busy_timeout(10000)")
+	q.Add("_pragma", "trusted_schema(OFF)")
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -502,6 +503,45 @@ func validateCredentials(ctx context.Context, dbPath string, items []*inputFile)
 		return err
 	}
 	defer db.Close()
+	// An operator-selected recovery package is untrusted SQLite, not just
+	// untrusted rows. Refuse views/computed columns before reading credentials;
+	// a small view could otherwise generate an unbounded BLOB in rows.Next.
+	var kind string
+	if err := db.QueryRowContext(ctx, "SELECT type FROM sqlite_master WHERE name='api_provider_secrets'").Scan(&kind); err != nil || kind != "table" {
+		return errors.New("provider credential schema must be an ordinary table")
+	}
+	columns, err := db.QueryContext(ctx, "PRAGMA table_xinfo(api_provider_secrets)")
+	if err != nil {
+		return err
+	}
+	for columns.Next() {
+		var cid, notNull, primaryKey, hidden int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := columns.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey, &hidden); err != nil {
+			columns.Close()
+			return err
+		}
+		if hidden != 0 {
+			columns.Close()
+			return errors.New("computed provider credential columns are not supported")
+		}
+	}
+	if err := columns.Err(); err != nil {
+		columns.Close()
+		return err
+	}
+	columns.Close()
+	var oversize int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM api_provider_secrets
+		WHERE length(ciphertext) > 65536 OR length(provider_id) > 256 OR length(key_id) > 256
+	)`).Scan(&oversize); err != nil {
+		return err
+	}
+	if oversize != 0 {
+		return errors.New("provider credential record exceeds recovery inspection limits")
+	}
 	rows, err := db.QueryContext(ctx, "SELECT provider_id,ciphertext,key_id FROM api_provider_secrets")
 	if err != nil {
 		return err
