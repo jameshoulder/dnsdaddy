@@ -925,13 +925,15 @@ func (c *Config) validateManagementBind() error {
 		return nil
 	}
 	kind := ClassifyManagementBind(c.HTTP.Listen)
-	if !kind.NeedsPublicBindAck() {
+	if kind != BindUnknown && !kind.NeedsPublicBindAck() {
 		return nil
 	}
 
 	shape := "binds every interface on this machine"
 	if kind == BindPublic {
 		shape = "is a globally routable address"
+	} else if kind == BindUnknown {
+		shape = "cannot be safely classified as a private or loopback address"
 	}
 	return fmt.Errorf(
 		"http.listen %q %s, which would publish the management dashboard and API "+
@@ -951,7 +953,16 @@ func (c *Config) validateManagementBind() error {
 // operator's IP address in the abuse report. Making them write one explicit
 // line to opt in is a far smaller cost than that.
 func (c *Config) validateNotAnOpenResolver() error {
-	if len(c.DNS.AllowedClientCIDRs) > 0 || c.DNS.AllowPublicResolver {
+	if c.DNS.AllowPublicResolver {
+		return nil
+	}
+	// Check effective prefixes, not raw array length: whitespace-only entries
+	// are discarded by the runtime ACL and must not disable open-resolver guards.
+	parsed, err := parsePrefixes(c.DNS.AllowedClientCIDRs)
+	if err != nil {
+		return err
+	}
+	if len(parsed) > 0 {
 		return nil
 	}
 
