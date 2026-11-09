@@ -227,6 +227,7 @@ func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, ge
 		err = errors.New("upstream returned no message")
 	}
 	if err == nil && msg != nil {
+		stripEDNSClientSubnet(msg)
 		r.cache.Put(key, msg, generation)
 		c.msg = msg
 		c.upstream = upstream
@@ -258,6 +259,9 @@ func (r *Resolver) forward(ctx context.Context, req *dns.Msg, route *ForwardRout
 	// state; send a clean copy.
 	out := req.Copy()
 	out.Id = dns.Id()
+	// ECS is client-specific metadata. Cache keys do not partition by it, so
+	// neither an upstream request nor a shared cached response may carry it.
+	stripEDNSClientSubnet(out)
 
 	// Ask the upstream to report its DNSSEC verdict.
 	//
@@ -393,6 +397,7 @@ func (r *Resolver) InflightStats() (current, peak int64, limitTimeouts uint64) {
 // reattach copies a response onto the client's question and message ID.
 func reattach(msg *dns.Msg, req *dns.Msg) *dns.Msg {
 	out := msg.Copy()
+	stripEDNSClientSubnet(out)
 	out.Id = req.Id
 	out.Question = req.Question
 	out.Response = true
@@ -413,6 +418,26 @@ func reattach(msg *dns.Msg, req *dns.Msg) *dns.Msg {
 		out.AuthenticatedData = false
 	}
 	return out
+}
+
+// stripEDNSClientSubnet removes client subnet options from messages that
+// share a cache and in-flight lookup key across clients. Keep DO and other
+// DNSSEC-relevant metadata intact.
+func stripEDNSClientSubnet(msg *dns.Msg) {
+	if msg == nil {
+		return
+	}
+	opt := msg.IsEdns0()
+	if opt == nil {
+		return
+	}
+	filtered := opt.Option[:0]
+	for _, option := range opt.Option {
+		if option.Option() != dns.EDNS0SUBNET {
+			filtered = append(filtered, option)
+		}
+	}
+	opt.Option = filtered
 }
 
 // clientWantsAD reports whether the client signalled interest in the AD bit,
