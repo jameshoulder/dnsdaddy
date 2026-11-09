@@ -370,6 +370,7 @@ func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest)
 	q := u.Query()
 	q.Set("mode", "rw")
 	q.Add("_pragma", "foreign_keys(ON)")
+	q.Add("_pragma", "trusted_schema(OFF)")
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -386,6 +387,19 @@ func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest)
 		return 0, err
 	}
 	defer tx.Rollback()
+	// Archive-defined views or triggers must not replace the session table or
+	// subvert revocation. This check runs before the DELETE below.
+	var sessionKind string
+	if err := tx.QueryRowContext(ctx, "SELECT type FROM sqlite_master WHERE name='sessions'").Scan(&sessionKind); err != nil || sessionKind != "table" {
+		return 0, errors.New("recovered sessions object must be a table")
+	}
+	var sessionTriggers int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='sessions'").Scan(&sessionTriggers); err != nil {
+		return 0, err
+	}
+	if sessionTriggers != 0 {
+		return 0, errors.New("recovered sessions table contains unexpected triggers")
+	}
 	var hasAuth int
 	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='admin_auth_state'").Scan(&hasAuth); err != nil {
 		return 0, err
@@ -402,6 +416,13 @@ func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest)
 	revoked, err := deleted.RowsAffected()
 	if err != nil {
 		return 0, err
+	}
+	var remaining int64
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sessions").Scan(&remaining); err != nil {
+		return 0, err
+	}
+	if remaining != 0 {
+		return 0, errors.New("recovery could not revoke every dashboard session")
 	}
 	if m.LocalFeedRoot != "" {
 		rows, err := tx.QueryContext(ctx, "SELECT id,url FROM feeds WHERE url LIKE 'file:%'")
