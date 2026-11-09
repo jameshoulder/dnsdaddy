@@ -1,6 +1,8 @@
 package backup
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,5 +50,41 @@ func TestSecurityRestoreForcesCredentialAndDataLocation(t *testing.T) {
 	}
 	if !strings.Contains(string(b), filepath.Join(dir, "data")) || strings.Contains(string(b), "admin_password: old") {
 		t.Fatalf("restore did not enforce recovered database location and cleared bootstrap password: %s", b)
+	}
+}
+
+func TestSecurityRestoreRefusesTriggerBypassingSessionRevocation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "restore.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, stmt := range []string{
+		"CREATE TABLE sessions (id TEXT)",
+		"INSERT INTO sessions VALUES ('old-session')",
+		"CREATE TRIGGER keep_session BEFORE DELETE ON sessions BEGIN SELECT RAISE(IGNORE); END",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := finishDatabase(context.Background(), dbPath, t.TempDir(), Manifest{}); err == nil {
+		t.Fatal("restore declared success although an archive trigger can retain sessions")
+	}
+}
+
+func TestSecurityCredentialInspectionRejectsComputedView(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "provider.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE VIEW api_provider_secrets AS SELECT 'p' AS provider_id, zeroblob(10000000) AS ciphertext, 'k' AS key_id"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCredentials(context.Background(), dbPath, nil); err == nil {
+		t.Fatal("restore queried an attacker-controlled computed credential view")
 	}
 }
