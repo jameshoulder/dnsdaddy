@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestSecurityCoverageMergesWithoutPairwiseRescans checks complete IP-family coverage using sibling-prefix merging.
 func TestSecurityCoverageMergesWithoutPairwiseRescans(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -31,6 +32,7 @@ func TestSecurityCoverageMergesWithoutPairwiseRescans(t *testing.T) {
 	}
 }
 
+// TestSecurityCoverageLargeNonUniversalInput ensures large sparse CIDR lists do not become universal grants.
 func TestSecurityCoverageLargeNonUniversalInput(t *testing.T) {
 	prefixes := make([]netip.Prefix, 0, 4096)
 	for i := 0; i < 4096; i++ {
