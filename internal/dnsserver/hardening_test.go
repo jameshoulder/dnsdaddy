@@ -56,6 +56,8 @@ func TestClientACLEmptyAllowsEverything(t *testing.T) {
 	}
 }
 
+// TestClientACLNotAppliedToTokenAuthenticatedClients verifies valid network-token
+// identities bypass the source-IP ACL, while stale identities fail closed.
 // A DoH or DoT client presents a per-network token, which identifies it far
 // better than a source address ever could. A roaming laptop on a coffee-shop
 // IP must not be locked out by the LAN ACL.
