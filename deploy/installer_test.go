@@ -2700,6 +2700,14 @@ func TestGeneratedCaddyfileDoesNotDependOnAVarLogDirectory(t *testing.T) {
 	if cfg == "" {
 		t.Fatal("no Caddyfile was written, so this test would assert nothing")
 	}
+	// The optional CI integration job uses the *generated* file to test Caddy
+	// itself against an unreachable upstream, rather than validating a copied
+	// logging snippet that could drift from the installer.
+	if output := os.Getenv("DNSDADDY_CADDY_TEST_OUTPUT"); output != "" {
+		if err := os.WriteFile(output, []byte(cfg), 0o600); err != nil {
+			t.Fatalf("export generated Caddyfile for integration test: %v", err)
+		}
+	}
 	if strings.Contains(cfg, "/var/log/caddy") {
 		t.Errorf("the generated Caddyfile still writes to /var/log/caddy:\n%s", cfg)
 	}
