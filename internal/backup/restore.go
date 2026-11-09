@@ -289,18 +289,23 @@ func rewriteConfiguration(root *os.Root, destination string, m Manifest) error {
 	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return errors.New("runtime configuration must be a YAML mapping")
 	}
-	setYAMLPath(document.Content[0], []string{"data_dir"}, filepath.Join(destination, "data"))
-	// The database preserves the current admin password hash. Reapplying an
-	// old bootstrap password from a YAML file would silently undo a password
-	// change made in the dashboard, so launch configuration clears it.
-	setYAMLPath(document.Content[0], []string{"http", "admin_password"}, "")
+	validPaths := map[string]string{
+		"dns.tls_cert_file":                 "refs/dns-tls-cert.pem",
+		"dns.tls_key_file":                  "refs/dns-tls-key.pem",
+		"dns.local_dnssec_trust_anchor_file": "refs/custom-trust-anchors.txt",
+		"feeds.local_feed_dir":              "refs/local-feeds",
+	}
 	for key, name := range m.Paths {
-		valid := map[string]string{"dns.tls_cert_file": "refs/dns-tls-cert.pem", "dns.tls_key_file": "refs/dns-tls-key.pem", "dns.local_dnssec_trust_anchor_file": "refs/custom-trust-anchors.txt", "feeds.local_feed_dir": "refs/local-feeds"}
-		if valid[key] != name {
+		expected, allowed := validPaths[key]
+		if !allowed || expected == "" || name != expected {
 			return errors.New("backup has an unsupported configuration path mapping")
 		}
 		setYAMLPath(document.Content[0], strings.Split(key, "."), filepath.Join(destination, filepath.FromSlash(name)))
 	}
+	// Archive mappings must never override the recovered database location or
+	// reintroduce an administrator bootstrap credential. Force these last.
+	setYAMLPath(document.Content[0], []string{"data_dir"}, filepath.Join(destination, "data"))
+	setYAMLPath(document.Content[0], []string{"http", "admin_password"}, "")
 	// A separate JSONL sink is derived output; keep future writes in the new
 	// private tree rather than to the original host's absolute path.
 	if n := yamlPath(document.Content[0], []string{"detection", "findings_file"}); n != nil && n.Value != "" {
