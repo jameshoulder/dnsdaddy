@@ -7,6 +7,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/feedimport"
 	"github.com/jameshoulder/dnsdaddy/internal/feedpolicy"
 	"github.com/jameshoulder/dnsdaddy/internal/protection"
@@ -786,7 +788,7 @@ func (c *Config) validate() error {
 	if _, err := parsePrefixes(c.HTTP.TrustedProxyCIDRs); err != nil {
 		return fmt.Errorf("http.trusted_proxy_cidrs: %w", err)
 	}
-	if _, err := parsePrefixes(c.DNS.AllowedClientCIDRs); err != nil {
+	if _, err := parseClientPrefixes(c.DNS.AllowedClientCIDRs); err != nil {
 		return fmt.Errorf("dns.allowed_client_cidrs: %w", err)
 	}
 
@@ -960,11 +962,14 @@ func (c *Config) validateNotAnOpenResolver() error {
 	}
 	// Check effective prefixes, not raw array length: whitespace-only entries
 	// are discarded by the runtime ACL and must not disable open-resolver guards.
-	parsed, err := parsePrefixes(c.DNS.AllowedClientCIDRs)
+	parsed, err := parseClientPrefixes(c.DNS.AllowedClientCIDRs)
 	if err != nil {
 		return err
 	}
 	if len(parsed) > 0 {
+		if clientacl.CoversEntireFamily(parsed) {
+			return errors.New("dns.allowed_client_cidrs covers an entire address family; set dns.allow_public_resolver: true only if this is intentional")
+		}
 		return nil
 	}
 
@@ -1031,10 +1036,29 @@ func parsePrefixes(cidrs []string) ([]netip.Prefix, error) {
 	return out, nil
 }
 
+// parseClientPrefixes uses the same canonical parser as the runtime DNS ACL.
+// In particular, IPv4-mapped IPv6 prefixes shorter than /96 must be rejected:
+// accepting them here but skipping them at runtime would turn a restrictive
+// bootstrap ACL into an unrestricted resolver.
+func parseClientPrefixes(cidrs []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(cidrs))
+	for _, raw := range cidrs {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		p, err := clientacl.ParsePrefix(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 // AllowedClientPrefixes returns the parsed client ACL. It is validated at
 // load time, so an error here is not expected.
 func (c *Config) AllowedClientPrefixes() []netip.Prefix {
-	p, _ := parsePrefixes(c.DNS.AllowedClientCIDRs)
+	p, _ := parseClientPrefixes(c.DNS.AllowedClientCIDRs)
 	return p
 }
 
