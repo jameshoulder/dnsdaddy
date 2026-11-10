@@ -130,11 +130,24 @@ NEW_BACKUP="$BACKUP_DIR/dnsdaddy-backup-$STAMP.db"
 if [[ $DRY_RUN -eq 0 ]]; then
   # .backup is consistent against a live WAL database; cp is not.
   [[ ! -e "$NEW_BACKUP" && ! -L "$NEW_BACKUP" ]] || die "backup destination already exists"
-  # SQLite creates the plaintext database with the process umask. Restrict
-  # access before the first byte is written, not with a later chmod alone.
-  ( umask 077; sqlite3 "$DB" ".backup '$NEW_BACKUP'" ) || die "backup failed — not touching the container"
+  # Work inside a new owner-only directory on the destination filesystem.
+  # A backup created directly in BACKUP_DIR could inherit a default ACL that
+  # grants readers access before chmod runs (or after SQLite fails). Keep the
+  # plaintext file unreachable until SQLite has finished and chmod has run.
+  (
+    umask 077
+    private_dir=$(mktemp -d "$BACKUP_DIR/.dnsdaddy-private.XXXXXXXX") || exit 1
+    trap 'rm -rf -- "$private_dir"' EXIT
+    chmod 0700 "$private_dir" || exit 1
+    private_backup="$private_dir/dnsdaddy.db"
+    sqlite3 "$DB" ".backup '$private_backup'" || exit 1
+    [[ -f "$private_backup" && ! -L "$private_backup" && -s "$private_backup" ]] || exit 1
+    chmod 0600 "$private_backup" || exit 1
+    # Hard-linking is atomic and fails if the target path already exists,
+    # avoiding mv --no-clobber silently skipping a raced-in destination.
+    ln -- "$private_backup" "$NEW_BACKUP" || exit 1
+  ) || die "backup failed or could not be securely published — not touching the container"
   [[ -f "$NEW_BACKUP" && ! -L "$NEW_BACKUP" && -s "$NEW_BACKUP" ]] || die "backup is missing, empty or not a regular file"
-  chmod 0600 "$NEW_BACKUP" || die "cannot secure backup permissions"
   ok "fresh backup: $NEW_BACKUP ($(du -h "$NEW_BACKUP" | cut -f1))"
 else
   act sqlite3 "$DB" ".backup '$NEW_BACKUP'"
