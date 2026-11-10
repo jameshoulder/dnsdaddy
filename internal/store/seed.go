@@ -31,6 +31,11 @@ const SettingLocalDNSSECDefault = "install.local_dnssec_default"
 // off it, so the two can never disagree about whether an installation is new.
 const installMarkerKey = "install.first_run_decisions_v1"
 
+// One-time, conservative repair for old installs where shipped feeds could
+// never commit. Once recorded, an operator can re-enable any feed without the
+// next restart silently disabling it again.
+const feedBootstrapRepairMarkerKey = "install.feed_bootstrap_repair_v1"
+
 // seed installs first-run defaults: three policies, a catch-all network, and
 // the built-in feed list. It is idempotent — existing rows are left alone,
 // except that built-in feed metadata (name, URL, category) is refreshed so an
@@ -157,6 +162,40 @@ func (s *Store) seed(ctx context.Context) error {
 		}
 	}
 
+	// Older releases shipped six enabled feeds. Some URLs are gone, while
+	// others exceed the index budget on the reference small VPS. Do not
+	// repeatedly retry known-broken built-ins on an installation where they
+	// have already failed without ever committing. This only runs once, only
+	// matches the original catalog URLs and error state, and never disables a
+	// feed that has successfully loaded before. Subsequent operator choices
+	// are authoritative.
+	var feedRepairDone int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM settings WHERE key = ?", feedBootstrapRepairMarkerKey,
+	).Scan(&feedRepairDone); err != nil {
+		return err
+	}
+	if feedRepairDone == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE feeds SET enabled = 0, updated_at = ?
+			WHERE builtin = 1 AND enabled = 1 AND last_success_at IS NULL
+			  AND last_status = 'error'
+			  AND (
+				(id = 'urlhaus' AND url = 'https://urlhaus.abuse.ch/downloads/hostfile/')
+				OR (id = 'coinblocker' AND url = 'https://raw.githubusercontent.com/ZeroDot1/CoinBlockerLists/master/list.txt')
+				OR (id = 'botnet-c2' AND url = 'https://blocklistproject.github.io/Lists/malware.txt')
+				OR (id = 'blocklistproject-phishing' AND url = 'https://blocklistproject.github.io/Lists/phishing.txt')
+				OR (id = 'phishing-army' AND url = 'https://phishing.army/download/phishing_army_blocklist_extended.txt')
+			  )`, now); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO settings (key, value) VALUES (?, '1')", feedBootstrapRepairMarkerKey,
+		); err != nil {
+			return err
+		}
+	}
+
 	for _, f := range catalog.DefaultFeeds {
 		// Preserve the operator's enabled/disabled choice and refresh state,
 		// but keep name/URL/category/format in sync with the shipped catalog.
@@ -166,6 +205,8 @@ func (s *Store) seed(ctx context.Context) error {
 			ON CONFLICT(id) DO UPDATE SET
 				name       = excluded.name,
 				url        = excluded.url,
+				-- A new URL must never send an ETag from its old upstream.
+				etag       = CASE WHEN feeds.url != excluded.url THEN '' ELSE feeds.etag END,
 				category   = excluded.category,
 				format     = excluded.format,
 				builtin    = 1,
