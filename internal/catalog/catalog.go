@@ -194,22 +194,25 @@ type Feed struct {
 	Enabled  bool
 }
 
-// DefaultFeeds are seeded on first run. The four security categories are
-// enabled; content-filtering feeds are seeded disabled so a fresh install
-// blocks threats and nothing else.
+// DefaultFeeds are seeded on first run. Only the bounded HaGeZi TIF Mini
+// source is enabled by default: its malware, phishing and C2 coverage offers
+// usable first-run protection on small VPSes. Large, retired or unavailable
+// feeds stay discoverable but require an operator to enable them explicitly.
+// Store.seed updates built-in URLs on upgrade without re-enabling user-disabled
+// feeds.
 var DefaultFeeds = []Feed{
 	{
 		ID:       "urlhaus",
-		Name:     "abuse.ch URLhaus",
+		Name:     "abuse.ch URLhaus (legacy hostfile)",
 		URL:      "https://urlhaus.abuse.ch/downloads/hostfile/",
 		Category: "malware",
 		Format:   "hosts",
-		Enabled:  true,
+		Enabled:  false,
 	},
 	{
 		ID:       "hagezi-tif-mini",
 		Name:     "HaGeZi Threat Intelligence Feeds (mini)",
-		URL:      "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/tif.mini.txt",
+		URL:      "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt",
 		Category: "malware",
 		Format:   "domains",
 		Enabled:  true,
@@ -220,7 +223,7 @@ var DefaultFeeds = []Feed{
 		URL:      "https://phishing.army/download/phishing_army_blocklist_extended.txt",
 		Category: "phishing",
 		Format:   "domains",
-		Enabled:  true,
+		Enabled:  false,
 	},
 	{
 		ID:       "blocklistproject-phishing",
@@ -228,7 +231,7 @@ var DefaultFeeds = []Feed{
 		URL:      "https://blocklistproject.github.io/Lists/phishing.txt",
 		Category: "phishing",
 		Format:   "hosts",
-		Enabled:  true,
+		Enabled:  false,
 	},
 	{
 		ID:       "botnet-c2",
@@ -236,15 +239,15 @@ var DefaultFeeds = []Feed{
 		URL:      "https://blocklistproject.github.io/Lists/malware.txt",
 		Category: "c2",
 		Format:   "hosts",
-		Enabled:  true,
+		Enabled:  false,
 	},
 	{
 		ID:       "coinblocker",
-		Name:     "CoinBlockerLists",
+		Name:     "CoinBlockerLists (upstream unavailable)",
 		URL:      "https://raw.githubusercontent.com/ZeroDot1/CoinBlockerLists/master/list.txt",
 		Category: "cryptomining",
 		Format:   "domains",
-		Enabled:  true,
+		Enabled:  false,
 	},
 	{
 		ID:       "nrd-30day",
