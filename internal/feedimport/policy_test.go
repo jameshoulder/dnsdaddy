@@ -14,7 +14,7 @@ func TestFiniteLimits(t *testing.T) {
 		}
 	}
 	l, n, d, err := (Limits{}).Normalize(0)
-	if err != nil || n != 128<<20 || l.Records != 1000000 || d.Seconds() != 90 {
+	if err != nil || n != 128<<20 || l.Records != 1000000 || l.MemoryBytes != 512<<20 || d.Seconds() != 90 {
 		t.Fatal(l, n, d, err)
 	}
 	for _, l := range []Limits{{Records: -1}, {Records: 5000001}, {LocalRecords: -1}, {Domains: -1}, {Claims: -1}, {MemoryBytes: -1}, {TempBytes: -1}, {Timeout: "invalid"}, {Timeout: "0s"}, {Timeout: "11m"}} {
