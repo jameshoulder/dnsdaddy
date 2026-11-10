@@ -92,56 +92,45 @@ func CoversEntireFamily(prefixes []netip.Prefix) bool {
 	return coversFamily(prefixes, true) || coversFamily(prefixes, false)
 }
 
+// coversFamily reports whether prefixes for the selected family merge to a
+// default route. It ignores invalid prefixes and IPv4-mapped prefixes shorter
+// than /96; other mapped prefixes are treated as IPv4.
 func coversFamily(prefixes []netip.Prefix, v4 bool) bool {
-	set := map[netip.Prefix]bool{}
+	// Merge siblings as they arrive. Each merge shortens a prefix by one bit,
+	// so even an adversarial list takes O(n * addressBits), not repeated
+	// pairwise rescans under the network configuration write lock.
+	set := make(map[netip.Prefix]struct{}, len(prefixes))
 	for _, p := range prefixes {
 		if !p.IsValid() {
 			continue
 		}
-		p = netip.PrefixFrom(Normalize(p.Addr()), p.Bits()).Masked()
-		if !p.IsValid() || p.Addr().Is4() != v4 {
-			continue
-		}
-		set[p] = true
-	}
-
-	for changed := true; changed; {
-		changed = false
-
-		// A prefix inside another contributes nothing, and leaving it in stops
-		// its container from ever finding its own sibling.
-		for p := range set {
-			for q := range set {
-				if q != p && q.Bits() < p.Bits() && q.Contains(p.Addr()) {
-					delete(set, p)
-					changed = true
-					break
-				}
-			}
-			if changed {
-				break
-			}
-		}
-		if changed {
-			continue
-		}
-
-		for p := range set {
-			sib, ok := sibling(p)
-			if !ok || !set[sib] {
+		if p.Addr().Is4In6() {
+			if p.Bits() < 96 {
 				continue
 			}
-			delete(set, p)
-			delete(set, sib)
-			set[netip.PrefixFrom(p.Addr(), p.Bits()-1).Masked()] = true
-			changed = true
-			break
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 		}
-	}
-
-	for p := range set {
-		if p.Bits() == 0 {
-			return true
+		p = p.Masked()
+		if p.Addr().Is4() != v4 {
+			continue
+		}
+		for {
+			if p.Bits() == 0 {
+				return true
+			}
+			if _, exists := set[p]; exists {
+				break
+			}
+			sib, ok := sibling(p)
+			if !ok {
+				break
+			}
+			if _, exists := set[sib]; !exists {
+				set[p] = struct{}{}
+				break
+			}
+			delete(set, sib)
+			p = netip.PrefixFrom(p.Addr(), p.Bits()-1).Masked()
 		}
 	}
 	return false

@@ -5681,8 +5681,11 @@ pages.settings = {
     $('#token-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const form = new FormData(e.target);
+      const viewEpoch = authenticatedViewEpoch;
       try {
         const token = await apiSend('POST', '/tokens', { name: form.get('name') });
+        // Responses that complete after sign-out must not reinsert secrets.
+        if (viewEpoch !== authenticatedViewEpoch || $('#app').hidden || !$('#token-secret')) return;
         $('#token-secret').innerHTML = sanitize(html`
           <div class="card token-reveal">
             <p class="small reveal-lead"><strong>Copy this now — it is not shown again.</strong></p>
@@ -5975,12 +5978,22 @@ const router = {
 
 /* ---------- auth & bootstrap -------------------------------------------- */
 
+let authenticatedViewEpoch = 0;
+
+/** Show the login screen, clear authenticated view data, and invalidate pending renders. */
 function showLogin() {
+  authenticatedViewEpoch++;
   router.invalidate();
   sidebarGate.cancel();
   setNavigation(false, { restoreFocus: false });
+  // Hiding an authenticated view leaves API tokens and private DoH URLs in
+  // its DOM, including copy-to-clipboard attributes. Remove those nodes.
+  $('#view').replaceChildren();
+  const tokenSecret = $('#token-secret');
+  if (tokenSecret) tokenSecret.replaceChildren();
   $('#app').hidden = true;
   $('#login').hidden = false;
+  $('#password').value = '';
   $('#password').focus();
 }
 
@@ -6036,8 +6049,11 @@ async function boot() {
   $('#logout-btn').addEventListener('click', async () => {
     try {
       await apiSend('POST', '/auth/logout');
-    } catch {
-      /* logging out locally is what matters */
+    } catch (err) {
+      // A failed revocation leaves the server-side session and cookie live.
+      // Never present sign-out as complete until the server confirms it.
+      toast('Sign out could not be confirmed. Your session may still be active; please retry.', 'error');
+      return;
     }
     showLogin();
   });

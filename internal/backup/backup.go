@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/config"
@@ -336,7 +337,9 @@ func (c *contextReader) Read(p []byte) (int, error) {
 
 // openRegular rejects symbolic links and devices. OpenRoot confines a racing
 // path replacement to its already-opened parent, and SameFile ensures it is
-// the regular inode inspected before opening, not a replacement.
+// the regular inode inspected before opening, not a replacement. It returns
+// ErrLimit if the inspected file exceeds limit bytes or has a negative size.
+// The caller must close the returned file. Filesystem errors are returned.
 func openRegular(name string, limit int64) (*os.File, error) {
 	parent, err := os.OpenRoot(filepath.Dir(name))
 	if err != nil {
@@ -354,7 +357,9 @@ func openRegular(name string, limit int64) (*os.File, error) {
 	if before.Size() < 0 || before.Size() > limit {
 		return nil, ErrLimit
 	}
-	f, err := parent.Open(base)
+	// O_NONBLOCK prevents a raced-in FIFO from hanging a privileged backup
+	// before descriptor identity and regular-file checks can run.
+	f, err := parent.OpenFile(base, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -467,11 +472,14 @@ func validArchiveName(name string) bool {
 	return true
 }
 
+// sqliteReadOnly opens and checks an existing SQLite database without trusting
+// its schema. It returns open or ping errors; the caller must close the database.
 func sqliteReadOnly(p string) (*sql.DB, error) {
 	u := url.URL{Scheme: "file", Path: p}
 	q := u.Query()
 	q.Set("mode", "ro")
 	q.Add("_pragma", "busy_timeout(10000)")
+	q.Add("_pragma", "trusted_schema(OFF)")
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -496,12 +504,55 @@ func OpenSource(p string) (*sql.DB, error) {
 	return sqliteReadOnly(p)
 }
 
+// validateCredentials checks that stored provider and webhook credentials can
+// be decrypted with the key in items. It rejects unsupported provider schemas,
+// oversized provider records, and invalid or missing keys, and returns database
+// and file errors encountered during inspection.
 func validateCredentials(ctx context.Context, dbPath string, items []*inputFile) error {
 	db, err := sqliteReadOnly(dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	// An operator-selected recovery package is untrusted SQLite, not just
+	// untrusted rows. Refuse views/computed columns before reading credentials;
+	// a small view could otherwise generate an unbounded BLOB in rows.Next.
+	var kind string
+	if err := db.QueryRowContext(ctx, "SELECT type FROM sqlite_master WHERE name='api_provider_secrets'").Scan(&kind); err != nil || kind != "table" {
+		return errors.New("provider credential schema must be an ordinary table")
+	}
+	columns, err := db.QueryContext(ctx, "PRAGMA table_xinfo(api_provider_secrets)")
+	if err != nil {
+		return err
+	}
+	for columns.Next() {
+		var cid, notNull, primaryKey, hidden int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := columns.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey, &hidden); err != nil {
+			columns.Close()
+			return err
+		}
+		if hidden != 0 {
+			columns.Close()
+			return errors.New("computed provider credential columns are not supported")
+		}
+	}
+	if err := columns.Err(); err != nil {
+		columns.Close()
+		return err
+	}
+	columns.Close()
+	var oversize int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM api_provider_secrets
+		WHERE length(ciphertext) > 65536 OR length(provider_id) > 256 OR length(key_id) > 256
+	)`).Scan(&oversize); err != nil {
+		return err
+	}
+	if oversize != 0 {
+		return errors.New("provider credential record exceeds recovery inspection limits")
+	}
 	rows, err := db.QueryContext(ctx, "SELECT provider_id,ciphertext,key_id FROM api_provider_secrets")
 	if err != nil {
 		return err

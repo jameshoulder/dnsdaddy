@@ -125,6 +125,9 @@ func (c *Controller) Update(ctx context.Context, next Config) (Config, error) {
 	return copyConfig(s.cfg), nil
 }
 
+// compile validates and normalizes protection settings for a new snapshot.
+// It rejects invalid rate limits and rebinding exceptions, including public
+// suffixes, and returns the validation error to the caller.
 func compile(cfg Config) (*snapshot, error) {
 	r := cfg.RateLimit
 	if math.IsNaN(r.QPS) || math.IsInf(r.QPS, 0) || r.QPS < 1 || r.QPS > 100000 {
@@ -154,7 +157,7 @@ func compile(cfg Config) (*snapshot, error) {
 		if _, err := netip.ParseAddr(name); err == nil {
 			return nil, errors.New("use allowCIDRs for address exceptions")
 		}
-		if suffix, icann := publicsuffix.PublicSuffix(name); icann && suffix == name {
+		if suffix, icann := publicsuffix.PublicSuffix(name); suffix == name && (icann || strings.Contains(name, ".")) {
 			return nil, fmt.Errorf("a public suffix such as %q is too broad; use a domain you control", name)
 		}
 		cfg.Rebinding.AllowDomains[i] = name

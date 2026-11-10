@@ -268,6 +268,9 @@ func writeRootFile(root *os.Root, name string, b []byte) error {
 	return f.Close()
 }
 
+// rewriteConfiguration rewrites the restored config under root for destination,
+// clears the bootstrap password, and rejects unsupported manifest path mappings.
+// It returns errors for invalid or oversized configuration and file operations.
 func rewriteConfiguration(root *os.Root, destination string, m Manifest) error {
 	f, err := root.Open("config.yaml")
 	if err != nil {
@@ -289,18 +292,23 @@ func rewriteConfiguration(root *os.Root, destination string, m Manifest) error {
 	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return errors.New("runtime configuration must be a YAML mapping")
 	}
-	setYAMLPath(document.Content[0], []string{"data_dir"}, filepath.Join(destination, "data"))
-	// The database preserves the current admin password hash. Reapplying an
-	// old bootstrap password from a YAML file would silently undo a password
-	// change made in the dashboard, so launch configuration clears it.
-	setYAMLPath(document.Content[0], []string{"http", "admin_password"}, "")
+	validPaths := map[string]string{
+		"dns.tls_cert_file":                  "refs/dns-tls-cert.pem",
+		"dns.tls_key_file":                   "refs/dns-tls-key.pem",
+		"dns.local_dnssec_trust_anchor_file": "refs/custom-trust-anchors.txt",
+		"feeds.local_feed_dir":               "refs/local-feeds",
+	}
 	for key, name := range m.Paths {
-		valid := map[string]string{"dns.tls_cert_file": "refs/dns-tls-cert.pem", "dns.tls_key_file": "refs/dns-tls-key.pem", "dns.local_dnssec_trust_anchor_file": "refs/custom-trust-anchors.txt", "feeds.local_feed_dir": "refs/local-feeds"}
-		if valid[key] != name {
+		expected, allowed := validPaths[key]
+		if !allowed || expected == "" || name != expected {
 			return errors.New("backup has an unsupported configuration path mapping")
 		}
 		setYAMLPath(document.Content[0], strings.Split(key, "."), filepath.Join(destination, filepath.FromSlash(name)))
 	}
+	// Archive mappings must never override the recovered database location or
+	// reintroduce an administrator bootstrap credential. Force these last.
+	setYAMLPath(document.Content[0], []string{"data_dir"}, filepath.Join(destination, "data"))
+	setYAMLPath(document.Content[0], []string{"http", "admin_password"}, "")
 	// A separate JSONL sink is derived output; keep future writes in the new
 	// private tree rather than to the original host's absolute path.
 	if n := yamlPath(document.Content[0], []string{"detection", "findings_file"}); n != nil && n.Value != "" {
@@ -360,11 +368,16 @@ func validateRestoredKey(ctx context.Context, dbPath string, root *os.Root, file
 	return validateCredentials(ctx, dbPath, items)
 }
 
+// finishDatabase validates the restored database, revokes its sessions and
+// relocates local feed URLs when the manifest specifies a feed root. It returns
+// the number of sessions deleted or an error from validation or database work.
+// A database error after the transaction commits can still leave changes saved.
 func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest) (int64, error) {
 	u := url.URL{Scheme: "file", Path: dbPath}
 	q := u.Query()
 	q.Set("mode", "rw")
 	q.Add("_pragma", "foreign_keys(ON)")
+	q.Add("_pragma", "trusted_schema(OFF)")
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
@@ -381,6 +394,19 @@ func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest)
 		return 0, err
 	}
 	defer tx.Rollback()
+	// Archive-defined views or triggers must not replace the session table or
+	// subvert revocation. This check runs before the DELETE below.
+	var sessionKind string
+	if err := tx.QueryRowContext(ctx, "SELECT type FROM sqlite_master WHERE type='table' AND name='sessions' COLLATE NOCASE").Scan(&sessionKind); err != nil || sessionKind != "table" {
+		return 0, errors.New("recovered sessions object must be a table")
+	}
+	var sessionTriggers int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='sessions' COLLATE NOCASE").Scan(&sessionTriggers); err != nil {
+		return 0, err
+	}
+	if sessionTriggers != 0 {
+		return 0, errors.New("recovered sessions table contains unexpected triggers")
+	}
 	var hasAuth int
 	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='admin_auth_state'").Scan(&hasAuth); err != nil {
 		return 0, err
@@ -397,6 +423,13 @@ func finishDatabase(ctx context.Context, dbPath, destination string, m Manifest)
 	revoked, err := deleted.RowsAffected()
 	if err != nil {
 		return 0, err
+	}
+	var remaining int64
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sessions").Scan(&remaining); err != nil {
+		return 0, err
+	}
+	if remaining != 0 {
+		return 0, errors.New("recovery could not revoke every dashboard session")
 	}
 	if m.LocalFeedRoot != "" {
 		rows, err := tx.QueryContext(ctx, "SELECT id,url FROM feeds WHERE url LIKE 'file:%'")

@@ -91,7 +91,7 @@ if [[ -z "$body" ]]; then
 else
   app_status=$(printf '%s' "$body" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
   if [[ "$app_status" != "ok" ]]; then
-    fail "api returned an unexpected status: $body"
+    fail "api returned an unexpected status: $(printf '%q' "$body")"
   else
     ok "api responding (status=ok)"
 

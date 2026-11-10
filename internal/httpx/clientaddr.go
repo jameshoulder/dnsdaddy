@@ -26,7 +26,9 @@ type TrustedProxies struct {
 }
 
 // ParseTrustedProxies compiles a list of CIDRs (or bare addresses, treated as
-// single-host prefixes).
+// single-host prefixes). Blank entries are ignored. IPv4-mapped addresses and
+// prefixes are converted to IPv4; mapped prefixes shorter than /96 and invalid
+// entries return an error.
 func ParseTrustedProxies(cidrs []string) (*TrustedProxies, error) {
 	t := &TrustedProxies{}
 	for _, raw := range cidrs {
@@ -39,12 +41,21 @@ func ParseTrustedProxies(cidrs []string) (*TrustedProxies, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid trusted proxy address %q: %w", raw, err)
 			}
+			if addr.Is4In6() {
+				addr = addr.Unmap()
+			}
 			t.prefixes = append(t.prefixes, netip.PrefixFrom(addr, addr.BitLen()))
 			continue
 		}
 		p, err := netip.ParsePrefix(raw)
 		if err != nil {
 			return nil, fmt.Errorf("invalid trusted proxy CIDR %q: %w", raw, err)
+		}
+		if p.Addr().Is4In6() {
+			if p.Bits() < 96 {
+				return nil, fmt.Errorf("invalid mapped trusted proxy CIDR %q", raw)
+			}
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 		}
 		t.prefixes = append(t.prefixes, p.Masked())
 	}

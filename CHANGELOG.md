@@ -22,6 +22,28 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Security-related upgrade note
+
+- DNS rebinding exceptions have stricter validation. Before upgrading, inspect
+  `protection.rebinding.allow_domains` in the YAML configuration and the
+  dashboard's saved Protection settings. Remove entries that are public
+  suffixes (for example, `github.io`) or replace them with a specific domain
+  you control (for example, `your-site.github.io`). The old broad exception
+  was accepted but could permit rebinding for unrelated tenants; the new
+  version refuses to start with such an exception. Make this change before
+  restarting after an upgrade, and retain a backup of the previous settings.
+
+- HTTP management listener hostnames that cannot be classified as private or
+  loopback now **fail startup unless explicitly acknowledged** with
+  `http.allow_public_bind: true` (or `DNSDADDY_ALLOW_PUBLIC_BIND=true`).
+  This includes `http.listen: "myhost.lan:8080"` and Compose service names such as
+  `http.listen: "dnsdaddy:8080"`: DNS resolution is not treated as proof that
+  a listener is private. Prefer an explicit loopback address
+  (`127.0.0.1:8080`) behind an HTTPS proxy or an explicit private LAN IP.
+  Only set `allow_public_bind` after checking the address and network boundary;
+  doing so acknowledges possible plaintext management exposure.
+
+
 ### Basic forwarding, clearer modes and immediate activity
 
 - Fresh installations start in **Forward**, the existing `off` mode, with

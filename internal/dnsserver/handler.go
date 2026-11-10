@@ -255,7 +255,10 @@ type networkIdentified interface {
 	NetworkID() string
 }
 
-// Handle resolves one message and returns the response to send.
+// Handle resolves one message and returns the response to send. Resolution
+// errors become DNS failure responses. For questions proceeding to policy, it
+// rejects names that normalization would alter and refuses unavailable
+// authenticated networks rather than selecting a fallback policy.
 func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (response *dns.Msg) {
 	h.activity.begin(time.Now())
 	outcome, cached := activityInvalid, false
@@ -322,12 +325,13 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		return errorResponse(req, dns.RcodeFormatError)
 	}
 
+	// A DNS question is not an operator-pasted URL. Do not apply a policy
+	// decision to a truncated/substituted name and then forward the original.
+	// Unsupported escaped wire labels are refused until they can be matched
+	// using their exact DNS label boundaries. The root NS question remains valid.
 	normalized := domainutil.Normalize(name)
-	if normalized == "" {
-		// Names we cannot normalise (root, malformed labels) are forwarded
-		// unfiltered rather than blocked: refusing them would break edge cases
-		// like the root NS query without protecting anyone.
-		normalized = name
+	if name != "" && (normalized == "" || normalized != name) {
+		return errorResponse(req, dns.RcodeFormatError)
 	}
 
 	var match policy.Match
@@ -335,7 +339,11 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		if m, ok := h.engine.MatchNetworkID(meta.networkID); ok {
 			match = m
 		} else {
-			match = h.engine.MatchClient(meta.clientAddr)
+			// An explicitly authenticated network must not turn into an IP or
+			// Default-network identity when a concurrent delete removes it.
+			h.refused.Add(1)
+			outcome = activityRefused
+			return protectedResponse(req, dns.ExtendedErrorCodeProhibited, "Authenticated network is unavailable")
 		}
 	} else {
 		match = h.engine.MatchClient(meta.clientAddr)

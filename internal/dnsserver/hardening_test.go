@@ -10,6 +10,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
+	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
 func allowClients(cidrs ...string) func(*HandlerOptions) {
@@ -55,19 +56,41 @@ func TestClientACLEmptyAllowsEverything(t *testing.T) {
 	}
 }
 
+// TestClientACLNotAppliedToTokenAuthenticatedClients verifies valid network-token
+// identities bypass the source-IP ACL, while stale identities fail closed.
 // A DoH or DoT client presents a per-network token, which identifies it far
 // better than a source address ever could. A roaming laptop on a coffee-shop
 // IP must not be locked out by the LAN ACL.
 func TestClientACLNotAppliedToTokenAuthenticatedClients(t *testing.T) {
 	h := newHarnessWithOptions(t, nil, allowClients("192.168.0.0/16"))
+	ctx := context.Background()
+
+	// A token identity must resolve to a real, enabled network. The earlier
+	// test used the fictional ID "n_test", inadvertently asserting that an
+	// invalid token network should bypass the security fallback check.
+	name := "Roaming test network"
+	network, err := h.store.CreateNetwork(ctx, store.NetworkInput{Name: &name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.engine.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	meta := clientMeta("203.0.113.9")
-	meta.networkID = "n_test"
+	meta.networkID = network.ID
 	meta.proto = "doh"
 
-	resp := h.handler.Handle(context.Background(), query("example.com", dns.TypeA), meta)
+	resp := h.handler.Handle(ctx, query("example.com", dns.TypeA), meta)
 	if resp.Rcode == dns.RcodeRefused {
-		t.Error("a token-authenticated client was refused by the IP ACL")
+		t.Error("a valid token-authenticated client was refused by the IP ACL")
+	}
+
+	// When a network disappears, don't substitute a weaker IP/default policy.
+	meta.networkID = "n_deleted"
+	resp = h.handler.Handle(ctx, query("example.com", dns.TypeA), meta)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Errorf("missing authenticated network got %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
 }
 

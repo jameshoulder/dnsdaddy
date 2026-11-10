@@ -68,6 +68,7 @@ import (
 	"net/netip"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -155,7 +156,8 @@ const defaultLabResolver = "127.0.0.1:5354"
 var productionDNSPorts = map[string]bool{"53": true, "853": true}
 
 // checkTarget refuses to generate traffic against something that looks like a
-// live resolver, unless the operator has said so explicitly.
+// live resolver, unless the operator has said so explicitly. The target must
+// have a numeric port from 1 through 65535, even when production is allowed.
 //
 // This refuses rather than warns, and the distinction is deliberate. A warning
 // on stderr is advisory: it is missed under -quiet, missed in a script, and
@@ -174,7 +176,11 @@ func checkTarget(server string, allowProduction bool) error {
 		return fmt.Errorf("invalid -server %q: %w", server, err)
 	}
 
-	if productionDNSPorts[port] && !allowProduction {
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("invalid numeric -server port %q", port)
+	}
+	if productionDNSPorts[strconv.Itoa(portNumber)] && !allowProduction {
 		return fmt.Errorf(
 			"refusing to send synthetic attack traffic to %s: port %s is a standard DNS port,\n"+
 				"and if that is a live DNS Daddy it will write synthetic findings into a real\n"+

@@ -193,7 +193,8 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, generation uint64)
 }
 
 // forwardOnce performs the upstream query, collapsing duplicate concurrent
-// questions onto a single flight.
+// questions onto a single flight. Responses sent to the cache have EDNS client
+// subnet options removed; upstream and context errors are returned.
 func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, generation uint64, route *ForwardRoute) (*dns.Msg, string, error) {
 	// A feed generation change also needs its own flight. Otherwise a caller
 	// admitted after a refresh could join a request started under old policy.
@@ -227,6 +228,7 @@ func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, ge
 		err = errors.New("upstream returned no message")
 	}
 	if err == nil && msg != nil {
+		stripEDNSClientSubnet(msg)
 		r.cache.Put(key, msg, generation)
 		c.msg = msg
 		c.upstream = upstream
@@ -245,6 +247,9 @@ func (r *Resolver) forwardOnce(ctx context.Context, key string, req *dns.Msg, ge
 	return msg.Copy(), upstream, nil
 }
 
+// forward sends a copy of req without EDNS client subnet options, using the
+// selected route or configured upstreams. It returns exchange, timeout, and
+// concurrency limit errors to the caller.
 func (r *Resolver) forward(ctx context.Context, req *dns.Msg, route *ForwardRoute) (*dns.Msg, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
@@ -258,6 +263,9 @@ func (r *Resolver) forward(ctx context.Context, req *dns.Msg, route *ForwardRout
 	// state; send a clean copy.
 	out := req.Copy()
 	out.Id = dns.Id()
+	// ECS is client-specific metadata. Cache keys do not partition by it, so
+	// neither an upstream request nor a shared cached response may carry it.
+	stripEDNSClientSubnet(out)
 
 	// Ask the upstream to report its DNSSEC verdict.
 	//
@@ -390,9 +398,11 @@ func (r *Resolver) InflightStats() (current, peak int64, limitTimeouts uint64) {
 	return r.inflightNow.Load(), r.inflightPeak.Load(), r.limitTimeouts.get()
 }
 
-// reattach copies a response onto the client's question and message ID.
+// reattach copies a response onto the client's question and message ID,
+// removing EDNS client subnet options from the copy.
 func reattach(msg *dns.Msg, req *dns.Msg) *dns.Msg {
 	out := msg.Copy()
+	stripEDNSClientSubnet(out)
 	out.Id = req.Id
 	out.Question = req.Question
 	out.Response = true
@@ -413,6 +423,31 @@ func reattach(msg *dns.Msg, req *dns.Msg) *dns.Msg {
 		out.AuthenticatedData = false
 	}
 	return out
+}
+
+// stripEDNSClientSubnet removes client subnet options from messages that
+// share a cache and in-flight lookup key across clients. Keep DO and other
+// DNSSEC-relevant metadata intact.
+func stripEDNSClientSubnet(msg *dns.Msg) {
+	if msg == nil {
+		return
+	}
+	// Malformed messages can contain multiple OPT records. IsEdns0
+	// returns only one, so inspect every extra record before forwarding or
+	// returning a cached answer to a different client.
+	for _, rr := range msg.Extra {
+		opt, ok := rr.(*dns.OPT)
+		if !ok {
+			continue
+		}
+		filtered := opt.Option[:0]
+		for _, option := range opt.Option {
+			if option.Option() != dns.EDNS0SUBNET {
+				filtered = append(filtered, option)
+			}
+		}
+		opt.Option = filtered
+	}
 }
 
 // clientWantsAD reports whether the client signalled interest in the AD bit,

@@ -7,6 +7,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jameshoulder/dnsdaddy/internal/clientacl"
 	"github.com/jameshoulder/dnsdaddy/internal/feedimport"
 	"github.com/jameshoulder/dnsdaddy/internal/feedpolicy"
 	"github.com/jameshoulder/dnsdaddy/internal/protection"
@@ -786,7 +788,7 @@ func (c *Config) validate() error {
 	if _, err := parsePrefixes(c.HTTP.TrustedProxyCIDRs); err != nil {
 		return fmt.Errorf("http.trusted_proxy_cidrs: %w", err)
 	}
-	if _, err := parsePrefixes(c.DNS.AllowedClientCIDRs); err != nil {
+	if _, err := parseClientPrefixes(c.DNS.AllowedClientCIDRs); err != nil {
 		return fmt.Errorf("dns.allowed_client_cidrs: %w", err)
 	}
 
@@ -912,7 +914,8 @@ func isSharedAddressSpace(addr netip.Addr) bool {
 var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
 
 // validateManagementBind refuses to publish the management interface to the
-// internet by accident.
+// internet by accident. Public, wildcard, and unclassified binds require
+// allow_public_bind; private and loopback binds do not.
 //
 // The dashboard and API can repoint a whole network's DNS, read every query
 // this resolver has answered, and rotate the credentials that let a device use
@@ -925,13 +928,15 @@ func (c *Config) validateManagementBind() error {
 		return nil
 	}
 	kind := ClassifyManagementBind(c.HTTP.Listen)
-	if !kind.NeedsPublicBindAck() {
+	if kind != BindUnknown && !kind.NeedsPublicBindAck() {
 		return nil
 	}
 
 	shape := "binds every interface on this machine"
 	if kind == BindPublic {
 		shape = "is a globally routable address"
+	} else if kind == BindUnknown {
+		shape = "cannot be safely classified as a private or loopback address"
 	}
 	return fmt.Errorf(
 		"http.listen %q %s, which would publish the management dashboard and API "+
@@ -944,14 +949,27 @@ func (c *Config) validateManagementBind() error {
 }
 
 // validateNotAnOpenResolver refuses to start a resolver that is reachable from
-// anywhere with no client ACL.
+// anywhere with no client ACL. Blank ACL entries are ignored, and malformed
+// entries return a parsing error unless public resolver access is allowed.
 //
 // Failing closed here is the whole point: an open resolver is discovered and
 // conscripted into amplification attacks within days, and by then it is the
 // operator's IP address in the abuse report. Making them write one explicit
 // line to opt in is a far smaller cost than that.
 func (c *Config) validateNotAnOpenResolver() error {
-	if len(c.DNS.AllowedClientCIDRs) > 0 || c.DNS.AllowPublicResolver {
+	if c.DNS.AllowPublicResolver {
+		return nil
+	}
+	// Check effective prefixes, not raw array length: whitespace-only entries
+	// are discarded by the runtime ACL and must not disable open-resolver guards.
+	parsed, err := parseClientPrefixes(c.DNS.AllowedClientCIDRs)
+	if err != nil {
+		return err
+	}
+	if len(parsed) > 0 {
+		if clientacl.CoversEntireFamily(parsed) {
+			return errors.New("dns.allowed_client_cidrs covers an entire address family; set dns.allow_public_resolver: true only if this is intentional")
+		}
 		return nil
 	}
 
@@ -1018,10 +1036,29 @@ func parsePrefixes(cidrs []string) ([]netip.Prefix, error) {
 	return out, nil
 }
 
+// parseClientPrefixes uses the same canonical parser as the runtime DNS ACL.
+// In particular, IPv4-mapped IPv6 prefixes shorter than /96 must be rejected:
+// accepting them here but skipping them at runtime would turn a restrictive
+// bootstrap ACL into an unrestricted resolver.
+func parseClientPrefixes(cidrs []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(cidrs))
+	for _, raw := range cidrs {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		p, err := clientacl.ParsePrefix(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 // AllowedClientPrefixes returns the parsed client ACL. It is validated at
 // load time, so an error here is not expected.
 func (c *Config) AllowedClientPrefixes() []netip.Prefix {
-	p, _ := parsePrefixes(c.DNS.AllowedClientCIDRs)
+	p, _ := parseClientPrefixes(c.DNS.AllowedClientCIDRs)
 	return p
 }
 

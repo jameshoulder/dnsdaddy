@@ -294,7 +294,9 @@ func (c InstanceConfig) Redact(s string) string {
 	return out
 }
 
-// SafeExcerpt is Excerpt with the credential removed.
+// SafeExcerpt returns a valid UTF-8 excerpt with the credential redacted before
+// truncation. limit is in bytes; values outside 1 through 4096 use 4096. A nil
+// response yields an empty string.
 //
 // The only excerpt an adapter should use. Response.Excerpt has no idea what
 // the credential is — it is a method on a body, not on a provider — so the
@@ -303,7 +305,16 @@ func (c InstanceConfig) SafeExcerpt(r *Response, limit int) string {
 	if r == nil {
 		return ""
 	}
-	return c.Redact(r.Excerpt(limit))
+	// Redact the entire bounded response before truncation. Otherwise a
+	// credential crossing the excerpt boundary survives as a plaintext prefix.
+	if limit <= 0 || limit > 4096 {
+		limit = 4096
+	}
+	safe := c.Redact(string(r.Body))
+	if len(safe) > limit {
+		safe = safe[:limit]
+	}
+	return strings.ToValidUTF8(safe, "")
 }
 
 // Clamp01 bounds a score to [0, 1].
