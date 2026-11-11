@@ -106,6 +106,14 @@ func TestMeasuredReportsFailingAndUnloadedFeeds(t *testing.T) {
 	h.login()
 	ctx := context.Background()
 
+	// Fresh installs enable only the bounded HaGeZi feed. This scenario
+	// deliberately needs two enabled feeds to compare failed and successful
+	// refreshes, so opt in the second feed within this isolated test.
+	enabledPhishing := true
+	if _, err := h.store.UpdateFeed(ctx, "phishing-army", store.FeedInput{Enabled: &enabledPhishing}); err != nil {
+		t.Fatalf("enable second feed for measured-report scenario: %v", err)
+	}
+
 	feeds, err := h.store.ListFeeds(ctx)
 	if err != nil || len(feeds) == 0 {
 		t.Fatalf("ListFeeds: %v (%d feeds)", err, len(feeds))
