@@ -110,6 +110,107 @@ func TestSeedIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestSeedSelectsOneBoundedSecurityFeed ensures fresh installs have a
+// trustworthy threat source without failing the entire initial refresh.
+func TestSeedSelectsOneBoundedSecurityFeed(t *testing.T) {
+	st := newTestStore(t)
+	feeds, err := st.ListFeeds(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enabled []string
+	for _, f := range feeds {
+		if f.Enabled {
+			enabled = append(enabled, f.ID)
+		}
+	}
+	if len(enabled) != 1 || enabled[0] != "hagezi-tif-mini" {
+		t.Fatalf("fresh installation enabled %v, want only hagezi-tif-mini", enabled)
+	}
+	f, err := st.GetFeed(context.Background(), "hagezi-tif-mini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.URL != "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt" || f.Format != "domains" {
+		t.Fatalf("invalid first-run threat feed: %+v", f)
+	}
+}
+
+// TestSeedRepairsOnlyFailedLegacyFeeds exercises a real old database and
+// ensures one-time repair never overwrites an operator's later choices.
+func TestSeedRepairsOnlyFailedLegacyFeeds(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := st.db.ExecContext(ctx, query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec("DELETE FROM settings WHERE key = ?", feedBootstrapRepairMarkerKey)
+	for _, id := range []string{"urlhaus", "coinblocker", "botnet-c2", "blocklistproject-phishing", "phishing-army"} {
+		exec("UPDATE feeds SET enabled=1, last_success_at=NULL, last_status='error' WHERE id=?", id)
+	}
+	// Already successful feeds should remain enabled even if their latest
+	// attempt failed: their existing cache still protects clients.
+	exec("UPDATE feeds SET last_success_at=?, last_status='error' WHERE id='phishing-army'", unixMilli(time.Now()))
+	// An operator's disabled built-in must not be re-enabled during repair.
+	exec("UPDATE feeds SET enabled=0 WHERE id='coinblocker'")
+	exec("UPDATE feeds SET url=?, etag='stale-old-url-etag' WHERE id='hagezi-tif-mini'",
+		"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/tif.mini.txt")
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"urlhaus", "botnet-c2", "blocklistproject-phishing"} {
+		f, err := st.GetFeed(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Enabled {
+			t.Errorf("never-successful legacy feed %s remained enabled", id)
+		}
+	}
+	phishing, err := st.GetFeed(ctx, "phishing-army")
+	if err != nil || !phishing.Enabled {
+		t.Fatalf("historically successful feed was disabled: %+v %v", phishing, err)
+	}
+	coin, err := st.GetFeed(ctx, "coinblocker")
+	if err != nil || coin.Enabled {
+		t.Fatalf("operator-disabled feed was enabled: %+v %v", coin, err)
+	}
+	hagezi, err := st.GetFeed(ctx, "hagezi-tif-mini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hagezi.URL != "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt" || hagezi.ETag != "" {
+		t.Fatalf("built-in URL or stale ETag not migrated: %+v", hagezi)
+	}
+	if _, err := st.UpdateFeed(ctx, "urlhaus", FeedInput{Enabled: ptr(true)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	urlhaus, err := st.GetFeed(ctx, "urlhaus")
+	if err != nil || !urlhaus.Enabled {
+		t.Fatalf("restart overwrote operator re-enable: %+v %v", urlhaus, err)
+	}
+}
+
 func TestPolicyCRUD(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

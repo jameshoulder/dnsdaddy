@@ -43,7 +43,12 @@ func (l Limits) Normalize(maxBytes int64) (Limits, int64, time.Duration, error) 
 		}
 	}
 	if l.MemoryBytes == 0 {
-		l.MemoryBytes = 256 << 20
+		// The index is accounted for alongside its replacement and a temporary
+		// parsing copy. The old 256 MiB budget yielded only ~75 MiB per index,
+		// rejecting even the size-optimized HaGeZi TIF Mini feed (~187k rows).
+		// Keep the accounting finite while giving a 1 GiB VPS enough headroom
+		// for that one default threat feed.
+		l.MemoryBytes = 512 << 20
 	}
 	if l.TempBytes == 0 {
 		l.TempBytes = 256 << 20

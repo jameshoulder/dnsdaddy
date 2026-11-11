@@ -1,8 +1,8 @@
 module github.com/jameshoulder/dnsdaddy
 
-go 1.26.9
+go 1.26.11
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/miekg/dns v1.1.73

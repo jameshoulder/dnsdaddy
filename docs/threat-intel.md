@@ -18,25 +18,31 @@ Enabled on a fresh install:
 
 | Feed | Category | Source |
 |---|---|---|
-| abuse.ch URLhaus | malware | `urlhaus.abuse.ch/downloads/hostfile/` |
-| HaGeZi Threat Intelligence (mini) | malware | `github.com/hagezi/dns-blocklists` |
-| Phishing Army (extended) | phishing | `phishing.army` |
-| The Block List Project — Phishing | phishing | `blocklistproject.github.io` |
-| The Block List Project — Malware & C2 | c2 | `blocklistproject.github.io` |
-| CoinBlockerLists | cryptomining | `github.com/ZeroDot1/CoinBlockerLists` |
+| HaGeZi Threat Intelligence (mini) | malware (includes multiple threat types) | [HaGeZi TIF Mini domain feed](https://github.com/hagezi/dns-blocklists) |
+
+This published, size-optimized feed includes malware, phishing, scams, and C2
+indicators, so it establishes first-run protection without loading several huge
+overlapping feeds. DNS Daddy assigns the feed's fallback `malware` category to
+its entries; the source may contain other threat types too.
 
 Shipped but **disabled** — enable them deliberately:
 
 | Feed | Category | Why it is off |
 |---|---|---|
+| abuse.ch URLhaus (legacy hostfile) | malware | The former hostfile endpoint returns HTTP 410; this catalogue entry is retained for existing configurations, not first-run refreshes. |
+| CoinBlockerLists (upstream unavailable) | cryptomining | The upstream download has been retired and the former GitHub raw URL returns 404. |
+| Phishing Army (extended) | phishing | Independent feed; may exceed bounded index accounting when combined with TIF Mini. Check its [licence](https://phishing.army/license/) before enabling. |
+| The Block List Project — Phishing | phishing | Very large feed. Test memory/index capacity before opting in. |
+| The Block List Project — Malware & C2 | c2 | Very large feed that can exceed default record and index budgets. |
 | Newly registered domains (30 day) | newly-registered | High volume and a real false-positive rate. Genuinely useful against phishing, but it will block a supplier's brand-new site. |
 | StevenBlack unified hosts | ads | Ad blocking is a preference, not a security control. It also adds ~150,000 domains. |
 | The Block List Project — Adult | adult | Content filtering is an HR decision, not a security one. |
 | The Block List Project — Gambling | gambling | As above. |
 
-A fresh install therefore blocks threats and nothing else. If a user complains
-that a site is blocked on day one, it was on a malware, phishing, C2, or
-cryptomining list.
+A fresh install therefore selects one threat feed and no content-filtering
+feeds. Blocking requires an enabled network and policy as well as a successful
+feed refresh. A newly installed server with an empty index reports NOT READY
+until it downloads its first usable feed.
 
 ## Why these sources
 
@@ -48,8 +54,9 @@ lookup on your network:
 2. **Independently verifiable.** You can fetch the same URL and diff it.
    Nothing is transformed on the way to you.
 3. **Actively maintained** with a visible update cadence, and a removal process.
-4. **Security-focused.** URLhaus tracks live malware distribution; Phishing Army
-   aggregates verified phishing. These are not general-purpose annoyance lists.
+4. **Security-focused.** The enabled TIF Mini source targets live threats rather
+   than general-purpose annoyance lists. Other catalogue entries are optional
+   and may require larger budgets or replacement sources.
 
 They are all third parties. We do not control what they list, and neither do
 you — which is why the allow list exists and why it beats everything else.
@@ -291,6 +298,13 @@ is reserved even on a cold start, so acceptance does not depend on whether an
 index is already loaded. If a caller supplies an oversized old index, its actual
 charge is retained rather than undercounted.
 
+The default accounting budget is **512 MiB**, giving about **160 MiB** for
+one published index. Earlier releases used 256 MiB (about 75 MiB per index),
+which rejected even the size-optimized TIF Mini source. This is application
+accounting, not a reservation of physical memory or a promise of a fixed RSS.
+Operators on small or shared hosts should measure memory usage when enabling
+additional feeds. Explicitly configured budget values are never overwritten.
+
 Each claim costs 512 bytes plus domain/category/feed-ID/feed-name lengths. Existing
 byte, record, unique-domain, claim, temporary-storage and timeout limits also apply;
 the first bound reached wins. This is conservative application accounting, not a
@@ -305,7 +319,11 @@ policy. An over-budget cold load stops startup before listeners open, preserving
 existing fail-closed startup policy. Reduce
 claims/feeds or approve an appropriately sized finite budget with measured host
 headroom. Splitting one feed does not evade the aggregate published-index cap.
-No data, cache or configured limit is silently deleted, increased or rewritten.
+No data, cache or explicitly configured limit is silently deleted, increased or rewritten.
+On upgrade, one seed migration disables only former built-in feeds that were
+enabled, have a recorded failed refresh and have **never** successfully loaded.
+Successful feeds and the operator's later enabled/disabled choices are retained.
+The migration runs once; a disabled feed can be re-enabled from the dashboard.
 
 A validated download commits its cache and complete index once. It is not rebuilt
 again after publication. Failed download/parse/capacity/cancellation/rename work
