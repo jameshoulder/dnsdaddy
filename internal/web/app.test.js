@@ -1878,12 +1878,12 @@ test('every text colour in the palette clears AA on the surface it sits on', () 
   };
 
   const surfaces = ['background', 'surface', 'surface-2', 'surface-3'].map(token);
-  // Text colours. --brand-cyan-dim is deliberately absent: it is a rule and a
+  // Text colours. --accent-dim is deliberately absent: it is a rule and a
   // border weight, never type, and the assertion below keeps it that way.
   const text = [
     'foreground', 'muted-foreground', 'faint',
-    'brand-cyan', 'brand-cyan-soft', 'primary', 'primary-dim',
-    'danger', 'warn', 'violet',
+    'accent', 'accent-soft', 'primary', 'primary-dim',
+    'success', 'danger', 'warn', 'info', 'violet',
   ];
   for (const name of text) {
     for (const surface of surfaces) {
@@ -1892,17 +1892,19 @@ test('every text colour in the palette clears AA on the surface it sits on', () 
     }
   }
 
-  // Filled controls carry dark type on a light ground; check both.
-  assert.ok(ratio(token('primary-foreground'), token('primary')) >= 4.5,
-    'the primary button label does not clear AA on its own fill');
+  // Filled red actions use white labels; text accents are separate tokens.
+  for (const fill of ['action', 'action-hover', 'action-pressed']) {
+    assert.ok(ratio(token('primary-foreground'), token(fill)) >= 4.5,
+      `the primary button label does not clear AA on --${fill}`);
+  }
   assert.ok(ratio('#FFECEF', token('danger-solid')) >= 4.5,
     'the Blocked chip label does not clear AA on its fill');
 
-  // The one sub-AA token must never become type.
-  const dimUses = [...appCss.matchAll(/([a-z-]+):\s*var\(--brand-cyan-dim\)/g)].map((m) => m[1]);
+  // The decorative accent border token must never become body text.
+  const dimUses = [...appCss.matchAll(/([a-z-]+):\s*var\(--accent-dim\)/g)].map((m) => m[1]);
   for (const property of dimUses) {
     assert.ok(!/^color$/.test(property),
-      '--brand-cyan-dim is used as a text colour but only clears AA-large');
+      '--accent-dim is decorative and must not be used for text');
   }
 });
 
@@ -2822,7 +2824,7 @@ test('the overview remains useful when an optional endpoint fails and names what
 
 test('the activity chart uses shared theme colours and retains full counts', () => {
   const out = areaChart([{ label: '09:00', total: 128491, blocked: 327 }]);
-  assert.match(out, /var\(--brand-cyan\)/);
+  assert.match(out, /var\(--info\)/);
   assert.match(out, /var\(--danger\)/);
   assert.match(out, /peak 128,491\/h/);
   assert.doesNotMatch(out, /#22D3EE|#1E2C42|#FF6B7A/);

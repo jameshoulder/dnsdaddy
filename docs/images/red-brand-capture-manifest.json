@@ -1,0 +1,435 @@
+{
+  "generatedAt": "2026-11-15T19:48:20.374Z",
+  "browser": "143.0.7499.4",
+  "checks": [
+    "a fresh install exposes selectable Forward mode directly on Overview",
+    "a new instance honestly waits for its first DNS query",
+    "a timer tick with no traffic does not flash or claim processing",
+    "native Learn still requires explicit authoritative-DNS acknowledgement",
+    "Forward applies from Overview without native transport consent",
+    "server addresses come from the actual authenticated endpoint",
+    "loopback-only lab does not claim a usable LAN address",
+    "the non-preferred host-only IP and copy action are visible without opening details",
+    "homepage copy succeeds for the literal loopback IP",
+    "fixture feed loads through the ordinary API without public network traffic",
+    "live activity shows real processing while query logging is disabled",
+    "live polling preserves mode-form focus and does not replace the page",
+    "Pause updates freezes the sample and clearly labels it paused",
+    "Resume updates catches up with actual DNS counters",
+    "unreachable telemetry keeps the last sample visibly stale",
+    "live telemetry recovers after a real browser connection failure",
+    "leaving Overview stops its independent live polling",
+    "GET and rendering never perform a transport test",
+    "native is initially selected and forwarder fields are not interactive",
+    "new encrypted setup does not choose a protocol or provider",
+    "explicit example fills a single complete DoH2 endpoint",
+    "adding an example does not consent, test, save or enable Live",
+    "adding an example preserves custom entries and revokes old consent",
+    "the endpoint editor enforces the sixteen-endpoint bound for examples and custom entries",
+    "endpoint boundary controls stay correct after removals",
+    "test requires explicit sharing consent without sending a request",
+    "adding an endpoint resets consent",
+    "endpoint order can be changed accessibly",
+    "deliberate local failure is shown rather than claiming connectivity",
+    "test sends the ordered draft and explicit consent",
+    "test does not activate or save transport",
+    "editing the tested draft hides its obsolete test result",
+    "invalid bootstrap configuration is reported and remains unsaved",
+    "approved encrypted settings persist through the real API",
+    "encrypted transport preserves the separately chosen Forward mode",
+    "a saved endpoint still needs consent before an explicit test",
+    "phone transport form has no page-level horizontal overflow",
+    "encrypted observe never asks for plaintext authoritative consent",
+    "the real mode API accepts observe while preserving encrypted transport",
+    "encrypted enforce never asks for plaintext authoritative consent",
+    "the real mode API accepts enforce while preserving encrypted transport",
+    "encrypted off never asks for plaintext authoritative consent",
+    "the real mode API accepts off while preserving encrypted transport",
+    "an unreachable encrypted endpoint produces a real failure without standard-upstream fallback",
+    "Overview distinguishes measured query failures from idle or successful processing",
+    "returning to plaintext native transport needs explicit acknowledgement",
+    "switching back keeps the saved endpoint configuration",
+    "reapplying native does not incorrectly demand a hidden acknowledgement",
+    "setup separates client addresses from outbound transport",
+    "phone overview has no page-level horizontal overflow",
+    "no browser JavaScript errors occurred",
+    "synthetic traffic reached only the loopback fixture",
+    "served assets match the current source"
+  ],
+  "images": [
+    {
+      "file": "red-dashboard.png",
+      "route": "#/dashboard",
+      "capturedAt": "2026-11-15T19:48:05.216Z",
+      "fullPage": false,
+      "width": 1440,
+      "height": 1000,
+      "sha256": "b932be1a3dcfdbe5ffa10c0bbcc746eeb2f74c72333ad9949857915825c53195",
+      "artifactFile": "browser/dashboard.png"
+    },
+    {
+      "file": "red-features-daddybound.png",
+      "route": "#/daddybound",
+      "capturedAt": "2026-11-15T19:48:15.381Z",
+      "fullPage": true,
+      "width": 1440,
+      "height": 2977,
+      "sha256": "87cf1e77031ecf8c3f9c243bd23f9f9dd74fedc7cf6e92d6563c2430aee0b509",
+      "artifactFile": "browser/features-daddybound.png"
+    },
+    {
+      "file": "red-features-daddybound-mobile.png",
+      "route": "#/daddybound",
+      "capturedAt": "2026-11-15T19:48:15.509Z",
+      "fullPage": true,
+      "width": 390,
+      "height": 4807,
+      "sha256": "0d0fb1c3516ad764610e86542b85916e820475bea336baaadd95d4a2826d1661",
+      "artifactFile": "browser/features-daddybound-mobile.png"
+    },
+    {
+      "file": "red-server-addresses.png",
+      "route": "#/setup",
+      "capturedAt": "2026-11-15T19:48:20.223Z",
+      "capture": "address card only; credential-bearing DoH URLs excluded",
+      "width": 1112,
+      "height": 1234,
+      "sha256": "ecaa0bbe16cac3722c857f37980c7316c2f93a1f320df4722c9e0ee553c4fff7",
+      "artifactFile": "browser/server-addresses.png"
+    },
+    {
+      "file": "red-mobile.png",
+      "route": "#/dashboard",
+      "capturedAt": "2026-11-15T19:48:20.352Z",
+      "fullPage": false,
+      "width": 390,
+      "height": 844,
+      "sha256": "cda378e5c6e00f27f667a88dda0ee6aa04d16b061adc47f24774fdbb3c87eb12",
+      "artifactFile": "browser/mobile.png"
+    }
+  ],
+  "assets": {
+    "app.js": "03aab6e141f2a48bfdc4397f1a01130238ac1855f8c1e56c94c198208aeac2d1",
+    "app.css": "4aec6dd314f2aa9ad76f68e1dad3e3a4d5b8e6e71bba6a821353993f0cadab46",
+    "index.html": "485a7ba06ec673930137dab7fd5f0e5c957a93543b470e935bac40f2838de9fa"
+  },
+  "binarySha256": "d1a7da796ed9bc9cf13da73a801a3d4d7c41088d3d7306f39969d86706ed420d",
+  "serverAddresses": {
+    "runtime": "host",
+    "source": "local_interfaces",
+    "preferredAddress": null,
+    "addresses": [
+      {
+        "address": "10.1.1.30",
+        "family": "ipv4",
+        "type": "private",
+        "interface": "eth0",
+        "dns": []
+      },
+      {
+        "address": "172.17.0.1",
+        "family": "ipv4",
+        "type": "private",
+        "interface": "docker0",
+        "dns": []
+      },
+      {
+        "address": "127.0.0.1",
+        "family": "ipv4",
+        "type": "loopback",
+        "interface": "lo",
+        "dns": [
+          {
+            "transport": "udp",
+            "port": 40489,
+            "endpoint": "127.0.0.1:40489"
+          },
+          {
+            "transport": "tcp",
+            "port": 40489,
+            "endpoint": "127.0.0.1:40489"
+          }
+        ]
+      },
+      {
+        "address": "::1",
+        "family": "ipv6",
+        "type": "loopback",
+        "interface": "lo",
+        "dns": []
+      },
+      {
+        "address": "fe80::6245:bdff:fef7:e3d9",
+        "family": "ipv6",
+        "type": "link_local",
+        "interface": "eth0",
+        "dns": []
+      }
+    ],
+    "listeners": [
+      {
+        "transport": "udp",
+        "listen": "127.0.0.1:40489",
+        "enabled": true,
+        "port": 40489,
+        "binding": "address"
+      },
+      {
+        "transport": "tcp",
+        "listen": "127.0.0.1:40489",
+        "enabled": true,
+        "port": 40489,
+        "binding": "address"
+      },
+      {
+        "transport": "dot",
+        "listen": "",
+        "enabled": false,
+        "port": null,
+        "binding": "disabled"
+      }
+    ],
+    "limit": 32,
+    "truncated": false,
+    "partial": false,
+    "notes": [
+      "These are local addresses visible to this DNS Daddy process. Containers and NAT may expose a different host/public IP or mapped port; no external IP discovery is performed.",
+      "DNS endpoints reflect configured listeners, not a reachability test. Client access rules, firewall, routing and operating-system IPv6 behavior still apply.",
+      "No non-loopback, non-link-local interface address matches a configured DNS listener. Check listen addresses and deployment port mappings before configuring another device.",
+      "Link-local addresses require the same network link; IPv6 also needs the client's interface scope. They are not suggested as portable DNS endpoints."
+    ]
+  },
+  "overview": {
+    "protectionStatus": "protected",
+    "resolverStatus": "operational",
+    "queries24h": 32,
+    "threatsBlocked24h": 6,
+    "blockRate24h": 18.75,
+    "protectedNetworks": 1,
+    "activePolicies": 3,
+    "blocklistDomains": 1,
+    "lastFeedRefresh": "2026-11-15T19:47:56.846Z",
+    "uptimeSeconds": 26,
+    "version": "dev+e9f44d5",
+    "hasSeenClients": false,
+    "clientAttribution": false,
+    "permittedNetworks": 0,
+    "unrestrictedAccess": false,
+    "servesOnlyLoopback": true,
+    "refusedClients": 0,
+    "measured": {
+      "window": {
+        "hours": 24,
+        "from": "2026-11-14T19:48:20.410248782Z",
+        "to": "2026-11-15T19:48:20.410248782Z",
+        "measuredAt": "2026-11-15T19:48:20.410248782Z",
+        "source": "hourly_rollups",
+        "rollupRetentionDays": 90
+      },
+      "networks": {
+        "configured": 1,
+        "enabled": 1,
+        "resolverPermitted": 0,
+        "adHocAccess": false,
+        "withBlockingPolicy": 1,
+        "monitorOnly": 0,
+        "withTrafficInWindow": 1
+      },
+      "clients": {
+        "attribution": false,
+        "observedInWindow": null,
+        "unavailable": "client addresses are not recorded (log.query_log and log.log_client_ip must both be on)",
+        "everSeen": false
+      },
+      "filtering": {
+        "policies": 3,
+        "blockingPolicies": 2,
+        "blockingPoliciesAssigned": 1,
+        "monitorOnlyPolicies": 1,
+        "customBlockingPolicies": 0,
+        "categoryBlockingAvailable": true,
+        "indexedDomains": 1
+      },
+      "feeds": {
+        "configured": 11,
+        "enabled": 1,
+        "loaded": 1,
+        "failing": 0,
+        "neverDownloaded": 0,
+        "lastSuccessAt": "2026-11-15T19:47:56.846Z",
+        "lastAttemptAt": "2026-11-15T19:47:56.846Z",
+        "refreshing": false
+      },
+      "outcomes": {
+        "queries": 32,
+        "blocked": 6,
+        "blockedByClass": {
+          "custom": 0,
+          "precaution": 0,
+          "preference": 0,
+          "security": 6,
+          "unclassified": 0
+        },
+        "errors": {
+          "count": 1,
+          "measuredSince": null,
+          "complete": true
+        }
+      },
+      "resolver": {
+        "errorRate": {
+          "available": true,
+          "numerator": 1,
+          "denominator": 32,
+          "ratio": 0.03125,
+          "windowHours": 24
+        },
+        "sinceStart": {
+          "uptimeSeconds": 26,
+          "queries": 32,
+          "blocked": 6,
+          "errors": 1,
+          "refused": 0,
+          "coversWindow": false
+        }
+      }
+    },
+    "live": {
+      "available": true,
+      "status": "degraded",
+      "startedAt": "2026-11-15T19:47:53.646754259Z",
+      "measuredAt": "2026-11-15T19:48:20.41069097Z",
+      "lastQueryAt": "2026-11-15T19:48:15.823978975Z",
+      "lastResponseAt": "2026-11-15T19:48:15.824053017Z",
+      "lastOutcome": "error",
+      "lastRcode": "SERVFAIL",
+      "inflight": 0,
+      "sinceStart": {
+        "received": 32,
+        "completed": 32,
+        "answered": 25,
+        "blocked": 6,
+        "cached": 0,
+        "errors": 1,
+        "refused": 0,
+        "rateLimited": 0,
+        "invalid": 0
+      },
+      "recent": {
+        "received": 32,
+        "completed": 32,
+        "answered": 25,
+        "blocked": 6,
+        "cached": 0,
+        "errors": 1,
+        "refused": 0,
+        "rateLimited": 0,
+        "invalid": 0,
+        "windowSeconds": 60,
+        "queriesPerSecond": 0.5333333333333333
+      }
+    }
+  },
+  "live": {
+    "available": true,
+    "status": "degraded",
+    "startedAt": "2026-11-15T19:47:53.646754259Z",
+    "measuredAt": "2026-11-15T19:48:20.412869094Z",
+    "lastQueryAt": "2026-11-15T19:48:15.823978975Z",
+    "lastResponseAt": "2026-11-15T19:48:15.824053017Z",
+    "lastOutcome": "error",
+    "lastRcode": "SERVFAIL",
+    "inflight": 0,
+    "sinceStart": {
+      "received": 32,
+      "completed": 32,
+      "answered": 25,
+      "blocked": 6,
+      "cached": 0,
+      "errors": 1,
+      "refused": 0,
+      "rateLimited": 0,
+      "invalid": 0
+    },
+    "recent": {
+      "received": 32,
+      "completed": 32,
+      "answered": 25,
+      "blocked": 6,
+      "cached": 0,
+      "errors": 1,
+      "refused": 0,
+      "rateLimited": 0,
+      "invalid": 0,
+      "windowSeconds": 60,
+      "queriesPerSecond": 0.5333333333333333
+    },
+    "clientAccess": {
+      "enabled": false,
+      "windowSeconds": 300,
+      "capacity": 64,
+      "dropped": 0,
+      "evicted": 0,
+      "aclStale": false,
+      "queryLogging": false,
+      "clientAddressLogging": true,
+      "entries": [],
+      "note": "Source diagnostics are disabled by query-log or client-address privacy settings. Anonymous DNS counters still work; no settings were changed."
+    }
+  },
+  "transport": {
+    "transport": "native",
+    "locked": false,
+    "chosenBy": "dashboard",
+    "endpoints": [
+      {
+        "protocol": "doh2",
+        "address": "https://127.0.0.1:36443/dns-query",
+        "serverName": "127.0.0.1",
+        "bootstrapIPs": [
+          "127.0.0.1"
+        ]
+      }
+    ],
+    "tlsMinimum": "1.3",
+    "encryptedOnly": false,
+    "plaintextFallback": false,
+    "bootstrap": "system",
+    "scope": "Forward and Learn answer through the configured upstreams. Daddybound native validation uses UDP/TCP port 53; background hostname resolution uses the system DNS servers.",
+    "daddyboundMode": "off",
+    "stats": null
+  },
+  "modeChanges": [
+    {
+      "mode": "off",
+      "acknowledgeNativeTransport": false
+    },
+    {
+      "mode": "observe",
+      "acknowledgeNativeTransport": false
+    },
+    {
+      "mode": "enforce",
+      "acknowledgeNativeTransport": false
+    },
+    {
+      "mode": "off",
+      "acknowledgeNativeTransport": false
+    }
+  ],
+  "upstreamQueries": 25,
+  "note": "Real isolated app with fresh Forward mode, query logging disabled, external feeds disabled and a synthetic local file feed loaded through the management API. Mode changes exercise encrypted loopback failure targets, and all DNS fixtures use loopback. The browser goes offline briefly to test unavailable telemetry. No API response or DOM content was replaced. Screenshots show actual first-run counters over synthetic .lab.example queries.",
+  "provenance": {
+    "repository": "jameshoulder/dnsdaddy",
+    "pullRequest": 98,
+    "headCommit": "89c14ba5c91ea80065676d21d9d6596be54165a9",
+    "workflowMergeCommit": "e9f44d52a59046015cd4a6599f4ff76f464c7d31",
+    "baseCommit": "bb9e1d108765a2b323291dbe3a018e90cad59d0a",
+    "workflowRun": "https://github.com/jameshoulder/dnsdaddy/actions/runs/43754259178",
+    "artifactId": 14177632701,
+    "artifactArchiveSha256": "7f237d9858160e5bdf49cfd7b6a97e24d299eedc18b2458f2d6b0d76ff4a97b1",
+    "originalReportSha256": "5f167789c17bc3ed21b35bf7fbcf37e0bd23dfb4be4b0479ceb0442793eecb63",
+    "captureMethod": "Original browser PNGs from the real isolated daemon; copied byte for byte. No recolouring, compositing, API response replacement or DOM substitution.",
+    "manifestChanges": "Adds provenance and artifactFile; prefixes image file names with red-. Other report fields are unchanged."
+  }
+}

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400" role="img" aria-labelledby="title">
+  <title id="title">DNS Daddy profile icon</title>
+  <rect width="400" height="400" rx="62" fill="#0B1014"/><circle cx="200" cy="200" r="164" fill="#E5252A" opacity=".10"/><g transform="translate(48 40) scale(7.6)"><g fill="none" stroke="#E5252A" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 14H6l-2-3M9 22H3M31 14h3l2-3M31 22h6"/>
+      <circle cx="3.5" cy="10" r="1.6"/><circle cx="2" cy="22" r="1.2"/>
+      <circle cx="36.5" cy="10" r="1.6"/><circle cx="38" cy="22" r="1.2"/>
+    </g><path d="M20 3 31 7.5v11.2c0 7.6-4.7 13.7-11 17.1C13.7 32.4 9 26.3 9 18.7V7.5Z"
+      fill="#141B22" stroke="#E5252A" stroke-width="2.2" stroke-linejoin="round"/>
+    <path d="M14 12v12c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7V12Z" fill="#F7F4ED"/>
+    <ellipse cx="20" cy="12" rx="6" ry="2.6" fill="#F7F4ED" stroke="#141B22" stroke-width="1"/>
+    <path d="M14 17c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7M14 22c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7"
+      fill="none" stroke="#141B22" stroke-width="1.2"/></g>
+</svg>

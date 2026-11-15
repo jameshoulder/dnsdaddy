@@ -1,13 +1,15 @@
 :root {
-  --dns-daddy-blue: #205AC9;
-  --dns-daddy-brand: #1B5CB8;
-  --dns-daddy-deep: #174E9D;
-  --dns-daddy-ink: #202B3E;
-  --dns-daddy-paper: #F4F6FA;
-  --dns-daddy-white: #FFFFFF;
-  --dns-daddy-silver: #DCE2EB;
-  --dns-daddy-ice: #E8EEF7;
-  --dns-daddy-green: #1D694F;
-  --dns-daddy-muted: #546175;
-  --dns-daddy-pale: #ACC6EC;
+  --dns-daddy-ink: #0B1014;
+  --dns-daddy-surface: #141B22;
+  --dns-daddy-elevated: #1B252E;
+  --dns-daddy-ivory: #F7F4ED;
+  --dns-daddy-muted: #A9B4BE;
+  --dns-daddy-red: #E5252A;
+  --dns-daddy-action: #B91C2B;
+  --dns-daddy-accent-text: #FF5A52;
+  --dns-daddy-success: #6DD6A0;
+  --dns-daddy-warning: #F1BF73;
+  --dns-daddy-information: #83BFFF;
+  --dns-daddy-danger: #FF8DA1;
+  --dns-daddy-accent-soft: #FF8B82;
 }

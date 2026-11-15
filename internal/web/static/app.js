@@ -49,18 +49,18 @@ const raw = (value) => ({ __raw: true, value });
 // are choices rather than threats. They stay far enough apart in hue to be
 // told apart in the breakdown meter, where they appear side by side.
 const CATEGORY_COLOURS = {
-  malware: '#AD2843',            // danger — outright malicious
-  phishing: '#99430B',           // credential theft
-  c2: '#A02772',                 // command-and-control
-  cryptomining: '#805400',       // resource abuse
-  'newly-registered': '#7046AC', // suspicion, not proof
-  ads: '#006E76',                // policy, not a threat
-  adult: '#9F375C',              // policy
-  gambling: '#726000',           // policy
-  custom: '#526578',             // operator's own list
+  malware: '#FF8DA1',            // danger — outright malicious
+  phishing: '#FFB36B',           // credential theft
+  c2: '#EF95D0',                 // command-and-control
+  cryptomining: '#E5C76B',       // resource abuse
+  'newly-registered': '#C8A6F7', // suspicion, not proof
+  ads: '#73CBD5',                // policy, not a threat
+  adult: '#DCA0B7',              // policy
+  gambling: '#C8C178',           // policy
+  custom: '#A9B4BE',             // operator's own list
 };
 
-const colourFor = (cat) => CATEGORY_COLOURS[cat] || '#526578';
+const colourFor = (cat) => CATEGORY_COLOURS[cat] || '#A9B4BE';
 
 function sanitize(htmlString) {
   const doc = new DOMParser().parseFromString(htmlString, 'text/html');
@@ -283,20 +283,20 @@ function areaChart(buckets) {
          aria-label="DNS queries and blocks over time">
       <defs>
         <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="var(--brand-cyan)" stop-opacity="0.18"/>
-          <stop offset="100%" stop-color="var(--brand-cyan)" stop-opacity="0"/>
+          <stop offset="0%" stop-color="var(--info)" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="var(--info)" stop-opacity="0"/>
         </linearGradient>
       </defs>
       ${raw(gridlines)}
       <path d="${raw(area(totalPts))}" fill="url(#areaFill)"/>
-      <path d="${raw(line(totalPts))}" fill="none" stroke="var(--brand-cyan)" stroke-width="2"
+      <path d="${raw(line(totalPts))}" fill="none" stroke="var(--info)" stroke-width="2"
             stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
       <path d="${raw(line(blockedPts))}" fill="none" stroke="var(--danger)" stroke-width="1.75"
             stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
     </svg>
     <div class="chart-axis">${raw(axis)}</div>
     <div class="chart-legend">
-      <span><i class="swatch" data-bg="var(--brand-cyan)"></i>Total queries · peak ${num(max)}/h</span>
+      <span><i class="swatch" data-bg="var(--info)"></i>Total queries · peak ${num(max)}/h</span>
       <span><i class="swatch" data-bg="var(--danger)"></i>Blocked queries</span>
     </div>
   `;

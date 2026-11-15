@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DNS Daddy</title>
-<meta name="description" content="Open-source protective DNS. Block malware, phishing and C2 at the resolver.">
+<meta name="description" content="DNS Daddy — open-source, self-hosted protective DNS and query investigation.">
+<meta name="theme-color" content="#0B1014">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
 </head>
@@ -56,42 +57,20 @@
       the HTTPS deployment, so it is a reconnaissance surface and stays inert.
     -->
     <svg class="login-globe" viewBox="0 0 420 420" preserveAspectRatio="xMidYMid meet" focusable="false">
-      <defs>
-        <radialGradient id="lgfade" cx="50%" cy="50%" r="62%">
-          <stop offset="0%" stop-color="#fff" stop-opacity="0.9"/>
-          <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
-        </radialGradient>
-        <mask id="lgmask"><rect width="420" height="420" fill="url(#lgfade)"/></mask>
-      </defs>
-
-      <g mask="url(#lgmask)" fill="none" stroke="currentColor">
-        <!-- Latitude/longitude shell. A globe drawn as a wireframe rather than
-             a map: DNS Daddy knows nothing about geography, and a map here
-             would imply it did. -->
-        <circle cx="210" cy="210" r="132" stroke-width="1.4" opacity="0.55"/>
-        <ellipse cx="210" cy="210" rx="52" ry="132" stroke-width="1" opacity="0.32"/>
-        <ellipse cx="210" cy="210" rx="98" ry="132" stroke-width="1" opacity="0.22"/>
-        <path d="M78 210h264" stroke-width="1" opacity="0.32"/>
-        <path d="M96 152h228" stroke-width="1" opacity="0.18"/>
-        <path d="M96 268h228" stroke-width="1" opacity="0.18"/>
-        <!-- Outer observation ring. -->
-        <circle cx="210" cy="210" r="176" stroke-width="1" opacity="0.14"/>
-      </g>
-
-      <!-- Node constellation and the links between them. Positions are fixed
-           and arbitrary; they are a motif, not a topology of anything. -->
-      <g mask="url(#lgmask)" stroke="currentColor" stroke-width="1.2" opacity="0.55" fill="none">
-        <path d="M132 148 L210 178 L292 140"/>
-        <path d="M210 178 L168 268"/>
-        <path d="M210 178 L286 246"/>
-      </g>
-      <g mask="url(#lgmask)" fill="currentColor">
-        <circle cx="132" cy="148" r="4.5"/>
-        <circle cx="292" cy="140" r="4"/>
-        <circle cx="168" cy="268" r="4"/>
-        <circle cx="286" cy="246" r="3.5"/>
-      </g>
-      <circle class="login-globe-core" cx="210" cy="178" r="7" fill="currentColor" mask="url(#lgmask)"/>
+      <!-- Brand illustration only; these lines are not live network telemetry. -->
+      <circle cx="210" cy="210" r="166" fill="#E5252A" opacity=".09"/>
+      <circle cx="210" cy="210" r="186" fill="none" stroke="currentColor" opacity=".15"/>
+      <path d="M15 112h62l35 35M308 273l35 35h62M29 298h54l32-32" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".45"/>
+      <g transform="translate(70 70) scale(7)"><g fill="none" stroke="#E5252A" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 14H6l-2-3M9 22H3M31 14h3l2-3M31 22h6"/>
+      <circle cx="3.5" cy="10" r="1.6"/><circle cx="2" cy="22" r="1.2"/>
+      <circle cx="36.5" cy="10" r="1.6"/><circle cx="38" cy="22" r="1.2"/>
+    </g><path d="M20 3 31 7.5v11.2c0 7.6-4.7 13.7-11 17.1C13.7 32.4 9 26.3 9 18.7V7.5Z"
+      fill="#141B22" stroke="#E5252A" stroke-width="2.2" stroke-linejoin="round"/>
+    <path d="M14 12v12c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7V12Z" fill="#F7F4ED"/>
+    <ellipse cx="20" cy="12" rx="6" ry="2.6" fill="#F7F4ED" stroke="#141B22" stroke-width="1"/>
+    <path d="M14 17c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7M14 22c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7"
+      fill="none" stroke="#141B22" stroke-width="1.2"/></g>
     </svg>
 
     <div class="login-aside-copy">
