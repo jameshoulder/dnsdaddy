@@ -1,72 +1,128 @@
-# DNS Daddy — Brand Package 3.0
+# DNS Daddy — Red identity
 
 **Protective DNS. Clearly explained.**
 
-The light blue-and-silver identity follows the merged DNS Daddy interface. It retains the globe-and-shield mark from [`internal/web/static/logo.svg`](../../internal/web/static/logo.svg), with consistent standalone, horizontal and stacked artwork for public use.
-
-**3.0 identifies this brand edition. It is not a DNS Daddy software release.**
+The current identity uses charcoal, ivory and strong red. The shield, database
+and network mark connects the software to James Houlder's wider visual identity
+while keeping DNS Daddy recognisable as its own project. This is a visual
+refresh, not a new software release or a change in the project's alpha status.
 
 ## Logo masters
 
-All wordmark lettering in these SVGs is outlined. The files contain no remote fonts, scripts or images. The primary artwork is intended for light backgrounds; reversed artwork is intended for dark or blue backgrounds. Transparent monochrome files are available for single-colour applications.
+The application uses [`logo.svg`](../../internal/web/static/logo.svg), including
+the stable `#mark` symbol. The favicon simplifies the mark for small sizes.
+Public SVG masters contain editable geometrical shapes and live lettering;
+there are no scripts, external images or remotely loaded fonts. Lettering uses
+Arial, Helvetica and the browser's sans-serif fallback. Use the provided PNG
+exports when a fixed rendering is needed.
 
 | Variant | Horizontal logo | Standalone mark |
-|---|---|---|
-| Primary colour | [SVG](logos/dns-daddy-logo-primary.svg) | [SVG](logos/dns-daddy-mark-primary.svg) |
-| Reversed | [SVG](logos/dns-daddy-logo-reversed.svg) | [SVG](logos/dns-daddy-mark-reversed.svg) |
-| Monochrome ink | [SVG](logos/dns-daddy-logo-monochrome-ink.svg) | [SVG](logos/dns-daddy-mark-monochrome-ink.svg) |
-| Monochrome white | [SVG](logos/dns-daddy-logo-monochrome-white.svg) | [SVG](logos/dns-daddy-mark-monochrome-white.svg) |
+| --- | --- | --- |
+| Primary, for light backgrounds | [SVG](logos/dns-daddy-logo-primary.svg) | [SVG](logos/dns-daddy-mark-primary.svg) |
+| Reversed, for dark backgrounds | [SVG](logos/dns-daddy-logo-reversed.svg) | [SVG](logos/dns-daddy-mark-reversed.svg) |
+| Monochrome ink, on ivory | [SVG](logos/dns-daddy-logo-monochrome-ink.svg) | [SVG](logos/dns-daddy-mark-monochrome-ink.svg) |
+| Monochrome white, on ink | [SVG](logos/dns-daddy-logo-monochrome-white.svg) | [SVG](logos/dns-daddy-mark-monochrome-white.svg) |
 
-Stacked lockups: [primary](logos/dns-daddy-logo-stacked-primary.svg) · [reversed](logos/dns-daddy-logo-stacked-reversed.svg).
+Stacked lockups: [primary](logos/dns-daddy-logo-stacked-primary.svg) ·
+[reversed](logos/dns-daddy-logo-stacked-reversed.svg).
 
-Keep at least one quarter of the mark's visible height clear around the artwork. Use the standalone mark where the full name would become cramped. As practical starting points, display the mark at 32 pixels or larger and the horizontal logo at 160 pixels or larger, then check the actual background and display. Do not stretch, rotate, outline, add shadows or change individual logo colours.
+Keep clear space of at least one quarter of the mark's height. Use the standalone
+mark when the name would be cramped. Start at 32 px for the full mark and 160 px
+for the horizontal logo; use the simplified favicon at smaller sizes. Preserve
+the proportions and choose the correct background variant.
 
 ## Colour and typography
 
-| Role | Colour |
-|---|---|
-| Primary blue / action accent | `#205AC9` |
-| Supporting brand blue | `#1B5CB8` |
-| Globe detail blue | `#174E9D` |
-| Ink | `#202B3E` |
-| Canvas | `#F4F6FA` |
-| Surface | `#FFFFFF` |
-| Silver | `#DCE2EB` |
-| Ice | `#E8EEF7` |
-| Secondary text | `#546175` |
-| Shield / positive status | `#1D694F` |
+| Role | Colour | Use |
+| --- | --- | --- |
+| Ink | `#0B1014` | Main canvas and artwork background |
+| Surface | `#141B22` | Cards and panels |
+| Elevated surface | `#1B252E` | Layered controls and surfaces |
+| Ivory | `#F7F4ED` | Primary text |
+| Muted | `#A9B4BE` | Supporting text |
+| Brand red | `#E5252A` | Mark, decorative rules and large wordmark lettering |
+| Action red | `#B91C2B` | Filled buttons with white labels |
+| Text accent | `#FF5A52` | Small red text, links and focus indicators |
+| Soft text accent | `#FF8B82` | Supporting accent and hover text |
+| Information | `#83BFFF` | Information labels and total-query series |
+| Success | `#6DD6A0` | Successful or healthy states |
+| Warning | `#F1BF73` | Cautions and incomplete states |
+| Danger | `#FF8DA1` | Blocked/error labels and blocked-query series |
 
-The machine-readable values are in [palette.json](palette.json) and [palette.css](palette.css). Use pale colours for surfaces and dividers, not small body text. In the application, colour supports a status label; it does not replace one.
+Machine-readable brand values are in [palette.json](palette.json) and
+[palette.css](palette.css). The application defines its full component and
+semantic palette in [`app.css`](../../internal/web/static/app.css).
 
-Public brand artwork uses **Inter**: regular for body copy, medium for the first half of the wordmark, and bold for “Daddy” and headlines. The current application keeps its native system-font stack. Inter is distributed under its upstream [SIL Open Font License](Inter-LICENSE.txt). These exports do not add a runtime font dependency.
+The vivid brand red does **not** meet the normal-text 4.5:1 contrast threshold
+against the ink canvas. Use the lighter text accent for small red text, and
+check the foreground/background pair for every new surface. Solid action
+buttons use a separate darker fill so white labels remain readable.
+
+Brand colour and operational state are separate. Information stays blue,
+success green, warnings amber and blocked/error states rose, with explicit
+labels. The total-query and blocked-query chart series retain distinct colours.
+Never communicate a status using colour alone.
+
+The application uses local system sans-serif and monospace stacks. It does not
+load fonts, scripts, analytics or artwork from a third party. The retained
+[Inter licence](Inter-LICENSE.txt) belongs to the previous brand edition;
+this refresh adds no font runtime dependency.
 
 ## Repository artwork
 
-| Asset | File | Purpose |
-|---|---|---|
-| README header | [PNG](../images/dnsdaddy-banner.png) · [outlined SVG source](github-readme-banner-1600x500.svg) | 1600 × 500 header used in the main README |
-| Profile icon | [PNG](../images/dnsdaddy-icon.png) | 400 × 400 light avatar |
-| GitHub social preview | [PNG](github-social-preview-1280x640.png) · [outlined SVG source](github-social-preview-1280x640.svg) | 1280 × 640 repository link card |
+| Asset | Files | Dimensions |
+| --- | --- | --- |
+| README banner | [PNG](../images/dnsdaddy-banner.png) · [SVG](github-readme-banner-1600x500.svg) | 1600 × 500 |
+| Profile icon | [PNG](../images/dnsdaddy-icon.png) · [SVG](dns-daddy-icon-400x400.svg) | 400 × 400 |
+| GitHub social preview | [PNG](github-social-preview-1280x640.png) · [SVG](github-social-preview-1280x640.svg) | 1280 × 640 |
 
-To activate the repository social preview, a repository administrator can open **Settings → Social preview → Edit → Upload an image** and choose the PNG. Committing the asset does not change that setting. GitHub recommends 1280 × 640 pixels and a file smaller than 1 MB; see the [official social-preview documentation](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/customizing-your-repositorys-social-media-preview).
+The social-preview file is ready to upload in **Repository Settings → Social
+preview**. Committing the artwork does not update that GitHub setting or an
+account avatar. See [GitHub's social-preview documentation](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/customizing-your-repositorys-social-media-preview).
 
 ## Voice and visual direction
 
 - **Lead:** Protective DNS. Clearly explained.
 - **Signature:** Protect. Observe. Respond.
-- **Campaign line:** See what your network is asking for.
-- **Descriptor:** Open-source protective DNS.
+- **Campaign line:** Know what your network is asking for.
+- **Descriptor:** Open-source, self-hosted protective DNS.
 
-Use plain, specific explanations of what the product observed and what the user can inspect. The visual language is light surfaces, blue emphasis, dark readable type and restrained globe-derived linework. The linework in social artwork is decorative; it does not represent live traffic or evidence.
+Use clear explanations of what the resolver observed and what the operator can
+inspect. Keep the application dense enough for useful investigation, with calm
+reading surfaces and restrained red emphasis. Red sun and brushstroke motifs
+belong in public artwork; decorative network lines must never be presented as
+live traffic or measured topology.
 
-Keep the alpha status and the experimental, alert-only nature of behavioural detection clear in product claims. Avoid promises of complete protection, independent certification or production detection accuracy that the project has not established.
+Preserve the alpha labels, AI-assistance disclosure, experimental scope and
+absence of an independent professional security review. Behavioural findings
+are alert-only. Keep resolution mode, DNSSEC validation and DNS transport
+distinct when describing Daddybound. Technical claims remain governed by the
+[capability documentation](../capabilities.md) and [trust statement](../../TRUST.md).
 
-## UI images
+## Website and service addresses
 
-The README screenshots are actual application captures of the current interface, using synthetic lab data. [Screenshot provenance](../images/SCREENSHOTS.md) records their routes, dimensions, source revision, capture conditions and checksums.
+The planned public website is `https://dnsdaddy.com`. The existing `.dev` website
+remains linked until the new site and HTTPS redirects are configured and
+verified. This visual change does not perform a domain migration.
 
-Brand artwork is separate from interface screenshots. When replacing a product screenshot, capture the current application and retain the visible experimental labels and limitations.
+Keep the existing demo, Observatory feeds, resolver/API endpoints and installer
+URLs intact. A website rebrand is not a reason to replace every `.dev` string.
 
-## Source and edition
+## Screenshot provenance
 
-Prepared on 29 September 2026 for DNS Daddy. The mark derives from the existing project SVG at the revision above; the new public lockups, palette and artwork extend that identity. The complete downloadable Brand Package 3.0 also contains transparent PNG exports, social covers, post designs, editable text templates, fonts, copy and a visual guide.
+Brand artwork is separate from application screenshots. Existing application
+captures retain their original dates and synthetic-lab scope in
+[SCREENSHOTS.md](../images/SCREENSHOTS.md); older light-theme captures are
+historical. Do not recolour a screenshot or present a mock-up as live telemetry.
+
+New product captures should use the running application, preserve visible
+limitations and record their source revision and capture conditions. The
+repository's deployment regression workflow runs the real daemon and browser
+and retains its evidence as a workflow artifact.
+
+## Source
+
+Created on 15 November 2026 from the supplied James Houlder / Tech Samurai
+visual reference. The mark and artwork are original code-native SVG drawings;
+the uploaded composite is a design reference, not a raster logo embedded in
+the application. Earlier brand editions remain available in Git history.

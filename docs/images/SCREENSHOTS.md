@@ -1,5 +1,10 @@
 # UI screenshot provenance
 
+**Theme note, 15 November 2026:** the current application uses the red,
+charcoal and ivory identity. The captures recorded below retain their original
+light-theme appearance and remain historical evidence of their stated source
+revisions. Brand artwork is maintained separately in [the brand directory](../brand/README.md).
+
 The repository contains **two identified capture groups from 29 September 2026**.
 The Overview, Daddybound and server-address images were refreshed for encrypted
 transport. Other feature images retain their earlier capture and scope. All

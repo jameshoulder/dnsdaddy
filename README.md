@@ -11,7 +11,7 @@ Block malicious domains at the resolver. See which device asked for what, why it
 **Free & Open Source · No Account · No Trial · No Subscription**
 
 [![Go](https://img.shields.io/badge/Go-1.26.8+-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License](https://img.shields.io/badge/license-Apache--2.0-205AC9)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-B91C2B)](LICENSE)
 [![CI](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml)
 [![Security](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml)
 
@@ -28,7 +28,7 @@ Block malicious domains at the resolver. See which device asked for what, why it
 
 ## See DNS Daddy in action
 
-Actual application screenshots from the current light interface, using synthetic lab data. [Capture details and source revision](docs/images/SCREENSHOTS.md).
+The application now uses a charcoal, ivory and red identity. The retained screenshots below show the September 2026 light interface using synthetic lab data; they document their original capture, not the current theme. [Capture details and source revision](docs/images/SCREENSHOTS.md) · [Current brand assets](docs/brand/README.md).
 
 <p align="center">
   <img src="docs/images/dashboard.png" alt="DNS Daddy overview showing query activity and a visible server IP with Copy IP and connection-scope labels" width="100%">
@@ -106,7 +106,7 @@ The same overview adapts to a phone viewport, with navigation available from the
 
 ### Brand assets
 
-The light blue-and-silver identity follows the current interface. [Logo masters, colours and repository artwork](docs/brand/README.md) are available in the **Brand Package 3.0** assets. This is the brand edition, not a software version.
+The charcoal, ivory and red identity includes a shield/database/network mark, accessible action colours and distinct operational status colours. [Logo masters, palette and repository artwork](docs/brand/README.md) are available for contributors and public use. This visual refresh does not change the software's alpha status.
 
 ## What is DNS Daddy?
 

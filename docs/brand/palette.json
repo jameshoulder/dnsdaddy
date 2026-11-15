@@ -1,18 +1,20 @@
 {
-  "name": "DNS Daddy Brand Package 3.0",
+  "name": "DNS Daddy \u2014 Red identity",
   "colors": {
-    "blue": "#205AC9",
-    "brand": "#1B5CB8",
-    "deep": "#174E9D",
-    "ink": "#202B3E",
-    "paper": "#F4F6FA",
-    "white": "#FFFFFF",
-    "silver": "#DCE2EB",
-    "ice": "#E8EEF7",
-    "green": "#1D694F",
-    "muted": "#546175",
-    "pale": "#ACC6EC"
+    "ink": "#0B1014",
+    "surface": "#141B22",
+    "elevated": "#1B252E",
+    "ivory": "#F7F4ED",
+    "muted": "#A9B4BE",
+    "red": "#E5252A",
+    "action": "#B91C2B",
+    "accent_text": "#FF5A52",
+    "success": "#6DD6A0",
+    "warning": "#F1BF73",
+    "information": "#83BFFF",
+    "danger": "#FF8DA1",
+    "accent_soft": "#FF8B82"
   },
-  "typeface": "Inter 4.1",
-  "ui_typeface": "Native system sans-serif"
+  "typeface": "Native system sans-serif; public SVG lettering uses Arial / Helvetica / sans-serif",
+  "notes": "Brand red is for graphics and large type. Use accent_text for small red text on ink; verify contrast on other backgrounds. Semantic statuses retain independent colours and labels. Application tokens are defined in internal/web/static/app.css."
 }
