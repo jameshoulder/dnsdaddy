@@ -25,8 +25,8 @@ should be swapping a binary, not restoring a backup.
 ### Added
 
 - Dashboard encrypted-transport examples for **Cloudflare DoH2**, **Cloudflare
-  DoH3** and **Quad9 DoQ**, with documentation that Cloudflare does not publish
-  a DoQ endpoint for 1.1.1.1.
+  DoH3** and **Quad9 DoQ** (`dns10.quad9.net` / non-filtering `9.9.9.10`), with
+  documentation that Cloudflare does not publish a DoQ endpoint for 1.1.1.1.
 - Charcoal/ivory **light and dark theme toggle** (charcoal remains the default).
 - Top-bar **Ad-hoc DNS access** control for the Default network.
 - Structured **public IP approval** dialog and clearer Setup acknowledgement

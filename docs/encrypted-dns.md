@@ -29,11 +29,14 @@ provider to receive the queries.
 | --- | --- | --- | --- | --- |
 | DoH · HTTP/2 | Add Cloudflare · DoH2 | `https://cloudflare-dns.com/dns-query` | `1.1.1.1`, `1.0.0.1` | TCP 443. Best first choice on networks that block UDP/QUIC. |
 | DoH · HTTP/3 | Add Cloudflare · DoH3 | `https://cloudflare-dns.com/dns-query` | `1.1.1.1`, `1.0.0.1` | Same hostname; negotiates HTTP/3 over UDP 443. |
-| DoQ | Add Quad9 · DoQ | `dns.quad9.net:853` | `9.9.9.9`, `149.112.112.112` | UDP 853 with ALPN `doq`. Cloudflare has no public DoQ endpoint. |
+| DoQ | Add Quad9 · DoQ | `dns10.quad9.net:853` | `9.9.9.10`, `149.112.112.10` | UDP 853 with ALPN `doq`. Uses Quad9's **non-filtering** 9.9.9.10 service so upstream malware blocking stays off. Cloudflare has no public DoQ endpoint. |
 
 Shared Cloudflare settings: transport `encrypted`, TLS server name
 `cloudflare-dns.com`, resolver mode unpinned (new data starts in Forward /
-`off`). Quad9's TLS server name is `dns.quad9.net`.
+`off`). Quad9's TLS server name for this example is `dns10.quad9.net`.
+Do not substitute `dns.quad9.net` / `9.9.9.9` unless you intentionally want
+Quad9's malware-blocking recursive service in front of DNS Daddy's local
+policy.
 
 Cloudflare documents its [resolver addresses](https://developers.cloudflare.com/1.1.1.1/ip-addresses/),
 [DoH protocols](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/),
@@ -44,11 +47,13 @@ and [privacy policy](https://www.quad9.net/privacy/policy/).
 Cloudflare's [IP certificate and bootstrap explanation](https://blog.cloudflare.com/unauthorized-issuance-of-certificates-for-1-1-1-1/)
 also describes how the literal-IP DoH URLs used by DNS Daddy's standard
 Forward defaults authenticate the resolver without a prior DNS lookup.
-The examples use the provider's standard resolver so DNS Daddy remains
-responsible for its local filtering policy. They do not select Cloudflare
-Families or Quad9's malware-blocking variants. IPv6-only hosts can replace
-Cloudflare bootstrap addresses with `2606:4700:4700::1111` and
-`2606:4700:4700::1001`, or Quad9's published IPv6 addresses.
+The examples keep filtering local to DNS Daddy: Cloudflare's standard
+(unfiltered) resolver, and Quad9's non-filtering `dns10` / `9.9.9.10`
+service. They do not select Cloudflare Families or Quad9's malware-blocking
+`9.9.9.9` / `dns.quad9.net` variant. IPv6-only hosts can replace Cloudflare
+bootstrap addresses with `2606:4700:4700::1111` and `2606:4700:4700::1001`,
+or Quad9's published `dns10` IPv6 addresses (`2620:fe::10`,
+`2620:fe::fe:10`).
 
 The runnable YAML/Docker example below remains the Cloudflare DoH2 starter
 because TCP 443 is the most widely reachable first path. Use the dashboard

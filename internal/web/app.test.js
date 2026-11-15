@@ -88,6 +88,7 @@ const {
   copyPlainText, serverAddressRow, serverAddressesCard, resolverConnectionGuide,
   DNS_TRANSPORT_PROTOCOLS, DNS_TRANSPORT_EXAMPLES, DNS_TRANSPORT_EXAMPLE_ORDER, transportExampleDraft, transportExampleCard, transportConsentError, transportEndpointFields,
   findingsWorkflowCard, investigateWorkflowCard, daddyboundWorkingSummary, confirmPublicAccess, currentTheme, applyTheme, paintAdHocControl,
+  investigationHeader, scrollInvestigationLane,
   negotiatedTLS, encryptedTransportStats, transportTestResult, dnsTransportCard,
 } = require('./static/app.js');
 
@@ -3777,13 +3778,16 @@ test('protocol example buttons cover Cloudflare DoH2, Cloudflare DoH3 and a docu
     protocol: 'doh3', address: 'https://cloudflare-dns.com/dns-query', serverName: 'cloudflare-dns.com', bootstrapIPs: ['1.1.1.1', '1.0.0.1'],
   });
   assert.deepEqual(transportExampleDraft([], 'quad9-doq')[0], {
-    protocol: 'doq', address: 'dns.quad9.net:853', serverName: 'dns.quad9.net', bootstrapIPs: ['9.9.9.9', '149.112.112.112'],
+    protocol: 'doq', address: 'dns10.quad9.net:853', serverName: 'dns10.quad9.net', bootstrapIPs: ['9.9.9.10', '149.112.112.10'],
   });
   const out = transportExampleCard();
   assert.match(out, /data-transport-example="cloudflare-doh2"/);
   assert.match(out, /data-transport-example="cloudflare-doh3"/);
   assert.match(out, /data-transport-example="quad9-doq"/);
   assert.match(out, /Cloudflare does not publish DoQ/);
+  assert.match(out, /non-filtering/);
+  assert.match(out, /dns10\.quad9\.net/);
+  assert.doesNotMatch(out, /data-transport-example="quad9-doq"[^>]*>[\s\S]*9\.9\.9\.9/);
   assert.match(out, /Add Cloudflare · DoH2/);
   assert.match(out, /Add Cloudflare · DoH3/);
   assert.match(out, /Add Quad9 · DoQ/);
@@ -3955,6 +3959,16 @@ test('public access confirmation refuses silently when no document is available'
 
 test('theme helpers default to the charcoal workspace', () => {
   assert.equal(currentTheme(), 'dark');
+});
+
+test('investigation evidence-lane controls do not steal the route hash', () => {
+  const out = investigationHeader({ kind: 'Domain', title: 'evil.example' }, { hours: 24, retentionDays: 7, queryLog: true, clientAttribution: true });
+  assert.match(out, /data-inv-lane="inv-activity"/);
+  assert.match(out, /data-inv-lane="inv-observations"/);
+  assert.doesNotMatch(out, /href="#inv-/);
+  assert.equal(scrollInvestigationLane(null, 'inv-activity'), false);
+  assert.equal(scrollInvestigationLane({ querySelector: () => null }, 'inv-activity'), false);
+  assert.equal(scrollInvestigationLane({ querySelector: () => ({}) }, '../evil'), false);
 });
 
 /* ---------- Live handler activity, separate from retained query history ---------- */

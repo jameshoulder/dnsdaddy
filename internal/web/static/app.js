@@ -2876,6 +2876,9 @@ function rawJsonSection(data) {
 
 function investigationHeader(subject, w) {
   const domainLanes = /domain/i.test(subject.kind || '');
+  // Buttons, not hash links: the dashboard router owns window.location.hash
+  // (#/investigate?…), so an href="#inv-activity" would navigate to Overview.
+  const lane = (id, label) => html`<button type="button" class="btn btn-ghost btn-sm" data-inv-lane="${id}">${label}</button>`;
   return html`
     <div class="card section">
       <div class="card-head inv-head"><div class="inv-subject">
@@ -2884,13 +2887,27 @@ function investigationHeader(subject, w) {
         ${raw(subject.sub ? html`<p>${subject.sub}</p>` : '')}
       </div><div class="row-end hero-intel">${raw(windowLine(w))}</div></div>
       <nav class="inv-lane-map" aria-label="Evidence lanes">
-        <a href="#inv-activity">1. Activity</a>
-        <a href="#inv-decisions">2. Decisions</a>
-        ${raw(domainLanes ? html`<a href="#inv-preview">3. Policy preview</a>` : '')}
-        <a href="#inv-findings">${domainLanes ? '4' : '3'}. Findings</a>
-        ${raw(domainLanes ? html`<a href="#inv-observations">5. Daddybound</a>` : html`<a href="#inv-learning">4. Learning</a>`)}
+        ${raw(lane('inv-activity', '1. Activity'))}
+        ${raw(lane('inv-decisions', '2. Decisions'))}
+        ${raw(domainLanes ? lane('inv-preview', '3. Policy preview') : '')}
+        ${raw(lane('inv-findings', `${domainLanes ? '4' : '3'}. Findings`))}
+        ${raw(domainLanes ? lane('inv-observations', '5. Daddybound') : lane('inv-learning', '4. Learning'))}
       </nav>
     </div>`;
+}
+
+function scrollInvestigationLane(root, laneId) {
+  // Reject anything that is not a plain HTML id so querySelector cannot be
+  // fed operator-controlled CSS from a crafted data-inv-lane attribute.
+  if (!root || !laneId || !/^[A-Za-z][\w-]*$/.test(laneId)) return false;
+  const target = root.querySelector('#' + laneId) || (typeof document !== 'undefined' ? document.getElementById(laneId) : null);
+  if (!target) return false;
+  if (typeof target.scrollIntoView === 'function') target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (typeof target.focus === 'function') {
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+  }
+  return true;
 }
 
 function investigationLearning(data) {
@@ -2978,6 +2995,15 @@ pages.investigate = {
         else window.location.hash = next;
       });
       $('#inv-clear').addEventListener('click', () => { window.location.hash = '#/investigate'; });
+    }
+    const view = $('#view');
+    if (view) {
+      view.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-inv-lane]');
+        if (!button || !view.contains(button)) return;
+        event.preventDefault();
+        scrollInvestigationLane(view, button.dataset.invLane);
+      });
     }
     mountDecisionCards();
     const enrich = $('#inv-enrich');
@@ -3581,6 +3607,8 @@ pages.networks = {
               ? `"${box.dataset.name}" may now use DNS Daddy`
               : `"${box.dataset.name}" can no longer use DNS Daddy`);
           }
+          // Keep the persistent top-bar control aligned with Networks mutations.
+          await refreshAdHocControl();
           router.reload();
         } catch (err) {
           box.checked = !wanted;
@@ -4912,11 +4940,11 @@ const DNS_TRANSPORT_EXAMPLES = {
   },
   'quad9-doq': {
     protocol: 'doq',
-    address: 'dns.quad9.net:853',
-    serverName: 'dns.quad9.net',
-    bootstrapIPs: ['9.9.9.9', '149.112.112.112'],
+    address: 'dns10.quad9.net:853',
+    serverName: 'dns10.quad9.net',
+    bootstrapIPs: ['9.9.9.10', '149.112.112.10'],
     label: 'Quad9 · DoQ',
-    note: 'Cloudflare does not publish a DoQ endpoint for 1.1.1.1. Quad9 serves DNS over QUIC on UDP 853.',
+    note: 'Cloudflare does not publish a DoQ endpoint for 1.1.1.1. Uses Quad9’s non-filtering 9.9.9.10 / dns10.quad9.net service on UDP 853 so upstream malware blocking stays off and DNS Daddy keeps local policy.',
   },
 };
 
@@ -4945,7 +4973,7 @@ function transportExampleCard() {
     return html`<button type="button" class="btn btn-observe btn-sm" data-transport-example="${id}" title="${example.note}">Add ${example.label}</button>`;
   }).join('');
   return html`<div class="transport-example note-loose"><h3>Start with a ready example</h3>
-    <p class="small">Fill a complete draft for each supported protocol. Cloudflare examples cover DoH over HTTP/2 and HTTP/3. Cloudflare does not publish DoQ, so the DoQ button uses Quad9’s documented UDP 853 endpoint instead. Each button only edits your draft.</p>
+    <p class="small">Fill a complete draft for each supported protocol. Cloudflare examples cover DoH over HTTP/2 and HTTP/3. Cloudflare does not publish DoQ, so the DoQ button uses Quad9’s non-filtering <span class="mono">dns10.quad9.net</span> service on UDP 853 — not the malware-blocking <span class="mono">9.9.9.9</span> variant — so upstream filtering stays off and DNS Daddy keeps local policy. Each button only edits your draft.</p>
     <div class="row note-tight transport-example-actions">${raw(buttons)}</div>
     <p class="small muted note-tight">Privacy policies:
       <a href="https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/" target="_blank" rel="noopener noreferrer">Cloudflare ↗</a>
@@ -6589,6 +6617,8 @@ if (typeof module !== 'undefined' && module.exports) {
     findingConfidence,
     findingsWorkflowCard,
     investigateWorkflowCard,
+    investigationHeader,
+    scrollInvestigationLane,
     recoveryCard,
     changeHistoryRows,
     protectionCard,

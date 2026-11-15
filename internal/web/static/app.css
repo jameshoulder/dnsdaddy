@@ -2178,17 +2178,12 @@ tbody td { padding: 13px 14px; }
 .inv-lane-map {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 14px;
+  gap: 8px;
   margin-top: var(--s4);
   padding-top: var(--s3);
   border-top: 1px solid var(--border);
 }
-.inv-lane-map a {
-  font-size: 12.5px;
-  text-decoration: none;
-  color: var(--info);
-}
-.inv-lane-map a:hover { text-decoration: underline; }
+.inv-lane-map .btn { font-size: 12px; }
 .daddybound-working .daddybound-facts { margin-top: var(--s3); }
 .daddybound-fact {
   display: flex;
