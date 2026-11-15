@@ -3130,14 +3130,17 @@ function clientAccessSummary(access) {
  * actually enforced. Returns a Promise so the acknowledgement can use a
  * structured dialog rather than a browser confirm() that buries the stakes.
  */
+// Settles a replaced dialog so a second confirmation cannot leave the first
+// sendNetwork() hanging on an orphaned Promise and keydown listener.
+let cancelPublicAccessDialog = null;
+
 function confirmPublicAccess(cidrs) {
   const list = (cidrs || []).filter(Boolean);
   if (typeof document === 'undefined') {
     return Promise.resolve(false);
   }
   return new Promise((resolve) => {
-    const existing = $('#public-access-dialog');
-    if (existing) existing.remove();
+    if (cancelPublicAccessDialog) cancelPublicAccessDialog();
     const ranges = list.length
       ? list.map((cidr) => html`<li><code class="mono">${cidr}</code></li>`).join('')
       : html`<li>The server named one or more public ranges.</li>`;
@@ -3173,11 +3176,17 @@ function confirmPublicAccess(cidrs) {
           <button type="button" class="btn btn-primary" data-public-access="approve" autofocus>I approve public DNS access</button>
         </div>
       </div>`);
+    let settled = false;
     const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (cancelPublicAccessDialog === cancel) cancelPublicAccessDialog = null;
       document.removeEventListener('keydown', onKey);
       dialog.remove();
       resolve(value);
     };
+    const cancel = () => finish(false);
+    cancelPublicAccessDialog = cancel;
     const onKey = (event) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -5368,8 +5377,9 @@ function daddyboundWorkingSummary(status) {
   const learnActive = rt.active === undefined ? mode.active && !mode.enforcing : rt.active;
   const anchorTone = !an.available ? 'warn' : an.viable ? 'ok' : 'bad';
   const observerTone = !rt.available ? '' : rt.health === 'ok' ? 'ok' : rt.health === 'degraded' ? 'warn' : 'bad';
+  const opsFailures = (Number(native.resolutionFailures) || 0) + (Number(native.limitRejected) || 0);
   const answerTone = mode.enforcing
-    ? (native.bogus || native.indeterminate ? 'warn' : 'ok')
+    ? ((Number(native.bogus) || 0) || (Number(native.indeterminate) || 0) || opsFailures ? 'warn' : 'ok')
     : mode.active ? 'info' : '';
   const fact = (label, value, note, tone = '') => html`<div class="daddybound-fact">
       <span class="label muted small">${label}</span>
@@ -5387,13 +5397,13 @@ function daddyboundWorkingSummary(status) {
       ${raw(fact(mode.enforcing ? 'Answer path' : 'Learn observer',
         mode.enforcing ? `${num(native.secure)} secure` : !rt.available ? 'Idle' : learnActive ? String(rt.health || 'unknown') : 'Retained',
         mode.enforcing
-          ? `${num(native.bogus)} bogus · ${num(native.indeterminate)} indeterminate`
+          ? `${num(native.bogus)} bogus · ${num(native.indeterminate)} indeterminate · ${num(native.resolutionFailures)} resolution failures · ${num(native.limitRejected)} limit-rejected`
           : !rt.available ? (rt.healthNote || 'No observer running in Forward') : `${num(rt.observed)} observed · ${num(rt.dropped)} not observed`,
         mode.enforcing ? answerTone : observerTone))}
       ${raw(fact('Stored evidence', st.total === undefined ? '—' : num(st.total),
         `Rows in the last ${st.windowHours || '—'}h · retention ${num(st.retentionDays)} day(s)`, st.total ? 'info' : ''))}
     </div>
-    <p class="muted small note-tight">These counters prove the engine is running and recording. They are not a readiness score, production false-positive rate or independent review.</p>
+    <p class="muted small note-tight">These figures describe the reported runtime and retained evidence for this process. They do not prove the engine is currently observing or recording, and they are not a readiness score, production false-positive rate or independent review.</p>
   </div>`;
 }
 
@@ -6312,13 +6322,18 @@ function paintAdHocControl(access) {
     : 'Ad-hoc DNS access is off: unmatched clients are REFUSED until a Network covers them. Click to serve every eligible ACL address without naming each network.';
 }
 
+let adHocRefreshGeneration = 0;
+
 async function refreshAdHocControl() {
   const button = $('#adhoc-access-btn');
   if (!button || $('#app').hidden) return;
+  const generation = ++adHocRefreshGeneration;
   try {
     const data = await apiGet('/networks');
+    if (generation !== adHocRefreshGeneration) return;
     paintAdHocControl(data && data.clientAccess);
   } catch {
+    if (generation !== adHocRefreshGeneration) return;
     paintAdHocControl(null);
   }
 }
@@ -6327,6 +6342,8 @@ async function toggleAdHocAccess() {
   const button = $('#adhoc-access-btn');
   if (!button || button.disabled) return;
   const want = button.getAttribute('aria-pressed') !== 'true';
+  // Invalidate in-flight reads so a stale "off" cannot overwrite this write.
+  adHocRefreshGeneration += 1;
   button.disabled = true;
   try {
     const updated = await sendNetwork('PATCH', `/networks/${DEFAULT_NETWORK_ID}`, { allowResolver: want });

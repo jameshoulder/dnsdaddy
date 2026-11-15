@@ -105,7 +105,10 @@ mean badges on the README.
 
 ## Suggested validation sequence
 
-1. Freeze a revision and run the release assurance artefacts in roadmap Phase 2.
+1. Freeze a revision and run the checks that already exist today (`go test ./...`,
+   dashboard tests, CI workflows, `dnsdaddy doctor`). The roadmap's Phase 2
+   release-assurance *bundle* is still planned work — create those artefacts as
+   they are defined; do not treat the proposal as a runnable checklist yet.
 2. Exercise Forward / Learn / Live and encrypted transports on constrained hardware.
 3. Walk Findings → Investigate → policy change on labelled lab traffic.
 4. Verify backup/restore and management-journal behaviour.

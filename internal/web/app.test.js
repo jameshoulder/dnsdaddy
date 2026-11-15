@@ -3944,12 +3944,17 @@ test('Daddybound working summary names live signals without inventing a readines
     mode: { effective: 'enforce', enforcing: true },
     anchors: { available: true, viable: true, trustedKeys: 2, persistence: { state: 'ok' } },
     runtime: { available: true, active: false, health: 'ok', observed: 12, dropped: 0 },
-    native: { available: true, secure: 40, bogus: 1, indeterminate: 2 },
+    native: { available: true, secure: 40, bogus: 1, indeterminate: 2, resolutionFailures: 5, limitRejected: 3 },
     stored: { total: 18, windowHours: 168, retentionDays: 30 },
   });
   assert.match(live, /Is Daddybound working/);
   assert.match(live, /Local DNSSEC on the answer path/);
   assert.match(live, /40 secure/);
+  assert.match(live, /5 resolution failures/);
+  assert.match(live, /3 limit-rejected/);
+  assert.match(live, /badge warn/);
+  assert.match(live, /reported runtime and retained evidence/);
+  assert.doesNotMatch(live, /prove the engine is running and recording/);
   assert.match(live, /not a readiness score/);
 });
 
