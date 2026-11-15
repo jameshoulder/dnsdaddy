@@ -28,10 +28,10 @@ Block malicious domains at the resolver. See which device asked for what, why it
 
 ## See DNS Daddy in action
 
-The application now uses a charcoal, ivory and red identity. The retained screenshots below show the September 2026 light interface using synthetic lab data; they document their original capture, not the current theme. [Capture details and source revision](docs/images/SCREENSHOTS.md) · [Current brand assets](docs/brand/README.md).
+The application uses a charcoal, ivory and red identity. The overview, encrypted-DNS controls, server details and mobile captures below show the running application on 15 November 2026 with synthetic lab traffic. Query, Findings, sign-in and Assurance images retain their September light-theme capture and are labelled historical. [Capture details and source revisions](docs/images/SCREENSHOTS.md) · [Current brand assets](docs/brand/README.md).
 
 <p align="center">
-  <img src="docs/images/dashboard.png" alt="DNS Daddy overview showing query activity and a visible server IP with Copy IP and connection-scope labels" width="100%">
+  <img src="docs/images/red-dashboard.png" alt="DNS Daddy charcoal and red overview showing live resolver activity, client access and the selected Forward mode" width="100%">
 </p>
 
 The overview brings together **query activity, blocks, findings and resolver setup**, including a suggested server IP and configured DNS ports when a compatible local address is known. It identifies loopback-only access and incomplete address discovery, so you can see when another device still needs configuration.
@@ -44,15 +44,16 @@ Daddybound's local validation mode. The image shows a deliberately failed
 loopback test, so its TLS status correctly stays unobserved.
 
 <p align="center">
-  <img src="docs/images/features-daddybound.png" alt="Daddybound transport editor with ordered encrypted endpoints, explicit consent and an actual failed loopback connection test" width="100%">
+  <img src="docs/images/red-features-daddybound.png" alt="Daddybound in the red interface, with selectable resolver modes, encrypted endpoints, explicit consent and an actual failed loopback connection test" width="100%">
 </p>
 
 The Setup card identifies the server IP source, configured listener ports and
 where an address can be used. This isolated capture reports its actual
-host-only address; no reachable LAN address is invented.
+host-only listener and detected interfaces, and explains that no LAN address
+matches that listener.
 
 <p align="center">
-  <img src="docs/images/features-server-addresses.png" alt="Server address details with copy controls, listener ports and honest loopback and incomplete-inventory labels" width="100%">
+  <img src="docs/images/red-server-addresses.png" alt="Server address details in the red interface with Copy IP, loopback listener ports and warnings that the detected LAN interfaces have no matching DNS listener" width="100%">
 </p>
 
 [Encrypted transport setup and scope](docs/encrypted-dns.md).
@@ -61,6 +62,8 @@ host-only address; no reachable LAN address is invented.
 
 ### Understand a blocked query
 
+*Historical light-theme capture, September 2026.*
+
 <p align="center">
   <img src="docs/images/queries.png" alt="DNS Daddy query log filtered to blocked queries, with a synthetic query expanded to show its explanation" width="100%">
 </p>
@@ -68,6 +71,8 @@ host-only address; no reachable LAN address is invented.
 Filter the query log, open a decision and inspect the client, network, source and reason in context. The example above uses a clearly labelled synthetic threat feed.
 
 ### Explainable behavioural detections
+
+*Historical light-theme capture, September 2026.*
 
 <p align="center">
   <img src="docs/images/detections.png" alt="DNS Daddy Findings page with a synthetic beaconing finding expanded to show measurements and evidence" width="100%">
@@ -80,6 +85,8 @@ DNS Daddy includes six experimental behavioural detectors for DNS tunnelling, be
 
 ### A straightforward control plane
 
+*Historical light-theme capture, September 2026.*
+
 <p align="center">
   <img src="docs/images/sign-in.png" alt="DNS Daddy sign-in screen in the light interface, with the password field empty" width="100%">
 </p>
@@ -87,6 +94,8 @@ DNS Daddy includes six experimental behavioural detectors for DNS tunnelling, be
 The web control plane provides a consistent place to configure, observe and investigate a self-hosted resolver.
 
 ### Assurance you can inspect
+
+*Historical light-theme capture, September 2026.*
 
 <p align="center">
   <img src="docs/images/assurance.png" alt="Full DNS Daddy Assurance page showing evidence categories, automated checks, experimental features and project limitations" width="100%">
@@ -97,10 +106,10 @@ The **Assurance** page separates what is *verified*, *tested*, *experimental* an
 ### Useful on a smaller screen
 
 <p align="center">
-  <img src="docs/images/mobile.png" alt="DNS Daddy overview on a 390-pixel-wide phone viewport" width="390">
+  <img src="docs/images/red-mobile.png" alt="DNS Daddy charcoal and red overview on a 390-pixel phone viewport, showing the deliberately induced lab failure honestly" width="390">
 </p>
 
-The same overview adapts to a phone viewport, with navigation available from the menu.
+The same overview adapts to a phone viewport, with navigation available from the menu. This capture follows a deliberately failed loopback query and preserves the real warning state.
 
 </details>
 

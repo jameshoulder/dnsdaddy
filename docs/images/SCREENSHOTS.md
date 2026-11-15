@@ -1,18 +1,51 @@
 # UI screenshot provenance
 
-**Theme note, 15 November 2026:** the current application uses the red,
-charcoal and ivory identity. The captures recorded below retain their original
-light-theme appearance and remain historical evidence of their stated source
-revisions. Brand artwork is maintained separately in [the brand directory](../brand/README.md).
+The repository contains a **red-identity capture group from 15 November 2026**
+and **two historical light-theme groups from 29 September 2026**. All are
+unedited captures of the running application over synthetic lab traffic; no
+API response or DOM content was substituted. They illustrate implemented
+controls, not production detection accuracy or field reliability. Brand
+artwork has separate [provenance](../brand/README.md).
 
-The repository contains **two identified capture groups from 29 September 2026**.
-The Overview, Daddybound and server-address images were refreshed for encrypted
-transport. Other feature images retain their earlier capture and scope. All
-images are unedited captures of the running application over synthetic lab
-traffic; no API response or DOM content was substituted. They illustrate
-implemented controls, not production detection accuracy or field reliability.
+## Red identity: 15 November 2026, 19:48 UTC
 
-## Encrypted transport and server addresses: 23:52 UTC
+These five images came from the successful [Deployment regression evidence
+workflow](https://github.com/jameshoulder/dnsdaddy/actions/runs/43754259178).
+The workflow tested PR head `89c14ba5c91ea80065676d21d9d6596be54165a9`
+through GitHub's merge commit `e9f44d52a59046015cd4a6599f4ff76f464c7d31`
+against base `bb9e1d108765a2b323291dbe3a018e90cad59d0a`. The binary label is
+`dev+e9f44d5`. Capture times, original artifact paths, image and served-asset
+hashes, fixture state and all checks are in
+[red-brand-capture-manifest.json](red-brand-capture-manifest.json).
+
+| File | Output size | Capture | Route | Visible state |
+| --- | ---: | --- | --- | --- |
+| [red-dashboard.png](red-dashboard.png) | 1440 × 1000 | Viewport | `#/dashboard` | 31 completed synthetic queries, six policy blocks and no errors at this point; query logging disabled. |
+| [red-features-daddybound.png](red-features-daddybound.png) | 1440 × 2977 | Full page | `#/daddybound` | Selectable Forward mode, saved encrypted profile, deliberately failed loopback endpoint test and unobserved TLS. |
+| [red-features-daddybound-mobile.png](red-features-daddybound-mobile.png) | 390 × 4807 | Full page | `#/daddybound` | The same controls and genuine failure state at phone width. |
+| [red-server-addresses.png](red-server-addresses.png) | 1112 × 1234 | Address card | `#/setup` | Loopback listener and actual detected interfaces; no matching LAN listener or portable endpoint is invented. |
+| [red-mobile.png](red-mobile.png) | 390 × 844 | Viewport | `#/dashboard` | 32 completed queries, including the deliberately induced `SERVFAIL`; warning state preserved. |
+
+The run used Chromium **143.0.7499.4** and a real isolated daemon with a fresh
+Forward configuration, a temporary database, loopback DNS fixtures and one
+synthetic local file feed. External feeds and query logging were disabled.
+Anonymous resolver counters still updated. The fixture exercised encrypted
+loopback failure targets and briefly took the browser offline to check
+unavailable telemetry. These failure states are intentional test inputs.
+
+**53 transport/activity browser checks passed**, with no browser JavaScript
+errors. The same workflow also passed the access-recovery and refresh/focus
+browser suites. The PNGs were copied byte for byte from artifact `14177632701`;
+the downloaded archive's SHA-256 was verified against GitHub's artifact
+metadata. The three served frontend asset hashes match the captured source,
+including the server's normal concatenation and asset fingerprinting. New
+filenames preserve the original September captures and their hashes.
+
+The capture manifest describes this particular lab run. A successful browser
+run does not establish native internet resolution, external provider accuracy,
+long-term learning efficacy or an independent security audit.
+
+## Historical encrypted transport and server addresses: 29 September, 23:52 UTC
 
 These five images were captured from **2026-09-29T23:52:05.284Z** through
 **2026-09-29T23:52:19.557Z**, from the working tree based on `dc2989bd`. The
@@ -66,7 +99,7 @@ its header describes the binary, browser and Playwright environment variables.
 | Capture | Original browser PNGs; no recolouring, compositing or image editing |
 | CSP | Production application CSP |
 
-### Current transport asset SHA-256
+### September transport asset SHA-256
 
 ```text
 4ee778fd9976b5839aef71833ee70215880d59c499b042ebabdf330478641091  app.js
@@ -74,7 +107,7 @@ aaa130bb1bd1ba14c9c84edf2999bc1318943da68fb993bc2bff7ac074285b59  app.css
 2a27f8afa2f8628654b7279b57710cfb3edc6911dae70b624894f98be5aca6a8  index.html
 ```
 
-### Current transport PNG SHA-256
+### September transport PNG SHA-256
 
 ```text
 de1ee304c7c066dcb166237e97ff6ed10153721d6dc5a3a73a74800d9c335916  dashboard.png
@@ -84,7 +117,7 @@ bee6c51986ebe611e701da6dcfa1d92b94607829f3979ee08407be0e2ed06103  features-daddy
 25c1d61b438b3c7b3b9bfd714f52a97b1fcbd83873ab4eb2f11b93ec9abeae8a  mobile.png
 ```
 
-## Retained earlier feature images: 21:11 UTC
+## Historical feature images: 29 September, 21:11 UTC
 
 The following files retain their original **2026-09-29T21:11:53.053Z–21:11:56.855Z**
 capture from the working tree based on `59cc816`. They cover the preceding
