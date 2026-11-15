@@ -22,6 +22,21 @@ should be swapping a binary, not restoring a backup.
 
 ## [Unreleased]
 
+### Added
+
+- Dashboard encrypted-transport examples for **Cloudflare DoH2**, **Cloudflare
+  DoH3** and **Quad9 DoQ**, with documentation that Cloudflare does not publish
+  a DoQ endpoint for 1.1.1.1.
+- Charcoal/ivory **light and dark theme toggle** (charcoal remains the default).
+- Top-bar **Ad-hoc DNS access** control for the Default network.
+- Structured **public IP approval** dialog and clearer Setup acknowledgement
+  copy when permitting publicly routable DNS clients.
+- Daddybound **“Is Daddybound working?”** transparency summary on Overview and
+  Daddybound, plus Findings/Investigate workflow guidance.
+- [Maturity programme](docs/maturity/README.md) covering privacy-first posture,
+  post-quantum stance, roaming-agent prerequisites and compliance evidence
+  boundaries (no certification claims).
+
 ### Security-related upgrade note
 
 - DNS rebinding exceptions have stricter validation. Before upgrading, inspect

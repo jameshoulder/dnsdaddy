@@ -3,8 +3,10 @@
  * Red identifies the brand and actions; blue denotes information and total queries.
  * Green, amber and rose retain their labelled success, warning and danger roles.
  * Component behaviour remains progressively enhanced HTML; no remote assets.
+ * Charcoal is the default; ivory light mode is an explicit operator choice.
  */
-:root {
+:root,
+[data-theme="dark"] {
   color-scheme: dark;
   --background: #0B1014;
   --surface: #141B22;
@@ -63,6 +65,54 @@
   --font-display: var(--font-sans);
   --font-mono: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
   --sidebar-w: 218px;
+  --modal-scrim: rgb(11 16 20 / 0.72);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #F4F6F8;
+  --surface: #FFFFFF;
+  --surface-2: #EEF2F5;
+  --surface-3: #E4EAF0;
+  --border: #C5D0DA;
+  --border-strong: #5B6B78;
+  --foreground: #141B22;
+  --muted-foreground: #4F5F6C;
+  --faint: #6A7A88;
+  --brand-red: #C91822;
+  --accent: #B91C2B;
+  --accent-soft: #D6454D;
+  --accent-dim: #8F4146;
+  --accent-bg: #F8E8E9;
+  --primary: #B91C2B;
+  --primary-foreground: #FFFFFF;
+  --primary-dim: #9F1824;
+  --primary-bg: #F8E8E9;
+  --action: #B91C2B;
+  --action-hover: #A31A28;
+  --action-pressed: #8E1622;
+  --success: #1F7A4D;
+  --danger: #A61B3A;
+  --warn: #8A5A12;
+  --info: #1F5F99;
+  --violet: #6B4EA3;
+  --danger-bg: #F8E8EC;
+  --warn-bg: #F7EFDF;
+  --info-bg: #E6F0F8;
+  --violet-bg: #EFE8F7;
+  --ok-bg: #E5F4EC;
+  --danger-line: #D7A0AE;
+  --danger-solid: #9F2444;
+  --warn-line: #D2B889;
+  --info-line: #9BB8D4;
+  --violet-line: #B9A6D6;
+  --ok-line: #8FBFA3;
+  --shadow-1: 0 1px 3px rgb(20 27 34 / 0.08);
+  --shadow-2: 0 12px 36px rgb(20 27 34 / 0.12);
+  --ring: 0 0 0 3px rgb(185 28 43 / 0.22);
+  --edge: inset 0 1px 0 rgb(255 255 255 / 0.7);
+  --brand-wash: radial-gradient(ellipse at 25% 10%, rgb(185 28 43 / 0.06), transparent 65%);
+  --modal-scrim: rgb(20 27 34 / 0.45);
 }
 
 *,
@@ -1622,7 +1672,7 @@ button, input, select, textarea, summary { -webkit-tap-highlight-color: transpar
   cursor: pointer;
 }
 .search-submit:hover { background: var(--surface-3); }
-.topbar-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 235px; }
+.topbar-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 360px; }
 #refresh-note { flex-basis: 100%; font-size: 11px; text-align: right; min-height: 16px; }
 .topbar-actions .btn { font-size: 11.5px; padding: 5px 8px; min-height: 30px; }
 #logout-btn { background: transparent; border-color: transparent; }
@@ -2113,4 +2163,94 @@ tbody td { padding: 13px 14px; }
   .transport-mode-options { grid-template-columns: 1fr; }
   .transport-endpoint { padding: 12px; }
   .transport-endpoint-actions { justify-content: flex-start; }
+}
+
+/* Theme toggle, ad-hoc control, investigation workflow, public-access dialog */
+.transport-example-actions { flex-wrap: wrap; gap: 8px; }
+.workflow-card .workflow-steps {
+  margin: 0 0 var(--s4);
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 10px;
+}
+.workflow-card .workflow-steps li { padding-left: 4px; }
+.workflow-card .workflow-steps strong { color: var(--foreground); }
+.inv-lane-map {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: var(--s4);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border);
+}
+.inv-lane-map a {
+  font-size: 12.5px;
+  text-decoration: none;
+  color: var(--info);
+}
+.inv-lane-map a:hover { text-decoration: underline; }
+.daddybound-working .daddybound-facts { margin-top: var(--s3); }
+.daddybound-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.daddybound-fact strong { font-size: 14px; }
+.modal-root {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--modal-scrim);
+}
+.modal-panel {
+  position: relative;
+  z-index: 1;
+  width: min(560px, 100%);
+  max-height: min(90vh, 720px);
+  overflow: auto;
+  padding: 24px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+.modal-panel h2 { margin: 4px 0 12px; font-size: 22px; }
+.public-access-cidrs {
+  margin: 0 0 16px;
+  padding: 12px 14px 12px 28px;
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+}
+.public-access-cidrs code { font-size: 13px; }
+.modal-actions { justify-content: flex-end; gap: 10px; }
+#adhoc-access-btn[aria-pressed="true"] {
+  border-color: var(--ok-line);
+  background: var(--ok-bg);
+  color: var(--success);
+}
+#theme-toggle[aria-pressed="true"] {
+  border-color: var(--border-strong);
+}
+
+@media (max-width: 760px) {
+  .daddybound-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .modal-panel { padding: 18px; }
+}
+
+@media (max-width: 430px) {
+  .daddybound-facts { grid-template-columns: 1fr; }
+  .topbar-actions #refresh-note { display: none; }
 }

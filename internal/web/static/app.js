@@ -2250,6 +2250,46 @@ function findingFilterForm(filters, byState) {
     </div>`;
 }
 
+function findingsWorkflowCard() {
+  return html`<div class="card section workflow-card">
+    <div class="card-head"><div><div class="card-eyebrow">How to use this page</div>
+      <h2>Findings → Investigate → decide</h2>
+      <p>Findings are hypotheses about unusual DNS behaviour. They never change an answer by themselves.</p></div></div>
+    <ol class="workflow-steps">
+      <li><strong>Scan severity and review state.</strong> High and awaiting-review items deserve attention first.</li>
+      <li><strong>Expand a finding.</strong> Read the measurements, false-positive notes and next steps the detector shipped with it.</li>
+      <li><strong>Investigate the domain or client.</strong> Open the linked Investigate view for recorded activity, historical decisions and Daddybound observations.</li>
+      <li><strong>Record a review.</strong> Acknowledge, resolve or mark a false positive. Reviews never unblock a domain or retrain the model.</li>
+    </ol>
+    <div class="row note-tight">
+      <a class="btn btn-observe btn-sm" href="#/investigate">Open Investigate</a>
+      <a class="btn btn-ghost btn-sm" href="#/daddybound">Daddybound status</a>
+      <a class="btn btn-ghost btn-sm" href="#/queries">Query log</a>
+    </div>
+  </div>`;
+}
+
+function investigateWorkflowCard() {
+  return html`<div class="card section workflow-card">
+    <div class="card-head"><div><div class="card-eyebrow">How to use this page</div>
+      <h2>One subject, five evidence lanes</h2>
+      <p>Investigate reconstructs what this resolver already knows about an exact domain or client address.</p></div></div>
+    <ol class="workflow-steps">
+      <li><strong>Recorded activity</strong> — query-log rows and counts for the subject.</li>
+      <li><strong>Historical decisions</strong> — why a name was allowed or blocked when that happened.</li>
+      <li><strong>Current policy preview</strong> — what the live configuration would decide now (read-only; no external call).</li>
+      <li><strong>Related findings</strong> — experimental behavioural signals about the same subject.</li>
+      <li><strong>Daddybound observations</strong> — local DNSSEC outcomes when Learn or Live recorded them.</li>
+    </ol>
+    <p class="muted small note-tight">Exact match only. This is not passive DNS, IP reputation or device discovery. Findings stay alert-only; use Policies if you need to change enforcement.</p>
+    <div class="row note-tight">
+      <a class="btn btn-observe btn-sm" href="#/detections">Open Findings</a>
+      <a class="btn btn-ghost btn-sm" href="#/daddybound">Daddybound status</a>
+      <a class="btn btn-ghost btn-sm" href="#/policies">Policies</a>
+    </div>
+  </div>`;
+}
+
 pages.detections = {
   title: 'Findings',
   subtitle: 'Behavioural findings. Observed and explained, never blocked.',
@@ -2280,6 +2320,7 @@ pages.detections = {
     const period = `Last ${filters.days} day${filters.days === '1' ? '' : 's'}`;
 
     return html`
+      ${raw(findingsWorkflowCard())}
       <div class="card notice">
         <p><strong>These findings do not block anything.</strong> They are behavioural
           signals for investigation, with the measurements retained for review. The local traffic
@@ -2299,7 +2340,7 @@ pages.detections = {
 
       <div class="card">
         <div class="card-head"><div><h2>Findings</h2><p>Newest first. Expand one to see the
-          measurements behind it and to record a review.</p></div></div>
+          measurements behind it and to record a review. Use Investigate for the full evidence trail.</p></div></div>
         <div id="f-results" aria-busy="true">${raw(emptyState('Loading findings…', 'Fetching matching findings.', { icon: '·' }))}</div>
         <p class="form-error" id="f-error" role="alert" hidden></p>
         <div class="row mt-4"><button type="button" class="btn btn-ghost" id="f-more" hidden>Load more</button></div>
@@ -2834,6 +2875,7 @@ function rawJsonSection(data) {
 }
 
 function investigationHeader(subject, w) {
+  const domainLanes = /domain/i.test(subject.kind || '');
   return html`
     <div class="card section">
       <div class="card-head inv-head"><div class="inv-subject">
@@ -2841,6 +2883,13 @@ function investigationHeader(subject, w) {
         <h2 class="mono">${subject.title}</h2>
         ${raw(subject.sub ? html`<p>${subject.sub}</p>` : '')}
       </div><div class="row-end hero-intel">${raw(windowLine(w))}</div></div>
+      <nav class="inv-lane-map" aria-label="Evidence lanes">
+        <a href="#inv-activity">1. Activity</a>
+        <a href="#inv-decisions">2. Decisions</a>
+        ${raw(domainLanes ? html`<a href="#inv-preview">3. Policy preview</a>` : '')}
+        <a href="#inv-findings">${domainLanes ? '4' : '3'}. Findings</a>
+        ${raw(domainLanes ? html`<a href="#inv-observations">5. Daddybound</a>` : html`<a href="#inv-learning">4. Learning</a>`)}
+      </nav>
     </div>`;
 }
 
@@ -2868,8 +2917,8 @@ pages.investigate = {
     const form = investigateForm(filters);
 
     if (!filters.domain && !filters.client) {
-      return html`${raw(form)}
-        ${raw(emptyState('Enter a domain or a client address', 'Query-log rows and findings link here. The page reads what this resolver kept: recorded activity, stored decisions, a read-only preview of current policy, evidence on file, and related findings.', { icon: '⌕' }))}`;
+      return html`${raw(investigateWorkflowCard())}${raw(form)}
+        ${raw(emptyState('Enter a domain or a client address', 'Paste an exact name from Findings or the query log. The page then opens five evidence lanes: activity, historical decisions, current policy preview, related findings and Daddybound observations.', { icon: '⌕' }))}`;
     }
 
     const hours = filters.hours ? `hours=${encodeURIComponent(filters.hours)}` : '';
@@ -3052,18 +3101,73 @@ function clientAccessSummary(access) {
  * Driven entirely by the server's own refusal: the ranges named are the ones
  * it objected to. Classifying addresses here as well would be a second
  * implementation of a security rule, free to drift from the one that is
- * actually enforced.
+ * actually enforced. Returns a Promise so the acknowledgement can use a
+ * structured dialog rather than a browser confirm() that buries the stakes.
  */
 function confirmPublicAccess(cidrs) {
-  const list = (cidrs || []).join(', ');
-  return confirm(
-    `${list} is a public internet address.\n\n` +
-      'Allowing it means DNS Daddy will accept DNS requests from that source.\n\n' +
-      'Make sure your VPS or cloud firewall restricts TCP and UDP port 53 to ' +
-      'addresses you trust. DNS Daddy will not open or close your provider ' +
-      'firewall, and cannot see it.\n\n' +
-      'Allow this network to use DNS Daddy?'
-  );
+  const list = (cidrs || []).filter(Boolean);
+  if (typeof document === 'undefined') {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const existing = $('#public-access-dialog');
+    if (existing) existing.remove();
+    const ranges = list.length
+      ? list.map((cidr) => html`<li><code class="mono">${cidr}</code></li>`).join('')
+      : html`<li>The server named one or more public ranges.</li>`;
+    const dialog = document.createElement('div');
+    dialog.id = 'public-access-dialog';
+    dialog.className = 'modal-root';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'public-access-title');
+    dialog.innerHTML = sanitize(html`
+      <div class="modal-backdrop" data-public-access="cancel"></div>
+      <div class="modal-panel public-access-panel">
+        <div class="card-eyebrow">Public internet address</div>
+        <h2 id="public-access-title">Approve public DNS access?</h2>
+        <p>DNS Daddy refused this permission until you acknowledge that the
+          following range${list.length === 1 ? '' : 's'} can reach the public
+          internet:</p>
+        <ul class="public-access-cidrs">${raw(ranges)}</ul>
+        <div class="notice-inline is-warn">
+          <strong>What you are approving.</strong> Checking continue means DNS
+          Daddy will accept ordinary DNS queries from these sources. Anyone who
+          can send traffic from them can use this resolver. DNS Daddy does not
+          open, close or inspect your VPS or cloud firewall — that remains your
+          responsibility for TCP and UDP port 53.
+        </div>
+        <ol class="compact-list">
+          <li>Confirm these are addresses you control or intentionally trust.</li>
+          <li>Restrict port 53 at the provider firewall to those trusted sources.</li>
+          <li>Prefer a private LAN, VPN or DoH token when a public IP is not required.</li>
+        </ol>
+        <div class="row note-loose modal-actions">
+          <button type="button" class="btn btn-ghost" data-public-access="cancel">Cancel</button>
+          <button type="button" class="btn btn-primary" data-public-access="approve" autofocus>I approve public DNS access</button>
+        </div>
+      </div>`);
+    const finish = (value) => {
+      document.removeEventListener('keydown', onKey);
+      dialog.remove();
+      resolve(value);
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        finish(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    dialog.addEventListener('click', (event) => {
+      const action = event.target.closest('[data-public-access]');
+      if (!action) return;
+      finish(action.dataset.publicAccess === 'approve');
+    });
+    document.body.appendChild(dialog);
+    const approve = $('[data-public-access="approve"]', dialog);
+    if (approve) approve.focus();
+  });
 }
 
 /**
@@ -3076,7 +3180,7 @@ async function sendNetwork(method, path, payload) {
   } catch (err) {
     const needsAck = err instanceof ApiError && err.body && err.body.publicAckRequired;
     if (!needsAck) throw err;
-    if (!confirmPublicAccess(err.body.publicCidrs)) return null;
+    if (!(await confirmPublicAccess(err.body.publicCidrs))) return null;
     return apiSend(method, path, { ...payload, publicAck: true });
   }
 }
@@ -4777,11 +4881,46 @@ const DNS_TRANSPORT_PROTOCOLS = {
 
 // An example is an explicit local edit. Rendering it never selects a provider,
 // sends a DNS query, grants consent, or changes the saved transport/mode.
-// Provider values: https://developers.cloudflare.com/1.1.1.1/ip-addresses/
-// and https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/.
+// Cloudflare publishes DoH on HTTPS (HTTP/2 and HTTP/3), not DoQ:
+// https://developers.cloudflare.com/1.1.1.1/ip-addresses/
+// https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/
+// Quad9 documents DoQ on UDP 853: https://www.quad9.net/service/service-addresses-and-features
 const DNS_TRANSPORT_EXAMPLES = {
-  cloudflare: { protocol: 'doh2', address: 'https://cloudflare-dns.com/dns-query', serverName: 'cloudflare-dns.com', bootstrapIPs: ['1.1.1.1', '1.0.0.1'] },
+  cloudflare: {
+    protocol: 'doh2',
+    address: 'https://cloudflare-dns.com/dns-query',
+    serverName: 'cloudflare-dns.com',
+    bootstrapIPs: ['1.1.1.1', '1.0.0.1'],
+    label: 'Cloudflare · DoH2',
+    note: 'HTTPS over HTTP/2 on TCP 443.',
+  },
+  'cloudflare-doh2': {
+    protocol: 'doh2',
+    address: 'https://cloudflare-dns.com/dns-query',
+    serverName: 'cloudflare-dns.com',
+    bootstrapIPs: ['1.1.1.1', '1.0.0.1'],
+    label: 'Cloudflare · DoH2',
+    note: 'HTTPS over HTTP/2 on TCP 443.',
+  },
+  'cloudflare-doh3': {
+    protocol: 'doh3',
+    address: 'https://cloudflare-dns.com/dns-query',
+    serverName: 'cloudflare-dns.com',
+    bootstrapIPs: ['1.1.1.1', '1.0.0.1'],
+    label: 'Cloudflare · DoH3',
+    note: 'HTTPS over HTTP/3 (QUIC) on UDP 443. Same hostname as DoH2; different protocol negotiation.',
+  },
+  'quad9-doq': {
+    protocol: 'doq',
+    address: 'dns.quad9.net:853',
+    serverName: 'dns.quad9.net',
+    bootstrapIPs: ['9.9.9.9', '149.112.112.112'],
+    label: 'Quad9 · DoQ',
+    note: 'Cloudflare does not publish a DoQ endpoint for 1.1.1.1. Quad9 serves DNS over QUIC on UDP 853.',
+  },
 };
+
+const DNS_TRANSPORT_EXAMPLE_ORDER = ['cloudflare-doh2', 'cloudflare-doh3', 'quad9-doq'];
 
 function transportExampleDraft(endpoints, exampleID) {
   const example = DNS_TRANSPORT_EXAMPLES[exampleID];
@@ -4791,16 +4930,28 @@ function transportExampleDraft(endpoints, exampleID) {
   // append the example so the operator's failover order does not change.
   if (draft.length === 1 && !draft[0].protocol && !draft[0].address && !draft[0].serverName && !draft[0].bootstrapIPs.length) draft.pop();
   if (draft.length >= 16) throw new Error('Remove an endpoint before adding an example. The limit is 16.');
-  draft.push({ ...example, bootstrapIPs: [...example.bootstrapIPs] });
+  draft.push({
+    protocol: example.protocol,
+    address: example.address,
+    serverName: example.serverName,
+    bootstrapIPs: [...example.bootstrapIPs],
+  });
   return draft;
 }
 
 function transportExampleCard() {
+  const buttons = DNS_TRANSPORT_EXAMPLE_ORDER.map((id) => {
+    const example = DNS_TRANSPORT_EXAMPLES[id];
+    return html`<button type="button" class="btn btn-observe btn-sm" data-transport-example="${id}" title="${example.note}">Add ${example.label}</button>`;
+  }).join('');
   return html`<div class="transport-example note-loose"><h3>Start with a ready example</h3>
-    <p class="small">Cloudflare’s standard resolver over HTTPS (HTTP/2), using TCP 443. The example includes the endpoint, TLS name and both bootstrap IPs. Cloudflare receives the DNS names you send to it.</p>
-    <div class="row note-tight"><button type="button" class="btn btn-observe btn-sm" data-transport-example="cloudflare">Add Cloudflare example</button>
-      <a class="small" href="https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/" target="_blank" rel="noopener noreferrer">Provider privacy policy ↗</a></div>
-    <ol class="compact-list"><li>Add the example or enter your provider’s details below. This only fills your draft.</li>
+    <p class="small">Fill a complete draft for each supported protocol. Cloudflare examples cover DoH over HTTP/2 and HTTP/3. Cloudflare does not publish DoQ, so the DoQ button uses Quad9’s documented UDP 853 endpoint instead. Each button only edits your draft.</p>
+    <div class="row note-tight transport-example-actions">${raw(buttons)}</div>
+    <p class="small muted note-tight">Privacy policies:
+      <a href="https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/" target="_blank" rel="noopener noreferrer">Cloudflare ↗</a>
+      · <a href="https://www.quad9.net/privacy/policy/" target="_blank" rel="noopener noreferrer">Quad9 ↗</a>.
+      The chosen provider receives the DNS names you send to it.</p>
+    <ol class="compact-list"><li>Add an example or enter your provider’s details below. This only fills your draft.</li>
       <li>Review the provider and check the sharing agreement, then select <strong>Test endpoints</strong>.</li>
       <li>After a successful test, select <strong>Apply DNS transport</strong>. Choose <strong>Forward</strong> above for basic forwarding; <strong>Learn</strong> and <strong>Live</strong> add local validation checks.</li></ol>
     <p class="small muted">The test checks an encrypted exchange, not a complete Live lookup. Finish by testing a device in <a href="#/setup">Setup</a>. Adding an example preserves existing entries; it does not save, connect or change your Daddybound mode.</p>
@@ -5171,14 +5322,60 @@ function localLearningCard(status) {
   </div>`;
 }
 
-function nativeOverview(status, learning) {
+function daddyboundWorkingSummary(status) {
+  if (!status) {
+    return html`<div class="card section daddybound-working">
+      <div class="card-head"><div><div class="card-eyebrow">Transparency</div><h2>Is Daddybound working?</h2>
+        <p>Runtime status could not be read. Nothing below is inferred from an older reading.</p></div>
+        <a class="btn btn-observe btn-sm" href="#/daddybound">Open Daddybound</a></div>
+      ${raw(unavailableState('Runtime status unavailable', 'Refresh or open Daddybound to inspect mode, anchors and observations.'))}
+    </div>`;
+  }
   const mode = nativeMode(status);
+  const an = status.anchors || {};
+  const rt = status.runtime || {};
+  const native = status.native || {};
+  const st = status.stored || {};
+  const persistence = an.persistence || {};
+  const learnActive = rt.active === undefined ? mode.active && !mode.enforcing : rt.active;
+  const anchorTone = !an.available ? 'warn' : an.viable ? 'ok' : 'bad';
+  const observerTone = !rt.available ? '' : rt.health === 'ok' ? 'ok' : rt.health === 'degraded' ? 'warn' : 'bad';
+  const answerTone = mode.enforcing
+    ? (native.bogus || native.indeterminate ? 'warn' : 'ok')
+    : mode.active ? 'info' : '';
+  const fact = (label, value, note, tone = '') => html`<div class="daddybound-fact">
+      <span class="label muted small">${label}</span>
+      <strong><span class="badge ${tone}">${value}</span></strong>
+      <span class="muted small">${note}</span>
+    </div>`;
+  return html`<div class="card section daddybound-working">
+    <div class="card-head"><div><div class="card-eyebrow">Transparency · experimental</div><h2>Is Daddybound working?</h2>
+      <p>Four live signals from this process. Reading them resolves nothing and changes no trust state.</p></div>
+      <a class="btn btn-observe btn-sm" href="#/daddybound">Full Daddybound</a></div>
+    <div class="grid grid-4 daddybound-facts">
+      ${raw(fact('Mode', mode.label, mode.enforcing ? 'Local DNSSEC on the answer path' : mode.active ? 'Sampled observations only' : status.mode && status.mode.effective === 'off' ? 'Forwarding · local validation off' : 'Mode unavailable', mode.tone))}
+      ${raw(fact('Trust anchors', !an.available ? 'Not running' : an.viable ? `${num(an.trustedKeys)} trusted` : 'Not viable',
+        !an.available ? (an.unavailable || 'No trust-anchor manager') : persistence.state === 'failing' ? 'State file cannot be written' : an.needsIntervention ? 'Operator intervention required' : 'RFC 5011 root trust point', anchorTone))}
+      ${raw(fact(mode.enforcing ? 'Answer path' : 'Learn observer',
+        mode.enforcing ? `${num(native.secure)} secure` : !rt.available ? 'Idle' : learnActive ? String(rt.health || 'unknown') : 'Retained',
+        mode.enforcing
+          ? `${num(native.bogus)} bogus · ${num(native.indeterminate)} indeterminate`
+          : !rt.available ? (rt.healthNote || 'No observer running in Forward') : `${num(rt.observed)} observed · ${num(rt.dropped)} not observed`,
+        mode.enforcing ? answerTone : observerTone))}
+      ${raw(fact('Stored evidence', st.total === undefined ? '—' : num(st.total),
+        `Rows in the last ${st.windowHours || '—'}h · retention ${num(st.retentionDays)} day(s)`, st.total ? 'info' : ''))}
+    </div>
+    <p class="muted small note-tight">These counters prove the engine is running and recording. They are not a readiness score, production false-positive rate or independent review.</p>
+  </div>`;
+}
+
+function nativeOverview(status, learning) {
   const ready = learning && learning.clients;
-  return html`<div class="card section native-overview"><div class="native-overview-item"><span class="label muted small">Daddybound</span><strong>${mode.label}</strong>
-      <span class="muted small">${mode.enforcing ? 'Local DNSSEC in the answer path' : mode.active ? 'Forwarding with sampled DNSSEC observations' : status && status.mode && status.mode.effective === 'off' ? 'Forwarding · local DNSSEC validation off' : 'Runtime status could not be read'}</span></div>
-    <div class="native-overview-item"><span class="label muted small">Local learning</span><strong>${learning ? learning.enabled && learning.running ? `${num(ready && ready.ready)} baselines ready` : learning.enabled ? 'Needs attention' : 'Off' : 'Unavailable'}</strong>
+  return html`${raw(daddyboundWorkingSummary(status))}
+    <div class="card section native-overview"><div class="native-overview-item"><span class="label muted small">Local learning</span><strong>${learning ? learning.enabled && learning.running ? `${num(ready && ready.ready)} baselines ready` : learning.enabled ? 'Needs attention' : 'Off' : 'Unavailable'}</strong>
       <span class="muted small">${ready ? `${num(ready.warming)} clients warming up · findings only` : 'Local observations and model health'}</span></div>
-    <a href="#/daddybound" class="btn btn-observe btn-sm">Open Daddybound</a></div>`;
+    <a href="#/daddybound" class="btn btn-observe btn-sm">Open Daddybound</a>
+    <a href="#/detections" class="btn btn-ghost btn-sm">Review findings</a></div>`;
 }
 
 pages.daddybound = {
@@ -5191,10 +5388,8 @@ pages.daddybound = {
     });
     const [runtime, learning, transport] = await Promise.all([read('/dnssec/status?hours=168'), read('/learning/status'), read('/dns/transport')]);
     if (!context.isCurrent || context.isCurrent()) this.transportSettings = transport;
-    return html`${raw(nativeModeCard(runtime))}${raw(dnsTransportCard(transport))}${raw(nativeEnforcementCard(runtime))}${raw(localLearningCard(learning))}
-      <details class="card section engine-details"><summary><h2>Trust anchors, observation health and evidence limits</h2></summary>
-        <div class="note-loose">${raw(daddyboundStatusCard(runtime))}</div>
-      </details>`;
+    return html`${raw(daddyboundWorkingSummary(runtime))}${raw(nativeModeCard(runtime))}${raw(dnsTransportCard(transport))}${raw(nativeEnforcementCard(runtime))}${raw(localLearningCard(learning))}
+      <div class="note-loose">${raw(daddyboundStatusCard(runtime))}</div>`;
   },
   async mounted() {
     mountDNSTransport(this.transportSettings);
@@ -6029,7 +6224,107 @@ async function refreshSidebarStatus() {
   $('#sidebar-version').textContent = state.version;
 }
 
+const THEME_STORAGE_KEY = 'dnsdaddy.theme';
+
+function currentTheme() {
+  if (typeof document !== 'undefined' && document.documentElement) {
+    const fromDom = document.documentElement.dataset.theme;
+    if (fromDom === 'light' || fromDom === 'dark') return fromDom;
+  }
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const saved = localStorage.getItem(THEME_STORAGE_KEY);
+      if (saved === 'light' || saved === 'dark') return saved;
+    }
+  } catch {
+    // Private browsing can refuse localStorage; the charcoal default still works.
+  }
+  return 'dark';
+}
+
+function applyTheme(theme) {
+  const next = theme === 'light' ? 'light' : 'dark';
+  if (typeof document !== 'undefined' && document.documentElement) {
+    document.documentElement.dataset.theme = next;
+    document.documentElement.style.colorScheme = next;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = next === 'light' ? '#F7F4ED' : '#0B1014';
+    const toggle = $('#theme-toggle');
+    if (toggle) {
+      toggle.setAttribute('aria-pressed', String(next === 'light'));
+      toggle.textContent = next === 'light' ? 'Dark mode' : 'Light mode';
+    }
+  }
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch { /* ignore */ }
+  return next;
+}
+
+function paintAdHocControl(access) {
+  if (typeof document === 'undefined') return;
+  const button = $('#adhoc-access-btn');
+  if (!button) return;
+  if (!access || access.unrestricted) {
+    button.disabled = true;
+    button.setAttribute('aria-pressed', 'false');
+    button.textContent = 'Ad-hoc: n/a';
+    button.title = access && access.unrestricted
+      ? 'No client ACL is configured, so every address may already query. Ad-hoc access only matters once an ACL is in force.'
+      : 'Ad-hoc access state is unavailable.';
+    return;
+  }
+  const on = Boolean(access.adHocAccess);
+  const gated = access.adHocAccessGated !== false;
+  button.disabled = !gated;
+  button.setAttribute('aria-pressed', String(on));
+  button.textContent = on ? 'Ad-hoc: on' : 'Ad-hoc: off';
+  button.title = on
+    ? 'Ad-hoc DNS access is on: unmatched clients inside the configured resolver ACL may use DNS Daddy. Click to turn it off. This never widens the ACL.'
+    : 'Ad-hoc DNS access is off: unmatched clients are REFUSED until a Network covers them. Click to serve every eligible ACL address without naming each network.';
+}
+
+async function refreshAdHocControl() {
+  const button = $('#adhoc-access-btn');
+  if (!button || $('#app').hidden) return;
+  try {
+    const data = await apiGet('/networks');
+    paintAdHocControl(data && data.clientAccess);
+  } catch {
+    paintAdHocControl(null);
+  }
+}
+
+async function toggleAdHocAccess() {
+  const button = $('#adhoc-access-btn');
+  if (!button || button.disabled) return;
+  const want = button.getAttribute('aria-pressed') !== 'true';
+  button.disabled = true;
+  try {
+    const updated = await sendNetwork('PATCH', `/networks/${DEFAULT_NETWORK_ID}`, { allowResolver: want });
+    if (!updated) {
+      toast('Ad-hoc access was not changed', 'error');
+      return;
+    }
+    if (updated.warning) toast(updated.warning, 'error');
+    else {
+      toast(want
+        ? 'Unmatched clients inside the configured resolver ACL may now use DNS Daddy'
+        : 'Ad-hoc access is off: unmatched clients are refused');
+    }
+    await refreshAdHocControl();
+    if (router.current === 'networks') router.reload();
+  } catch (err) {
+    reportError(err);
+  } finally {
+    if (button.isConnected) button.disabled = false;
+    await refreshAdHocControl();
+  }
+}
+
 async function boot() {
+  applyTheme(currentTheme());
+
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const err = $('#login-error');
@@ -6040,6 +6335,7 @@ async function boot() {
       showApp();
       await router.navigate();
       await refreshSidebarStatus();
+      await refreshAdHocControl();
     } catch (ex) {
       err.textContent = ex.message || 'Sign in failed';
       err.hidden = false;
@@ -6061,7 +6357,17 @@ async function boot() {
   $('#refresh-btn').addEventListener('click', () => {
     router.reload();
     refreshSidebarStatus();
+    refreshAdHocControl();
   });
+
+  const themeToggle = $('#theme-toggle');
+  if (themeToggle) {
+    themeToggle.addEventListener('click', () => {
+      applyTheme(currentTheme() === 'light' ? 'dark' : 'light');
+    });
+  }
+  const adhocBtn = $('#adhoc-access-btn');
+  if (adhocBtn) adhocBtn.addEventListener('click', () => { toggleAdHocAccess(); });
 
   $('#menu-btn').addEventListener('click', () => setNavigation(!$('#sidebar').classList.contains('open')));
   if ($('#nav-close')) $('#nav-close').addEventListener('click', () => setNavigation(false));
@@ -6157,6 +6463,7 @@ async function boot() {
     showApp();
     await router.navigate();
     await refreshSidebarStatus();
+    await refreshAdHocControl();
   } else {
     showLogin();
   }
@@ -6267,6 +6574,8 @@ if (typeof module !== 'undefined' && module.exports) {
     serverAddressesCard,
     resolverConnectionGuide,
     DNS_TRANSPORT_PROTOCOLS,
+    DNS_TRANSPORT_EXAMPLES,
+    DNS_TRANSPORT_EXAMPLE_ORDER,
     transportExampleDraft,
     transportExampleCard,
     transportConsentError,
@@ -6278,6 +6587,8 @@ if (typeof module !== 'undefined' && module.exports) {
     localLearningCard,
     learningWindows,
     findingConfidence,
+    findingsWorkflowCard,
+    investigateWorkflowCard,
     recoveryCard,
     changeHistoryRows,
     protectionCard,
@@ -6294,10 +6605,16 @@ if (typeof module !== 'undefined' && module.exports) {
     localDnssecCard,
     daddyboundModes,
     daddyboundStatusCard,
+    daddyboundWorkingSummary,
     anchorKeyRows,
     networkRow,
     adHocBadge,
     isDefaultNetwork,
     DEFAULT_NETWORK_ID,
+    confirmPublicAccess,
+    currentTheme,
+    applyTheme,
+    paintAdHocControl,
+    THEME_STORAGE_KEY,
   };
 }

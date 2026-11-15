@@ -145,6 +145,14 @@ in [the catalogue](../internal/catalog/catalog.go). No proprietary default threa
 feed or required black-box scoring service. Optional operator-configured external
 integrations retain their existing explicit-consent and disclosure boundaries.
 
+## Maturity programme
+
+Privacy-first controls, post-quantum inventory work, roaming-agent design and
+organisational assurance (ISO 27001, Cyber Essentials, SOC 2, HIPAA and related
+frameworks) are tracked in [maturity/README.md](maturity/README.md) and the
+[compliance roadmap](trust/compliance-roadmap.md). Those documents describe
+evidence programmes. They do not certify the binary.
+
 ## Contributing evidence
 
 Reproducible failures, well-described benign detector alerts and independent code
