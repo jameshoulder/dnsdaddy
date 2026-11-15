@@ -2985,7 +2985,7 @@ pages.investigate = {
       ${raw(observationsSection(data.observations))}
       ${raw(rawJsonSection(data))}`;
   },
-  async mounted() {
+  async mounted(context = {}) {
     const form = $('#inv-form');
     if (form) {
       form.addEventListener('submit', (event) => {
@@ -2998,12 +2998,15 @@ pages.investigate = {
     }
     const view = $('#view');
     if (view) {
-      view.addEventListener('click', (event) => {
+      const onLane = (event) => {
         const button = event.target.closest('[data-inv-lane]');
         if (!button || !view.contains(button)) return;
         event.preventDefault();
         scrollInvestigationLane(view, button.dataset.invLane);
-      });
+      };
+      view.addEventListener('click', onLane);
+      // #view persists across routes; drop this listener when the page unmounts.
+      if (context.signal) context.signal.addEventListener('abort', () => view.removeEventListener('click', onLane), { once: true });
     }
     mountDecisionCards();
     const enrich = $('#inv-enrich');
@@ -3141,6 +3144,8 @@ function confirmPublicAccess(cidrs) {
   }
   return new Promise((resolve) => {
     if (cancelPublicAccessDialog) cancelPublicAccessDialog();
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const inertRoots = [$('#app'), $('#login')].filter(Boolean);
     const ranges = list.length
       ? list.map((cidr) => html`<li><code class="mono">${cidr}</code></li>`).join('')
       : html`<li>The server named one or more public ranges.</li>`;
@@ -3177,12 +3182,24 @@ function confirmPublicAccess(cidrs) {
         </div>
       </div>`);
     let settled = false;
+    const focusables = () => $$('button:not([disabled])', $('.modal-panel', dialog) || dialog)
+      .filter((el) => !el.hidden);
+    const restoreFocus = () => {
+      if (previousFocus && previousFocus.isConnected) {
+        previousFocus.focus();
+        return;
+      }
+      const fallback = $('#adhoc-access-btn') || $('#view') || $('#password');
+      if (fallback && typeof fallback.focus === 'function') fallback.focus();
+    };
     const finish = (value) => {
       if (settled) return;
       settled = true;
       if (cancelPublicAccessDialog === cancel) cancelPublicAccessDialog = null;
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
+      for (const root of inertRoots) root.inert = false;
       dialog.remove();
+      restoreFocus();
       resolve(value);
     };
     const cancel = () => finish(false);
@@ -3191,9 +3208,23 @@ function confirmPublicAccess(cidrs) {
       if (event.key === 'Escape') {
         event.preventDefault();
         finish(false);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const targets = focusables();
+      if (!targets.length) return;
+      const first = targets[0];
+      const last = targets[targets.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
       }
     };
-    document.addEventListener('keydown', onKey);
+    for (const root of inertRoots) root.inert = true;
+    document.addEventListener('keydown', onKey, true);
     dialog.addEventListener('click', (event) => {
       const action = event.target.closest('[data-public-access]');
       if (!action) return;
