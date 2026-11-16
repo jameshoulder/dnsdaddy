@@ -460,7 +460,9 @@ func validArchiveName(name string) bool {
 		return false
 	}
 	for _, c := range name {
-		if c < 32 || c == 127 {
+		// Reject ASCII and C1 controls; archive paths are operator-visible
+		// filesystem names, not a place for terminal or path smuggling bytes.
+		if c <= 0x1f || (c >= 0x7f && c <= 0x9f) {
 			return false
 		}
 	}

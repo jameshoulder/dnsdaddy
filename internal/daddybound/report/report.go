@@ -146,7 +146,7 @@ func Build(opts Options) (Document, error) {
 				"docs/maturity/verified-trust.md",
 			},
 			NativeCDAndAD:  "internal/daddybound/native/client_test.go; forward_test.go (upstream AD never inherited)",
-			EncryptedNoPtx: "docs/encrypted-dns.md; make test-adversarial EncryptedFixture* (no plaintext fallback)",
+			EncryptedNoPtx: "docs/encrypted-dns.md; make test-adversarial (includes resolver EncryptedFixture tests; no plaintext fallback)",
 		},
 		Milestone: verifiedTrustChecklist(),
 	}
