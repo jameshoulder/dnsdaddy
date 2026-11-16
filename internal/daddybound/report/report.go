@@ -76,17 +76,17 @@ type Evidence struct {
 
 // Milestone tracks the Verified Trust checklist at a coarse grain.
 type Milestone struct {
-	Name    string  `json:"name"`
-	Doc     string  `json:"doc"`
-	Items   []Item  `json:"items"`
-	Note    string  `json:"note"`
+	Name  string `json:"name"`
+	Doc   string `json:"doc"`
+	Items []Item `json:"items"`
+	Note  string `json:"note"`
 }
 
 // Item is one checklist row with an honest status.
 type Item struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Status string `json:"status"` // available | partial | planned
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Status   string `json:"status"` // available | partial | planned
 	Evidence string `json:"evidence"`
 }
 
@@ -132,10 +132,10 @@ func Build(opts Options) (Document, error) {
 			ByExpect: map[string]int{},
 		},
 		Evidence: Evidence{
-			OfflineLab:     "dnsdaddy daddybound validate  |  make daddybound-report",
-			Differential:   "make test-daddybound  (needs libunbound-dev, bind9-dnsutils, cgo)",
-			Corpus:         "make corpus  (network; several minutes; not a PR gate)",
-			Fuzz:           "make fuzz-daddybound",
+			OfflineLab:   "dnsdaddy daddybound validate  |  make daddybound-report",
+			Differential: "make test-daddybound  (needs libunbound-dev, bind9-dnsutils, cgo)",
+			Corpus:       "make corpus  (network; several minutes; not a PR gate)",
+			Fuzz:         "make fuzz-daddybound",
 			Documents: []string{
 				"docs/daddybound/validation-lab.md",
 				"docs/daddybound/standards.md",
