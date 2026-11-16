@@ -1,7 +1,7 @@
 {
   "title": "Daddybound laboratory conformance",
-  "generatedAt": "2026-11-16T11:16:00.561391577Z",
-  "revision": "a607371",
+  "generatedAt": "2026-11-16T11:16:11.604288281Z",
+  "revision": "9ddf8cb",
   "experimental": true,
   "claims": [
     "The offline signed laboratory reaches the verdict each scenario requires.",
