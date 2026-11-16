@@ -8,6 +8,19 @@
 <meta name="theme-color" content="#0B1014">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
+<script>
+  // Apply the saved theme before paint so the charcoal workspace does not flash.
+  (function () {
+    try {
+      var theme = localStorage.getItem('dnsdaddy.theme');
+      if (theme !== 'light' && theme !== 'dark') theme = 'dark';
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+    } catch (e) {
+      document.documentElement.dataset.theme = 'dark';
+    }
+  })();
+</script>
 </head>
 <body>
 <a class="skip-link" href="#view">Skip to content</a>
@@ -172,6 +185,16 @@
         <button class="search-submit" id="search-submit" type="submit">Search</button>
       </form>
       <div class="topbar-actions">
+        <button type="button" class="btn btn-ghost btn-sm" id="adhoc-access-btn"
+          aria-pressed="false"
+          title="Ad-hoc DNS access lets unmatched clients already inside the configured resolver ACL use DNS Daddy without adding a named Network. It never widens the ACL or exposes the resolver to the public internet.">
+          Ad-hoc: …
+        </button>
+        <button type="button" class="btn btn-ghost btn-sm" id="theme-toggle"
+          aria-pressed="false"
+          title="Switch between the charcoal workspace and the ivory light workspace">
+          Light mode
+        </button>
         <span class="muted small" id="refresh-note"></span>
         <button class="btn btn-ghost btn-sm" id="auto-refresh-btn" aria-pressed="false" title="Pause automatic updates on Overview and Blocked domains">Pause updates</button>
         <button class="btn btn-ghost btn-sm" id="refresh-btn">Refresh</button>

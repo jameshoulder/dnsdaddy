@@ -65,7 +65,7 @@
   function previewMarkup(plan, editing) {
     return `<div class="section"><h3>${editing ? 'Replace this connection’s addresses?' : 'Allow these addresses?'}</h3><p>${plan.addresses.map(a => `<code>${encode(a.cidr)}</code>${a.single ? '' : ' (whole subnet)'}`).join(', ') || 'Encrypted network link only.'}</p>
       <p>${editing ? 'This replaces the selected connection’s ranges and enables it. Its private link is kept. ' : ''}Other connections and existing access stay unchanged.</p>
-      ${plan.publicAckRequired ? '<p><label><input type="checkbox" id="setup-public-ack"> I control these public IPs and want to allow them. An internet IP may represent every device sharing that connection; restrict the firewall too.</label></p>' : ''}
+      ${plan.publicAckRequired ? '<div class="notice-inline is-warn"><p><strong>Public internet address.</strong> DNS Daddy will accept ordinary DNS from the ranges below only after you acknowledge them. Anyone who can send traffic from those sources can use this resolver. DNS Daddy does not open or inspect your provider firewall — restrict TCP/UDP 53 there yourself.</p><p><label><input type="checkbox" id="setup-public-ack"> I control these public IPs (or intentionally trust them) and approve public DNS access. An internet IP may represent every device sharing that connection.</label></p></div>' : ''}
       <button class="btn btn-primary" type="button" id="setup-apply">Allow connection</button>
       <details><summary>Technical details</summary>${plan.warnings.map(w => `<p class="small muted">${encode(w)}</p>`).join('')}</details></div>`;
   }

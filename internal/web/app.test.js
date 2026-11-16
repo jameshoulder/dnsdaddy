@@ -86,7 +86,9 @@ const {
   investigationLearning, decisionEvidenceContent,
   exportCard, readCompleteExport,
   copyPlainText, serverAddressRow, serverAddressesCard, resolverConnectionGuide,
-  DNS_TRANSPORT_PROTOCOLS, transportExampleDraft, transportExampleCard, transportConsentError, transportEndpointFields,
+  DNS_TRANSPORT_PROTOCOLS, DNS_TRANSPORT_EXAMPLES, DNS_TRANSPORT_EXAMPLE_ORDER, transportExampleDraft, transportExampleCard, transportConsentError, transportEndpointFields,
+  findingsWorkflowCard, investigateWorkflowCard, daddyboundWorkingSummary, confirmPublicAccess, currentTheme, applyTheme, paintAdHocControl,
+  investigationHeader, scrollInvestigationLane,
   negotiatedTLS, encryptedTransportStats, transportTestResult, dnsTransportCard,
 } = require('./static/app.js');
 
@@ -3767,10 +3769,34 @@ test('the explicit Cloudflare example fills all required fields and preserves a 
   assert.throws(() => transportExampleDraft([], 'constructor'), /Unknown/);
 });
 
+test('protocol example buttons cover Cloudflare DoH2, Cloudflare DoH3 and a documented DoQ provider', () => {
+  assert.deepEqual(DNS_TRANSPORT_EXAMPLE_ORDER, ['cloudflare-doh2', 'cloudflare-doh3', 'quad9-doq']);
+  assert.deepEqual(transportExampleDraft([], 'cloudflare-doh2')[0], {
+    protocol: 'doh2', address: 'https://cloudflare-dns.com/dns-query', serverName: 'cloudflare-dns.com', bootstrapIPs: ['1.1.1.1', '1.0.0.1'],
+  });
+  assert.deepEqual(transportExampleDraft([], 'cloudflare-doh3')[0], {
+    protocol: 'doh3', address: 'https://cloudflare-dns.com/dns-query', serverName: 'cloudflare-dns.com', bootstrapIPs: ['1.1.1.1', '1.0.0.1'],
+  });
+  assert.deepEqual(transportExampleDraft([], 'quad9-doq')[0], {
+    protocol: 'doq', address: 'dns10.quad9.net:853', serverName: 'dns10.quad9.net', bootstrapIPs: ['9.9.9.10', '149.112.112.10'],
+  });
+  const out = transportExampleCard();
+  assert.match(out, /data-transport-example="cloudflare-doh2"/);
+  assert.match(out, /data-transport-example="cloudflare-doh3"/);
+  assert.match(out, /data-transport-example="quad9-doq"/);
+  assert.match(out, /Cloudflare does not publish DoQ/);
+  assert.match(out, /non-filtering/);
+  assert.match(out, /dns10\.quad9\.net/);
+  assert.doesNotMatch(out, /data-transport-example="quad9-doq"[^>]*>[\s\S]*9\.9\.9\.9/);
+  assert.match(out, /Add Cloudflare · DoH2/);
+  assert.match(out, /Add Cloudflare · DoH3/);
+  assert.match(out, /Add Quad9 · DoQ/);
+});
+
 test('example guidance separates a draft, a connectivity test, activation and local Live validation', () => {
   const out = transportExampleCard();
-  assert.match(out, /type="button"[^>]+data-transport-example="cloudflare"/);
-  assert.match(out, /Cloudflare receives the DNS names/);
+  assert.match(out, /type="button"[^>]+data-transport-example="cloudflare-doh2"/);
+  assert.match(out, /The chosen provider receives the DNS names/);
   assert.match(out, /Test endpoints/);
   assert.match(out, /Apply DNS transport/);
   assert.match(out, /not a complete Live lookup/);
@@ -3895,6 +3921,59 @@ test('encrypted Forward clearly retains its endpoint path without claiming local
   assert.doesNotMatch(out, /is answering through its native resolver|Live · enforcing/);
   assert.match(transportExampleCard(), /Choose <strong>Forward<\/strong> above for basic forwarding/);
   assert.doesNotMatch(transportExampleCard(), /Keep or select <strong>Live/);
+});
+
+test('Findings and Investigate workflow cards explain the evidence path without claiming enforcement', () => {
+  const findings = findingsWorkflowCard();
+  assert.match(findings, /Findings → Investigate → decide/);
+  assert.match(findings, /never change an answer/);
+  assert.match(findings, /href="#\/investigate"/);
+  assert.doesNotMatch(findings, /will block|automatically block/i);
+  const investigate = investigateWorkflowCard();
+  assert.match(investigate, /five evidence lanes/i);
+  assert.match(investigate, /Daddybound observations/);
+  assert.match(investigate, /href="#\/detections"/);
+  assert.match(investigate, /Exact match only/);
+});
+
+test('Daddybound working summary names live signals without inventing a readiness score', () => {
+  const missing = daddyboundWorkingSummary(null);
+  assert.match(missing, /Runtime status unavailable/);
+  assert.doesNotMatch(missing, /ready for production|certified/i);
+  const live = daddyboundWorkingSummary({
+    mode: { effective: 'enforce', enforcing: true },
+    anchors: { available: true, viable: true, trustedKeys: 2, persistence: { state: 'ok' } },
+    runtime: { available: true, active: false, health: 'ok', observed: 12, dropped: 0 },
+    native: { available: true, secure: 40, bogus: 1, indeterminate: 2, resolutionFailures: 5, limitRejected: 3 },
+    stored: { total: 18, windowHours: 168, retentionDays: 30 },
+  });
+  assert.match(live, /Is Daddybound working/);
+  assert.match(live, /Local DNSSEC on the answer path/);
+  assert.match(live, /40 secure/);
+  assert.match(live, /5 resolution failures/);
+  assert.match(live, /3 limit-rejected/);
+  assert.match(live, /badge warn/);
+  assert.match(live, /reported runtime and retained evidence/);
+  assert.doesNotMatch(live, /prove the engine is running and recording/);
+  assert.match(live, /not a readiness score/);
+});
+
+test('public access confirmation refuses silently when no document is available', async () => {
+  assert.equal(await confirmPublicAccess(['203.0.113.10/32']), false);
+});
+
+test('theme helpers default to the charcoal workspace', () => {
+  assert.equal(currentTheme(), 'dark');
+});
+
+test('investigation evidence-lane controls do not steal the route hash', () => {
+  const out = investigationHeader({ kind: 'Domain', title: 'evil.example' }, { hours: 24, retentionDays: 7, queryLog: true, clientAttribution: true });
+  assert.match(out, /data-inv-lane="inv-activity"/);
+  assert.match(out, /data-inv-lane="inv-observations"/);
+  assert.doesNotMatch(out, /href="#inv-/);
+  assert.equal(scrollInvestigationLane(null, 'inv-activity'), false);
+  assert.equal(scrollInvestigationLane({ querySelector: () => null }, 'inv-activity'), false);
+  assert.equal(scrollInvestigationLane({ querySelector: () => ({}) }, '../evil'), false);
 });
 
 /* ---------- Live handler activity, separate from retained query history ---------- */

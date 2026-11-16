@@ -17,39 +17,54 @@ Read [ADR 0004](decisions/0004-encrypted-forwarding.md) for the architecture and
 
 ## Start with a working example
 
-For a first encrypted setup, DNS Daddy includes a complete **Cloudflare DoH
-over HTTP/2** starter with selectable **Forward, Learn and Live** modes. It
-starts in Forward on a new database. It uses outbound TCP 443, so it does
-not require QUIC or direct access to authoritative servers on port 53. No API
-key, account, domain name or server certificate is needed for this outbound
-connection. You are explicitly choosing Cloudflare to receive the queries.
+For a first encrypted setup, DNS Daddy includes dashboard example buttons for
+each supported outbound protocol. Cloudflare publishes DoH over HTTP/2 and
+HTTP/3; it does **not** publish a DoQ endpoint for 1.1.1.1, so the DoQ
+example uses Quad9's documented UDP 853 service instead. Fresh databases still
+start in **Forward**. No API key, account, domain name or server certificate is
+needed for these outbound connections. You are explicitly choosing that
+provider to receive the queries.
 
-| Setting | Example value | What it does |
-| --- | --- | --- |
-| Transport | `encrypted` | Uses only the configured encrypted forwarders. |
-| Protocol | `doh2` | HTTPS over HTTP/2 on TCP 443, with authenticated TLS 1.3. |
-| Endpoint | `https://cloudflare-dns.com/dns-query` | Cloudflare's standard public resolver. |
-| TLS server name | `cloudflare-dns.com` | The identity the certificate must authenticate. |
-| Bootstrap IPs | `1.1.1.1`, `1.0.0.1` | Finds the endpoint without first needing a working DNS resolver. Both IPs belong to the same provider. |
-| Resolver mode | Unpinned; new data starts in `Forward` / `off` | The dashboard can select Forward, Learn or Live. Existing saved selections are retained. |
+| Protocol | Example button | Endpoint | Bootstrap IPs | Notes |
+| --- | --- | --- | --- | --- |
+| DoH · HTTP/2 | Add Cloudflare · DoH2 | `https://cloudflare-dns.com/dns-query` | `1.1.1.1`, `1.0.0.1` | TCP 443. Best first choice on networks that block UDP/QUIC. |
+| DoH · HTTP/3 | Add Cloudflare · DoH3 | `https://cloudflare-dns.com/dns-query` | `1.1.1.1`, `1.0.0.1` | Same hostname; negotiates HTTP/3 over UDP 443. |
+| DoQ | Add Quad9 · DoQ | `dns10.quad9.net:853` | `9.9.9.10`, `149.112.112.10` | UDP 853 with ALPN `doq`. Uses Quad9's **non-filtering** 9.9.9.10 service so upstream malware blocking stays off. Cloudflare has no public DoQ endpoint. |
+
+Shared Cloudflare settings: transport `encrypted`, TLS server name
+`cloudflare-dns.com`, resolver mode unpinned (new data starts in Forward /
+`off`). Quad9's TLS server name for this example is `dns10.quad9.net`.
+Do not substitute `dns.quad9.net` / `9.9.9.9` unless you intentionally want
+Quad9's malware-blocking recursive service in front of DNS Daddy's local
+policy.
 
 Cloudflare documents its [resolver addresses](https://developers.cloudflare.com/1.1.1.1/ip-addresses/),
 [DoH protocols](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/),
 [endpoint and DNS wire format](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-wireformat/),
 and [privacy policy](https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/).
-Its [IP certificate and bootstrap explanation](https://blog.cloudflare.com/unauthorized-issuance-of-certificates-for-1-1-1-1/)
+Quad9 documents its [service addresses](https://www.quad9.net/service/service-addresses-and-features)
+and [privacy policy](https://www.quad9.net/privacy/policy/).
+Cloudflare's [IP certificate and bootstrap explanation](https://blog.cloudflare.com/unauthorized-issuance-of-certificates-for-1-1-1-1/)
 also describes how the literal-IP DoH URLs used by DNS Daddy's standard
 Forward defaults authenticate the resolver without a prior DNS lookup.
-The example uses the standard resolver so DNS Daddy remains responsible for
-its local filtering policy. The example does not select Cloudflare's Families
-filtering service. IPv6-only hosts can replace the bootstrap list with
-`2606:4700:4700::1111` and `2606:4700:4700::1001`.
+The examples keep filtering local to DNS Daddy: Cloudflare's standard
+(unfiltered) resolver, and Quad9's non-filtering `dns10` / `9.9.9.10`
+service. They do not select Cloudflare Families or Quad9's malware-blocking
+`9.9.9.9` / `dns.quad9.net` variant. IPv6-only hosts can replace Cloudflare
+bootstrap addresses with `2606:4700:4700::1111` and `2606:4700:4700::1001`,
+or Quad9's published `dns10` IPv6 addresses (`2620:fe::10`,
+`2620:fe::fe:10`).
+
+The runnable YAML/Docker example below remains the Cloudflare DoH2 starter
+because TCP 443 is the most widely reachable first path. Use the dashboard
+buttons when you want DoH3 or DoQ drafts instead.
 
 ### Already running DNS Daddy
 
-Use **Daddybound → DNS transport → Encrypted forwarding → Add Cloudflare
-example**. Review the filled fields, check the sharing agreement, select
-**Test endpoints**, then **Apply DNS transport** after a successful test.
+Use **Daddybound → DNS transport → Encrypted forwarding**, then **Add
+Cloudflare · DoH2**, **Add Cloudflare · DoH3** or **Add Quad9 · DoQ**. Review
+the filled fields, check the sharing agreement, select **Test endpoints**,
+then **Apply DNS transport** after a successful test.
 Use **Forward** for your first real lookup. In **Overview** or **Daddybound**,
 choose the mode and select **Apply resolver mode**. Later, choose **Learn**
 for independent background validation or **Live** for local enforcement.
@@ -226,10 +241,11 @@ discovery to reach a different service. Zero-RTT queries are disabled.
 ## Configure it in the dashboard
 
 1. Open **Daddybound → DNS transport** and select **Encrypted forwarding**.
-2. Select **Add Cloudflare example** to fill a working DoH2 draft, or add
-   your resolver's supported protocol and address. DoQ takes a host or
-   `host:port`; DoH takes its complete `https://host/path` endpoint URL.
-   A DoT endpoint on TCP 853 is not a DoQ endpoint on UDP 853.
+2. Select **Add Cloudflare · DoH2**, **Add Cloudflare · DoH3** or **Add
+   Quad9 · DoQ** to fill a complete draft, or enter your resolver's supported
+   protocol and address. DoQ takes a host or `host:port`; DoH takes its
+   complete `https://host/path` endpoint URL. A DoT endpoint on TCP 853 is
+   not a DoQ endpoint on UDP 853.
 3. Provide literal bootstrap IPs for a named endpoint. Obtain them from the
    resolver operator or your own deployment configuration. The client never
    asks ordinary DNS how to find its encrypted resolver.

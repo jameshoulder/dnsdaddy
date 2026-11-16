@@ -39,6 +39,7 @@ and compliance roadmap without claiming certification or an independent audit.
 | [threat-model.md](threat-model.md) | Assets, boundaries, actors, threats, mitigations, and residual risk |
 | [audit-2026-08.md](audit-2026-08.md) | August 2026 maturation audit: findings, fixes, and where a reviewer should start |
 | [roadmap.md](roadmap.md) | What might come next, and what would have to be true first |
+| [maturity/README.md](maturity/README.md) | Privacy, post-quantum stance, roaming agents and human-validation programme — without certification claims |
 | [../SECURITY.md](../SECURITY.md) | Reporting a vulnerability |
 | [security/](security/) | Point-in-time security review records |
 
