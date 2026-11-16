@@ -1,7 +1,7 @@
 # Daddybound laboratory conformance
 
-Generated: `2026-11-16T14:53:09Z`  
-Revision: `b15d3e6`  
+Generated: `2026-11-16T15:00:58Z`  
+Revision: `f73b078`  
 Status: **experimental**
 
 ## What this report claims
@@ -107,7 +107,7 @@ this narrows Daddybound's own anchor set and asks about a name the hierarchy doe
 - Real-world corpus: `make corpus  (network; several minutes; not a PR gate)`
 - Fuzz targets: `make fuzz-surface  (Daddybound, feeds, backup paths, encrypted framing)`
 - CD/AD independence tests: `internal/daddybound/native/client_test.go; forward_test.go (upstream AD never inherited)`
-- Encrypted no-plaintext-fallback: `docs/encrypted-dns.md; make test-adversarial EncryptedFixture* (no plaintext fallback)`
+- Encrypted no-plaintext-fallback: `docs/encrypted-dns.md; make test-adversarial (includes resolver EncryptedFixture tests; no plaintext fallback)`
 
 Documents:
 

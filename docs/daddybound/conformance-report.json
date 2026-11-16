@@ -1,7 +1,7 @@
 {
   "title": "Daddybound laboratory conformance",
-  "generatedAt": "2026-11-16T14:53:09.554589345Z",
-  "revision": "b15d3e6",
+  "generatedAt": "2026-11-16T15:00:59.222701114Z",
+  "revision": "f73b078",
   "experimental": true,
   "claims": [
     "The offline signed laboratory reaches the verdict each scenario requires.",
@@ -823,7 +823,7 @@
       "docs/maturity/verified-trust.md"
     ],
     "nativeCdAndAd": "internal/daddybound/native/client_test.go; forward_test.go (upstream AD never inherited)",
-    "encryptedNoPlaintextFallback": "docs/encrypted-dns.md; make test-adversarial EncryptedFixture* (no plaintext fallback)"
+    "encryptedNoPlaintextFallback": "docs/encrypted-dns.md; make test-adversarial (includes resolver EncryptedFixture tests; no plaintext fallback)"
   },
   "milestone": {
     "name": "DNS Daddy: Verified Trust",
