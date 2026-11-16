@@ -177,7 +177,9 @@ when validation cannot complete. Encrypted failover is limited to the approved
 encrypted endpoints; there is no fallback to native recursion, legacy upstreams
 or system DNS. A DNSSEC CD request skips cryptographic checks only, not the
 other DNS Daddy controls. Read [encrypted-dns.md](encrypted-dns.md) for transport
-scope, migration and operational limitations.
+scope, migration and operational limitations. Offline laboratory conformance is
+regenerable via `make daddybound-report`; the [Verified Trust](maturity/verified-trust.md)
+milestone tracks what that evidence does and does not claim.
 
 Implemented protocol work includes the chain walk, authenticated NSEC/NSEC3
 denial, CNAME/DNAME processing, native authoritative resolution, and managed

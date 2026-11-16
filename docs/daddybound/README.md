@@ -162,6 +162,28 @@ hold-down, and a self-signed revocation withdraws one. The compiled-in digests
 seed that and are never discarded: a lost state file costs hold-down progress,
 not the ability to validate.
 
+## CD=1 and managed-client policy
+
+RFC 4035 requires a validating resolver to honour a client's Checking Disabled
+(CD) bit: when CD=1, cryptographic checking is skipped for that query and the
+answer must not claim Authenticated Data. Daddybound Live does that.
+
+What CD does **not** change:
+
+- Client admission (ACL / networks / ad-hoc access)
+- Blocking policy, rebinding protection and rate limits
+- Selected encrypted transport (CD never requests a plaintext fallback)
+- Upstream AD inheritance — a forwarded AD bit is still never treated as a
+  local Secure verdict when checking is enabled for other queries
+
+**Strict posture for managed clients (operator recommendation):** treat Live as
+a validating path for devices you admit deliberately. Keep the client ACL
+tight; do not expose Live on an open recursive listener so that arbitrary
+clients can set CD=1 and receive unchecked data. Prefer Learn while evaluating
+disagreements. A future Verified Trust control may add an explicit
+`refuse_client_cd` (or equivalent) for managed fleets; until then, admission
+policy is the gate. Tests: `internal/daddybound/native/client_test.go`.
+
 ## Trying it
 
 ```
@@ -169,6 +191,8 @@ dnsdaddy daddybound lab          # the laboratory hierarchy and its trust anchor
 dnsdaddy daddybound scenarios    # every scenario and why it exists
 dnsdaddy daddybound validate     # run them and report each verdict
 dnsdaddy daddybound validate -scenario tampered-answer -trace
+dnsdaddy daddybound report       # Verified Trust laboratory conformance package
+make daddybound-report           # regenerate docs/daddybound/conformance-report.{md,json}
 ```
 
 These commands build a signed hierarchy in memory. They cannot be pointed at
@@ -177,6 +201,8 @@ or the dashboard; the Assurance page and `GET /api/v1/dnssec/status` report
 effective mode, selected transport, local validation counters, anchor lifecycle
 and observation losses. `GET /api/v1/dns/transport` reports the current approved
 endpoint configuration and transport counters without sending a test query.
+See [Verified Trust](../maturity/verified-trust.md) for the milestone checklist
+and measurable gates.
 Recorded observation provenance remains immutable:
 
 | Recorded operation | Observation `resolution` | Client query `dnssecSource` |
@@ -212,4 +238,6 @@ make corpus
 | [ADR 0003](../decisions/0003-daddybound-native-live.md) | Native Live answer binding, mode controls, failure semantics and limits |
 | [Encrypted DNS](../encrypted-dns.md) | Optional encrypted outbound profiles, local validation, recipient and transport boundaries |
 | [validation-lab.md](validation-lab.md) | The laboratory, the scenarios, and the differential comparison |
+| [conformance-report.md](conformance-report.md) | Regenerated offline laboratory conformance package |
+| [Verified Trust](../maturity/verified-trust.md) | P0 milestone: reproducible assurance for Daddybound |
 | [roadmap.md](roadmap.md) | What comes next, and what each step unblocks |

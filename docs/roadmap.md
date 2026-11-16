@@ -52,6 +52,14 @@ The following are planned work, not current capabilities. Stop after each phase,
 report what changed and what remains experimental, and update the capability map
 only when implementation and tests justify changing an item's status.
 
+### Phase 0 — Verified Trust (active P0)
+
+Turn Daddybound's laboratory, differential oracles and standards map into an
+independently reviewable assurance package before broadening feature work.
+Charter and checklist: [maturity/verified-trust.md](maturity/verified-trust.md).
+Regenerate evidence: `make daddybound-report`. This phase does **not** promote
+Live to production-ready.
+
 ### Phase 2 — release assurance artefacts
 
 Plan a release checklist with revision/toolchain records, scanner outputs, SPDX
