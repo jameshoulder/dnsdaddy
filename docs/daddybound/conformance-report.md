@@ -1,7 +1,7 @@
 # Daddybound laboratory conformance
 
-Generated: `2026-11-16T11:23:44Z`  
-Revision: `c1c786e`  
+Generated: `2026-11-16T15:00:58Z`  
+Revision: `f73b078`  
 Status: **experimental**
 
 ## What this report claims
@@ -102,15 +102,17 @@ this narrows Daddybound's own anchor set and asks about a name the hierarchy doe
 ## How to reproduce and extend
 
 - Offline laboratory: `dnsdaddy daddybound validate  |  make daddybound-report`
+- Adversarial / hostile suites: `make test-adversarial  |  docs/daddybound/adversarial-lab.md`
 - Differential vs Unbound/delv: `make test-daddybound  (needs libunbound-dev, bind9-dnsutils, cgo)`
 - Real-world corpus: `make corpus  (network; several minutes; not a PR gate)`
-- Fuzz targets: `make fuzz-daddybound`
+- Fuzz targets: `make fuzz-surface  (Daddybound, feeds, backup paths, encrypted framing)`
 - CD/AD independence tests: `internal/daddybound/native/client_test.go; forward_test.go (upstream AD never inherited)`
-- Encrypted no-plaintext-fallback: `docs/encrypted-dns.md; resolver encrypted_* tests (no plaintext fallback)`
+- Encrypted no-plaintext-fallback: `docs/encrypted-dns.md; make test-adversarial (includes resolver EncryptedFixture tests; no plaintext fallback)`
 
 Documents:
 
 - `docs/daddybound/validation-lab.md`
+- `docs/daddybound/adversarial-lab.md`
 - `docs/daddybound/standards.md`
 - `docs/daddybound/security-model.md`
 - `docs/maturity/verified-trust.md`
@@ -127,10 +129,10 @@ Statuses describe repository evidence today. partial means implemented evidence 
 | `VT-1.4` | RFC 5011 rollover, recovery, clock skew | partial | trustanchors/; differential timemodel_test.go |
 | `VT-1.5` | Local validation never inherits upstream AD | available | native/forward_test.go; observe source CD=1 |
 | `VT-1.6` | CD=1 handling documented and tested | partial | native/client_test.go; docs/daddybound/README.md CD=1 managed-client policy |
-| `VT-1.7` | Reproducible malicious-DNS laboratory | partial | lab/ scenarios + Server; not a full packet-adversary harness |
+| `VT-1.7` | Reproducible malicious-DNS laboratory | partial | make test-adversarial; docs/daddybound/adversarial-lab.md (packet MITM harness still later) |
 | `VT-1.8` | Independent adversarial review of Daddybound | planned | external engagement required |
 | `VT-1.9` | Published DNSSEC conformance report | partial | this package + docs/maturity/verified-trust.md |
-| `VT-2.1` | Extended fuzz of DNS wire / DoH / feeds / backup | partial | make fuzz-daddybound; expand beyond daddybound |
+| `VT-2.1` | Extended fuzz of DNS wire / DoH / feeds / backup | partial | make fuzz-surface; feed parse + backup path fuzz added |
 | `VT-2.2` | AuthN/session/token/CSRF/SSRF review evidence | partial | docs/security-testing.md; CI security workflow |
 | `VT-2.3` | Hardened container/host deployment guide | partial | docs/deploy.md; Dockerfile non-root where possible |
 | `VT-2.4` | Signed releases, SPDX SBOM, checksum verification | partial | roadmap Phase 2; existing checksums/SBOM inputs |

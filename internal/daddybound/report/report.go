@@ -69,6 +69,7 @@ type Evidence struct {
 	Differential   string   `json:"differential"`
 	Corpus         string   `json:"corpus"`
 	Fuzz           string   `json:"fuzz"`
+	Adversarial    string   `json:"adversarial"`
 	Documents      []string `json:"documents"`
 	NativeCDAndAD  string   `json:"nativeCdAndAd"`
 	EncryptedNoPtx string   `json:"encryptedNoPlaintextFallback"`
@@ -135,15 +136,17 @@ func Build(opts Options) (Document, error) {
 			OfflineLab:   "dnsdaddy daddybound validate  |  make daddybound-report",
 			Differential: "make test-daddybound  (needs libunbound-dev, bind9-dnsutils, cgo)",
 			Corpus:       "make corpus  (network; several minutes; not a PR gate)",
-			Fuzz:         "make fuzz-daddybound",
+			Fuzz:         "make fuzz-surface  (Daddybound, feeds, backup paths, encrypted framing)",
+			Adversarial:  "make test-adversarial  |  docs/daddybound/adversarial-lab.md",
 			Documents: []string{
 				"docs/daddybound/validation-lab.md",
+				"docs/daddybound/adversarial-lab.md",
 				"docs/daddybound/standards.md",
 				"docs/daddybound/security-model.md",
 				"docs/maturity/verified-trust.md",
 			},
 			NativeCDAndAD:  "internal/daddybound/native/client_test.go; forward_test.go (upstream AD never inherited)",
-			EncryptedNoPtx: "docs/encrypted-dns.md; resolver encrypted_* tests (no plaintext fallback)",
+			EncryptedNoPtx: "docs/encrypted-dns.md; make test-adversarial (includes resolver EncryptedFixture tests; no plaintext fallback)",
 		},
 		Milestone: verifiedTrustChecklist(),
 	}
@@ -279,6 +282,7 @@ func WriteMarkdown(w io.Writer, doc Document) error {
 	fmt.Fprintln(&b, "## How to reproduce and extend")
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "- Offline laboratory: `%s`\n", doc.Evidence.OfflineLab)
+	fmt.Fprintf(&b, "- Adversarial / hostile suites: `%s`\n", doc.Evidence.Adversarial)
 	fmt.Fprintf(&b, "- Differential vs Unbound/delv: `%s`\n", doc.Evidence.Differential)
 	fmt.Fprintf(&b, "- Real-world corpus: `%s`\n", doc.Evidence.Corpus)
 	fmt.Fprintf(&b, "- Fuzz targets: `%s`\n", doc.Evidence.Fuzz)
@@ -317,10 +321,10 @@ func verifiedTrustChecklist() Milestone {
 			{ID: "VT-1.4", Title: "RFC 5011 rollover, recovery, clock skew", Status: "partial", Evidence: "trustanchors/; differential timemodel_test.go"},
 			{ID: "VT-1.5", Title: "Local validation never inherits upstream AD", Status: "available", Evidence: "native/forward_test.go; observe source CD=1"},
 			{ID: "VT-1.6", Title: "CD=1 handling documented and tested", Status: "partial", Evidence: "native/client_test.go; docs/daddybound/README.md CD=1 managed-client policy"},
-			{ID: "VT-1.7", Title: "Reproducible malicious-DNS laboratory", Status: "partial", Evidence: "lab/ scenarios + Server; not a full packet-adversary harness"},
+			{ID: "VT-1.7", Title: "Reproducible malicious-DNS laboratory", Status: "partial", Evidence: "make test-adversarial; docs/daddybound/adversarial-lab.md (packet MITM harness still later)"},
 			{ID: "VT-1.8", Title: "Independent adversarial review of Daddybound", Status: "planned", Evidence: "external engagement required"},
 			{ID: "VT-1.9", Title: "Published DNSSEC conformance report", Status: "partial", Evidence: "this package + docs/maturity/verified-trust.md"},
-			{ID: "VT-2.1", Title: "Extended fuzz of DNS wire / DoH / feeds / backup", Status: "partial", Evidence: "make fuzz-daddybound; expand beyond daddybound"},
+			{ID: "VT-2.1", Title: "Extended fuzz of DNS wire / DoH / feeds / backup", Status: "partial", Evidence: "make fuzz-surface; feed parse + backup path fuzz added"},
 			{ID: "VT-2.2", Title: "AuthN/session/token/CSRF/SSRF review evidence", Status: "partial", Evidence: "docs/security-testing.md; CI security workflow"},
 			{ID: "VT-2.3", Title: "Hardened container/host deployment guide", Status: "partial", Evidence: "docs/deploy.md; Dockerfile non-root where possible"},
 			{ID: "VT-2.4", Title: "Signed releases, SPDX SBOM, checksum verification", Status: "partial", Evidence: "roadmap Phase 2; existing checksums/SBOM inputs"},

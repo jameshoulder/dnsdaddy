@@ -65,6 +65,13 @@ daddybound-report: ## Regenerate the Verified Trust laboratory conformance packa
 	go run ./cmd/dnsdaddy daddybound report -format json -o docs/daddybound/conformance-report.json
 	@echo "Wrote docs/daddybound/conformance-report.md and .json"
 
+.PHONY: test-adversarial
+test-adversarial: ## Offline Verified Trust adversarial suites (hostile DNS, lab, CD/AD, encrypted no-downgrade)
+	@# Named gate for docs/daddybound/adversarial-lab.md. No network, no CGO.
+	go test ./internal/daddybound/recursive/ ./internal/daddybound/lab/ ./internal/daddybound/native/ -count=1
+	go test ./internal/resolver/ -run 'EncryptedFixture' -count=1
+	go test ./internal/config/ -run 'MalformedEncryptedEndpointEnvironmentCannotSilentlyFallBack' -count=1
+
 .PHONY: corpus
 corpus: ## Compare Daddybound against libunbound and delv over real Internet names (needs network, several minutes)
 	@# Deliberately not part of `make test` and not in CI. It needs the
@@ -83,6 +90,19 @@ fuzz-daddybound: ## Fuzz the Daddybound input surface for 30s per target
 	@# fuzzing dies quietly. Package and target together, because -fuzz
 	@# refuses a pattern matching more than one package.
 	@grep -rn '^func Fuzz[A-Za-z0-9_]*(' ./internal/daddybound/ | \
+	while IFS= read -r line; do \
+		file=$${line%%:*}; fn=$${line##*func }; \
+		printf '%s %s\n' "$$(dirname "$$file")" "$${fn%%(*}"; \
+	done | sort -u | while read -r pkg target; do \
+		echo "--- $$pkg $$target ---"; \
+		go test "$$pkg" -run '^$$' -fuzz "^$$target$$" -fuzztime=30s || exit 1; \
+	done
+
+.PHONY: fuzz-surface
+fuzz-surface: ## Fuzz Daddybound plus feed parsing, backup path checks and encrypted framing (30s each)
+	@# Broader Verified Trust surface than fuzz-daddybound alone. Still
+	@# discovered rather than hard-coded so new Fuzz* targets are picked up.
+	@grep -rn '^func Fuzz[A-Za-z0-9_]*(' ./internal/daddybound/ ./internal/blocklist/ ./internal/backup/ ./internal/resolver/ ./internal/domainutil/ | \
 	while IFS= read -r line; do \
 		file=$${line%%:*}; fn=$${line##*func }; \
 		printf '%s %s\n' "$$(dirname "$$file")" "$${fn%%(*}"; \
