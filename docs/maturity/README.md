@@ -6,14 +6,24 @@ audited or production-ready for regulated environments.
 
 **Authoritative inventory:** [capabilities.md](../capabilities.md)  
 **Compliance crosswalk:** [trust/compliance-roadmap.md](../trust/compliance-roadmap.md)  
-**Product roadmap:** [roadmap.md](../roadmap.md)
+**Product roadmap:** [roadmap.md](../roadmap.md)  
+**P0 milestone:** [Verified Trust](verified-trust.md) — prove the resolver with a regenerable conformance package
 
 Nothing here turns a planned control into a present capability. Shipping a
 toggle is not ISO 27001, Cyber Essentials, HIPAA or SOC 2. Those are
 organisational assurance engagements with defined scopes, evidence and
 independent assessors.
 
-## What this pass delivered in the product
+## Active P0: Verified Trust
+
+Ship a reproducible demonstration that Daddybound correctly validates signed
+and unsigned answers, rejects bogus DNSSEC, reports crypto/transport failures,
+cannot silently downgrade encrypted upstreams, fits target hardware limits and
+exposes enough evidence for an independent reviewer. Regenerate the laboratory
+package with `make daddybound-report`. Details and checklist:
+[verified-trust.md](verified-trust.md).
+
+## What the maturity UX pass delivered in the product
 
 | Area | Change | Boundary |
 | --- | --- | --- |

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/jameshoulder/dnsdaddy/internal/daddybound/lab"
+	"github.com/jameshoulder/dnsdaddy/internal/daddybound/report"
 )
 
 // This command runs the deterministic offline laboratory and prints each
@@ -31,6 +33,8 @@ func runDaddybound(args []string) error {
 		return daddyboundScenarios(args[1:])
 	case "validate":
 		return daddyboundValidate(args[1:])
+	case "report":
+		return daddyboundReport(args[1:])
 	case "help", "-h", "--help":
 		daddyboundUsage(os.Stdout)
 		return nil
@@ -52,11 +56,17 @@ Usage:
   dnsdaddy daddybound lab                 show the laboratory hierarchy and its trust anchor
   dnsdaddy daddybound scenarios           list the scenarios and what each one proves
   dnsdaddy daddybound validate [flags]    run the scenarios and report each verdict
+  dnsdaddy daddybound report [flags]      emit the Verified Trust laboratory conformance package
 
 Validate flags:
   -scenario name   run one scenario by name (default: all)
   -trace           print the full step trace for each scenario
   -json            emit results as JSON
+
+Report flags:
+  -format json|markdown   output format (default: markdown)
+  -o path                 write to path instead of stdout
+  -revision text          record a source revision (default: git HEAD when available)
 
 Exits non-zero if any scenario reaches a verdict other than the one the
 standards require of it.
@@ -245,6 +255,57 @@ func daddyboundValidate(args []string) error {
 		return fmt.Errorf("%d scenarios reached a verdict the standards do not permit", failures)
 	}
 	return nil
+}
+
+// daddyboundReport emits the Verified Trust laboratory conformance package.
+func daddyboundReport(args []string) error {
+	fs := newFlagSet("daddybound report")
+	format := fs.String("format", "markdown", "output format: markdown or json")
+	outPath := fs.String("o", "", "write to path instead of stdout")
+	revision := fs.String("revision", "", "source revision to record (default: git HEAD when available)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	rev := strings.TrimSpace(*revision)
+	if rev == "" {
+		rev = gitHEAD()
+	}
+	doc, err := report.Build(report.Options{Revision: rev})
+	if err != nil {
+		return err
+	}
+	if doc.Summary.Disagreed > 0 {
+		return fmt.Errorf("%d scenarios disagreed with the standards; refusing to emit a green report", doc.Summary.Disagreed)
+	}
+
+	var buf strings.Builder
+	switch strings.ToLower(*format) {
+	case "json":
+		if err := report.WriteJSON(&buf, doc); err != nil {
+			return err
+		}
+	case "markdown", "md":
+		if err := report.WriteMarkdown(&buf, doc); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown report format %q (want markdown or json)", *format)
+	}
+
+	if *outPath == "" {
+		_, err := io.WriteString(os.Stdout, buf.String())
+		return err
+	}
+	return os.WriteFile(*outPath, []byte(buf.String()), 0o644)
+}
+
+func gitHEAD() string {
+	out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func writeJSON(w io.Writer, v any) error {

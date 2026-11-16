@@ -58,6 +58,13 @@ test-ui: ## Run the dashboard's JavaScript tests (needs node; no packages to ins
 test-daddybound: ## Compare Daddybound against libunbound and BIND delv (needs libunbound-dev, bind9-dnsutils, cgo)
 	CGO_ENABLED=1 go test -tags daddybound_unbound -v ./internal/daddybound/...
 
+.PHONY: daddybound-report
+daddybound-report: ## Regenerate the Verified Trust laboratory conformance package (offline; no CGO)
+	@mkdir -p docs/daddybound
+	go run ./cmd/dnsdaddy daddybound report -format markdown -o docs/daddybound/conformance-report.md
+	go run ./cmd/dnsdaddy daddybound report -format json -o docs/daddybound/conformance-report.json
+	@echo "Wrote docs/daddybound/conformance-report.md and .json"
+
 .PHONY: corpus
 corpus: ## Compare Daddybound against libunbound and delv over real Internet names (needs network, several minutes)
 	@# Deliberately not part of `make test` and not in CI. It needs the

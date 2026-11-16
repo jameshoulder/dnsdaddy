@@ -7,6 +7,12 @@ breaking it. It never touches the network, and the same hierarchy can be
 served over real DNS so that a reference validator sees exactly the records
 Daddybound validated.
 
+The Verified Trust milestone regenerates a publishable summary of this
+laboratory with `make daddybound-report` (or
+`dnsdaddy daddybound report`). See
+[conformance-report.md](conformance-report.md) and
+[maturity/verified-trust.md](../maturity/verified-trust.md).
+
 ```
 .                                signed; the trust anchor
   dnsdaddylab.                   delegated with a DS
