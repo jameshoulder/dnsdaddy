@@ -47,7 +47,7 @@ means not yet an evidence package.
 | 1.4 | RFC 5011 rollover, recovery, key changes, clock skew | partial | `trustanchors/`; differential time-model tests |
 | 1.5 | Locally validated answers never inherit upstream AD | available | `native/forward_test.go`; observe path uses CD=1 |
 | 1.6 | CD=1 handling + documented strict policy for managed clients | partial | `native/client_test.go`; Daddybound README CD semantics |
-| 1.7 | Reproducible malicious-DNS laboratory | partial | Offline signed lab + scenario builders; not yet a full packet-adversary / cache-poison harness |
+| 1.7 | Reproducible malicious-DNS laboratory | partial | `make test-adversarial` + [adversarial-lab.md](../daddybound/adversarial-lab.md); packet MITM harness still later |
 | 1.8 | Independent adversarial code review | planned | External engagement once this package is reviewable |
 | 1.9 | Published DNSSEC conformance report | partial | `dnsdaddy daddybound report` / `make daddybound-report` |
 
@@ -55,7 +55,7 @@ means not yet an evidence package.
 
 | # | Item | Status | Notes |
 | --- | --- | --- | --- |
-| 2.1 | Extended Go fuzz (wire, HTTP, TLS/QUIC, feeds, backup) | partial | `make fuzz-daddybound` today; broaden outside Daddybound |
+| 2.1 | Extended Go fuzz (wire, HTTP, TLS/QUIC, feeds, backup) | partial | `make fuzz-surface` covers Daddybound, feed lines, backup paths, encrypted framing |
 | 2.2 | AuthN, session, tokens, CSRF, SSRF, dashboard controls | partial | Existing security testing docs and CI; deepen for Verified Trust |
 | 2.3 | Hardened container/host deployment | partial | Deploy docs + non-root container work; tighten capabilities/read-only FS |
 | 2.4 | Verifiable provenance, signed artefacts, SPDX SBOM | partial | Roadmap Phase 2; ship as a release gate |
@@ -76,6 +76,12 @@ make daddybound-report
 # Equivalent:
 go run ./cmd/dnsdaddy daddybound report -format markdown -o docs/daddybound/conformance-report.md
 go run ./cmd/dnsdaddy daddybound report -format json -o docs/daddybound/conformance-report.json
+
+# Offline adversarial / hostile + encrypted no-downgrade suites
+make test-adversarial
+
+# Broader fuzz surface (feeds, backup paths, Daddybound, encrypted framing)
+make fuzz-surface
 
 # Differential vs Unbound + delv (optional local deps)
 make test-daddybound

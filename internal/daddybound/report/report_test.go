@@ -50,6 +50,8 @@ func TestWriteMarkdownContainsGates(t *testing.T) {
 		"Milestone: DNS Daddy: Verified Trust",
 		"VT-1.5",
 		"make test-daddybound",
+		"make test-adversarial",
+		"make fuzz-surface",
 		fmt.Sprintf("| Scenarios | %d |", doc.Summary.Scenarios),
 		fmt.Sprintf("| Agreed with scenario expectations | %d |", doc.Summary.Agreed),
 		fmt.Sprintf("| Disagreed | %d |", doc.Summary.Disagreed),

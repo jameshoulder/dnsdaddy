@@ -193,6 +193,7 @@ dnsdaddy daddybound validate     # run them and report each verdict
 dnsdaddy daddybound validate -scenario tampered-answer -trace
 dnsdaddy daddybound report       # Verified Trust laboratory conformance package
 make daddybound-report           # regenerate docs/daddybound/conformance-report.{md,json}
+make test-adversarial            # hostile DNS + encrypted no-downgrade suites
 ```
 
 These commands build a signed hierarchy in memory. They cannot be pointed at
@@ -239,5 +240,6 @@ make corpus
 | [Encrypted DNS](../encrypted-dns.md) | Optional encrypted outbound profiles, local validation, recipient and transport boundaries |
 | [validation-lab.md](validation-lab.md) | The laboratory, the scenarios, and the differential comparison |
 | [conformance-report.md](conformance-report.md) | Regenerated offline laboratory conformance package |
+| [adversarial-lab.md](adversarial-lab.md) | Named hostile / tamper / encrypted no-downgrade suites |
 | [Verified Trust](../maturity/verified-trust.md) | P0 milestone: reproducible assurance for Daddybound |
 | [roadmap.md](roadmap.md) | What comes next, and what each step unblocks |

@@ -175,6 +175,30 @@ func TestAWrongTransactionIDIsRejected(t *testing.T) {
 	}
 }
 
+// A packet that looks like a query (QR=0) is not evidence of an answer, even
+// when every other field matches. Accepting it is how a resolver confuses
+// reflection traffic with authoritative data.
+func TestAReplyMustBeMarkedAsAResponse(t *testing.T) {
+	h := reclab.Start(t,
+		reclab.Zone{Name: ".", Delegations: map[string][]string{"com.": {"ns1.com."}}},
+		reclab.Zone{Name: "com.", Delegations: map[string][]string{"example.com.": {"ns1.example.com."}}},
+		reclab.Zone{
+			Name:    "example.com.",
+			Records: []dns.RR{reclab.A("www.example.com.", "93.184.216.34")},
+			Rewrite: func(req, reply *dns.Msg) { reply.Response = false },
+		},
+	)
+	r := labResolver(t, h, time.Second)
+
+	_, err := r.Resolve(context.Background(), "www.example.com.", dns.TypeA)
+	if err == nil {
+		t.Fatal("a reply with QR unset was accepted as an answer")
+	}
+	if !errors.Is(err, recursive.ErrMismatchedReply) && !errors.Is(err, recursive.ErrNoReachableServer) {
+		t.Fatalf("unexpected error kind: %v", err)
+	}
+}
+
 // Glue for a nameserver outside the delegated zone is a hint the parent had no
 // authority to give. The name is resolved instead — which here means it cannot
 // be resolved at all, and that is the correct outcome rather than following

@@ -24,6 +24,11 @@ should be swapping a binary, not restoring a backup.
 
 ### Added
 
+- **Verified Trust** adversarial slice: named
+  [adversarial laboratory](docs/daddybound/adversarial-lab.md),
+  `make test-adversarial` (hostile DNS, CD/AD, encrypted no-downgrade),
+  `make fuzz-surface` (feeds, backup archive paths, Daddybound, encrypted
+  framing), and a recursive rejection test for replies with QR unset.
 - **Verified Trust** P0 milestone: charter
   ([docs/maturity/verified-trust.md](docs/maturity/verified-trust.md)),
   regenerable Daddybound laboratory conformance package
