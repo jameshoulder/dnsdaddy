@@ -276,7 +276,7 @@ func daddyboundReport(args []string) error {
 		return err
 	}
 	if doc.Summary.Disagreed > 0 {
-		return fmt.Errorf("%d scenarios disagreed with the standards; refusing to emit a green report", doc.Summary.Disagreed)
+		return fmt.Errorf("%d scenarios disagreed with scenario expectations; refusing to emit a green report", doc.Summary.Disagreed)
 	}
 
 	var buf strings.Builder
@@ -297,7 +297,9 @@ func daddyboundReport(args []string) error {
 		_, err := io.WriteString(os.Stdout, buf.String())
 		return err
 	}
-	return os.WriteFile(*outPath, []byte(buf.String()), 0o644)
+	// 0o600 matches the project gosec G306 policy. Checked-in docs remain
+	// world-readable via git; the write itself does not need a world-readable mode.
+	return os.WriteFile(*outPath, []byte(buf.String()), 0o600)
 }
 
 func gitHEAD() string {

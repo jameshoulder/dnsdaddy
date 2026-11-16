@@ -69,7 +69,7 @@ the plan deliberately concentrate on **proving the resolver**.
 ## How to regenerate the conformance package
 
 ```bash
-# Offline laboratory agreement with standards (no network, no CGO)
+# Offline laboratory agreement with scenario expectations (no network, no CGO)
 make daddybound-report
 
 # Writes docs/daddybound/conformance-report.md and .json
@@ -85,7 +85,9 @@ make corpus
 ```
 
 The report refuses to emit a “green” package if any laboratory scenario
-disagrees with the standards.
+disagrees with its documented expectations. Agreement is with the scenario
+corpus (including named known gaps), not an unrestricted claim of agreement
+with every reading of the DNSSEC standards.
 
 ## What the report claims — and does not
 

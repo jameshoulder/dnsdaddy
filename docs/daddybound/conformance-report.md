@@ -1,7 +1,7 @@
 # Daddybound laboratory conformance
 
-Generated: `2026-11-16T11:16:11Z`  
-Revision: `9ddf8cb`  
+Generated: `2026-11-16T11:23:44Z`  
+Revision: `c1c786e`  
 Status: **experimental**
 
 ## What this report claims
@@ -12,6 +12,7 @@ Status: **experimental**
 
 ## What this report does not claim
 
+- Unrestricted agreement with every reading of the DNSSEC standards (known gaps remain named).
 - Production reliability of Live mode.
 - An independent professional security review.
 - Zero unexplained differences against Unbound/BIND on every live Internet name.
@@ -23,7 +24,7 @@ Status: **experimental**
 | Metric | Value |
 | --- | ---: |
 | Scenarios | 78 |
-| Agreed with standards | 78 |
+| Agreed with scenario expectations | 78 |
 | Disagreed | 0 |
 
 ### By family

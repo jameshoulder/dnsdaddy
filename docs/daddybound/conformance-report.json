@@ -1,7 +1,7 @@
 {
   "title": "Daddybound laboratory conformance",
-  "generatedAt": "2026-11-16T11:16:11.604288281Z",
-  "revision": "9ddf8cb",
+  "generatedAt": "2026-11-16T11:23:44.953409521Z",
+  "revision": "c1c786e",
   "experimental": true,
   "claims": [
     "The offline signed laboratory reaches the verdict each scenario requires.",
@@ -9,6 +9,7 @@
     "This package can be regenerated from the same binary and source revision."
   ],
   "nonClaims": [
+    "Unrestricted agreement with every reading of the DNSSEC standards (known gaps remain named).",
     "Production reliability of Live mode.",
     "An independent professional security review.",
     "Zero unexplained differences against Unbound/BIND on every live Internet name.",

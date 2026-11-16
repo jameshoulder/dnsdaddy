@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,9 @@ func TestWriteMarkdownContainsGates(t *testing.T) {
 		"Milestone: DNS Daddy: Verified Trust",
 		"VT-1.5",
 		"make test-daddybound",
+		fmt.Sprintf("| Scenarios | %d |", doc.Summary.Scenarios),
+		fmt.Sprintf("| Agreed with scenario expectations | %d |", doc.Summary.Agreed),
+		fmt.Sprintf("| Disagreed | %d |", doc.Summary.Disagreed),
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("markdown missing %q", want)

@@ -29,7 +29,8 @@ should be swapping a binary, not restoring a backup.
   regenerable Daddybound laboratory conformance package
   (`dnsdaddy daddybound report`, `make daddybound-report`) and documented CD=1
   managed-client posture. The package claims offline laboratory agreement with
-  standards; it does not claim production Live readiness or an external audit.
+  scenario expectations (known gaps remain named); it does not claim unrestricted
+  standards agreement, production Live readiness or an external audit.
 - Dashboard encrypted-transport examples for **Cloudflare DoH2**, **Cloudflare
   DoH3** and **Quad9 DoQ** (`dns10.quad9.net` / non-filtering `9.9.9.10`), with
   documentation that Cloudflare does not publish a DoQ endpoint for 1.1.1.1.

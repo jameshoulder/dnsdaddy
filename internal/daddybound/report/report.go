@@ -120,6 +120,7 @@ func Build(opts Options) (Document, error) {
 			"This package can be regenerated from the same binary and source revision.",
 		},
 		NonClaims: []string{
+			"Unrestricted agreement with every reading of the DNSSEC standards (known gaps remain named).",
 			"Production reliability of Live mode.",
 			"An independent professional security review.",
 			"Zero unexplained differences against Unbound/BIND on every live Internet name.",
@@ -221,7 +222,7 @@ func WriteMarkdown(w io.Writer, doc Document) error {
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "| Metric | Value |\n| --- | ---: |\n")
 	fmt.Fprintf(&b, "| Scenarios | %d |\n", doc.Summary.Scenarios)
-	fmt.Fprintf(&b, "| Agreed with standards | %d |\n", doc.Summary.Agreed)
+	fmt.Fprintf(&b, "| Agreed with scenario expectations | %d |\n", doc.Summary.Agreed)
 	fmt.Fprintf(&b, "| Disagreed | %d |\n", doc.Summary.Disagreed)
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "### By family")
