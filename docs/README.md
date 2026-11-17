@@ -28,6 +28,8 @@ and compliance roadmap without claiming certification or an independent audit.
 | [threat-intel.md](threat-intel.md) | Every default feed, where it comes from, and handling a false positive |
 | [privacy.md](privacy.md) | What is stored, for how long, and how to store less |
 | [architecture.md](architecture.md) | How a query flows through the system, and why it is built this way |
+| [dns-security-map.md](dns-security-map.md) | DNS Security Map: retained network→client→domain investigation view |
+| [dns-security-map-topology.md](dns-security-map-topology.md) | Future optional topology sources (not implemented in Phase 1) |
 | [siem.md](siem.md) | Getting findings into Wazuh, Elastic, Splunk or Sentinel |
 
 ## Security

@@ -70,10 +70,13 @@ in-memory snapshots that are swapped atomically when configuration changes.
 | `internal/detect` | Behavioural detection: enrichment, detectors, findings, sinks |
 | `internal/dnsserver` | UDP/TCP/DoT listeners and the DoH endpoint |
 | `internal/api` | REST API, auth, metrics, OpenAPI |
-| `internal/web` | The embedded dashboard |
+| `internal/web` | The embedded dashboard (including the DNS Security Map page) |
+| `internal/store` network-map aggregation | Read-only bounded aggregation over retained `query_log` for `GET /api/v1/network-map`; never on the DNS answer path |
 
 Dependencies point one way: `dnsserver` → `policy` → `blocklist`/`store`.
-Nothing in the resolution path imports `api`.
+Nothing in the resolution path imports `api`. Map aggregation reads the store
+from authenticated API handlers only; refreshing the map does not resolve DNS
+or mutate policy.
 
 `detect` sits beside `querylog` rather than inside the resolution path: the
 handler hands it a value and moves on. Nothing `detect` produces can reach back

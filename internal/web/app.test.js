@@ -92,6 +92,11 @@ const {
   negotiatedTLS, encryptedTransportStats, transportTestResult, dnsTransportCard,
 } = require('./static/app.js');
 
+// map.js is concatenated into the served dashboard (see embed.go). Node tests
+// load app.js alone, so register the page the sidebar expects.
+const { securityMapPage, mapFilters, mapHash, outcomeTone, layoutGraph } = require('./static/map.js');
+pages['security-map'] = securityMapPage;
+
 const OBSERVATORY_ID = 'dnsdaddy-observatory';
 
 function feed(overrides = {}) {
@@ -894,6 +899,22 @@ test('the Assurance page is reachable', () => {
   assert.ok(indexHtml.includes('href="#/assurance"'), 'Assurance is missing from the navigation');
   assert.ok(pages.assurance, 'Assurance has no page');
   assert.equal(routeName('#/assurance'), 'assurance');
+});
+
+test('the DNS Security Map page is reachable from Workspace', () => {
+  assert.ok(indexHtml.includes('href="#/security-map"'), 'DNS Security Map missing from navigation');
+  assert.ok(pages['security-map'], 'security-map has no page');
+  assert.equal(routeName('#/security-map?hours=1'), 'security-map');
+  assert.equal(mapFilters('#/security-map?window=15m&action=blocked').window, '15m');
+  assert.match(mapHash({ window: '24', view: 'table' }), /#\/security-map\?/);
+  assert.equal(outcomeTone({ allowed: 1, blocked: 1, errors: 0 }), 'mixed');
+  const L = layoutGraph({
+    networks: [{ id: 'n1', name: 'LAN' }],
+    clients: [{ id: 'client:n1/10.0.0.1', networkId: 'n1', clientIp: '10.0.0.1', allowed: 1, blocked: 0, errors: 0 }],
+    domains: [{ id: 'domain:a.example', domain: 'a.example', allowed: 1, blocked: 0, errors: 0 }],
+    edges: [{ id: 'e1', clientId: 'client:n1/10.0.0.1', domainId: 'domain:a.example', allowed: 1, blocked: 0, errors: 0 }],
+  }, '');
+  assert.match(L.clientNodes, /10\.0\.0\.1/);
 });
 
 test('an unknown or empty hash falls back to the dashboard', () => {

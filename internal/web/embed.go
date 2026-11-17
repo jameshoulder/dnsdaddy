@@ -27,14 +27,21 @@ func dashboardAsset(sub fs.FS, name string) ([]byte, error) {
 	if err != nil || name != "app.js" {
 		return data, err
 	}
-	extra, err := fs.ReadFile(sub, "setup.js")
-	if errors.Is(err, fs.ErrNotExist) {
+	parts := [][]byte{data}
+	for _, name := range []string{"setup.js", "map.js"} {
+		extra, err := fs.ReadFile(sub, name)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, extra)
+	}
+	if len(parts) == 1 {
 		return data, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return bytes.Join([][]byte{data, extra}, []byte("\n;\n")), nil
+	return bytes.Join(parts, []byte("\n;\n")), nil
 }
 
 // dashboardIndex ties the HTML to the exact script/style bytes in this binary.

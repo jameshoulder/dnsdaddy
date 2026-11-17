@@ -118,6 +118,14 @@ Native aggregate counters and per-client rate-limit state still support DNS
 availability; rate-limit state is bounded runtime memory, not a query-history
 table or a source of client-address metric labels.
 
+The [DNS Security Map](dns-security-map.md) (`GET /api/v1/network-map`) reads
+the same retained query rows under the same controls. When query logging or
+client-IP logging is off, the map returns `available: false` and does not
+reconstruct omitted client identity from findings, diagnostics or model state.
+Map aggregation is authenticated, `Cache-Control: no-store`, never placed in
+public health/login responses, and never persisted as a second browsing-history
+copy. Opening the page does not trigger external lookups.
+
 ## What is written to disk
 
 The main database is `dnsdaddy.db` in the data directory. SQLite WAL files can
