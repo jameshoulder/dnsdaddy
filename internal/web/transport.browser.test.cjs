@@ -24,14 +24,17 @@ const { chromium } = require(process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES ? pa
 const checks = [];
 const check = (name, value) => { assert.ok(value, name); checks.push(name); };
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-// The production app.js response includes the setup extension in one script
-// task. Reconstruct its bytes from both source files rather than trusting the
+// The production app.js response includes setup.js then map.js in one script
+// task (see dashboardAsset). Reconstruct those bytes rather than trusting the
 // response under test or dropping the served-asset integrity assertion.
 async function sourceAsset(name) {
   const data = await fs.readFile(path.join(__dirname, 'static', name));
   if (name !== 'app.js') return data;
-  const setup = await fs.readFile(path.join(__dirname, 'static', 'setup.js'));
-  return Buffer.concat([data, Buffer.from('\n;\n'), setup]);
+  const parts = [data];
+  for (const extra of ['setup.js', 'map.js']) {
+    parts.push(Buffer.from('\n;\n'), await fs.readFile(path.join(__dirname, 'static', extra)));
+  }
+  return Buffer.concat(parts);
 }
 async function port() {
   const server = net.createServer();

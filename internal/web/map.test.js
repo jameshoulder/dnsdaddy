@@ -232,6 +232,8 @@ test('domain details use the query-log domain filter, not exactDomain', async ()
     signal: new AbortController().signal,
   });
   assert.match(markup, /#\/queries\?[^"]*domain=evil\.example/);
+  assert.match(markup, /Query log \(name contains\)/);
+  assert.match(markup, /substring filter/);
   assert.doesNotMatch(markup, /exactDomain=/);
 });
 

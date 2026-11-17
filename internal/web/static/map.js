@@ -202,8 +202,9 @@ function detailsPanel(sel, data) {
       </dl>
       <div class="row note-tight">
         <a class="btn btn-observe btn-sm" href="${investigateHash({ domain: d.domain, hours: data.requestedHours || '1' })}">Investigate domain</a>
-        <a class="btn btn-ghost btn-sm" href="${typeof queryHash === 'function' ? queryHash({ domain: d.domain, hours: data.requestedHours || '1' }) : `#/queries?domain=${encodeURIComponent(d.domain)}&hours=${encodeURIComponent(data.requestedHours || '1')}`}">Query log</a>
+        <a class="btn btn-ghost btn-sm" href="${typeof queryHash === 'function' ? queryHash({ domain: d.domain, hours: data.requestedHours || '1' }) : `#/queries?domain=${encodeURIComponent(d.domain)}&hours=${encodeURIComponent(data.requestedHours || '1')}`}">Query log (name contains)</a>
       </div>
+      <p class="muted small">Investigate is an exact-name match. The query-log link uses the existing substring filter and may include other names that contain this string.</p>
       ${mapRaw(findings.length ? mapHtml`<h3 class="map-subhead">Related findings <span class="badge">experimental</span></h3>
         <ul class="map-finding-list">${mapRaw(findings.map((f) => mapHtml`<li><a href="#/detections?id=${encodeURIComponent(f.id)}">${f.title}</a>
           <span class="muted small">${f.severity}</span></li>`).join(''))}</ul>` : '')}

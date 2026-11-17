@@ -204,8 +204,8 @@ func TestBuildNetworkMapKeepsNewestClientNameAndBlockCategory(t *testing.T) {
 		CIDRs: ptr([]string{"10.0.0.0/24"}),
 	})
 	if err := st.InsertQueryBatch(ctx, []QueryEvent{
-		{Time: now.Add(-10 * time.Minute), ClientIP: "10.0.0.7", ClientName: "old-name", NetworkID: lan.ID, Domain: "a.example", QType: "A", Action: ActionBlocked, Category: "ads"},
-		{Time: now.Add(-2 * time.Minute), ClientIP: "10.0.0.7", ClientName: "new-name", NetworkID: lan.ID, Domain: "b.example", QType: "A", Action: ActionBlocked, Category: "malware"},
+		{Time: now.Add(-10 * time.Minute), ClientIP: "10.0.0.7", ClientName: "old-name", NetworkID: lan.ID, Domain: "shared.example", QType: "A", Action: ActionBlocked, Category: "ads"},
+		{Time: now.Add(-2 * time.Minute), ClientIP: "10.0.0.7", ClientName: "new-name", NetworkID: lan.ID, Domain: "shared.example", QType: "A", Action: ActionBlocked, Category: "malware"},
 		{Time: now.Add(-time.Minute), ClientIP: "10.0.0.7", ClientName: "new-name", NetworkID: lan.ID, Domain: "c.example", QType: "A", Action: ActionAllowed},
 	}, true); err != nil {
 		t.Fatal(err)
@@ -227,22 +227,14 @@ func TestBuildNetworkMapKeepsNewestClientNameAndBlockCategory(t *testing.T) {
 	if client == nil || client.ClientName != "new-name" {
 		t.Fatalf("client name = %+v, want newest new-name", client)
 	}
-	var domain *NetworkMapDomain
+	var shared *NetworkMapDomain
 	for i := range g.Domains {
-		if g.Domains[i].Domain == "a.example" || g.Domains[i].Domain == "b.example" {
-			if g.Domains[i].Domain == "b.example" {
-				domain = &g.Domains[i]
-			}
+		if g.Domains[i].Domain == "shared.example" {
+			shared = &g.Domains[i]
 		}
 	}
-	if domain == nil || domain.Category != "malware" {
-		t.Fatalf("newest blocked domain category = %+v, want malware", domain)
-	}
-	// Domain a.example only saw ads; that remains its category.
-	for _, d := range g.Domains {
-		if d.Domain == "a.example" && d.Category != "ads" {
-			t.Fatalf("a.example category = %q, want ads", d.Category)
-		}
+	if shared == nil || shared.Category != "malware" {
+		t.Fatalf("shared.example category = %+v, want newest malware (not older ads)", shared)
 	}
 }
 
