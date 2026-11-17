@@ -366,8 +366,8 @@ function renderTable(data) {
       <td class="num">${num(e.blocked)}</td>
       <td class="num">${num(e.errors)}</td>
       <td>
-        ${mapRaw(client ? mapHtml`<a class="btn btn-ghost btn-sm" href="${investigateHash({ client: client.clientIp })}">Client</a>` : '')}
-        ${mapRaw(domain ? mapHtml`<a class="btn btn-ghost btn-sm" href="${investigateHash({ domain: domain.domain })}">Domain</a>` : '')}
+        ${mapRaw(client ? mapHtml`<a class="btn btn-ghost btn-sm" href="${investigateHash({ client: client.clientIp, hours: data.requestedHours || '1' })}">Client</a>` : '')}
+        ${mapRaw(domain ? mapHtml`<a class="btn btn-ghost btn-sm" href="${investigateHash({ domain: domain.domain, hours: data.requestedHours || '1' })}">Domain</a>` : '')}
       </td>
     </tr>`;
   }).join('');
@@ -419,8 +419,18 @@ const securityMapPage = {
         ${mapRaw(unavailableState('DNS Security Map unavailable', err.message || 'The request failed.'))}`;
     }
 
-    // Preserve requested hours for investigate links.
-    if (!data.requestedHours && filters.window !== '15m') data.requestedHours = Number(filters.window) || 1;
+    // Preserve requested hours for investigate links. Investigate supports 1/24/168
+    // only; a 15-minute map widens to 1 hour and says so.
+    if (!data.requestedHours) {
+      if (filters.window === '15m') {
+        data.requestedHours = 1;
+        data.limitations = (data.limitations || []).concat([
+          'Investigate links use the nearest supported 1-hour window; this map itself remains a 15-minute view.',
+        ]);
+      } else {
+        data.requestedHours = Number(filters.window) || 1;
+      }
+    }
 
     if (!data.available) {
       return mapHtml`${mapRaw(mapToolbar(filters, networksPayload.networks || [], data))}
@@ -509,29 +519,48 @@ const securityMapPage = {
     });
 
     if (canvas) {
+      const toSvgPoint = (ev) => {
+        if (typeof canvas.createSVGPoint === 'function' && canvas.getScreenCTM) {
+          const ctm = canvas.getScreenCTM();
+          if (ctm) {
+            const pt = canvas.createSVGPoint();
+            pt.x = ev.clientX;
+            pt.y = ev.clientY;
+            return pt.matrixTransform(ctm.inverse());
+          }
+        }
+        const rect = canvas.getBoundingClientRect();
+        const vb = (canvas.viewBox && canvas.viewBox.baseVal) || { width: rect.width, height: rect.height };
+        return {
+          x: ((ev.clientX - rect.left) / Math.max(rect.width, 1)) * (vb.width || rect.width),
+          y: ((ev.clientY - rect.top) / Math.max(rect.height, 1)) * (vb.height || rect.height),
+        };
+      };
       let dragging = false;
       let lastX = 0;
       let lastY = 0;
       canvas.addEventListener('pointerdown', (ev) => {
         if (ev.target.closest && ev.target.closest('.map-node')) return;
         dragging = true;
-        lastX = ev.clientX;
-        lastY = ev.clientY;
+        const start = toSvgPoint(ev);
+        lastX = start.x;
+        lastY = start.y;
         if (canvas.setPointerCapture) canvas.setPointerCapture(ev.pointerId);
       });
       canvas.addEventListener('pointermove', (ev) => {
         if (!dragging) return;
-        state.x += ev.clientX - lastX;
-        state.y += ev.clientY - lastY;
-        lastX = ev.clientX;
-        lastY = ev.clientY;
+        const p = toSvgPoint(ev);
+        state.x += p.x - lastX;
+        state.y += p.y - lastY;
+        lastX = p.x;
+        lastY = p.y;
         applyTransform();
       });
       canvas.addEventListener('pointerup', () => { dragging = false; });
       canvas.addEventListener('wheel', (ev) => {
         ev.preventDefault();
-        const rect = canvas.getBoundingClientRect();
-        zoom(ev.deltaY < 0 ? 1.1 : 1 / 1.1, ev.clientX - rect.left, ev.clientY - rect.top);
+        const p = toSvgPoint(ev);
+        zoom(ev.deltaY < 0 ? 1.1 : 1 / 1.1, p.x, p.y);
       }, { passive: false });
     }
 

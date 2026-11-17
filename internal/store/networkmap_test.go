@@ -148,6 +148,53 @@ func TestBuildNetworkMapAggregatesWithoutFindingJoinInflation(t *testing.T) {
 	}
 }
 
+func TestBuildNetworkMapDoesNotGuessAmbiguousFindingNetwork(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	a := mustCreateNetwork(t, st, NetworkInput{
+		Name: ptr("A"), Enabled: ptr(true), AllowResolver: ptr(true),
+		CIDRs: ptr([]string{"10.0.0.0/24"}),
+	})
+	b := mustCreateNetwork(t, st, NetworkInput{
+		Name: ptr("B"), Enabled: ptr(true), AllowResolver: ptr(true),
+		CIDRs: ptr([]string{"10.2.0.0/24"}),
+	})
+	if err := st.InsertQueryBatch(ctx, []QueryEvent{
+		{Time: now.Add(-time.Minute), ClientIP: "10.0.0.50", NetworkID: a.ID, Domain: "one.example", QType: "A", Action: ActionAllowed},
+		{Time: now.Add(-time.Minute), ClientIP: "10.0.0.50", NetworkID: b.ID, Domain: "two.example", QType: "A", Action: ActionAllowed},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	networks, _ := st.ListNetworks(ctx)
+	g, err := st.BuildNetworkMap(ctx, NetworkMapFilter{
+		Since: now.Add(-time.Hour), Until: now.Add(time.Minute),
+		MaxClients: 10, MaxDomains: 10, MaxEdges: 20, MaxSourceRows: 100,
+	}, networks, []Finding{{
+		ID: "f-ambiguous", Time: now, EventType: "dns.tunnel.suspected", Severity: "low",
+		ClientIP: "10.0.0.50", Domain: "one.example", Detector: "fixture",
+		Title: "Ambiguous", Summary: "no network id", Detail: `{}`,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *NetworkMapFinding
+	for i := range g.Findings {
+		if g.Findings[i].ID == "f-ambiguous" {
+			found = &g.Findings[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("finding missing")
+	}
+	if found.ClientID != "" || found.NetworkID != "" {
+		t.Fatalf("ambiguous finding must not invent a network context: %+v", found)
+	}
+	if found.DomainID == "" {
+		t.Fatal("domain link should still attach")
+	}
+}
+
 func TestBuildNetworkMapKeepsNewestClientNameAndBlockCategory(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

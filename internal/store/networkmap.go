@@ -569,13 +569,23 @@ func (s *Store) BuildNetworkMap(ctx context.Context, f NetworkMapFilter, network
 		if fnd.ClientIP != "" {
 			nid := fnd.NetworkID
 			if nid == "" {
-				// Prefer matching any kept client with this IP (first).
+				// Link by IP alone only when exactly one displayed client
+				// context matches; otherwise leave unset rather than guess.
+				var matchID, matchNet string
+				matches := 0
 				for ck, id := range clientByIPNet {
-					if ck.ip == fnd.ClientIP {
-						mf.ClientID = id
-						mf.NetworkID = ck.net
+					if ck.ip != fnd.ClientIP {
+						continue
+					}
+					matches++
+					matchID, matchNet = id, ck.net
+					if matches > 1 {
 						break
 					}
+				}
+				if matches == 1 {
+					mf.ClientID = matchID
+					mf.NetworkID = matchNet
 				}
 			} else if id, ok := clientByIPNet[clientKey{nid, fnd.ClientIP}]; ok {
 				mf.ClientID = id

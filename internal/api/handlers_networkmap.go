@@ -206,21 +206,28 @@ func (a *API) handleNetworkMap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Findings are loaded separately (no join that multiplies query counts).
-	findings, _, err := a.Store.ListFindings(ctx, store.FindingFilter{
+	findings, findingsCursor, err := a.Store.ListFindings(ctx, store.FindingFilter{
 		Since: since, Until: until, Limit: 200,
 	})
 	if err != nil {
 		// Findings are optional enrichment; map still works without them.
 		findings = nil
 		out.Limitations = append(out.Limitations, "Findings could not be loaded for this window; query relationships are still shown.")
-	} else if networkID != "" {
-		filtered := findings[:0]
-		for _, f := range findings {
-			if f.NetworkID == networkID || (f.NetworkID == "" && (f.ClientIP != "" || f.Domain != "")) {
-				filtered = append(filtered, f)
-			}
+	} else {
+		// Note incomplete findings before any network filter, so a filtered
+		// first page cannot hide that more findings exist.
+		if findingsCursor != "" {
+			out.Limitations = append(out.Limitations, "Related findings are truncated to the first 200 in this window; more exist. Open Findings for the full list.")
 		}
-		findings = filtered
+		if networkID != "" {
+			filtered := findings[:0]
+			for _, f := range findings {
+				if f.NetworkID == networkID || (f.NetworkID == "" && (f.ClientIP != "" || f.Domain != "")) {
+					filtered = append(filtered, f)
+				}
+			}
+			findings = filtered
+		}
 	}
 
 	filter := store.NetworkMapFilter{
