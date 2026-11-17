@@ -148,6 +148,57 @@ func TestBuildNetworkMapAggregatesWithoutFindingJoinInflation(t *testing.T) {
 	}
 }
 
+func TestBuildNetworkMapKeepsNewestClientNameAndBlockCategory(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	lan := mustCreateNetwork(t, st, NetworkInput{
+		Name: ptr("LAN"), Enabled: ptr(true), AllowResolver: ptr(true),
+		CIDRs: ptr([]string{"10.0.0.0/24"}),
+	})
+	if err := st.InsertQueryBatch(ctx, []QueryEvent{
+		{Time: now.Add(-10 * time.Minute), ClientIP: "10.0.0.7", ClientName: "old-name", NetworkID: lan.ID, Domain: "a.example", QType: "A", Action: ActionBlocked, Category: "ads"},
+		{Time: now.Add(-2 * time.Minute), ClientIP: "10.0.0.7", ClientName: "new-name", NetworkID: lan.ID, Domain: "b.example", QType: "A", Action: ActionBlocked, Category: "malware"},
+		{Time: now.Add(-time.Minute), ClientIP: "10.0.0.7", ClientName: "new-name", NetworkID: lan.ID, Domain: "c.example", QType: "A", Action: ActionAllowed},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	networks, _ := st.ListNetworks(ctx)
+	g, err := st.BuildNetworkMap(ctx, NetworkMapFilter{
+		Since: now.Add(-time.Hour), Until: now.Add(time.Minute),
+		MaxClients: 10, MaxDomains: 10, MaxEdges: 20, MaxSourceRows: 100,
+	}, networks, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var client *NetworkMapClient
+	for i := range g.Clients {
+		if g.Clients[i].ClientIP == "10.0.0.7" {
+			client = &g.Clients[i]
+		}
+	}
+	if client == nil || client.ClientName != "new-name" {
+		t.Fatalf("client name = %+v, want newest new-name", client)
+	}
+	var domain *NetworkMapDomain
+	for i := range g.Domains {
+		if g.Domains[i].Domain == "a.example" || g.Domains[i].Domain == "b.example" {
+			if g.Domains[i].Domain == "b.example" {
+				domain = &g.Domains[i]
+			}
+		}
+	}
+	if domain == nil || domain.Category != "malware" {
+		t.Fatalf("newest blocked domain category = %+v, want malware", domain)
+	}
+	// Domain a.example only saw ads; that remains its category.
+	for _, d := range g.Domains {
+		if d.Domain == "a.example" && d.Category != "ads" {
+			t.Fatalf("a.example category = %q, want ads", d.Category)
+		}
+	}
+}
+
 func TestBuildNetworkMapRespectsNetworkAndActionFilters(t *testing.T) {
 	st := newTestStore(t)
 	now, lan, _ := seedNetworkMap(t, st)

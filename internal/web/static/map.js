@@ -176,7 +176,7 @@ function detailsPanel(sel, data) {
       </dl>
       <div class="row note-tight">
         <a class="btn btn-observe btn-sm" href="${investigateHash({ client: c.clientIp, hours: data.requestedHours || '1' })}">Investigate client</a>
-        <a class="btn btn-ghost btn-sm" href="#/queries?clientIp=${encodeURIComponent(c.clientIp)}&hours=${encodeURIComponent(data.requestedHours || '1')}">Query log</a>
+        <a class="btn btn-ghost btn-sm" href="${typeof queryHash === 'function' ? queryHash({ clientIp: c.clientIp, hours: data.requestedHours || '1' }) : `#/queries?clientIp=${encodeURIComponent(c.clientIp)}&hours=${encodeURIComponent(data.requestedHours || '1')}`}">Query log</a>
       </div>
       ${mapRaw(findings.length ? mapHtml`<h3 class="map-subhead">Related findings <span class="badge">experimental</span></h3>
         <ul class="map-finding-list">${mapRaw(findings.map((f) => mapHtml`<li><a href="#/detections?id=${encodeURIComponent(f.id)}">${f.title}</a>
@@ -202,7 +202,7 @@ function detailsPanel(sel, data) {
       </dl>
       <div class="row note-tight">
         <a class="btn btn-observe btn-sm" href="${investigateHash({ domain: d.domain, hours: data.requestedHours || '1' })}">Investigate domain</a>
-        <a class="btn btn-ghost btn-sm" href="#/queries?exactDomain=${encodeURIComponent(d.domain)}&hours=${encodeURIComponent(data.requestedHours || '1')}">Query log</a>
+        <a class="btn btn-ghost btn-sm" href="${typeof queryHash === 'function' ? queryHash({ domain: d.domain, hours: data.requestedHours || '1' }) : `#/queries?domain=${encodeURIComponent(d.domain)}&hours=${encodeURIComponent(data.requestedHours || '1')}`}">Query log</a>
       </div>
       ${mapRaw(findings.length ? mapHtml`<h3 class="map-subhead">Related findings <span class="badge">experimental</span></h3>
         <ul class="map-finding-list">${mapRaw(findings.map((f) => mapHtml`<li><a href="#/detections?id=${encodeURIComponent(f.id)}">${f.title}</a>

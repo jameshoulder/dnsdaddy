@@ -305,6 +305,9 @@ func (s *Store) BuildNetworkMap(ctx context.Context, f NetworkMapFilter, network
 	var processed int64
 	var unattributed int64
 
+	// Source rows are scanned newest-first (ORDER BY ts DESC). Keep the first
+	// nonempty metadata value so client names and block categories reflect the
+	// most recent evidence in the window, not the oldest overwrite.
 	addOutcome := func(a *aggOutcomes, action string, ts int64, category string) {
 		a.queries++
 		switch action {
@@ -312,7 +315,7 @@ func (s *Store) BuildNetworkMap(ctx context.Context, f NetworkMapFilter, network
 			a.allowed++
 		case ActionBlocked:
 			a.blocked++
-			if category != "" {
+			if category != "" && a.category == "" {
 				a.category = category
 			}
 		case ActionError:
@@ -358,7 +361,7 @@ func (s *Store) BuildNetworkMap(ctx context.Context, f NetworkMapFilter, network
 			ca = &clientAgg{domains: map[string]struct{}{}}
 			clients[ck] = ca
 		}
-		if cname != "" {
+		if cname != "" && ca.name == "" {
 			ca.name = cname
 		}
 		addOutcome(&ca.aggOutcomes, action, ts, category)

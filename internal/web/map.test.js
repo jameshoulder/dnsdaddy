@@ -215,6 +215,26 @@ test('table view exposes investigation links without graph gestures', async () =
   assert.doesNotMatch(markup, /map-canvas/);
 });
 
+test('domain details use the query-log domain filter, not exactDomain', async () => {
+  const pages = loadMapDashboard(async (raw) => {
+    const url = new URL(raw, 'https://fixture.invalid');
+    if (url.pathname === '/api/v1/networks') {
+      return new Response(JSON.stringify({ networks: fixtureGraph.networks }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify(fixtureGraph), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  }, '#/security-map?hours=1&focus=domain:evil.example');
+  const markup = await pages['security-map'].render({
+    hash: '#/security-map?hours=1&focus=domain:evil.example',
+    signal: new AbortController().signal,
+  });
+  assert.match(markup, /#\/queries\?[^"]*domain=evil\.example/);
+  assert.doesNotMatch(markup, /exactDomain=/);
+});
+
 test('clearSensitive resets viewport state used across refreshes', () => {
   securityMapPage._viewport = { x: 40, y: 12, k: 1.5 };
   securityMapPage.clearSensitive();
