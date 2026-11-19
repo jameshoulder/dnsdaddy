@@ -280,6 +280,9 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/investigate/domain/{domain}/enrich", a.handleInvestigateEnrich)
 	api.HandleFunc("GET /api/v1/investigate/client/{ip}", a.handleInvestigateClient)
 
+	// DNS Security Map: read-only aggregation of retained query relationships.
+	api.HandleFunc("GET /api/v1/network-map", a.handleNetworkMap)
+
 	api.HandleFunc("GET /api/v1/clients", a.handleListClients)
 	api.HandleFunc("PUT /api/v1/clients", a.handleSetClient)
 

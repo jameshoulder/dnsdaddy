@@ -14,8 +14,33 @@ func TestSetupExtensionIsIncludedInTheServedScript(t *testing.T) {
 	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte("function mountGuide")) || !bytes.Contains(w.Body.Bytes(), []byte("async function boot")) {
 		t.Fatal("the production dashboard did not contain both bootstrap and guided setup")
 	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("security-map")) || !bytes.Contains(w.Body.Bytes(), []byte("DNS Security Map")) {
+		t.Fatal("the production dashboard did not include the DNS Security Map extension")
+	}
 	if w.Header().Get("ETag") == "" {
 		t.Fatal("assembled script has no cache identity")
+	}
+}
+
+func TestMapExtensionChangesInvalidateTheDashboardFingerprint(t *testing.T) {
+	fixture := fstest.MapFS{
+		"index.html": {Data: []byte(`<script src="/app.js"></script><link href="/app.css">`)},
+		"app.js":     {Data: []byte("main();")},
+		"app.css":    {Data: []byte("body{}")},
+		"setup.js":   {Data: []byte("setup();")},
+		"map.js":     {Data: []byte("mapFirst();")},
+	}
+	before, first, err := dashboardIndex(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture["map.js"].Data = []byte("mapSecond();")
+	after, second, err := dashboardIndex(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(before, after) || first["app.js"] == second["app.js"] {
+		t.Fatal("map changes reused stale dashboard bytes")
 	}
 }
 

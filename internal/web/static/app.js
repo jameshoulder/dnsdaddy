@@ -6419,6 +6419,9 @@ async function boot() {
   });
 
   $('#logout-btn').addEventListener('click', async () => {
+    if (pages['security-map'] && typeof pages['security-map'].clearSensitive === 'function') {
+      pages['security-map'].clearSensitive();
+    }
     try {
       await apiSend('POST', '/auth/logout');
     } catch (err) {

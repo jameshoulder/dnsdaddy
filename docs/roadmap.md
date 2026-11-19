@@ -83,6 +83,11 @@ journal entry cannot be saved.
 
 ### Phase 4 — investigation depth
 
+**Available (Phase 1 map):** the [DNS Security Map](dns-security-map.md) visualises
+retained network→client→domain query relationships without topology discovery.
+Optional UniFi / pfSense / SNMPv3 collectors remain deferred; see
+[dns-security-map-topology.md](dns-security-map-topology.md).
+
 Plan a registered-domain first-seen index independent of query-log retention,
 one row per domain, explicitly local observation rather than threat intelligence.
 Extend existing decision records rather than replace them, including versioned

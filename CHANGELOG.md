@@ -24,6 +24,12 @@ should be swapping a binary, not restoring a backup.
 
 ### Added
 
+- **DNS Security Map** (Phase 1): Workspace page and authenticated
+  `GET /api/v1/network-map` aggregating retained query evidence into
+  network → observed client → exact queried-name relationships, with
+  filters, details, table alternative and Investigate links. Read-only;
+  no topology discovery, external enrichment or DNS-path work. See
+  [docs/dns-security-map.md](docs/dns-security-map.md).
 - **Verified Trust** adversarial slice: named
   [adversarial laboratory](docs/daddybound/adversarial-lab.md),
   `make test-adversarial` (hostile DNS, CD/AD, encrypted no-downgrade),

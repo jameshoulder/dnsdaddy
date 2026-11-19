@@ -2017,6 +2017,112 @@ paths:
         '400':
           description: The path does not name an IP address
       operationId: getInvestigateClientByIp
+  /api/v1/network-map:
+    get:
+      tags:
+      - Investigation
+      summary: DNS Security Map graph from retained query evidence
+      description: |
+        Authenticated read-only aggregation of retained `query_log` rows into
+        configured network containers, observed client contexts and exact
+        queried names for a bounded time window.
+
+        Client→domain edges mean DNS queries recorded in the selected window.
+        They are not visits, downloads, connections or exfiltration. Client
+        addresses are observed source IPs, not authenticated device identities.
+        Network membership uses the `networkId` recorded on each query row.
+
+        Findings are listed separately and never create queried edges. Opening
+        this endpoint does not resolve DNS, contact external services, mutate
+        policy, refresh feeds or change trust anchors.
+
+        When query logging or client-IP logging is disabled, the response remains
+        authenticated JSON with `available: false` and an explicit reason. Client
+        nodes are not reconstructed from other tables. Disabling logging stops
+        new collection; it does not by itself erase previously retained rows.
+
+        Counts describe the processed/displayed subset when source-row or
+        display caps truncate the graph. Cache-Control is always `no-store`.
+      parameters:
+      - name: hours
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 168
+        description: Retained-data window in hours. Ignored when window=15m.
+      - name: window
+        in: query
+        schema:
+          type: string
+          enum: ['15m']
+        description: Short preset; when set to 15m, uses the last 15 minutes.
+      - name: networkId
+        in: query
+        schema:
+          type: string
+        description: Limit to query rows whose recorded networkId matches.
+      - name: action
+        in: query
+        schema:
+          type: string
+          enum: [allowed, blocked, error]
+        description: Outcome filter using existing query-log semantics.
+      - name: client
+        in: query
+        schema:
+          type: string
+        description: Focus on one client IP address.
+      - name: domain
+        in: query
+        schema:
+          type: string
+        description: Focus on one exact normalised DNS name.
+      - name: search
+        in: query
+        schema:
+          type: string
+          maxLength: 200
+        description: Substring filter over the displayed client/domain dataset.
+      - name: maxClients
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+      - name: maxDomains
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+      - name: maxEdges
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+      - name: maxSourceRows
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+      responses:
+        '200':
+          description: Graph snapshot or privacy-limited empty payload
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkMapResponse'
+        '400':
+          description: Invalid time window or filter
+        '401':
+          description: Authentication required
+        '504':
+          description: Aggregation timed out; narrow the window or focus
+      operationId: getNetworkMap
   /api/v1/clients:
     get:
       tags:
@@ -6495,7 +6601,192 @@ components:
           type: integer
           description: Events discarded/rejected during shutdown, also included in dropped. Logged when
             the bounded drain cannot retain all accepted records.
+    NetworkMapResponse:
+      type: object
+      required:
+      - schemaVersion
+      - generatedAt
+      - effectiveFrom
+      - effectiveTo
+      - queryLog
+      - clientAttribution
+      - retentionDays
+      - available
+      - limitations
+      - edgeMeaning
+      - networks
+      - clients
+      - domains
+      - edges
+      - findings
+      - totals
+      - limits
+      properties:
+        schemaVersion:
+          type: integer
+        generatedAt:
+          type: string
+          format: date-time
+        requestedHours:
+          type: integer
+        effectiveFrom:
+          type: string
+          format: date-time
+        effectiveTo:
+          type: string
+          format: date-time
+        queryLog:
+          type: boolean
+        clientAttribution:
+          type: boolean
+        retentionDays:
+          type: integer
+        available:
+          type: boolean
+        unavailable:
+          type: string
+        limitations:
+          type: array
+          items:
+            type: string
+        edgeMeaning:
+          type: string
+        networks:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetworkMapNetwork'
+        clients:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetworkMapClient'
+        domains:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetworkMapDomain'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetworkMapEdge'
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetworkMapFinding'
+        totals:
+          $ref: '#/components/schemas/NetworkMapTotals'
+        limits:
+          $ref: '#/components/schemas/NetworkMapLimits'
+        resolverStatus:
+          type: object
+          properties:
+            note:
+              type: string
+            mode:
+              type: string
+          description: Current runtime context only; not historical transport proof.
+    NetworkMapNetwork:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        enabled: {type: boolean}
+        cidrs:
+          type: array
+          items: {type: string}
+        clientsInWindow: {type: integer}
+        queries: {type: integer, format: int64}
+        blocked: {type: integer, format: int64}
+        errors: {type: integer, format: int64}
+    NetworkMapClient:
+      type: object
+      properties:
+        id: {type: string}
+        clientIp: {type: string}
+        clientName: {type: string}
+        nameSource: {type: string}
+        networkId: {type: string}
+        queries: {type: integer, format: int64}
+        allowed: {type: integer, format: int64}
+        blocked: {type: integer, format: int64}
+        errors: {type: integer, format: int64}
+        distinctDomains: {type: integer, format: int64}
+        firstSeen: {type: string, format: date-time}
+        lastSeen: {type: string, format: date-time}
+        attributionSource: {type: string}
+    NetworkMapDomain:
+      type: object
+      properties:
+        id: {type: string}
+        domain: {type: string}
+        queries: {type: integer, format: int64}
+        allowed: {type: integer, format: int64}
+        blocked: {type: integer, format: int64}
+        errors: {type: integer, format: int64}
+        distinctClients: {type: integer, format: int64}
+        category: {type: string}
+        firstSeen: {type: string, format: date-time}
+        lastSeen: {type: string, format: date-time}
+    NetworkMapEdge:
+      type: object
+      properties:
+        id: {type: string}
+        type: {type: string, enum: [queried]}
+        clientId: {type: string}
+        domainId: {type: string}
+        queries: {type: integer, format: int64}
+        allowed: {type: integer, format: int64}
+        blocked: {type: integer, format: int64}
+        errors: {type: integer, format: int64}
+        qtypes:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        firstSeen: {type: string, format: date-time}
+        lastSeen: {type: string, format: date-time}
+        meaning: {type: string}
+    NetworkMapFinding:
+      type: object
+      properties:
+        id: {type: string}
+        time: {type: string, format: date-time}
+        eventType: {type: string}
+        severity: {type: string}
+        title: {type: string}
+        clientIp: {type: string}
+        networkId: {type: string}
+        domain: {type: string}
+        clientId: {type: string}
+        domainId: {type: string}
+        maturity: {type: string}
+    NetworkMapTotals:
+      type: object
+      properties:
+        sourceRowsProcessed: {type: integer, format: int64}
+        clients: {type: integer}
+        domains: {type: integer}
+        edges: {type: integer}
+        findingsLinked: {type: integer}
+        queries: {type: integer, format: int64}
+        allowed: {type: integer, format: int64}
+        blocked: {type: integer, format: int64}
+        errors: {type: integer, format: int64}
+        unattributedQueries: {type: integer, format: int64}
+    NetworkMapLimits:
+      type: object
+      properties:
+        maxClients: {type: integer}
+        maxDomains: {type: integer}
+        maxEdges: {type: integer}
+        maxSourceRows: {type: integer}
+        truncatedClients: {type: boolean}
+        truncatedDomains: {type: boolean}
+        truncatedEdges: {type: boolean}
+        truncatedSource: {type: boolean}
+        omittedClients: {type: integer}
+        omittedDomains: {type: integer}
+        omittedEdges: {type: integer}
     InvestigationWindow:
+
       type: object
       properties:
         hours:
