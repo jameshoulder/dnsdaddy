@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -97,15 +98,21 @@ func (s *Store) beginImmediate(ctx context.Context) (*sql.Conn, error) {
 
 func commitConn(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
-		conn.Close()
+		rollbackConn(conn)
 		return err
 	}
 	return conn.Close()
 }
 
-func rollbackConn(ctx context.Context, conn *sql.Conn) {
-	_, _ = conn.ExecContext(ctx, "ROLLBACK")
+// rollbackConn ends an IMMEDIATE write transaction without inheriting the
+// caller's cancellation: a canceled request must not leave the write lock on a
+// pooled connection. A failed cleanup discards the connection.
+func rollbackConn(conn *sql.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
 	_ = conn.Close()
 }
 
@@ -120,7 +127,7 @@ func (s *Store) BeginConfigChange(ctx context.Context, actor, action, target str
 	}
 	defer func() {
 		if conn != nil {
-			rollbackConn(ctx, conn)
+			rollbackConn(conn)
 		}
 	}()
 	prev, err := journalTipHashConn(ctx, conn)
@@ -185,7 +192,7 @@ func (s *Store) CompleteConfigChange(ctx context.Context, id int64, status strin
 	}
 	defer func() {
 		if conn != nil {
-			rollbackConn(ctx, conn)
+			rollbackConn(conn)
 		}
 	}()
 	var e ConfigChangeEvent

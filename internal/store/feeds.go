@@ -224,10 +224,13 @@ var ErrStaleFeedRefresh = errors.New("feed URL changed during refresh; evidence 
 
 func (s *Store) RecordFeedRefresh(ctx context.Context, id string, r FeedResult) error {
 	now := unixMilli(time.Now())
-	source := truncate(r.SourceURL, 2048)
-	if source == "" {
+	if strings.TrimSpace(r.SourceURL) == "" {
 		return fmt.Errorf("feed refresh requires source URL evidence")
 	}
+	// Predicate matches the full configured URL; storage truncates only the
+	// evidence column so long URLs cannot look "stale" after a successful fetch.
+	match := r.SourceURL
+	source := truncate(r.SourceURL, 2048)
 	apply := func(query string, args ...any) error {
 		res, err := s.db.ExecContext(ctx, query, args...)
 		if err != nil {
@@ -250,14 +253,14 @@ func (s *Store) RecordFeedRefresh(ctx context.Context, id string, r FeedResult) 
 			UPDATE feeds SET last_refreshed_at = ?, last_success_at = ?, last_status = ?,
 			                 last_error = '', refresh_source_url = ?, updated_at = ?
 			 WHERE id = ? AND url = ?`,
-			now, now, r.Status, source, now, id, source)
+			now, now, r.Status, source, now, id, match)
 	}
 	if r.Error != "" && !r.Committed {
 		return apply(`
 			UPDATE feeds SET last_refreshed_at = ?, last_status = ?, last_error = ?,
 			                 refresh_source_url = ?, updated_at = ?
 			 WHERE id = ? AND url = ?`,
-			now, r.Status, truncate(r.Error, 500), source, now, id, source)
+			now, r.Status, truncate(r.Error, 500), source, now, id, match)
 	}
 	// Committed warnings without a new body (for example a 304 whose count
 	// write failed) must not demand fresh checksum evidence or erase last-good.
@@ -273,7 +276,7 @@ func (s *Store) RecordFeedRefresh(ctx context.Context, id string, r FeedResult) 
 			                 last_status = ?, last_error = ?, refresh_source_url = ?,
 			                 updated_at = ?
 			 WHERE id = ? AND url = ?`,
-			r.DomainCount, now, now, status, errText, source, now, id, source)
+			r.DomainCount, now, now, status, errText, source, now, id, match)
 	}
 	if r.ContentSHA256 == "" {
 		return fmt.Errorf("committed feed refresh requires content checksum evidence")
@@ -293,7 +296,7 @@ func (s *Store) RecordFeedRefresh(ctx context.Context, id string, r FeedResult) 
 		 WHERE id = ? AND url = ?`,
 		r.DomainCount, now, now, status, errText, r.ETag,
 		r.ContentSHA256, r.ContentSHA256, r.ParserAccepted, r.ParserRejected,
-		source, now, id, source)
+		source, now, id, match)
 }
 
 // ClearFeedETag drops the conditional-request token so the next refresh must
