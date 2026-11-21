@@ -5085,6 +5085,28 @@ components:
           - encrypted_forwarded
           description: 'Recorded provenance: native or encrypted_forwarded for locally checked Live answers,
             upstream for forwarding assertions, empty for unknown legacy rows.'
+        answer:
+          $ref: '#/components/schemas/AnswerTelemetry'
+          description: Opt-in A/AAAA answer summary when log.answer_telemetry is enabled and the answer
+            contained address records. Omitted or empty when the setting is off, the row predates the
+            feature, or the answer had no A/AAAA records. Never includes TXT contents or raw addresses.
+    AnswerTelemetry:
+      type: object
+      description: Privacy-preserving summary of A/AAAA answers beside a query-log row.
+      properties:
+        recorded:
+          type: boolean
+          description: True when address telemetry was collected for this row.
+        addrCount:
+          type: integer
+          description: Number of unique A/AAAA addresses in the answer.
+        addrSha256:
+          type: string
+          description: Hex SHA-256 of the sorted unique address strings.
+        minTtl:
+          type: integer
+          format: int64
+          description: Lowest TTL among those address records, in seconds.
     Category:
       type: object
       properties:
