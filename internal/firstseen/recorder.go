@@ -84,6 +84,10 @@ func (r *Recorder) Record(e Event) {
 }
 
 // Run drains the queue until ctx is cancelled, then drains remaining items.
+//
+// Cancellation only initiates shutdown. Accepted observations use a separate
+// bounded write context so a cancelled run context cannot discard work already
+// taken from the queue.
 func (r *Recorder) Run(ctx context.Context) {
 	defer close(r.done)
 	for {
@@ -92,7 +96,7 @@ func (r *Recorder) Run(ctx context.Context) {
 			r.shutdown()
 			return
 		case e := <-r.ch:
-			r.write(ctx, e)
+			r.write(e)
 		}
 	}
 }
@@ -105,7 +109,7 @@ func (r *Recorder) shutdown() {
 	for {
 		select {
 		case e := <-r.ch:
-			r.write(context.Background(), e)
+			r.write(e)
 		case <-deadline:
 			return
 		default:
@@ -122,13 +126,13 @@ func (r *Recorder) Wait() {
 	<-r.done
 }
 
-func (r *Recorder) write(ctx context.Context, e Event) {
+func (r *Recorder) write(e Event) {
 	parent, ok := detect.RegisteredDomain(e.Domain)
 	if !ok {
 		r.skipped.Add(1)
 		return
 	}
-	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := r.store.ObserveRegisteredDomain(wctx, parent, e.Time); err != nil {
 		r.failed.Add(1)

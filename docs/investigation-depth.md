@@ -16,11 +16,13 @@ opt-in answer telemetry.
 | `queryCount` | How many questions contributed |
 
 The index is **independent of query-log retention length**. Pruning the log
-does not erase “have we ever seen this registered domain”. It still honours
-the same admission decision as the query log: when `log.query_log` is false or
-the matched policy disables `logQueries`, no observation is written. No client
-addresses are stored. Names without a registered domain (single labels, public
-suffixes, private namespaces such as `.local`) are skipped.
+does not erase recorded first-seen history. It still honours the same admission
+decision as the query log: when `log.query_log` is false or the matched policy
+disables `logQueries`, no observation is written. The recorder can also drop
+observations when its queue is full, so a missing row is not proof that a
+domain was never resolved — only that no observation was successfully recorded.
+No client addresses are stored. Names without a registered domain (single
+labels, public suffixes, private namespaces such as `.local`) are skipped.
 
 Surfaced on domain Investigate as `firstSeen`, and controlled by
 `log.first_seen_index` (default on).

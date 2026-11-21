@@ -7141,6 +7141,8 @@ components:
               type: string
         window:
           $ref: '#/components/schemas/InvestigationWindow'
+        firstSeen:
+          $ref: '#/components/schemas/InvestigationFirstSeen'
         activity:
           $ref: '#/components/schemas/InvestigationActivity'
         decisions:
@@ -7153,6 +7155,29 @@ components:
           $ref: '#/components/schemas/InvestigationFindings'
         observations:
           $ref: '#/components/schemas/InvestigationObservations'
+    InvestigationFirstSeen:
+      type: object
+      description: Retention-independent registered-domain observation for Investigate.
+      properties:
+        available:
+          type: boolean
+          description: False when the index is disabled or unreadable.
+        registeredDomain:
+          type: string
+          description: eTLD+1 when the name has a registered domain.
+        firstSeen:
+          type: string
+          format: date-time
+          description: Absent when no observation has been successfully recorded.
+        lastSeen:
+          type: string
+          format: date-time
+        queryCount:
+          type: integer
+          format: int64
+        note:
+          type: string
+          description: Limits of the index, including unavailable and not-yet-observed states.
     ClientInvestigation:
       type: object
       properties:
@@ -7168,6 +7193,10 @@ components:
               type: object
               description: The network and policy the current configuration maps this address to. Current,
                 not historical.
+            identity:
+              $ref: '#/components/schemas/Client'
+              description: Confidence-labelled device identity. confidence unknown with an empty name is
+                a valid result when no operator name exists.
         window:
           $ref: '#/components/schemas/InvestigationWindow'
         activity:

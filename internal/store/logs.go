@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -367,6 +368,10 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 		}
 		e.Time = fromUnixMilli(ts)
 		e.Cached = cached == 1
+		if minTTL < 0 || minTTL > math.MaxUint32 {
+			return nil, 0, fmt.Errorf("query_log answer_min_ttl %d out of uint32 range", minTTL)
+		}
+		// #nosec G115 -- range-checked against MaxUint32 immediately above.
 		e.Answer.MinTTL = uint32(minTTL)
 		if e.Answer.AddrCount > 0 || e.Answer.AddrSHA256 != "" {
 			e.Answer.Recorded = true
