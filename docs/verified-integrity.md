@@ -59,12 +59,15 @@ comparison never enter the durable seal.
    backup metadata. `tipHash` is the last **completed** seal (pending rows are
    excluded from the exported tip).
 2. After restore or incident review, re-run verify with that checkpoint.
+   Always require `ok: true` (full chain verification) before trusting any
+   checkpoint result — a deleted earlier sealed row can still leave
+   `checkpointFound: true` / `tipMatches: true` with `ok: false`.
    `checkpointFound: true` only proves history through that seal is still
    present; it does **not** prove later history is complete. For an exact
    backup restore, use the checkpoint saved with that backup and require
-   `tipMatches: true`. An older ancestor checkpoint protects only through
-   that point — later valid writes leave `checkpointFound: true` with
-   `tipMatches: false`.
+   `ok: true` and `tipMatches: true`. An older ancestor checkpoint protects
+   only through that point — later valid writes leave `checkpointFound: true`
+   with `tipMatches: false` (still require `ok: true`).
 3. Treat feed checksum mismatch / not-loaded as “do not claim this feed is
    protecting anyone” — the same rule as the existing `loaded` field.
 
