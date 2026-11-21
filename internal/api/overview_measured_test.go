@@ -131,7 +131,7 @@ func TestMeasuredReportsFailingAndUnloadedFeeds(t *testing.T) {
 	if err := h.store.RecordFeedRefresh(ctx, enabled[0].ID, store.FeedResult{Status: "error", Error: "HTTP 503"}); err != nil {
 		t.Fatalf("RecordFeedRefresh: %v", err)
 	}
-	if err := h.store.RecordFeedRefresh(ctx, enabled[1].ID, store.FeedResult{Status: "ok", DomainCount: 12}); err != nil {
+	if err := h.store.RecordFeedRefresh(ctx, enabled[1].ID, store.FeedResult{Status: "ok", DomainCount: 12, ContentSHA256: "feedok12", SourceURL: "https://example.org/ok.txt"}); err != nil {
 		t.Fatalf("RecordFeedRefresh: %v", err)
 	}
 

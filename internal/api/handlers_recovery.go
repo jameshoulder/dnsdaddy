@@ -46,7 +46,22 @@ func (a *API) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, map[string]any{"events": events, "hasMore": more, "nextBeforeId": next,
 		"scope":       "authenticated management configuration writes since this feature was installed; direct SQL/YAML edits and earlier changes are not reconstructed",
-		"consistency": "durable intent followed by actual persisted changes; pending/incomplete entries need investigation"})
+		"consistency": "durable intent followed by actual persisted changes; sealed rows carry a local hash chain (prevHash/entryHash). Pending/incomplete entries need investigation. See GET /api/v1/config/history/verify."})
+}
+
+func (a *API) handleConfigHistoryVerify(w http.ResponseWriter, r *http.Request) {
+	expected := strings.TrimSpace(r.URL.Query().Get("expectedTip"))
+	if len(expected) > 128 {
+		writeError(w, 400, "expectedTip is too long")
+		return
+	}
+	result, err := a.Store.VerifyConfigHistory(r.Context(), expected)
+	if err != nil {
+		writeError(w, 500, "configuration history could not be verified")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, result)
 }
 
 func (a *API) handleRecoveryStatus(w http.ResponseWriter, r *http.Request) {

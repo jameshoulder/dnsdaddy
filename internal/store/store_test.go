@@ -674,7 +674,7 @@ func TestRecordFeedRefreshTracksLastSuccessSeparately(t *testing.T) {
 		t.Error("a brand new feed claims a successful download")
 	}
 
-	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "ok", DomainCount: 10, ETag: `"v1"`}); err != nil {
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "ok", DomainCount: 10, ETag: `"v1"`, ContentSHA256: "aa", SourceURL: "https://example.org/list.txt", ParserAccepted: 10}); err != nil {
 		t.Fatalf("record success: %v", err)
 	}
 	good, err := st.GetFeed(ctx, f.ID)

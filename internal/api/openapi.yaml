@@ -3794,7 +3794,7 @@ paths:
       description: Newest durable management changes first. Covers authenticated management writes since
         installation of this feature; excludes provider tests, exports and backup passphrases. Direct
         SQL/YAML changes and historical changes are not reconstructed. Read pending/incomplete events
-        as an unresolved outcome.
+        as an unresolved outcome. Sealed rows include prevHash/entryHash for the local journal chain.
       responses:
         '200':
           description: Current result
@@ -3837,6 +3837,48 @@ paths:
           format: int64
         description: Return events older than this event ID.
       operationId: getConfigHistory
+  /api/v1/config/history/verify:
+    get:
+      tags:
+      - Administration
+      summary: Verify the local configuration journal hash chain
+      description: Walks sealed management-history rows and reports broken links or rehashed payloads.
+        Optional expectedTip compares the current tip digest to an operator-held checkpoint. This does
+        not protect against wholesale database replacement without that external checkpoint. See
+        docs/verified-integrity.md.
+      parameters:
+      - name: expectedTip
+        in: query
+        schema:
+          type: string
+          maxLength: 128
+        description: Optional trusted tip hash checkpoint (64 hex characters for SHA-256).
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigHistoryVerify'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: Invalid expectedTip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: History could not be verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      operationId: verifyConfigHistory
   /api/v1/recovery/status:
     get:
       tags:
@@ -5399,6 +5441,23 @@ components:
           type: string
         lastError:
           type: string
+        contentSha256:
+          type: string
+          description: Hex SHA-256 of the last committed cache body. Empty until a successful commit
+            records local evidence. Not a publisher signature.
+        lastGoodSha256:
+          type: string
+          description: Hex SHA-256 of the last known-good cache body. Retained across failed refreshes
+            so operators can name the intelligence still enforceable.
+        parserAccepted:
+          type: integer
+          description: Usable domains/indicators accepted from the last successful parse.
+        parserRejected:
+          type: integer
+          description: Junk lines or unusable indicators skipped from the last successful parse.
+        refreshSourceUrl:
+          type: string
+          description: URL or file:// target of the last refresh attempt.
         createdAt:
           type: string
           format: date-time
@@ -7472,6 +7531,12 @@ components:
           - incomplete
         target:
           type: string
+        prevHash:
+          type: string
+          description: SHA-256 hex digest of the previous sealed journal entry, or the genesis sentinel.
+        entryHash:
+          type: string
+          description: SHA-256 hex digest of this sealed journal entry.
       required:
       - id
       - at
@@ -7483,7 +7548,46 @@ components:
       - changes
       type: object
       description: Durable management intent plus the actual persisted outcome. Pending/incomplete requires
-        investigation; history is not reconstructed for older changes or direct YAML/SQL edits.
+        investigation; history is not reconstructed for older changes or direct YAML/SQL edits. Sealed
+        rows carry a local hash chain; see /api/v1/config/history/verify.
+    ConfigHistoryVerify:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        checked:
+          type: integer
+        sealed:
+          type: integer
+        legacyUnsealed:
+          type: integer
+        tipHash:
+          type: string
+        expectedTip:
+          type: string
+        tipMatches:
+          type:
+          - boolean
+          - 'null'
+        breaks:
+          type: array
+          items:
+            type: string
+        detectionScope:
+          type: string
+        trustedCheckpoint:
+          type: string
+      required:
+      - ok
+      - checked
+      - sealed
+      - legacyUnsealed
+      - tipHash
+      - breaks
+      - detectionScope
+      - trustedCheckpoint
+      description: Local journal verification result. A matching tip checkpoint is required to detect
+        wholesale database replacement.
     DNSSECAnchorKey:
       properties:
         addHoldDownUntil:

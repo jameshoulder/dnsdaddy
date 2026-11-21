@@ -30,6 +30,7 @@ and compliance roadmap without claiming certification or an independent audit.
 | [architecture.md](architecture.md) | How a query flows through the system, and why it is built this way |
 | [dns-security-map.md](dns-security-map.md) | DNS Security Map: retained network→client→domain investigation view |
 | [dns-security-map-topology.md](dns-security-map-topology.md) | Future optional topology sources (not implemented in Phase 1) |
+| [verified-integrity.md](verified-integrity.md) | Feed checksum evidence and hash-chained management journal (Phase 3) |
 | [siem.md](siem.md) | Getting findings into Wazuh, Elastic, Splunk or Sentinel |
 
 ## Security

@@ -122,6 +122,9 @@ func describeLoadError(err error) string {
 	if errors.Is(err, os.ErrNotExist) {
 		return "its cached copy is missing"
 	}
+	if errors.Is(err, errChecksumMismatch) {
+		return "its cached copy no longer matches last-good checksum evidence"
+	}
 	// Parser and filesystem errors may contain publisher-controlled field names,
 	// response text, or paths. Only emit application-controlled classifications.
 	if errors.Is(err, os.ErrPermission) {
@@ -424,17 +427,21 @@ func (m *Manager) cachePath(feedID string) string {
 // download fetches one feed into its cache file, using the stored ETag to skip
 // unchanged content.
 func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
+	withSource := func(r store.FeedResult) store.FeedResult {
+		r.SourceURL = f.URL
+		return r
+	}
 	if strings.HasPrefix(f.URL, "file://") {
-		return m.copyLocal(ctx, f)
+		return withSource(m.copyLocal(ctx, f))
 	}
 
 	if err := m.policy.ValidateURL(f.URL); err != nil {
-		return store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)}
+		return withSource(store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)})
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
 	if err != nil {
-		return store.FeedResult{Status: "error", Error: "feed content or cache operation failed"}
+		return withSource(store.FeedResult{Status: "error", Error: "feed content or cache operation failed"})
 	}
 	req.Header.Set("User-Agent", "dnsdaddy/"+version.String()+" (+https://github.com/jameshoulder/dnsdaddy)")
 	if Format(f.Format) == FormatObservatory {
@@ -448,21 +455,21 @@ func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)}
+		return withSource(store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)})
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotModified {
-		return store.FeedResult{Status: "not-modified", ETag: f.ETag}
+		return withSource(store.FeedResult{Status: "not-modified", ETag: f.ETag})
 	}
 	if resp.StatusCode != http.StatusOK {
-		return store.FeedResult{
+		return withSource(store.FeedResult{
 			Status: "error",
 			Error:  fmt.Sprintf("feed server returned HTTP %d", resp.StatusCode),
-		}
+		})
 	}
 
-	return m.snapshot(ctx, f, resp.Body, nil, resp.Header.Get("ETag"))
+	return withSource(m.snapshot(ctx, f, resp.Body, nil, resp.Header.Get("ETag")))
 }
 
 // rebuild publishes only a complete bounded candidate. Ordinary corrupt feeds

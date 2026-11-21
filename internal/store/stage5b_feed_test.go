@@ -18,7 +18,7 @@ func TestStage5BCommittedWarningPreservesSuccessEvidence(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = s.RecordFeedRefresh(ctx, f.ID, FeedResult{Committed: true, Status: "committed-warning", Error: "feed cache/index committed; durability unconfirmed", ETag: "synthetic-v1", DomainCount: 3}); e != nil {
+	if e = s.RecordFeedRefresh(ctx, f.ID, FeedResult{Committed: true, Status: "committed-warning", Error: "feed cache/index committed; durability unconfirmed", ETag: "synthetic-v1", DomainCount: 3, ContentSHA256: "abc123", SourceURL: "https://example.org/list.txt", ParserAccepted: 3}); e != nil {
 		t.Fatal(e)
 	}
 	after, e := s.GetFeed(ctx, f.ID)

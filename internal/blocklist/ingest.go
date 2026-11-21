@@ -3,6 +3,8 @@ package blocklist
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -284,14 +286,18 @@ func (m *Manager) snapshot(ctx context.Context, f store.Feed, src io.Reader, loc
 			recordLimit = left
 		}
 	}
-	_, records, err := m.parseFile(ctx, tmp, f, budget, recordLimit)
+	_, stats, err := m.parseFile(ctx, tmp, f, budget, recordLimit)
 	if local != nil {
 		left := m.limits.LocalRecords - m.localRecords
-		if records > left {
-			records = left
+		if stats.Records > left {
+			stats.Records = left
 		}
-		m.localRecords += records
+		m.localRecords += stats.Records
 	}
+	if err != nil {
+		return failedImport(err)
+	}
+	digest, err := hashOpenFile(tmp)
 	if err != nil {
 		return failedImport(err)
 	}
@@ -335,11 +341,54 @@ func (m *Manager) snapshot(ctx context.Context, f store.Feed, src io.Reader, loc
 		e = d.Sync()
 		d.Close()
 	}
-	if e != nil {
-		return store.FeedResult{Committed: true, Status: "committed-warning", DomainCount: ix.CountsByFeed()[f.ID], ETag: etag, Error: "feed cache/index committed; directory durability could not be confirmed"}
+	result := store.FeedResult{
+		Committed:      true,
+		Status:         "ok",
+		ETag:           etag,
+		DomainCount:    ix.CountsByFeed()[f.ID],
+		SourceURL:      f.URL,
+		ContentSHA256:  digest,
+		ParserAccepted: stats.Accepted,
+		ParserRejected: stats.Rejected,
 	}
-	return store.FeedResult{Committed: true, Status: "ok", ETag: etag, DomainCount: ix.CountsByFeed()[f.ID]}
+	if e != nil {
+		result.Status = "committed-warning"
+		result.Error = "feed cache/index committed; directory durability could not be confirmed"
+	}
+	return result
 }
+
+func hashOpenFile(f *os.File) (string, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// verifyCachedChecksum compares an on-disk cache body to last-good evidence.
+// Missing evidence skips the check (upgrades before the first sealed commit).
+func verifyCachedChecksum(f *os.File, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	got, err := hashOpenFile(f)
+	if err != nil {
+		return err
+	}
+	if got != expected {
+		return errChecksumMismatch
+	}
+	return nil
+}
+
+var errChecksumMismatch = errors.New("cached feed checksum does not match last good evidence")
 
 type importBudget struct {
 	used   int64
@@ -394,18 +443,24 @@ func (m *Manager) addBounded(b *Builder, budget *importBudget, d string, e Entry
 	b.Add(d, e)
 	return nil
 }
-func (m *Manager) parseFile(ctx context.Context, file *os.File, f store.Feed, budget *importBudget, recordLimit int) (*Builder, int, error) {
+type parseStats struct {
+	Records  int
+	Accepted int
+	Rejected int
+}
+
+func (m *Manager) parseFile(ctx context.Context, file *os.File, f store.Feed, budget *importBudget, recordLimit int) (*Builder, parseStats, error) {
+	var stats parseStats
 	if _, err := regular(file, m.maxBytes); err != nil {
-		return nil, 0, err
+		return nil, stats, err
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, 0, err
+		return nil, stats, err
 	}
 	if budget.used >= budget.limit {
-		return nil, 0, feedimport.Limit("index memory accounting")
+		return nil, stats, feedimport.Limit("index memory accounting")
 	}
 	b := NewBuilder(1024)
-	records := 0
 	r := &countedReader{ctx: ctx, r: file, left: m.maxBytes}
 	emit := func(d string, cat string) error {
 		return m.addBounded(b, budget, d, Entry{Category: cat, FeedID: f.ID, FeedName: f.Name})
@@ -427,9 +482,11 @@ func (m *Manager) parseFile(ctx context.Context, file *os.File, f store.Feed, bu
 			}
 			return nil
 		})
-		records = res.Accepted + res.Skipped
+		stats.Accepted = res.Accepted
+		stats.Rejected = res.Skipped
+		stats.Records = res.Accepted + res.Skipped
 		if err != nil {
-			return nil, records, err
+			return nil, stats, err
 		}
 		if res.Skipped > 0 {
 			m.log.Debug("observatory feed had unusable indicators", "feed", f.ID, "accepted", res.Accepted, "skipped", res.Skipped)
@@ -438,16 +495,18 @@ func (m *Manager) parseFile(ctx context.Context, file *os.File, f store.Feed, bu
 	} else {
 		// Count every processed line, including comments, junk and duplicates.
 		lr := &lineCounter{r: r}
-		_, _, err := parseLines(ctx, lr, Format(f.Format), recordLimit, func(d string) error { return emit(d, f.Category) })
-		records = lr.lines
+		accepted, rejected, err := parseLines(ctx, lr, Format(f.Format), recordLimit, func(d string) error { return emit(d, f.Category) })
+		stats.Accepted = accepted
+		stats.Rejected = rejected
+		stats.Records = lr.lines
 		if lr.last {
-			records++
+			stats.Records++
 		}
 		if err != nil {
-			return nil, records, err
+			return nil, stats, err
 		}
 	}
-	return b, records, ctx.Err()
+	return b, stats, ctx.Err()
 }
 
 type countedReader struct {
@@ -517,9 +576,25 @@ func (m *Manager) candidate(ctx context.Context, override string, staged *os.Fil
 		}
 		beforeUsed, beforeClaims := budget.used, budget.claims
 		var part *Builder
-		records := 0
+		var stats parseStats
 		if err == nil {
-			part, records, err = m.parseFile(ctx, file, f, budget, m.limits.Records)
+			// Staged downloads are freshly validated; existing cache files are
+			// checked against last-good evidence when that evidence exists.
+			if own && f.ID != override {
+				if err = verifyCachedChecksum(file, f.LastGoodSHA256); err != nil {
+					file.Close()
+					budget.used, budget.claims = beforeUsed, beforeClaims
+					if errors.Is(err, errChecksumMismatch) {
+						loads[f.ID] = FeedLoad{Error: "its cached copy no longer matches last-good checksum evidence"}
+						m.log.Warn("skipping feed with checksum mismatch", "feed", f.ID)
+						continue
+					}
+					loads[f.ID] = FeedLoad{Error: describeLoadError(err)}
+					m.log.Warn("skipping feed with no usable cached copy", "feed", f.ID, "error", describeLoadError(err))
+					continue
+				}
+			}
+			part, stats, err = m.parseFile(ctx, file, f, budget, m.limits.Records)
 			if own {
 				file.Close()
 			}
@@ -537,10 +612,10 @@ func (m *Manager) candidate(ctx context.Context, override string, staged *os.Fil
 			continue
 		}
 		if strings.HasPrefix(f.URL, "file:") {
-			if records > m.limits.LocalRecords-localRecords {
+			if stats.Records > m.limits.LocalRecords-localRecords {
 				return nil, nil, feedimport.Limit("aggregate local records")
 			}
-			localRecords += records
+			localRecords += stats.Records
 		}
 		// The staging contribution and global candidate coexist. Charge both until
 		// the merge completes, then release the staging accounting reservation.

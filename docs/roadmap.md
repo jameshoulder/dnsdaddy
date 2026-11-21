@@ -69,17 +69,20 @@ release bundle already exists. Separate tested, scanned and independently review
 evidence; never add an audit badge on the strength of automation. Extend bounded
 fuzz coverage for DNS wire messages, DoH bodies, feed lines and backup archives.
 
-### Phase 3 — feed supply chain and management history
+### Phase 3 — feed supply chain and management history (implemented)
 
-Extend feed refresh evidence with source URL, checksum, parser rejects and
-last-success age, preserving the last good snapshot when verification fails.
-Existing cached-feed fallback is not a claim of signed publisher provenance.
+Feed refresh evidence now records source URL, content SHA-256, last-good
+SHA-256, parser accept/reject counts and last-success age. Failed verification
+retains the previous cache and last-good digest. Rebuilds skip checksum
+mismatches. This remains local evidence, not signed publisher provenance.
+See [verified-integrity.md](verified-integrity.md).
 
-Extend the existing durable intent/outcome management journal with a hash chain
-and redacted values. Specify what tampering can be detected and which trusted
-checkpoint is needed; do not describe a local hash chain as protection against
-a compromised host. Preserve refusal of a management write when its initial
-journal entry cannot be saved.
+The management journal seals redacted intent/outcome rows with a local hash
+chain (`prevHash` / `entryHash`) and exposes
+`GET /api/v1/config/history/verify` with optional tip checkpoints. Detection
+limits are documented there: without an external tip, wholesale database
+replacement is not claimed. Management writes are still refused when the
+initial journal entry cannot be saved.
 
 ### Phase 4 — investigation depth
 

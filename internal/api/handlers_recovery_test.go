@@ -16,9 +16,43 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/store"
 )
 
+func TestConfigHistoryVerifyReportsSealedChain(t *testing.T) {
+	h := newHarness(t)
+	resp, _ := h.do("GET", "/api/v1/config/history/verify", nil)
+	if resp.StatusCode != 401 {
+		t.Fatalf("anonymous verify status %d", resp.StatusCode)
+	}
+	h.login()
+	resp, raw := h.do("POST", "/api/v1/tokens", map[string]string{"name": "verify-chain"})
+	if resp.StatusCode != 201 {
+		t.Fatalf("create token: %d %s", resp.StatusCode, raw)
+	}
+	resp, raw = h.do("GET", "/api/v1/config/history/verify", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("verify: %d %s", resp.StatusCode, raw)
+	}
+	var got store.JournalVerifyResult
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.OK || got.Sealed < 1 || got.TipHash == "" {
+		t.Fatalf("expected sealed chain: %+v", got)
+	}
+	resp, raw = h.do("GET", "/api/v1/config/history/verify?expectedTip="+got.TipHash, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("verify tip: %d %s", resp.StatusCode, raw)
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.OK || got.TipMatches == nil || !*got.TipMatches {
+		t.Fatalf("expected tip match: %+v", got)
+	}
+}
+
 func TestRecoveryRoutesRequireAuthenticationAndSameOrigin(t *testing.T) {
 	h := newHarness(t)
-	for _, p := range []string{"/api/v1/config/history", "/api/v1/recovery/status"} {
+	for _, p := range []string{"/api/v1/config/history", "/api/v1/config/history/verify", "/api/v1/recovery/status"} {
 		resp, _ := h.do("GET", p, nil)
 		if resp.StatusCode != 401 {
 			t.Errorf("%s status %d", p, resp.StatusCode)
