@@ -396,7 +396,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		outcome = activityBlocked
 		event.Action = store.ActionBlocked
 		event.ElapsedMS = int(time.Since(start).Milliseconds())
-		h.noteFirstSeen(event)
+		h.noteFirstSeen(event, persist)
 		h.qlog.Record(event, persist)
 		// After the query log and before the response is built: the recorder's
 		// send is non-blocking and drops rather than waiting, so this cannot
@@ -445,7 +445,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		// SERVFAIL, but from a client's seat the two are indistinguishable and
 		// the resolution-failure detector wants to see both.
 		event.DNSSEC = store.DNSSECServfail
-		h.noteFirstSeen(event)
+		h.noteFirstSeen(event, persist)
 		h.qlog.Record(event, persist)
 		h.observe(event, meta, dns.RcodeServerFailure, 0, false, false, persist)
 		h.log.Debug("resolution failed", "domain", normalized, "error", err)
@@ -467,7 +467,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		if nativeResult == nil {
 			event.Reason = "Upstream returned " + dns.RcodeToString[res.Rcode]
 		}
-		h.noteFirstSeen(event)
+		h.noteFirstSeen(event, persist)
 		h.qlog.Record(event, persist)
 		if nativeResult != nil && persist {
 			h.recordDecision(event, match, policy.Decision{Reason: event.Reason, Basis: &policy.Basis{
@@ -481,7 +481,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 			h.blocked.Add(1)
 			outcome = activityBlocked
 			event.Action, event.Category, event.Source, event.Reason = store.ActionBlocked, "dns_rebinding", "Local response protection", reason
-			h.noteFirstSeen(event)
+			h.noteFirstSeen(event, persist)
 			h.qlog.Record(event, persist)
 			if persist {
 				h.recordDecision(event, match, policy.Decision{Blocked: true, Reason: reason, BlockMode: store.BlockRefused, Basis: &policy.Basis{
@@ -502,7 +502,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		event.DNSSECObservationID = h.observeDNSSEC(event, q, persist)
 	}
 	h.attachAnswerTelemetry(&event, res.Msg)
-	h.noteFirstSeen(event)
+	h.noteFirstSeen(event, persist)
 	h.qlog.Record(event, persist)
 	if persist {
 		h.recordDecision(event, match, decision)
@@ -796,8 +796,13 @@ func (h *Handler) recordDecision(event store.QueryEvent, match policy.Match, d p
 }
 
 // noteFirstSeen records the registered domain off the resolution path.
-func (h *Handler) noteFirstSeen(event store.QueryEvent) {
-	if h.firstSeen == nil || event.Domain == "" {
+//
+// persist is the same admission decision as the query log: instance-wide
+// query logging and the per-policy LogQueries flag. The index outlives log
+// retention, but it must not retain domain history when the operator asked
+// for no per-query retention at all.
+func (h *Handler) noteFirstSeen(event store.QueryEvent, persist bool) {
+	if !persist || h.firstSeen == nil || event.Domain == "" {
 		return
 	}
 	h.firstSeen.Record(firstseen.Event{Time: event.Time, Domain: event.Domain})

@@ -20,7 +20,9 @@ type DomainFirstSeen struct {
 
 // ObserveRegisteredDomain upserts the first-seen index for one eTLD+1.
 //
-// first_seen is preserved on conflict; last_seen and query_count advance.
+// On conflict, first_seen takes the earlier of the stored and incoming times
+// (out-of-order completion after a slow resolve must not leave a later
+// first_seen), last_seen takes the later, and query_count advances.
 func (s *Store) ObserveRegisteredDomain(ctx context.Context, registeredDomain string, at time.Time) error {
 	registeredDomain = strings.ToLower(strings.TrimSpace(registeredDomain))
 	if registeredDomain == "" {
@@ -34,6 +36,7 @@ func (s *Store) ObserveRegisteredDomain(ctx context.Context, registeredDomain st
 		INSERT INTO domain_first_seen (registered_domain, first_seen, last_seen, query_count)
 		VALUES (?, ?, ?, 1)
 		ON CONFLICT(registered_domain) DO UPDATE SET
+			first_seen = MIN(domain_first_seen.first_seen, excluded.first_seen),
 			last_seen = MAX(domain_first_seen.last_seen, excluded.last_seen),
 			query_count = domain_first_seen.query_count + 1`,
 		registeredDomain, ms, ms)

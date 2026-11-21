@@ -33,6 +33,31 @@ func TestObserveRegisteredDomainPreservesFirstSeen(t *testing.T) {
 	}
 }
 
+func TestObserveRegisteredDomainKeepsEarlierFirstSeenOutOfOrder(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	earlier := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	later := earlier.Add(time.Minute)
+
+	// Later observation arrives first (fast resolve finishing before a slow one).
+	if err := st.ObserveRegisteredDomain(ctx, "example.com", later); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ObserveRegisteredDomain(ctx, "example.com", earlier); err != nil {
+		t.Fatal(err)
+	}
+	row, err := st.LookupRegisteredDomain(ctx, "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !row.FirstSeen.Equal(earlier) {
+		t.Fatalf("firstSeen = %v, want earlier %v", row.FirstSeen, earlier)
+	}
+	if !row.LastSeen.Equal(later) {
+		t.Fatalf("lastSeen = %v, want later %v", row.LastSeen, later)
+	}
+}
+
 func TestClientIdentityUnknownWithoutRow(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

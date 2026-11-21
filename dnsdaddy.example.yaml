@@ -285,9 +285,10 @@ log:
   # asked weeks after the fact.
   decision_retention_days: 30
 
-  # One row per registered domain (eTLD+1) with first/last seen, independent of
-  # query-log retention. No client addresses. Local observation only — not
-  # WHOIS registration age. Set false to disable.
+  # One row per registered domain (eTLD+1) with first/last seen. Survives
+  # query-log pruning, but only writes when the query log would also keep a
+  # row. No client addresses. Local observation only — not WHOIS registration
+  # age. Set false to disable.
   first_seen_index: true
 
   # Opt-in: store a SHA-256 of sorted unique A/AAAA addresses, address count and
