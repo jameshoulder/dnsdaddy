@@ -119,7 +119,7 @@ type Feed struct {
 	ParserRejected int `json:"parserRejected"`
 	// RefreshSourceURL is the URL (or file:// path) that the last refresh
 	// attempt targeted. Cleared when the configured URL changes.
-	RefreshSourceURL string `json:"refreshSourceUrl"`
+	RefreshSourceURL string    `json:"refreshSourceUrl"`
 	CreatedAt        time.Time `json:"createdAt"`
 	UpdatedAt        time.Time `json:"updatedAt"`
 }

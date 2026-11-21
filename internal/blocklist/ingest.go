@@ -456,6 +456,7 @@ func (m *Manager) addBounded(b *Builder, budget *importBudget, d string, e Entry
 	b.Add(d, e)
 	return nil
 }
+
 type parseStats struct {
 	Records  int
 	Accepted int

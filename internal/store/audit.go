@@ -287,16 +287,16 @@ func hashJournalEntry(e ConfigChangeEvent) (string, error) {
 
 // JournalVerifyResult reports what a local hash-chain walk can and cannot say.
 type JournalVerifyResult struct {
-	OK              bool     `json:"ok"`
-	Checked         int      `json:"checked"`
-	Sealed          int      `json:"sealed"`
-	LegacyUnsealed  int      `json:"legacyUnsealed"`
-	TipHash         string   `json:"tipHash"`
-	ExpectedTip     string   `json:"expectedTip,omitempty"`
-	TipMatches      *bool    `json:"tipMatches,omitempty"`
-	Breaks          []string `json:"breaks"`
-	DetectionScope  string   `json:"detectionScope"`
-	TrustedCheckpoint string `json:"trustedCheckpoint"`
+	OK                bool     `json:"ok"`
+	Checked           int      `json:"checked"`
+	Sealed            int      `json:"sealed"`
+	LegacyUnsealed    int      `json:"legacyUnsealed"`
+	TipHash           string   `json:"tipHash"`
+	ExpectedTip       string   `json:"expectedTip,omitempty"`
+	TipMatches        *bool    `json:"tipMatches,omitempty"`
+	Breaks            []string `json:"breaks"`
+	DetectionScope    string   `json:"detectionScope"`
+	TrustedCheckpoint string   `json:"trustedCheckpoint"`
 }
 
 // VerifyConfigHistory walks sealed journal rows oldest-first. expectedTip, when
