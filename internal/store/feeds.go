@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -16,7 +17,8 @@ func (s *Store) ListFeeds(ctx context.Context) ([]Feed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, url, category, format, enabled, builtin, domain_count,
 		       last_refreshed_at, last_success_at, last_status, last_error, etag,
-		       created_at, updated_at
+		       content_sha256, last_good_sha256, parser_accepted, parser_rejected,
+		       refresh_source_url, created_at, updated_at
 		FROM feeds ORDER BY category, name`)
 	if err != nil {
 		return nil, err
@@ -33,7 +35,8 @@ func (s *Store) ListFeeds(ctx context.Context) ([]Feed, error) {
 		)
 		if err := rows.Scan(&f.ID, &f.Name, &f.URL, &f.Category, &f.Format, &enabled, &builtin,
 			&f.DomainCount, &refreshed, &succeed, &f.LastStatus, &f.LastError, &f.ETag,
-			&created, &updated); err != nil {
+			&f.ContentSHA256, &f.LastGoodSHA256, &f.ParserAccepted, &f.ParserRejected,
+			&f.RefreshSourceURL, &created, &updated); err != nil {
 			return nil, err
 		}
 		f.Enabled = enabled == 1
@@ -136,11 +139,16 @@ func (s *Store) UpdateFeed(ctx context.Context, id string, in FeedInput) (Feed, 
 		if err := s.validateFeedURL(*in.URL); err != nil {
 			return Feed{}, err
 		}
-		// A changed source invalidates the cached ETag and counts, and with
-		// them the claim that this feed has ever downloaded successfully —
-		// that was the old URL's record, not this one's.
-		sets = append(sets, "url = ?", "etag = ''", "domain_count = 0", "last_success_at = NULL")
-		args = append(args, strings.TrimSpace(*in.URL))
+		newURL := strings.TrimSpace(*in.URL)
+		if newURL != existing.URL {
+			// A changed source invalidates the cached ETag, counts and local
+			// supply-chain evidence — that was the old URL's record, not this one's.
+			sets = append(sets,
+				"url = ?", "etag = ''", "domain_count = 0", "last_success_at = NULL",
+				"content_sha256 = ''", "last_good_sha256 = ''", "parser_accepted = 0",
+				"parser_rejected = 0", "refresh_source_url = ''")
+			args = append(args, newURL)
+		}
 	}
 	if in.Category != nil {
 		if !catalog.ValidCategory(*in.Category) {
@@ -193,39 +201,108 @@ type FeedResult struct {
 	Status      string
 	Error       string
 	ETag        string
+	// SourceURL is the URL or file:// target of this attempt.
+	SourceURL string
+	// ContentSHA256 is the hex digest of committed cache bytes. Required for a
+	// successful commit that replaces cache content; optional on not-modified.
+	ContentSHA256 string
+	// ParserAccepted / ParserRejected are counts from the parse that produced
+	// the committed body. Zero on not-modified leaves previous evidence intact.
+	ParserAccepted int
+	ParserRejected int
 }
 
 // RecordFeedRefresh stores the outcome of a feed fetch.
 //
 // last_refreshed_at moves on every attempt, successful or not; last_success_at
 // moves only when the attempt produced content this server can enforce. On a
-// failure the second one is deliberately left alone, because it is what says
-// how old the intelligence still in the index is.
+// failure the second one — and last_good_sha256 — are deliberately left alone,
+// because they name how old the intelligence still in the index is.
+// ErrStaleFeedRefresh means the configured URL changed while a refresh was
+// in flight; evidence must not be attributed to the new source.
+var ErrStaleFeedRefresh = errors.New("feed URL changed during refresh; evidence not recorded")
+
 func (s *Store) RecordFeedRefresh(ctx context.Context, id string, r FeedResult) error {
 	now := unixMilli(time.Now())
-	// A "not modified" response leaves the previous domain count intact. It is
-	// still a success: the provider confirmed the cached copy is current.
+	if strings.TrimSpace(r.SourceURL) == "" {
+		return fmt.Errorf("feed refresh requires source URL evidence")
+	}
+	// Predicate matches the full configured URL; storage truncates only the
+	// evidence column so long URLs cannot look "stale" after a successful fetch.
+	match := r.SourceURL
+	source := truncate(r.SourceURL, 2048)
+	apply := func(query string, args ...any) error {
+		res, err := s.db.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrStaleFeedRefresh
+		}
+		return nil
+	}
+	// A "not modified" response leaves the previous domain count and checksum
+	// intact. It is still a success: the provider confirmed the cached copy
+	// is current.
 	if r.Status == "not-modified" {
-		_, err := s.db.ExecContext(ctx, `
+		return apply(`
 			UPDATE feeds SET last_refreshed_at = ?, last_success_at = ?, last_status = ?,
-			                 last_error = '', updated_at = ? WHERE id = ?`,
-			now, now, r.Status, now, id)
-		return err
+			                 last_error = '', refresh_source_url = ?, updated_at = ?
+			 WHERE id = ? AND url = ?`,
+			now, now, r.Status, source, now, id, match)
 	}
+	if r.Error != "" && !r.Committed {
+		return apply(`
+			UPDATE feeds SET last_refreshed_at = ?, last_status = ?, last_error = ?,
+			                 refresh_source_url = ?, updated_at = ?
+			 WHERE id = ? AND url = ?`,
+			now, r.Status, truncate(r.Error, 500), source, now, id, match)
+	}
+	// Committed warnings without a new body (for example a 304 whose count
+	// write failed) must not demand fresh checksum evidence or erase last-good.
+	if r.Committed && r.ContentSHA256 == "" {
+		status := r.Status
+		errText := ""
+		if r.Error != "" {
+			status = "committed-warning"
+			errText = truncate(r.Error, 500)
+		}
+		return apply(`
+			UPDATE feeds SET domain_count = ?, last_refreshed_at = ?, last_success_at = ?,
+			                 last_status = ?, last_error = ?, refresh_source_url = ?,
+			                 updated_at = ?
+			 WHERE id = ? AND url = ?`,
+			r.DomainCount, now, now, status, errText, source, now, id, match)
+	}
+	if r.ContentSHA256 == "" {
+		return fmt.Errorf("committed feed refresh requires content checksum evidence")
+	}
+	status := r.Status
+	errText := ""
 	if r.Committed && r.Error != "" {
-		_, err := s.db.ExecContext(ctx, `UPDATE feeds SET domain_count=?,last_refreshed_at=?,last_success_at=?,last_status='committed-warning',last_error=?,etag=?,updated_at=? WHERE id=?`, r.DomainCount, now, now, truncate(r.Error, 500), r.ETag, now, id)
-		return err
+		status = "committed-warning"
+		errText = truncate(r.Error, 500)
 	}
-	if r.Error != "" {
-		_, err := s.db.ExecContext(ctx,
-			"UPDATE feeds SET last_refreshed_at = ?, last_status = ?, last_error = ?, updated_at = ? WHERE id = ?",
-			now, r.Status, truncate(r.Error, 500), now, id)
-		return err
-	}
-	_, err := s.db.ExecContext(ctx, `
+	return apply(`
 		UPDATE feeds SET domain_count = ?, last_refreshed_at = ?, last_success_at = ?,
-		                 last_status = ?, last_error = '', etag = ?, updated_at = ? WHERE id = ?`,
-		r.DomainCount, now, now, r.Status, r.ETag, now, id)
+		                 last_status = ?, last_error = ?, etag = ?,
+		                 content_sha256 = ?, last_good_sha256 = ?,
+		                 parser_accepted = ?, parser_rejected = ?,
+		                 refresh_source_url = ?, updated_at = ?
+		 WHERE id = ? AND url = ?`,
+		r.DomainCount, now, now, status, errText, r.ETag,
+		r.ContentSHA256, r.ContentSHA256, r.ParserAccepted, r.ParserRejected,
+		source, now, id, match)
+}
+
+// ClearFeedETag drops the conditional-request token so the next refresh must
+// re-download. Used when a 304 cannot rebuild a matching cache.
+func (s *Store) ClearFeedETag(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE feeds SET etag='', updated_at=? WHERE id=?`, unixMilli(time.Now()), id)
 	return err
 }
 

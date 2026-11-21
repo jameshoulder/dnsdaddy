@@ -122,6 +122,9 @@ func describeLoadError(err error) string {
 	if errors.Is(err, os.ErrNotExist) {
 		return "its cached copy is missing"
 	}
+	if errors.Is(err, errChecksumMismatch) {
+		return "its cached copy no longer matches last-good checksum evidence"
+	}
 	// Parser and filesystem errors may contain publisher-controlled field names,
 	// response text, or paths. Only emit application-controlled classifications.
 	if errors.Is(err, os.ErrPermission) {
@@ -338,9 +341,17 @@ func (m *Manager) finishRefresh(ctx context.Context, f store.Feed, res store.Fee
 		}
 	}
 
+	if res.SourceURL == "" {
+		res.SourceURL = f.URL
+	}
 	if res.Status == "not-modified" {
 		if err := m.rebuildRequired(ctx, f.ID); err != nil {
 			res = failedImport(err)
+			res.SourceURL = f.URL
+			// A checksum/missing-cache rejection must not keep looping on 304s.
+			if clearErr := m.store.ClearFeedETag(ctx, f.ID); clearErr != nil {
+				m.log.Warn("could not clear feed etag after failed 304 rebuild", "feed", f.ID)
+			}
 		} else {
 			res.Committed = true
 		}
@@ -363,6 +374,10 @@ func (m *Manager) finishRefresh(ctx context.Context, f store.Feed, res store.Fee
 		}
 	}
 	if err := m.store.RecordFeedRefresh(recordCtx, f.ID, res); err != nil {
+		if errors.Is(err, store.ErrStaleFeedRefresh) {
+			m.log.Warn("feed refresh evidence skipped because URL changed during download", "feed", f.ID)
+			return res
+		}
 		if res.Committed {
 			res.Status = "committed-warning"
 			res.Error = "feed cache/index committed; refresh history could not be recorded"
@@ -424,17 +439,21 @@ func (m *Manager) cachePath(feedID string) string {
 // download fetches one feed into its cache file, using the stored ETag to skip
 // unchanged content.
 func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
+	withSource := func(r store.FeedResult) store.FeedResult {
+		r.SourceURL = f.URL
+		return r
+	}
 	if strings.HasPrefix(f.URL, "file://") {
-		return m.copyLocal(ctx, f)
+		return withSource(m.copyLocal(ctx, f))
 	}
 
 	if err := m.policy.ValidateURL(f.URL); err != nil {
-		return store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)}
+		return withSource(store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)})
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
 	if err != nil {
-		return store.FeedResult{Status: "error", Error: "feed content or cache operation failed"}
+		return withSource(store.FeedResult{Status: "error", Error: "feed content or cache operation failed"})
 	}
 	req.Header.Set("User-Agent", "dnsdaddy/"+version.String()+" (+https://github.com/jameshoulder/dnsdaddy)")
 	if Format(f.Format) == FormatObservatory {
@@ -448,21 +467,21 @@ func (m *Manager) download(ctx context.Context, f store.Feed) store.FeedResult {
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)}
+		return withSource(store.FeedResult{Status: "error", Error: feedpolicy.Failure(err)})
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotModified {
-		return store.FeedResult{Status: "not-modified", ETag: f.ETag}
+		return withSource(store.FeedResult{Status: "not-modified", ETag: f.ETag})
 	}
 	if resp.StatusCode != http.StatusOK {
-		return store.FeedResult{
+		return withSource(store.FeedResult{
 			Status: "error",
 			Error:  fmt.Sprintf("feed server returned HTTP %d", resp.StatusCode),
-		}
+		})
 	}
 
-	return m.snapshot(ctx, f, resp.Body, nil, resp.Header.Get("ETag"))
+	return withSource(m.snapshot(ctx, f, resp.Body, nil, resp.Header.Get("ETag")))
 }
 
 // rebuild publishes only a complete bounded candidate. Ordinary corrupt feeds

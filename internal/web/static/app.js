@@ -3899,6 +3899,16 @@ pages.feeds = {
                           ? html`<span>last good ${relTime(f.lastSuccessAt)}</span>`
                           : ''
                       )}
+                      ${raw(
+                        f.lastGoodSha256
+                          ? html`<span class="mono" title="${f.lastGoodSha256}">sha256 ${f.lastGoodSha256.slice(0, 12)}…</span>`
+                          : ''
+                      )}
+                      ${raw(
+                        f.parserAccepted || f.parserRejected
+                          ? html`<span>parsed ${num(f.parserAccepted)} / rejected ${num(f.parserRejected)}</span>`
+                          : ''
+                      )}
                     </div>
                     ${raw(f.lastError ? html`<p class="rec-note is-warn">${f.lastError}</p>` : '')}
                     ${raw(
@@ -5690,15 +5700,27 @@ pages.recovery = {
       if (error.status === 401 || error.name === 'AbortError') throw error;
       return { available: false, error: error.message };
     });
-    const [status, history] = await Promise.all([read('/recovery/status'), read('/config/history?limit=50')]);
+    const [status, history, integrity] = await Promise.all([
+      read('/recovery/status'),
+      read('/config/history?limit=50'),
+      read('/config/history/verify'),
+    ]);
     if (!context.isCurrent || context.isCurrent()) this.history = history;
-    return html`${raw(recoveryCard(status))}<div class="card section" id="change-history">
+    return html`${raw(recoveryCard(status))}<div class="card section" id="journal-integrity">
+      <div class="card-head"><div><h2>Journal integrity</h2>
+        <p>Local hash-chain check for sealed configuration history. Export the tip offline if you need wholesale-replacement detection.</p></div>
+        <button type="button" class="btn btn-ghost" id="verify-journal">Re-check</button></div>
+      <label class="field note-tight"><span>Trusted tip checkpoint (optional)</span>
+        <input id="journal-tip" class="mono" type="text" spellcheck="false" placeholder="Paste a previously exported tipHash" value="${(integrity && integrity.expectedTip) || ''}">
+      </label>
+      <div id="journal-verify">${raw(journalVerifyPanel(integrity))}</div>
+    </div><div class="card section" id="change-history">
       <div class="card-head"><div><h2>Configuration history</h2><p>Newest first. Original event details are retained; credentials and secret values are redacted.</p></div></div>
       <div id="change-events">${raw(history.error ? unavailableState('Change history unavailable', history.error) : changeHistoryRows(history.events))}</div>
       <div class="row note-loose"><button type="button" class="btn btn-ghost" id="history-more" ${raw(history.hasMore ? '' : 'hidden')}>Load earlier changes</button><span id="history-result" class="small muted" role="status"></span></div>
       ${raw(history.scope ? html`<p class="muted small">${history.scope}</p>` : '')}
       ${raw(history.consistency ? html`<p class="muted small">${history.consistency}</p>` : '')}
-      <p class="muted small note-tight">This is an application history, not a tamper-evident audit log. An incomplete event does not prove a change was applied.</p>
+      <p class="muted small note-tight">Sealed rows are hash-chained locally. Without an external tip checkpoint this is not host-compromise proof. An incomplete event does not prove a change was applied.</p>
     </div>`;
   },
   async mounted() {
@@ -5719,6 +5741,21 @@ pages.recovery = {
       } catch (err) { error.textContent = err.message; error.hidden = false; progress.textContent = ''; }
       finally { button.disabled = false; }
     });
+    const verifyBtn = $('#verify-journal');
+    if (verifyBtn) verifyBtn.addEventListener('click', async () => {
+      const host = $('#journal-verify');
+      if (!host) return;
+      verifyBtn.disabled = true;
+      try {
+        const tip = ($('#journal-tip') && $('#journal-tip').value.trim()) || '';
+        const path = tip ? `/config/history/verify?expectedTip=${encodeURIComponent(tip)}` : '/config/history/verify';
+        host.innerHTML = sanitize(journalVerifyPanel(await apiGet(path)));
+      } catch (err) {
+        host.innerHTML = sanitize(unavailableState('Journal verification unavailable', err.message));
+      } finally {
+        verifyBtn.disabled = false;
+      }
+    });
     const button = $('#history-more');
     let cursor = this.history && this.history.nextBeforeId;
     if (button) button.addEventListener('click', async () => {
@@ -5734,6 +5771,28 @@ pages.recovery = {
     });
   },
 };
+
+function journalVerifyPanel(data) {
+  if (!data || data.error) {
+    return unavailableState('Journal verification unavailable', (data && data.error) || 'Verification could not be read.');
+  }
+  const badge = data.ok
+    ? html`<span class="badge ok">Chain intact</span>`
+    : html`<span class="badge bad">Breaks detected</span>`;
+  const breaks = (data.breaks || []).map((b) => html`<li>${b}</li>`).join('');
+  const tipNote = data.tipMatches === false && data.checkpointFound
+    ? html`<span class="muted">checkpoint found; tip has advanced</span>`
+    : '';
+  return html`<div class="rec-meta note-tight">
+      ${raw(badge)}
+      <span>${num(data.sealed)} sealed</span>
+      <span>${num(data.legacyUnsealed)} legacy unsealed</span>
+      <span class="mono" title="${data.tipHash || ''}">tip ${(data.tipHash || '').slice(0, 16)}${(data.tipHash || '').length > 16 ? '…' : ''}</span>
+      ${raw(tipNote)}
+    </div>
+    ${raw(breaks ? html`<ul class="muted small">${raw(breaks)}</ul>` : '')}
+    <p class="muted small">${data.detectionScope || ''}</p>`;
+}
 
 
 /* ---------- Availability and DNS rebinding controls ---------------------- */
@@ -6672,6 +6731,7 @@ if (typeof module !== 'undefined' && module.exports) {
     scrollInvestigationLane,
     recoveryCard,
     changeHistoryRows,
+    journalVerifyPanel,
     protectionCard,
     webhookCard,
     providerCard,

@@ -313,7 +313,11 @@ func TestUpgradeFromPreLastSuccessDatabase(t *testing.T) {
 	}
 
 	// The first refresh after the upgrade fills it in.
-	if err := st.RecordFeedRefresh(ctx, "legacy-feed", FeedResult{Status: "ok", DomainCount: 43}); err != nil {
+	legacy, err := st.GetFeed(ctx, "legacy-feed")
+	if err != nil {
+		t.Fatalf("GetFeed legacy: %v", err)
+	}
+	if err := st.RecordFeedRefresh(ctx, "legacy-feed", FeedResult{Status: "ok", DomainCount: 43, ContentSHA256: "deadbeef", SourceURL: legacy.URL}); err != nil {
 		t.Fatalf("RecordFeedRefresh: %v", err)
 	}
 	f, err = st.GetFeed(ctx, "legacy-feed")

@@ -106,8 +106,22 @@ type Feed struct {
 	LastStatus  string     `json:"lastStatus"`
 	LastError   string     `json:"lastError"`
 	ETag        string     `json:"-"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
+	// ContentSHA256 is the hex SHA-256 of the last committed cache body for
+	// this feed. Empty until a successful commit records evidence.
+	ContentSHA256 string `json:"contentSha256"`
+	// LastGoodSHA256 is the hex SHA-256 of the last known-good cache body.
+	// Failures leave this alone so operators can still name the intelligence
+	// that remains enforceable; it is local evidence, not publisher signature.
+	LastGoodSHA256 string `json:"lastGoodSha256"`
+	// ParserAccepted / ParserRejected count usable domains and rejected junk
+	// lines/indicators from the last successful parse of committed content.
+	ParserAccepted int `json:"parserAccepted"`
+	ParserRejected int `json:"parserRejected"`
+	// RefreshSourceURL is the URL (or file:// path) that the last refresh
+	// attempt targeted. Cleared when the configured URL changes.
+	RefreshSourceURL string    `json:"refreshSourceUrl"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 // QueryEvent is one resolved (or blocked) DNS question.

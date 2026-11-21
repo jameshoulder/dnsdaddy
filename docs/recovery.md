@@ -24,9 +24,12 @@ never stored or returned. Request bodies, cookies, authorization headers,
 passphrases and query strings are never journal content.
 
 The journal begins when this feature is installed. It does not reconstruct past
-changes or pretend to observe direct SQL or YAML edits. It is local operational
-history, not an independently protected or tamper-proof audit service: somebody
-who can replace the database can replace its history.
+changes or pretend to observe direct SQL or YAML edits. Sealed rows carry a
+local hash chain (`prevHash` / `entryHash`). Verify with
+`GET /api/v1/config/history/verify` and an optional operator-held `expectedTip`.
+Without that external checkpoint, wholesale database replacement is not
+detectable. Somebody who can replace the database and the tip you trust can
+replace its history. Details: [verified-integrity.md](verified-integrity.md).
 
 ### What the outcome means
 

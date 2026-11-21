@@ -104,6 +104,11 @@ CREATE TABLE IF NOT EXISTS feeds (
     last_status       TEXT    NOT NULL DEFAULT '',
     last_error        TEXT    NOT NULL DEFAULT '',
     etag              TEXT    NOT NULL DEFAULT '',
+    content_sha256    TEXT    NOT NULL DEFAULT '',
+    last_good_sha256  TEXT    NOT NULL DEFAULT '',
+    parser_accepted   INTEGER NOT NULL DEFAULT 0,
+    parser_rejected   INTEGER NOT NULL DEFAULT 0,
+    refresh_source_url TEXT   NOT NULL DEFAULT '',
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL
 );

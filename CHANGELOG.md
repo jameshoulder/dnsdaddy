@@ -24,6 +24,12 @@ should be swapping a binary, not restoring a backup.
 
 ### Added
 
+- **Verified Integrity** (Phase 3): Feed supply-chain evidence (source URL,
+  content/last-good SHA-256, parser accept/reject counts) with last-good
+  retention on failed refresh and rebuild skips on checksum mismatch; hash-
+  chained management journal with `GET /api/v1/config/history/verify` and
+  optional tip checkpoints. Local evidence only — not publisher provenance or
+  host-compromise proof. See [docs/verified-integrity.md](docs/verified-integrity.md).
 - **DNS Security Map** (Phase 1): Workspace page and authenticated
   `GET /api/v1/network-map` aggregating retained query evidence into
   network → observed client → exact queried-name relationships, with

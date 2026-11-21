@@ -197,6 +197,15 @@ var addedColumns = []struct{ table, column, definition string }{
 	// cannot answer the question an operator actually asks of a feed that is
 	// erroring: how old is the intelligence still being enforced.
 	{"feeds", "last_success_at", "INTEGER"},
+	// Local feed supply-chain evidence: checksum of committed cache bytes,
+	// last-good checksum retained across failures, parser accept/reject counts
+	// and the URL targeted by the last refresh attempt. Empty on upgrade until
+	// the next successful commit; not publisher-signed provenance.
+	{"feeds", "content_sha256", "TEXT NOT NULL DEFAULT ''"},
+	{"feeds", "last_good_sha256", "TEXT NOT NULL DEFAULT ''"},
+	{"feeds", "parser_accepted", "INTEGER NOT NULL DEFAULT 0"},
+	{"feeds", "parser_rejected", "INTEGER NOT NULL DEFAULT 0"},
+	{"feeds", "refresh_source_url", "TEXT NOT NULL DEFAULT ''"},
 	// Whether a network's addresses may query the resolver, as distinct from
 	// which policy they get. Defaults to 0: an upgrade must not grant a
 	// permission nobody asked for, so every pre-existing network starts

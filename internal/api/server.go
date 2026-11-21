@@ -187,6 +187,7 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/learning/status", a.handleLearningStatus)
 	api.HandleFunc("GET /api/v1/learning/clients", a.handleLearningClients)
 	api.HandleFunc("GET /api/v1/config/history", a.handleConfigHistory)
+	api.HandleFunc("GET /api/v1/config/history/verify", a.handleConfigHistoryVerify)
 	api.HandleFunc("GET /api/v1/recovery/status", a.handleRecoveryStatus)
 	api.HandleFunc("POST /api/v1/recovery/backup", a.handleRecoveryBackup)
 	api.HandleFunc("GET /api/v1/reports/summary", a.handleReportSummary)

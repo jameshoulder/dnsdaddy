@@ -128,10 +128,10 @@ func TestMeasuredReportsFailingAndUnloadedFeeds(t *testing.T) {
 		t.Fatalf("need two enabled seeded feeds, have %d", len(enabled))
 	}
 	// One feed fails its refresh having never succeeded; another succeeds.
-	if err := h.store.RecordFeedRefresh(ctx, enabled[0].ID, store.FeedResult{Status: "error", Error: "HTTP 503"}); err != nil {
+	if err := h.store.RecordFeedRefresh(ctx, enabled[0].ID, store.FeedResult{Status: "error", Error: "HTTP 503", SourceURL: enabled[0].URL}); err != nil {
 		t.Fatalf("RecordFeedRefresh: %v", err)
 	}
-	if err := h.store.RecordFeedRefresh(ctx, enabled[1].ID, store.FeedResult{Status: "ok", DomainCount: 12}); err != nil {
+	if err := h.store.RecordFeedRefresh(ctx, enabled[1].ID, store.FeedResult{Status: "ok", DomainCount: 12, ContentSHA256: "feedok12", SourceURL: enabled[1].URL}); err != nil {
 		t.Fatalf("RecordFeedRefresh: %v", err)
 	}
 

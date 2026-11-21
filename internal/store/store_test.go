@@ -674,7 +674,8 @@ func TestRecordFeedRefreshTracksLastSuccessSeparately(t *testing.T) {
 		t.Error("a brand new feed claims a successful download")
 	}
 
-	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "ok", DomainCount: 10, ETag: `"v1"`}); err != nil {
+	feedURL := f.URL
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "ok", DomainCount: 10, ETag: `"v1"`, ContentSHA256: "aa", SourceURL: feedURL, ParserAccepted: 10}); err != nil {
 		t.Fatalf("record success: %v", err)
 	}
 	good, err := st.GetFeed(ctx, f.ID)
@@ -685,7 +686,7 @@ func TestRecordFeedRefreshTracksLastSuccessSeparately(t *testing.T) {
 		t.Fatal("a successful refresh recorded no success time")
 	}
 
-	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "error", Error: "HTTP 404 from https://example.org/list.txt"}); err != nil {
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "error", Error: "HTTP 404 from https://example.org/list.txt", SourceURL: feedURL}); err != nil {
 		t.Fatalf("record failure: %v", err)
 	}
 	after, err := st.GetFeed(ctx, f.ID)
@@ -704,7 +705,7 @@ func TestRecordFeedRefreshTracksLastSuccessSeparately(t *testing.T) {
 
 	// "Not modified" is a success: the provider confirmed the cached copy is
 	// current, so the intelligence is not stale.
-	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "not-modified", ETag: `"v1"`}); err != nil {
+	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "not-modified", ETag: `"v1"`, SourceURL: feedURL}); err != nil {
 		t.Fatalf("record not-modified: %v", err)
 	}
 	fresh, err := st.GetFeed(ctx, f.ID)
