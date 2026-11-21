@@ -5431,6 +5431,16 @@ components:
           type: string
         name:
           type: string
+        confidence:
+          type: string
+          description: Identity confidence. unknown means no operator-assigned name.
+          enum:
+          - unknown
+          - operator
+          - observed
+        source:
+          type: string
+          description: How the name was assigned. manual for operator-set names.
         updatedAt:
           type: string
           format: date-time
@@ -6561,6 +6571,20 @@ components:
           type: string
           example: '1.0'
           description: Moves when the wording rules change, so two explanations can be told apart.
+        blockMode:
+          type: string
+          description: Block response mode captured at decision time.
+          enum:
+          - nxdomain
+          - zeroip
+          - refused
+          - ''
+        feedId:
+          type: string
+          description: Feed id that listed the domain when the rule was category.
+        feedName:
+          type: string
+          description: Feed display name captured at decision time.
         evidence:
           type: array
           description: Captured evidence on detail and export endpoints. Consult evidenceSource for legacy

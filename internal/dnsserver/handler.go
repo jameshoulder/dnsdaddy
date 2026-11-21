@@ -19,6 +19,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/decisions"
 	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
+	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/policy"
 	"github.com/jameshoulder/dnsdaddy/internal/protection"
 	"github.com/jameshoulder/dnsdaddy/internal/querylog"
@@ -46,8 +47,10 @@ type Handler struct {
 
 	logClientIP     bool
 	queryLogEnabled bool
+	answerTelemetry bool
 	refuseANY       bool
 	timeout         time.Duration
+	firstSeen       FirstSeenRecorder
 
 	// acl decides which source addresses may resolve at all. Nil means no
 	// restriction; config.validateNotAnOpenResolver refuses to start with a
@@ -95,6 +98,12 @@ type DecisionRecorder interface {
 	Record(decisions.Event)
 }
 
+// FirstSeenRecorder receives observed questions for the registered-domain
+// index. Nil unless enabled. Record must never block.
+type FirstSeenRecorder interface {
+	Record(firstseen.Event)
+}
+
 // DNSSECObserver receives queries whose answers are already decided.
 //
 // Observe must not block and must not be able to influence anything: it
@@ -125,6 +134,8 @@ type HandlerOptions struct {
 	// persistence off is enough — a policy cannot opt back into logging that
 	// the operator has disabled instance-wide.
 	QueryLogEnabled bool
+	// AnswerTelemetry stores a hash of A/AAAA answers beside query-log rows.
+	AnswerTelemetry bool
 	Timeout         time.Duration
 	// ClientACL restricts which source addresses may resolve. Nil permits
 	// everything, which config validation only allows for a loopback-only
@@ -142,6 +153,8 @@ type HandlerOptions struct {
 	// Decisions, when set, receives every enforced or alerted decision so it
 	// can be explained later. Nil unless the operator switched it on.
 	Decisions DecisionRecorder
+	// FirstSeen, when set, records registered-domain first/last seen off-path.
+	FirstSeen FirstSeenRecorder
 	// DNSSEC, when set, observes answers with Daddybound. Nil unless
 	// dns.local_dnssec_validation is "observe".
 	DNSSEC DNSSECObserver
@@ -168,6 +181,7 @@ func NewHandler(
 		log:             log,
 		logClientIP:     o.LogClientIP,
 		queryLogEnabled: o.QueryLogEnabled,
+		answerTelemetry: o.AnswerTelemetry,
 		refuseANY:       o.RefuseANY,
 		acl:             o.ClientACL,
 		detector:        o.Detector,
@@ -175,6 +189,7 @@ func NewHandler(
 		protection:      o.Protection,
 		native:          o.Native,
 		decisions:       o.Decisions,
+		firstSeen:       o.FirstSeen,
 		dnssec:          o.DNSSEC,
 		timeout:         timeout,
 		activity:        activityTracker{startedAt: time.Now()},
@@ -381,6 +396,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		outcome = activityBlocked
 		event.Action = store.ActionBlocked
 		event.ElapsedMS = int(time.Since(start).Milliseconds())
+		h.noteFirstSeen(event)
 		h.qlog.Record(event, persist)
 		// After the query log and before the response is built: the recorder's
 		// send is non-blocking and drops rather than waiting, so this cannot
@@ -429,6 +445,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		// SERVFAIL, but from a client's seat the two are indistinguishable and
 		// the resolution-failure detector wants to see both.
 		event.DNSSEC = store.DNSSECServfail
+		h.noteFirstSeen(event)
 		h.qlog.Record(event, persist)
 		h.observe(event, meta, dns.RcodeServerFailure, 0, false, false, persist)
 		h.log.Debug("resolution failed", "domain", normalized, "error", err)
@@ -450,6 +467,7 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 		if nativeResult == nil {
 			event.Reason = "Upstream returned " + dns.RcodeToString[res.Rcode]
 		}
+		h.noteFirstSeen(event)
 		h.qlog.Record(event, persist)
 		if nativeResult != nil && persist {
 			h.recordDecision(event, match, policy.Decision{Reason: event.Reason, Basis: &policy.Basis{
@@ -463,9 +481,10 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 			h.blocked.Add(1)
 			outcome = activityBlocked
 			event.Action, event.Category, event.Source, event.Reason = store.ActionBlocked, "dns_rebinding", "Local response protection", reason
+			h.noteFirstSeen(event)
 			h.qlog.Record(event, persist)
 			if persist {
-				h.recordDecision(event, match, policy.Decision{Blocked: true, Reason: reason, Basis: &policy.Basis{
+				h.recordDecision(event, match, policy.Decision{Blocked: true, Reason: reason, BlockMode: store.BlockRefused, Basis: &policy.Basis{
 					Rule: policy.RuleRebinding, PolicyID: match.PolicyID, PolicyName: match.PolicyName, Category: "dns_rebinding"}})
 			}
 			h.observe(event, meta, dns.RcodeRefused, 0, false, true, persist)
@@ -482,6 +501,8 @@ func (h *Handler) Handle(ctx context.Context, req *dns.Msg, meta requestMeta) (r
 	if nativeResult == nil {
 		event.DNSSECObservationID = h.observeDNSSEC(event, q, persist)
 	}
+	h.attachAnswerTelemetry(&event, res.Msg)
+	h.noteFirstSeen(event)
 	h.qlog.Record(event, persist)
 	if persist {
 		h.recordDecision(event, match, decision)
@@ -769,6 +790,23 @@ func (h *Handler) recordDecision(event store.QueryEvent, match policy.Match, d p
 		Action:      event.Action,
 		Blocked:     d.Blocked,
 		Reason:      d.Reason,
+		BlockMode:   d.BlockMode,
 		Basis:       d.Basis,
 	})
+}
+
+// noteFirstSeen records the registered domain off the resolution path.
+func (h *Handler) noteFirstSeen(event store.QueryEvent) {
+	if h.firstSeen == nil || event.Domain == "" {
+		return
+	}
+	h.firstSeen.Record(firstseen.Event{Time: event.Time, Domain: event.Domain})
+}
+
+// attachAnswerTelemetry fills opt-in A/AAAA summary fields on the event.
+func (h *Handler) attachAnswerTelemetry(event *store.QueryEvent, msg *dns.Msg) {
+	if !h.answerTelemetry || event == nil || msg == nil {
+		return
+	}
+	event.Answer = store.SummarizeAnswerAddresses(msg)
 }

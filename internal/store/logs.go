@@ -37,9 +37,10 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		stmt, err := tx.PrepareContext(ctx, `
 			INSERT INTO query_log (id, ts, client_ip, client_name, network_id, qname, qtype,
 			                       action, reason, category, source, proto, elapsed_ms, cached,
-			                       dnssec, dnssec_obs, dnssec_source)
+			                       dnssec, dnssec_obs, dnssec_source,
+			                       answer_addr_count, answer_addrs_sha256, answer_min_ttl)
 			VALUES ((SELECT value + 1 FROM export_sequences WHERE dataset = 'queries'),
-			        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return err
 		}
@@ -48,7 +49,8 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		for _, e := range events {
 			if _, err := stmt.ExecContext(ctx, unixMilli(e.Time), e.ClientIP, e.ClientName, e.NetworkID,
 				e.Domain, e.QType, e.Action, e.Reason, e.Category, e.Source, e.Proto,
-				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID, e.DNSSECSource); err != nil {
+				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID, e.DNSSECSource,
+				e.Answer.AddrCount, e.Answer.AddrSHA256, int64(e.Answer.MinTTL)); err != nil {
 				return err
 			}
 		}
@@ -338,7 +340,8 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 	// ("network_id = ?"); every filter value is bound as a parameter in args.
 	// Never append a fragment built from input here.
 	q := `SELECT id, ts, client_ip, client_name, network_id, qname, qtype, action,
-	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs, dnssec_source
+	             reason, category, source, proto, elapsed_ms, cached, dnssec, dnssec_obs, dnssec_source,
+	             answer_addr_count, answer_addrs_sha256, answer_min_ttl
 	      FROM query_log WHERE ` + strings.Join(where, " AND ") + `
 	      ORDER BY ` + order + ` LIMIT ?`
 
@@ -354,14 +357,20 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 			e      QueryEvent
 			ts     int64
 			cached int
+			minTTL int64
 		)
 		if err := rows.Scan(&e.ID, &ts, &e.ClientIP, &e.ClientName, &e.NetworkID, &e.Domain,
 			&e.QType, &e.Action, &e.Reason, &e.Category, &e.Source, &e.Proto, &e.ElapsedMS,
-			&cached, &e.DNSSEC, &e.DNSSECObservationID, &e.DNSSECSource); err != nil {
+			&cached, &e.DNSSEC, &e.DNSSECObservationID, &e.DNSSECSource,
+			&e.Answer.AddrCount, &e.Answer.AddrSHA256, &minTTL); err != nil {
 			return nil, 0, err
 		}
 		e.Time = fromUnixMilli(ts)
 		e.Cached = cached == 1
+		e.Answer.MinTTL = uint32(minTTL)
+		if e.Answer.AddrCount > 0 || e.Answer.AddrSHA256 != "" {
+			e.Answer.Recorded = true
+		}
 		out = append(out, e)
 	}
 	if err := rows.Err(); err != nil {

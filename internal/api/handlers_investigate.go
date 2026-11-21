@@ -10,6 +10,7 @@ import (
 
 	"github.com/jameshoulder/dnsdaddy/internal/apiprovider"
 	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/detect"
 	"github.com/jameshoulder/dnsdaddy/internal/domainutil"
 	"github.com/jameshoulder/dnsdaddy/internal/evidence"
 	"github.com/jameshoulder/dnsdaddy/internal/learning"
@@ -192,7 +193,9 @@ type domainInvestigation struct {
 		Input  string `json:"input"`
 		Client string `json:"client,omitempty"`
 	} `json:"subject"`
-	Window       investigationWindow       `json:"window"`
+	Window investigationWindow `json:"window"`
+	// FirstSeen is the retention-independent registered-domain observation.
+	FirstSeen    investigationFirstSeen    `json:"firstSeen"`
 	Activity     investigationActivity     `json:"activity"`
 	Decisions    investigationDecisions    `json:"decisions"`
 	Preview      investigationPreview      `json:"preview"`
@@ -210,6 +213,9 @@ type clientInvestigation struct {
 		// address: which network and policy it maps to now. Current, not
 		// historical; the recorded rows carry their own network id.
 		Attribution previewContext `json:"attribution"`
+		// Identity is the confidence-labelled device name. Unknown is valid
+		// when no operator name exists; this never invents a name.
+		Identity store.Client `json:"identity"`
 	} `json:"subject"`
 	Window       investigationWindow       `json:"window"`
 	Activity     investigationActivity     `json:"activity"`
@@ -217,6 +223,16 @@ type clientInvestigation struct {
 	Findings     investigationFindings     `json:"findings"`
 	Learning     investigationLearning     `json:"learning"`
 	Observations investigationObservations `json:"observations"`
+}
+
+// investigationFirstSeen is the durable eTLD+1 observation section.
+type investigationFirstSeen struct {
+	Available        bool       `json:"available"`
+	RegisteredDomain string     `json:"registeredDomain,omitempty"`
+	FirstSeen        *time.Time `json:"firstSeen,omitempty"`
+	LastSeen         *time.Time `json:"lastSeen,omitempty"`
+	QueryCount       int64      `json:"queryCount,omitempty"`
+	Note             string     `json:"note"`
 }
 
 type investigationLearning struct {
@@ -295,6 +311,7 @@ func (a *API) handleInvestigateDomain(w http.ResponseWriter, r *http.Request) {
 	out.Subject.Client = client
 	out.Window = a.investigationWindowFor(r, now)
 	since := out.Window.From
+	out.FirstSeen = a.firstSeenFor(ctx, domain)
 
 	// --- recorded activity ----------------------------------------------------
 	if out.Activity, err = a.domainActivity(ctx, domain, client, since, out.Window); err != nil {
@@ -351,6 +368,14 @@ func (a *API) handleInvestigateClient(w http.ResponseWriter, r *http.Request) {
 	var out clientInvestigation
 	out.Subject.Client = client
 	out.Subject.Name = a.Engine.ClientName(client)
+	if ident, ierr := a.Store.ClientIdentity(ctx, client); ierr == nil {
+		out.Subject.Identity = ident
+		if out.Subject.Name == "" {
+			out.Subject.Name = ident.Name
+		}
+	} else {
+		out.Subject.Identity = store.Client{IP: client, Confidence: store.IdentityConfidenceUnknown}
+	}
 	out.Window = a.investigationWindowFor(r, now)
 	since := out.Window.From
 	foundBaseline := false
@@ -812,4 +837,38 @@ func (a *API) observationsFor(ctx context.Context, domain, client string, since,
 	// Mode describe current execution, independently of historical rows.
 	out.Available = out.Available || len(rows) > 0
 	return out, nil
+}
+
+// firstSeenFor looks up the durable registered-domain observation for a name.
+func (a *API) firstSeenFor(ctx context.Context, domain string) investigationFirstSeen {
+	out := investigationFirstSeen{
+		Available: a.Config.Log.FirstSeenIndex,
+		Note: "local observation of this registered domain on this resolver; " +
+			"independent of query-log retention. Not WHOIS registration age or threat intelligence",
+	}
+	if !out.Available {
+		out.Note = "registered-domain first-seen index is disabled (log.first_seen_index)"
+		return out
+	}
+	parent, ok := detect.RegisteredDomain(domain)
+	if !ok {
+		out.Note = "this name has no registered domain (single label, public suffix, or private namespace)"
+		return out
+	}
+	out.RegisteredDomain = parent
+	row, err := a.Store.LookupRegisteredDomain(ctx, parent)
+	if errors.Is(err, store.ErrNotFound) {
+		out.Note = "this registered domain has not been observed since the index was enabled"
+		return out
+	}
+	if err != nil {
+		out.Available = false
+		out.Note = "could not read the first-seen index"
+		return out
+	}
+	fs, ls := row.FirstSeen, row.LastSeen
+	out.FirstSeen = &fs
+	out.LastSeen = &ls
+	out.QueryCount = row.QueryCount
+	return out
 }

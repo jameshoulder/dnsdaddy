@@ -232,6 +232,19 @@ var addedColumns = []struct{ table, column, definition string }{
 	// SettingStatsErrorsSince) so a reader can tell "no errors" from "not
 	// yet measured".
 	{"stats_hourly", "errors", "INTEGER NOT NULL DEFAULT 0"},
+	// Opt-in answer telemetry beside query-log rows. Empty on every existing
+	// row and when the setting is off.
+	{"query_log", "answer_addr_count", "INTEGER NOT NULL DEFAULT 0"},
+	{"query_log", "answer_addrs_sha256", "TEXT NOT NULL DEFAULT ''"},
+	{"query_log", "answer_min_ttl", "INTEGER NOT NULL DEFAULT 0"},
+	// Decision-time block mode and feed identity.
+	{"decisions", "block_mode", "TEXT NOT NULL DEFAULT ''"},
+	{"decisions", "feed_id", "TEXT NOT NULL DEFAULT ''"},
+	{"decisions", "feed_name", "TEXT NOT NULL DEFAULT ''"},
+	// Device identity labels. Existing operator names become high-confidence
+	// manual assignments; absence of a row remains "unknown".
+	{"clients", "identity_confidence", "TEXT NOT NULL DEFAULT 'operator'"},
+	{"clients", "identity_source", "TEXT NOT NULL DEFAULT 'manual'"},
 }
 
 // SettingStatsErrorsSince is when stats_hourly.errors began being counted on
@@ -248,6 +261,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := migrateExportSequences(db); err != nil {
+		return err
+	}
+	if err := migrateDomainFirstSeen(db); err != nil {
 		return err
 	}
 	for _, c := range addedColumns {

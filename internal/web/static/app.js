@@ -1529,6 +1529,8 @@ function decisionRow(d) {
         <div class="rec-meta">
           ${raw(d.clientName || d.clientIp ? html`<span>asked by ${d.clientName || d.clientIp}</span>` : '')}
           ${raw(d.qtype ? html`<span>${d.qtype}</span>` : '')}
+          ${raw(d.blockMode ? html`<span>block mode ${d.blockMode}</span>` : '')}
+          ${raw(d.feedName || d.feedId ? html`<span>feed ${d.feedName || d.feedId}</span>` : '')}
         </div>
         ${raw(d.policyPath ? html`<div class="decision-path mono">${d.policyPath}</div>` : '')}
         <div class="decision-evidence" data-evidence-for="${d.id}">
@@ -2647,6 +2649,35 @@ function outcomeBadge(outcome) {
   return html`<span class="badge ${cls}">${label}</span>`;
 }
 
+// 0. Retention-independent registered-domain first seen.
+function firstSeenSection(fs) {
+  if (!fs) return '';
+  const stat = (label, value) => html`<div class="qfact"><dt>${label}</dt><dd>${raw(value)}</dd></div>`;
+  return html`
+    <div class="card section" id="inv-first-seen">
+      <div class="card-head"><div><h2>Registered-domain first seen</h2><p>${fs.note || ''}</p></div></div>
+      ${raw(!fs.available
+        ? emptyState('Not indexing', fs.note || 'The first-seen index is disabled.', { icon: '○' })
+        : !fs.firstSeen
+          ? emptyState('Not observed yet', fs.note || 'No durable observation for this registered domain.', { icon: '○' })
+          : html`<dl class="claim-key">
+              ${raw(stat('Registered domain', html`<span class="mono">${fs.registeredDomain}</span>`))}
+              ${raw(stat('First seen', relTime(fs.firstSeen)))}
+              ${raw(stat('Last seen', relTime(fs.lastSeen)))}
+              ${raw(stat('Observed queries', html`<span class="mono">${num(fs.queryCount)}</span>`))}
+            </dl>`)}
+    </div>`;
+}
+
+function identityLine(identity) {
+  if (!identity) return '';
+  const conf = identity.confidence || 'unknown';
+  if (conf === 'unknown' || !identity.name) {
+    return html`<p class="muted small">Device identity: <strong>unknown</strong> — no operator-assigned name. Unknown is a valid result; DNS Daddy does not invent names from leases or reverse DNS.</p>`;
+  }
+  return html`<p class="muted small">Device identity: <strong class="mono">${identity.name}</strong> · confidence <span class="badge">${conf}</span>${raw(identity.source ? html` · source ${identity.source}` : '')}</p>`;
+}
+
 // 1. What happened.
 function activitySection(act, { client = false } = {}) {
   if (!act || !act.available) {
@@ -2887,11 +2918,12 @@ function investigationHeader(subject, w) {
         ${raw(subject.sub ? html`<p>${subject.sub}</p>` : '')}
       </div><div class="row-end hero-intel">${raw(windowLine(w))}</div></div>
       <nav class="inv-lane-map" aria-label="Evidence lanes">
-        ${raw(lane('inv-activity', '1. Activity'))}
-        ${raw(lane('inv-decisions', '2. Decisions'))}
-        ${raw(domainLanes ? lane('inv-preview', '3. Policy preview') : '')}
-        ${raw(lane('inv-findings', `${domainLanes ? '4' : '3'}. Findings`))}
-        ${raw(domainLanes ? lane('inv-observations', '5. Daddybound') : lane('inv-learning', '4. Learning'))}
+        ${raw(domainLanes ? lane('inv-first-seen', '1. First seen') : '')}
+        ${raw(lane('inv-activity', domainLanes ? '2. Activity' : '1. Activity'))}
+        ${raw(lane('inv-decisions', domainLanes ? '3. Decisions' : '2. Decisions'))}
+        ${raw(domainLanes ? lane('inv-preview', '4. Policy preview') : '')}
+        ${raw(lane('inv-findings', `${domainLanes ? '5' : '3'}. Findings`))}
+        ${raw(domainLanes ? lane('inv-observations', '6. Daddybound') : lane('inv-learning', '4. Learning'))}
       </nav>
     </div>`;
 }
@@ -2954,6 +2986,7 @@ pages.investigate = {
           kind: 'Client', title: sub.name ? `${sub.name} · ${sub.client}` : sub.client,
           sub: `Current attribution: ${att.attribution === 'catch_all' ? 'catch-all network' : att.attribution === 'network_prefix' ? 'matched by network prefix' : 'none'}${att.networkName ? ` · ${att.networkName}` : ''}${att.policyName ? ` · policy ${att.policyName}` : ''} — as configured now, not as recorded then.`,
         }, data.window))}
+        ${raw(identityLine(sub.identity))}
         ${raw(activitySection(data.activity, { client: true }))}
         ${raw(decisionSection(data.decisions))}
         ${raw(relatedFindingsSection(data.findings))}
@@ -2977,6 +3010,7 @@ pages.investigate = {
         title: sub.domain,
         sub: `${sub.input && sub.input !== sub.domain ? `Entered as ${sub.input}. ` : ''}${sub.client ? `Narrowed to client ${sub.client}.` : ''}`,
       }, data.window))}
+      ${raw(firstSeenSection(data.firstSeen))}
       ${raw(activitySection(data.activity))}
       ${raw(decisionSection(data.decisions))}
       ${raw(previewSection(data.preview))}

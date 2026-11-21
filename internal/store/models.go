@@ -142,6 +142,10 @@ type QueryEvent struct {
 	// would silently mis-attribute a verdict whenever the same name was asked
 	// twice in the same instant, which is exactly what a busy resolver does.
 	DNSSECObservationID string `json:"-"`
+
+	// Answer is opt-in telemetry about A/AAAA answers. Zero when the setting
+	// is off or the answer had no address records.
+	Answer AnswerTelemetry `json:"answer,omitempty"`
 }
 
 // DNSSEC statuses recorded on the serving path. Read DNSSECSource alongside
@@ -160,11 +164,26 @@ const (
 	DNSSECServfail = "servfail"
 )
 
-// Client is an operator-assigned friendly name for a device IP.
+// Device identity confidence labels. Unknown is a valid result when no row
+// exists; the API must not invent a name to avoid returning unknown.
+const (
+	IdentityConfidenceUnknown  = "unknown"
+	IdentityConfidenceOperator = "operator"
+	IdentityConfidenceObserved = "observed"
+)
+
+const (
+	IdentitySourceNone   = ""
+	IdentitySourceManual = "manual"
+)
+
+// Client is a confidence-labelled device identity for a source IP.
 type Client struct {
-	IP        string    `json:"ip"`
-	Name      string    `json:"name"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	IP         string    `json:"ip"`
+	Name       string    `json:"name"`
+	Confidence string    `json:"confidence"`
+	Source     string    `json:"source,omitempty"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 // APIToken is a machine credential for the management API. The secret itself is

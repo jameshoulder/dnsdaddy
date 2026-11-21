@@ -271,6 +271,15 @@ var internalTLDs = map[string]bool{
 	"workgroup":   true,
 }
 
+// RegisteredDomain returns the public-suffix eTLD+1 for name, or ok=false when
+// the name has no registered domain (single labels, public suffixes, and
+// private-namespace TLDs). Prefer this over inventing a parent from the last
+// two labels — country-code compounds such as example.co.uk need the PSL.
+func RegisteredDomain(name string) (string, bool) {
+	parent, _, ok := split(name)
+	return parent, ok
+}
+
 // split separates a name into its registered domain (eTLD+1) and everything
 // below it.
 //

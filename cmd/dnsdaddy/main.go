@@ -39,6 +39,7 @@ import (
 	"github.com/jameshoulder/dnsdaddy/internal/diag"
 	"github.com/jameshoulder/dnsdaddy/internal/dnsserver"
 	"github.com/jameshoulder/dnsdaddy/internal/feedimport"
+	"github.com/jameshoulder/dnsdaddy/internal/firstseen"
 	"github.com/jameshoulder/dnsdaddy/internal/httpx"
 	"github.com/jameshoulder/dnsdaddy/internal/intel"
 	"github.com/jameshoulder/dnsdaddy/internal/learning"
@@ -359,6 +360,19 @@ func run() error {
 			"retention_days", cfg.Log.DecisionRetentionDays)
 	}
 
+	// Registered-domain first-seen index: one row per eTLD+1, independent of
+	// query-log retention. No client addresses. Nil when disabled.
+	var firstSeenRecorder *firstseen.Recorder
+	if cfg.Log.FirstSeenIndex {
+		firstSeenRecorder = firstseen.New(st, firstseen.Options{Log: log})
+		go firstSeenRecorder.Run(ctx)
+		defer func() { stop(); firstSeenRecorder.Wait() }()
+		log.Info("registered-domain first-seen index enabled")
+	}
+	if cfg.Log.AnswerTelemetry {
+		log.Info("answer telemetry enabled", "note", "A/AAAA address hashes and TTLs only; TXT contents are never stored")
+	}
+
 	// One runtime selection drives Live native answers or independent Learn
 	// observations. Forward constructs no native resolver. Learn and
 	// Live share one anchor manager, and mode changes are persisted first.
@@ -409,6 +423,7 @@ func run() error {
 	handler := dnsserver.NewHandler(engine, res, lists, qlog, log, dnsserver.HandlerOptions{
 		LogClientIP:     cfg.Log.LogClientIP,
 		QueryLogEnabled: cfg.Log.QueryLog,
+		AnswerTelemetry: cfg.Log.AnswerTelemetry,
 		Timeout:         queryTimeout,
 		ClientACL:       acl,
 		RefuseANY:       cfg.DNS.RefuseANY,
@@ -417,6 +432,7 @@ func run() error {
 		Protection:      protectionController,
 		Native:          dnssecController,
 		Decisions:       recorderOrNil(decisionRecorder),
+		FirstSeen:       firstSeenOrNil(firstSeenRecorder),
 		DNSSEC:          dnssecController,
 	})
 
@@ -967,6 +983,13 @@ func envOr(key, def string) string {
 // query would call through a nil pointer. This is the classic Go footgun and
 // it is worth a named function rather than a clever inline conditional.
 func recorderOrNil(r *decisions.Recorder) dnsserver.DecisionRecorder {
+	if r == nil {
+		return nil
+	}
+	return r
+}
+
+func firstSeenOrNil(r *firstseen.Recorder) dnsserver.FirstSeenRecorder {
 	if r == nil {
 		return nil
 	}

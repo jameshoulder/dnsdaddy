@@ -342,13 +342,21 @@ type Logging struct {
 	// an explicit false disables these additional retained records.
 	DecisionRecords bool `yaml:"decision_records"`
 	// DecisionRetentionDays bounds how long those records are kept.
-	DecisionRetentionDays int  `yaml:"decision_retention_days"`
-	QueryLog              bool `yaml:"query_log"`
-	LogClientIP           bool `yaml:"log_client_ip"`
-	RetentionDays         int  `yaml:"retention_days"`
-	RollupDays            int  `yaml:"rollup_days"`
-	BufferSize            int  `yaml:"buffer_size"`
-	FlushIntervalMS       int  `yaml:"flush_interval_ms"`
+	DecisionRetentionDays int `yaml:"decision_retention_days"`
+	// FirstSeenIndex records each registered domain (eTLD+1) independently of
+	// query-log retention. Enabled by default when query logging is on; an
+	// explicit false disables the index. No client addresses are stored.
+	FirstSeenIndex bool `yaml:"first_seen_index"`
+	// AnswerTelemetry stores a hash of A/AAAA answer addresses, address count
+	// and minimum TTL beside query-log rows. Off by default. Never stores TXT
+	// contents or raw address lists.
+	AnswerTelemetry bool `yaml:"answer_telemetry"`
+	QueryLog        bool `yaml:"query_log"`
+	LogClientIP     bool `yaml:"log_client_ip"`
+	RetentionDays   int  `yaml:"retention_days"`
+	RollupDays      int  `yaml:"rollup_days"`
+	BufferSize      int  `yaml:"buffer_size"`
+	FlushIntervalMS int  `yaml:"flush_interval_ms"`
 }
 
 // Cache controls the answer cache.
@@ -487,6 +495,8 @@ func Default() Config {
 			LogClientIP:           true,
 			DecisionRecords:       true,
 			DecisionRetentionDays: 30,
+			FirstSeenIndex:        true,
+			AnswerTelemetry:       false,
 			RetentionDays:         7,
 			RollupDays:            90,
 			BufferSize:            8192,
