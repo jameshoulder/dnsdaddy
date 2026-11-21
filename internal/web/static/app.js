@@ -5710,6 +5710,9 @@ pages.recovery = {
       <div class="card-head"><div><h2>Journal integrity</h2>
         <p>Local hash-chain check for sealed configuration history. Export the tip offline if you need wholesale-replacement detection.</p></div>
         <button type="button" class="btn btn-ghost" id="verify-journal">Re-check</button></div>
+      <label class="field note-tight"><span>Trusted tip checkpoint (optional)</span>
+        <input id="journal-tip" class="mono" type="text" spellcheck="false" placeholder="Paste a previously exported tipHash" value="${(integrity && integrity.expectedTip) || ''}">
+      </label>
       <div id="journal-verify">${raw(journalVerifyPanel(integrity))}</div>
     </div><div class="card section" id="change-history">
       <div class="card-head"><div><h2>Configuration history</h2><p>Newest first. Original event details are retained; credentials and secret values are redacted.</p></div></div>
@@ -5777,15 +5780,16 @@ function journalVerifyPanel(data) {
     ? html`<span class="badge ok">Chain intact</span>`
     : html`<span class="badge bad">Breaks detected</span>`;
   const breaks = (data.breaks || []).map((b) => html`<li>${b}</li>`).join('');
+  const tipNote = data.tipMatches === false && data.checkpointFound
+    ? html`<span class="muted">checkpoint found; tip has advanced</span>`
+    : '';
   return html`<div class="rec-meta note-tight">
       ${raw(badge)}
       <span>${num(data.sealed)} sealed</span>
       <span>${num(data.legacyUnsealed)} legacy unsealed</span>
       <span class="mono" title="${data.tipHash || ''}">tip ${(data.tipHash || '').slice(0, 16)}${(data.tipHash || '').length > 16 ? '…' : ''}</span>
+      ${raw(tipNote)}
     </div>
-    <label class="field note-tight"><span>Trusted tip checkpoint (optional)</span>
-      <input id="journal-tip" class="mono" type="text" spellcheck="false" placeholder="Paste a previously exported tipHash" value="${data.expectedTip || ''}">
-    </label>
     ${raw(breaks ? html`<ul class="muted small">${raw(breaks)}</ul>` : '')}
     <p class="muted small">${data.detectionScope || ''}</p>`;
 }

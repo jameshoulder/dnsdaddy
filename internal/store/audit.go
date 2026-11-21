@@ -83,46 +83,79 @@ type ConfigChangeEvent struct {
 	EntryHash   string         `json:"entryHash,omitempty"`
 }
 
+func (s *Store) beginImmediate(ctx context.Context) (*sql.Conn, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func commitConn(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		conn.Close()
+		return err
+	}
+	return conn.Close()
+}
+
+func rollbackConn(ctx context.Context, conn *sql.Conn) {
+	_, _ = conn.ExecContext(ctx, "ROLLBACK")
+	_ = conn.Close()
+}
+
 func (s *Store) BeginConfigChange(ctx context.Context, actor, action, target string) (int64, error) {
 	if actor == "" || len(actor) > 256 || action == "" || len(action) > 80 || len(target) > 512 {
 		return 0, errors.New("invalid configuration audit identity")
 	}
 	at := unixMilli(time.Now().UTC())
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.beginImmediate(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
-	prev, err := journalTipHashTx(ctx, tx)
+	defer func() {
+		if conn != nil {
+			rollbackConn(ctx, conn)
+		}
+	}()
+	prev, err := journalTipHashConn(ctx, conn)
 	if err != nil {
+		return 0, err
+	}
+	// IMMEDIATE lock lets us reserve the next id and seal it in one INSERT so
+	// Begin does not require a follow-up UPDATE (completion is the only UPDATE).
+	var id int64
+	if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) + 1 FROM config_change_history`).Scan(&id); err != nil {
 		return 0, err
 	}
 	pending := ConfigChangeEvent{
+		ID:         id,
 		At:         fromUnixMilli(at),
 		Actor:      actor,
 		Action:     action,
 		Target:     target,
 		Status:     "pending",
 		HTTPStatus: 0,
-		Changes:    []ConfigChange{},
 		Error:      "",
 		PrevHash:   prev,
 	}
-	entryHash, err := hashJournalEntry(pending)
+	entryHash, err := hashJournalEntry(pending, "[]")
 	if err != nil {
 		return 0, err
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO config_change_history(at,actor,action,target,status,prev_hash,entry_hash) VALUES(?,?,?,?,'pending',?,?)`, at, actor, action, target, prev, entryHash)
-	if err != nil {
+	if _, err := conn.ExecContext(ctx, `INSERT INTO config_change_history(id,at,actor,action,target,status,prev_hash,entry_hash) VALUES(?,?,?,?,?,'pending',?,?)`, id, at, actor, action, target, prev, entryHash); err != nil {
 		return 0, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
+	if err := commitConn(ctx, conn); err != nil {
+		conn = nil
 		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
+	conn = nil
 	return id, nil
 }
 
@@ -146,16 +179,20 @@ func (s *Store) CompleteConfigChange(ctx context.Context, id int64, status strin
 		return errors.New("audit status note is too long")
 	}
 	completedAt := unixMilli(time.Now().UTC())
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		if conn != nil {
+			rollbackConn(ctx, conn)
+		}
+	}()
 	var e ConfigChangeEvent
 	var at int64
-	var prevHash string
-	err = tx.QueryRowContext(ctx, `SELECT id,at,actor,action,target,prev_hash FROM config_change_history WHERE id=? AND status='pending'`, id).
-		Scan(&e.ID, &at, &e.Actor, &e.Action, &e.Target, &prevHash)
+	var prevHash, storedHash, storedChanges string
+	err = conn.QueryRowContext(ctx, `SELECT id,at,actor,action,target,prev_hash,entry_hash,changes FROM config_change_history WHERE id=? AND status='pending'`, id).
+		Scan(&e.ID, &at, &e.Actor, &e.Action, &e.Target, &prevHash, &storedHash, &storedChanges)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("configuration audit record is not pending")
@@ -163,18 +200,27 @@ func (s *Store) CompleteConfigChange(ctx context.Context, id int64, status strin
 		return err
 	}
 	e.At = fromUnixMilli(at)
-	e.Status = status
-	e.HTTPStatus = httpStatus
-	e.Changes = changes
-	e.Error = note
+	e.Status = "pending"
+	e.HTTPStatus = 0
+	e.Error = ""
 	e.PrevHash = prevHash
-	completeTime := fromUnixMilli(completedAt)
-	e.CompletedAt = &completeTime
-	entryHash, err := hashJournalEntry(e)
+	wantPending, err := hashJournalEntry(e, storedChanges)
 	if err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE config_change_history SET completed_at=?,status=?,http_status=?,changes=?,error=?,entry_hash=? WHERE id=? AND status='pending'`, completedAt, status, httpStatus, string(encoded), note, entryHash, id)
+	if storedHash == "" || wantPending != storedHash {
+		return errors.New("configuration audit pending seal does not match stored intent")
+	}
+	e.Status = status
+	e.HTTPStatus = httpStatus
+	e.Error = note
+	completeTime := fromUnixMilli(completedAt)
+	e.CompletedAt = &completeTime
+	entryHash, err := hashJournalEntry(e, string(encoded))
+	if err != nil {
+		return err
+	}
+	res, err := conn.ExecContext(ctx, `UPDATE config_change_history SET completed_at=?,status=?,http_status=?,changes=?,error=?,entry_hash=? WHERE id=? AND status='pending'`, completedAt, status, httpStatus, string(encoded), note, entryHash, id)
 	if err != nil {
 		return err
 	}
@@ -185,7 +231,12 @@ func (s *Store) CompleteConfigChange(ctx context.Context, id int64, status strin
 	if n != 1 {
 		return errors.New("configuration audit record is not pending")
 	}
-	return tx.Commit()
+	if err := commitConn(ctx, conn); err != nil {
+		conn = nil
+		return err
+	}
+	conn = nil
+	return nil
 }
 
 // ListConfigChanges uses a strict monotonically descending ID cursor. New
@@ -231,9 +282,12 @@ func (s *Store) ListConfigChanges(ctx context.Context, beforeID int64, limit int
 	return result, more, nil
 }
 
-func journalTipHashTx(ctx context.Context, tx *sql.Tx) (string, error) {
+func journalTipHashConn(ctx context.Context, conn *sql.Conn) (string, error) {
+	// Chain continuity includes pending seals so a second concurrent begin
+	// cannot fork from an older completed tip. Offline tipHash export uses
+	// completed rows only (see VerifyConfigHistory).
 	var tip string
-	err := tx.QueryRowContext(ctx, `SELECT entry_hash FROM config_change_history WHERE entry_hash != '' ORDER BY id DESC LIMIT 1`).Scan(&tip)
+	err := conn.QueryRowContext(ctx, `SELECT entry_hash FROM config_change_history WHERE entry_hash != '' ORDER BY id DESC LIMIT 1`).Scan(&tip)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JournalGenesisPrev, nil
 	}
@@ -247,32 +301,34 @@ func journalTipHashTx(ctx context.Context, tx *sql.Tx) (string, error) {
 }
 
 type journalSeal struct {
-	At          int64          `json:"at"`
-	CompletedAt int64          `json:"completedAt"`
-	Actor       string         `json:"actor"`
-	Action      string         `json:"action"`
-	Target      string         `json:"target"`
-	Status      string         `json:"status"`
-	HTTPStatus  int            `json:"httpStatus"`
-	Changes     []ConfigChange `json:"changes"`
-	Error       string         `json:"error"`
-	PrevHash    string         `json:"prevHash"`
+	ID          int64  `json:"id"`
+	At          int64  `json:"at"`
+	CompletedAt int64  `json:"completedAt"`
+	Actor       string `json:"actor"`
+	Action      string `json:"action"`
+	Target      string `json:"target"`
+	Status      string `json:"status"`
+	HTTPStatus  int    `json:"httpStatus"`
+	ChangesJSON string `json:"changes"`
+	Error       string `json:"error"`
+	PrevHash    string `json:"prevHash"`
 }
 
-func hashJournalEntry(e ConfigChangeEvent) (string, error) {
-	seal := journalSeal{
-		At:         unixMilli(e.At.UTC()),
-		Actor:      e.Actor,
-		Action:     e.Action,
-		Target:     e.Target,
-		Status:     e.Status,
-		HTTPStatus: e.HTTPStatus,
-		Changes:    e.Changes,
-		Error:      e.Error,
-		PrevHash:   e.PrevHash,
+func hashJournalEntry(e ConfigChangeEvent, changesJSON string) (string, error) {
+	if changesJSON == "" {
+		changesJSON = "[]"
 	}
-	if seal.Changes == nil {
-		seal.Changes = []ConfigChange{}
+	seal := journalSeal{
+		ID:          e.ID,
+		At:          unixMilli(e.At.UTC()),
+		Actor:       e.Actor,
+		Action:      e.Action,
+		Target:      e.Target,
+		Status:      e.Status,
+		HTTPStatus:  e.HTTPStatus,
+		ChangesJSON: changesJSON,
+		Error:       e.Error,
+		PrevHash:    e.PrevHash,
 	}
 	if e.CompletedAt != nil {
 		seal.CompletedAt = unixMilli(e.CompletedAt.UTC())
@@ -294,22 +350,27 @@ type JournalVerifyResult struct {
 	TipHash           string   `json:"tipHash"`
 	ExpectedTip       string   `json:"expectedTip,omitempty"`
 	TipMatches        *bool    `json:"tipMatches,omitempty"`
+	CheckpointFound   *bool    `json:"checkpointFound,omitempty"`
 	Breaks            []string `json:"breaks"`
 	DetectionScope    string   `json:"detectionScope"`
 	TrustedCheckpoint string   `json:"trustedCheckpoint"`
 }
 
 // VerifyConfigHistory walks sealed journal rows oldest-first. expectedTip, when
-// non-empty, is an operator-held checkpoint of the tip hash; without it the
-// walk can still detect broken links and rehashed rows inside this database,
-// but not silent wholesale replacement of the journal.
+// non-empty, is an operator-held checkpoint; it must appear somewhere in the
+// sealed chain (later valid appends are not breaks). tipMatches reports whether
+// it equals the current stable tip (last completed seal). Without a checkpoint
+// the walk still detects broken links and rehashed rows, but not silent
+// wholesale replacement or a missing sealed suffix.
 func (s *Store) VerifyConfigHistory(ctx context.Context, expectedTip string) (JournalVerifyResult, error) {
 	out := JournalVerifyResult{
 		OK:     true,
 		Breaks: []string{},
-		DetectionScope: "Detects mutation, reordering or truncation among sealed journal rows in this database. " +
+		DetectionScope: "Detects mutation or reordering among sealed journal rows when a surviving link exposes the gap. " +
+			"Detecting a missing sealed suffix requires a trusted expectedTip checkpoint. " +
 			"Does not protect against an attacker who replaces the whole database without an external tip checkpoint.",
-		TrustedCheckpoint: "Export and store tipHash offline (or compare against a prior verify response). Empty expectedTip skips the tip comparison.",
+		TrustedCheckpoint: "Export tipHash from a completed journal state and store it offline. " +
+			"expectedTip must match that exact backup/journal state or an ancestor seal still present in the chain; later valid changes advance tipHash and make tipMatches false while checkpointFound stays true.",
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id,at,completed_at,actor,action,target,status,http_status,changes,error,prev_hash,entry_hash FROM config_change_history ORDER BY id ASC`)
 	if err != nil {
@@ -318,6 +379,8 @@ func (s *Store) VerifyConfigHistory(ctx context.Context, expectedTip string) (Jo
 	defer rows.Close()
 	prev := JournalGenesisPrev
 	sealedStarted := false
+	seen := map[string]bool{}
+	stableTip := JournalGenesisPrev
 	for rows.Next() {
 		var e ConfigChangeEvent
 		var at int64
@@ -355,7 +418,7 @@ func (s *Store) VerifyConfigHistory(ctx context.Context, expectedTip string) (Jo
 			out.OK = false
 			out.Breaks = append(out.Breaks, fmt.Sprintf("id=%d: prev_hash mismatch", e.ID))
 		}
-		want, err := hashJournalEntry(e)
+		want, err := hashJournalEntry(e, changes)
 		if err != nil {
 			out.OK = false
 			out.Breaks = append(out.Breaks, fmt.Sprintf("id=%d: cannot rehash", e.ID))
@@ -366,21 +429,24 @@ func (s *Store) VerifyConfigHistory(ctx context.Context, expectedTip string) (Jo
 			out.Breaks = append(out.Breaks, fmt.Sprintf("id=%d: entry_hash mismatch", e.ID))
 		}
 		prev = e.EntryHash
-		out.TipHash = e.EntryHash
+		seen[e.EntryHash] = true
+		if e.Status != "pending" {
+			stableTip = e.EntryHash
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
-	if out.Sealed == 0 && out.LegacyUnsealed == 0 {
-		out.TipHash = JournalGenesisPrev
-	}
+	out.TipHash = stableTip
 	if expectedTip != "" {
 		out.ExpectedTip = expectedTip
+		found := seen[expectedTip] || expectedTip == JournalGenesisPrev && out.Sealed == 0
+		out.CheckpointFound = &found
 		match := out.TipHash == expectedTip
 		out.TipMatches = &match
-		if !match {
+		if !found {
 			out.OK = false
-			out.Breaks = append(out.Breaks, "tip hash does not match trusted checkpoint")
+			out.Breaks = append(out.Breaks, "trusted checkpoint was not found in the sealed journal chain")
 		}
 	}
 	return out, nil

@@ -7563,12 +7563,19 @@ components:
           type: integer
         tipHash:
           type: string
+          description: Last completed seal hash (pending rows are excluded from the exported tip).
         expectedTip:
           type: string
         tipMatches:
           type:
           - boolean
           - 'null'
+          description: Whether expectedTip equals the current stable tipHash.
+        checkpointFound:
+          type:
+          - boolean
+          - 'null'
+          description: Whether expectedTip appears anywhere in the sealed chain (including ancestors).
         breaks:
           type: array
           items:
@@ -7586,8 +7593,8 @@ components:
       - breaks
       - detectionScope
       - trustedCheckpoint
-      description: Local journal verification result. A matching tip checkpoint is required to detect
-        wholesale database replacement.
+      description: Local journal verification result. A checkpoint found in the sealed chain is required
+        to detect wholesale replacement; tipMatches is exact-tip equality for frozen snapshots.
     DNSSECAnchorKey:
       properties:
         addHoldDownUntil:

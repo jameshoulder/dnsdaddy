@@ -56,8 +56,13 @@ comparison never enter the durable seal.
 ## Operator practice
 
 1. After important changes, copy `tipHash` from verify into offline notes or
-   backup metadata.
+   backup metadata. `tipHash` is the last **completed** seal (pending rows are
+   excluded from the exported tip).
 2. After restore or incident review, re-run verify with that checkpoint.
+   `expectedTip` must match the exact backup/journal state you saved, or an
+   ancestor seal still present in the chain. Later valid management writes
+   advance `tipHash` and set `tipMatches: false` while `checkpointFound`
+   stays true — that is not a break.
 3. Treat feed checksum mismatch / not-loaded as “do not claim this feed is
    protecting anyone” — the same rule as the existing `loaded` field.
 

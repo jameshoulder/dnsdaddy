@@ -18,14 +18,14 @@ func TestStage5BCommittedWarningPreservesSuccessEvidence(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = s.RecordFeedRefresh(ctx, f.ID, FeedResult{Committed: true, Status: "committed-warning", Error: "feed cache/index committed; durability unconfirmed", ETag: "synthetic-v1", DomainCount: 3, ContentSHA256: "abc123", SourceURL: "https://example.org/list.txt", ParserAccepted: 3}); e != nil {
+	if e = s.RecordFeedRefresh(ctx, f.ID, FeedResult{Committed: true, Status: "committed-warning", Error: "feed cache/index committed; durability unconfirmed", ETag: "synthetic-v1", DomainCount: 3, ContentSHA256: "abc123", SourceURL: f.URL, ParserAccepted: 3}); e != nil {
 		t.Fatal(e)
 	}
 	after, e := s.GetFeed(ctx, f.ID)
 	if e != nil || after.LastSuccess == nil || after.LastError == "" || after.LastStatus != "committed-warning" || after.DomainCount != 3 || after.ETag != "synthetic-v1" {
 		t.Fatal("warning lost committed history")
 	}
-	if e = s.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "error", Error: "feed import rejected"}); e != nil {
+	if e = s.RecordFeedRefresh(ctx, f.ID, FeedResult{Status: "error", Error: "feed import rejected", SourceURL: f.URL}); e != nil {
 		t.Fatal(e)
 	}
 	failed, e := s.GetFeed(ctx, f.ID)

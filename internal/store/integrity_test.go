@@ -16,12 +16,12 @@ func TestFeedRefreshPreservesLastGoodChecksumOnFailure(t *testing.T) {
 	}
 	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{
 		Status: "ok", DomainCount: 4, ETag: `"v1"`, ContentSHA256: "goodhash",
-		SourceURL: url, ParserAccepted: 4, ParserRejected: 1,
+		SourceURL: f.URL, ParserAccepted: 4, ParserRejected: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.RecordFeedRefresh(ctx, f.ID, FeedResult{
-		Status: "error", Error: "HTTP 500", SourceURL: url,
+		Status: "error", Error: "HTTP 500", SourceURL: f.URL,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestFeedRefreshPreservesLastGoodChecksumOnFailure(t *testing.T) {
 	if got.ParserAccepted != 4 || got.ParserRejected != 1 {
 		t.Fatalf("parser evidence lost: %+v", got)
 	}
-	if got.RefreshSourceURL != url {
+	if got.RefreshSourceURL != f.URL {
 		t.Fatalf("source url = %q", got.RefreshSourceURL)
 	}
 	if got.LastSuccess == nil || got.LastStatus != "error" {
@@ -108,7 +108,15 @@ func TestJournalHashChainLinksEntries(t *testing.T) {
 		t.Fatalf("genesis prev = %q", events[2].PrevHash)
 	}
 	got, err := st.VerifyConfigHistory(ctx, events[0].EntryHash)
-	if err != nil || !got.OK || got.TipMatches == nil || !*got.TipMatches {
-		t.Fatalf("verify: %+v %v", got, err)
+	if err != nil || !got.OK || got.TipMatches == nil || !*got.TipMatches || got.CheckpointFound == nil || !*got.CheckpointFound {
+		t.Fatalf("verify tip: %+v %v", got, err)
+	}
+	older := events[2].EntryHash
+	got, err = st.VerifyConfigHistory(ctx, older)
+	if err != nil || !got.OK || got.CheckpointFound == nil || !*got.CheckpointFound {
+		t.Fatalf("ancestor checkpoint should remain found: %+v %v", got, err)
+	}
+	if got.TipMatches == nil || *got.TipMatches {
+		t.Fatalf("ancestor checkpoint should not equal current tip: %+v", got)
 	}
 }

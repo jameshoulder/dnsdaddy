@@ -341,9 +341,17 @@ func (m *Manager) finishRefresh(ctx context.Context, f store.Feed, res store.Fee
 		}
 	}
 
+	if res.SourceURL == "" {
+		res.SourceURL = f.URL
+	}
 	if res.Status == "not-modified" {
 		if err := m.rebuildRequired(ctx, f.ID); err != nil {
 			res = failedImport(err)
+			res.SourceURL = f.URL
+			// A checksum/missing-cache rejection must not keep looping on 304s.
+			if clearErr := m.store.ClearFeedETag(ctx, f.ID); clearErr != nil {
+				m.log.Warn("could not clear feed etag after failed 304 rebuild", "feed", f.ID)
+			}
 		} else {
 			res.Committed = true
 		}
@@ -366,6 +374,10 @@ func (m *Manager) finishRefresh(ctx context.Context, f store.Feed, res store.Fee
 		}
 	}
 	if err := m.store.RecordFeedRefresh(recordCtx, f.ID, res); err != nil {
+		if errors.Is(err, store.ErrStaleFeedRefresh) {
+			m.log.Warn("feed refresh evidence skipped because URL changed during download", "feed", f.ID)
+			return res
+		}
 		if res.Committed {
 			res.Status = "committed-warning"
 			res.Error = "feed cache/index committed; refresh history could not be recorded"

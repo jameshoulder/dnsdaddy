@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -50,7 +51,12 @@ func (a *API) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleConfigHistoryVerify(w http.ResponseWriter, r *http.Request) {
-	expected := strings.TrimSpace(r.URL.Query().Get("expectedTip"))
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeError(w, 400, "query string is malformed")
+		return
+	}
+	expected := strings.TrimSpace(query.Get("expectedTip"))
 	if len(expected) > 128 {
 		writeError(w, 400, "expectedTip is too long")
 		return
