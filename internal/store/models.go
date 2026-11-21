@@ -143,9 +143,11 @@ type QueryEvent struct {
 	// twice in the same instant, which is exactly what a busy resolver does.
 	DNSSECObservationID string `json:"-"`
 
-	// Answer is opt-in telemetry about A/AAAA answers. Zero when the setting
-	// is off or the answer had no address records.
-	Answer AnswerTelemetry `json:"answer,omitempty"`
+	// Answer is opt-in telemetry about A/AAAA answers. Nil when the setting
+	// is off, the row predates the feature, or the answer had no address
+	// records. A pointer so omitempty actually omits the field (structs never
+	// omit as empty values).
+	Answer *AnswerTelemetry `json:"answer,omitempty"`
 }
 
 // DNSSEC statuses recorded on the serving path. Read DNSSECSource alongside

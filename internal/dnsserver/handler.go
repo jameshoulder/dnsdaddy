@@ -813,5 +813,9 @@ func (h *Handler) attachAnswerTelemetry(event *store.QueryEvent, msg *dns.Msg) {
 	if !h.answerTelemetry || event == nil || msg == nil {
 		return
 	}
-	event.Answer = store.SummarizeAnswerAddresses(msg)
+	sum := store.SummarizeAnswerAddresses(msg)
+	if !sum.Recorded {
+		return
+	}
+	event.Answer = &sum
 }

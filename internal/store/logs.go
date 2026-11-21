@@ -48,10 +48,20 @@ func (s *Store) InsertQueryBatch(ctx context.Context, events []QueryEvent, persi
 		defer stmt.Close()
 
 		for _, e := range events {
+			var (
+				addrCount int
+				addrHash  string
+				minTTL    int64
+			)
+			if e.Answer != nil && e.Answer.Recorded {
+				addrCount = e.Answer.AddrCount
+				addrHash = e.Answer.AddrSHA256
+				minTTL = int64(e.Answer.MinTTL)
+			}
 			if _, err := stmt.ExecContext(ctx, unixMilli(e.Time), e.ClientIP, e.ClientName, e.NetworkID,
 				e.Domain, e.QType, e.Action, e.Reason, e.Category, e.Source, e.Proto,
 				e.ElapsedMS, boolToInt(e.Cached), e.DNSSEC, e.DNSSECObservationID, e.DNSSECSource,
-				e.Answer.AddrCount, e.Answer.AddrSHA256, int64(e.Answer.MinTTL)); err != nil {
+				addrCount, addrHash, minTTL); err != nil {
 				return err
 			}
 		}
@@ -355,26 +365,32 @@ func (s *Store) ListQueries(ctx context.Context, f QueryFilter) ([]QueryEvent, i
 	out := make([]QueryEvent, 0, limit)
 	for rows.Next() {
 		var (
-			e      QueryEvent
-			ts     int64
-			cached int
-			minTTL int64
+			e         QueryEvent
+			ts        int64
+			cached    int
+			addrCount int
+			addrHash  string
+			minTTL    int64
 		)
 		if err := rows.Scan(&e.ID, &ts, &e.ClientIP, &e.ClientName, &e.NetworkID, &e.Domain,
 			&e.QType, &e.Action, &e.Reason, &e.Category, &e.Source, &e.Proto, &e.ElapsedMS,
 			&cached, &e.DNSSEC, &e.DNSSECObservationID, &e.DNSSECSource,
-			&e.Answer.AddrCount, &e.Answer.AddrSHA256, &minTTL); err != nil {
+			&addrCount, &addrHash, &minTTL); err != nil {
 			return nil, 0, err
 		}
 		e.Time = fromUnixMilli(ts)
 		e.Cached = cached == 1
-		if minTTL < 0 || minTTL > math.MaxUint32 {
-			return nil, 0, fmt.Errorf("query_log answer_min_ttl %d out of uint32 range", minTTL)
-		}
-		// #nosec G115 -- range-checked against MaxUint32 immediately above.
-		e.Answer.MinTTL = uint32(minTTL)
-		if e.Answer.AddrCount > 0 || e.Answer.AddrSHA256 != "" {
-			e.Answer.Recorded = true
+		if addrCount > 0 || addrHash != "" || minTTL != 0 {
+			if minTTL < 0 || minTTL > math.MaxUint32 {
+				return nil, 0, fmt.Errorf("query_log answer_min_ttl %d out of uint32 range", minTTL)
+			}
+			// #nosec G115 -- range-checked against MaxUint32 immediately above.
+			e.Answer = &AnswerTelemetry{
+				AddrCount:  addrCount,
+				AddrSHA256: addrHash,
+				MinTTL:     uint32(minTTL),
+				Recorded:   true,
+			}
 		}
 		out = append(out, e)
 	}
