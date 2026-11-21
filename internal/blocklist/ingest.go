@@ -297,7 +297,7 @@ func (m *Manager) snapshot(ctx context.Context, f store.Feed, src io.Reader, loc
 	if err != nil {
 		return failedImport(err)
 	}
-	digest, err := hashOpenFile(tmp)
+	digest, err := hashOpenFile(ctx, tmp, m.maxBytes)
 	if err != nil {
 		return failedImport(err)
 	}
@@ -358,13 +358,21 @@ func (m *Manager) snapshot(ctx context.Context, f store.Feed, src io.Reader, loc
 	return result
 }
 
-func hashOpenFile(f *os.File) (string, error) {
+// hashOpenFile digests at most max bytes under ctx. Callers must already have
+// established a regular single-link file within max, or pass validate=true via
+// verifyCachedChecksum which does that first. An oversized read fails closed
+// instead of hashing unbounded content while holding manager locks.
+func hashOpenFile(ctx context.Context, f *os.File, max int64) (string, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	n, err := copyBounded(ctx, h, f, max)
+	if err != nil {
 		return "", err
+	}
+	if n == 0 {
+		return "", errors.New("empty feed")
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return "", err
@@ -374,11 +382,16 @@ func hashOpenFile(f *os.File) (string, error) {
 
 // verifyCachedChecksum compares an on-disk cache body to last-good evidence.
 // Missing evidence skips the check (upgrades before the first sealed commit).
-func verifyCachedChecksum(f *os.File, expected string) error {
+// Size/type validation runs before any digest read so oversized or sparse
+// replacements cannot monopolise the rebuild path.
+func verifyCachedChecksum(ctx context.Context, f *os.File, expected string, max int64) error {
 	if expected == "" {
 		return nil
 	}
-	got, err := hashOpenFile(f)
+	if _, err := regular(f, max); err != nil {
+		return err
+	}
+	got, err := hashOpenFile(ctx, f, max)
 	if err != nil {
 		return err
 	}
@@ -581,7 +594,7 @@ func (m *Manager) candidate(ctx context.Context, override string, staged *os.Fil
 			// Staged downloads are freshly validated; existing cache files are
 			// checked against last-good evidence when that evidence exists.
 			if own && f.ID != override {
-				if err = verifyCachedChecksum(file, f.LastGoodSHA256); err != nil {
+				if err = verifyCachedChecksum(ctx, file, f.LastGoodSHA256, m.maxBytes); err != nil {
 					file.Close()
 					budget.used, budget.claims = beforeUsed, beforeClaims
 					if errors.Is(err, errChecksumMismatch) {

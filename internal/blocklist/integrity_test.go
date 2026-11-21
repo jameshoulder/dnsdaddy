@@ -4,10 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
+
+	"github.com/jameshoulder/dnsdaddy/internal/config"
+	"github.com/jameshoulder/dnsdaddy/internal/feedimport"
 )
 
 func TestFeedChecksumEvidenceAndLastGoodRetention(t *testing.T) {
@@ -60,5 +65,32 @@ func TestFeedChecksumEvidenceAndLastGoodRetention(t *testing.T) {
 	}
 	if after.LastGoodSHA256 != digest {
 		t.Fatalf("last good checksum changed after tamper: %q", after.LastGoodSHA256)
+	}
+}
+
+func TestVerifyCachedChecksumRejectsOversizedBeforeHash(t *testing.T) {
+	h := newManagerHarness(t, func(cfg *config.Feeds) {
+		cfg.MaxFeedBytes = 64
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	path := h.mgr.cachePath("oversized")
+	if err := os.WriteFile(path, make([]byte, 128), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	err = verifyCachedChecksum(ctx, f, "deadbeef", h.mgr.maxBytes)
+	if err == nil {
+		t.Fatal("accepted oversized cache for hashing")
+	}
+	if errors.Is(err, errChecksumMismatch) {
+		t.Fatal("hashed oversized cache instead of rejecting on size")
+	}
+	if !errors.Is(err, feedimport.ErrLimit) {
+		t.Fatalf("want feed byte limit, got %v", err)
 	}
 }
