@@ -5106,7 +5106,10 @@ components:
         minTtl:
           type: integer
           format: int64
-          description: Lowest TTL among those address records, in seconds.
+          description: Lowest TTL among those address records, in seconds. Always
+            present when recorded is true (including zero). Absence of the whole
+            answer object means telemetry was unavailable or not collected —
+            not that minTtl was zero.
     Category:
       type: object
       properties:

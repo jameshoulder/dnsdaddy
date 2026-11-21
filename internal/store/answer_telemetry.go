@@ -20,7 +20,9 @@ type AnswerTelemetry struct {
 	// AddrSHA256 is the hex SHA-256 of the sorted unique address strings.
 	AddrSHA256 string `json:"addrSha256,omitempty"`
 	// MinTTL is the lowest TTL among those address records (seconds).
-	MinTTL uint32 `json:"minTtl,omitempty"`
+	// Not omitempty: when recorded is true, an omitted minTtl would be
+	// indistinguishable from zero TTL on an address record.
+	MinTTL uint32 `json:"minTtl"`
 	// Recorded is true when answer telemetry was collected for this row.
 	Recorded bool `json:"recorded,omitempty"`
 }
