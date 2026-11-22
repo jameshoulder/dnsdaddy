@@ -36,6 +36,11 @@ type Decision struct {
 	// an explanation that changes after the fact is not an audit trail.
 	Explanation        string `json:"explanation"`
 	ExplanationVersion string `json:"explanationVersion"`
+	// BlockMode is the response mode used when this decision blocked.
+	BlockMode string `json:"blockMode,omitempty"`
+	// FeedID / FeedName are the feed that listed the domain when Rule is category.
+	FeedID   string `json:"feedId,omitempty"`
+	FeedName string `json:"feedName,omitempty"`
 
 	// Cited is populated by DecisionWithEvidence, not by the list queries.
 	Cited []CitedEvidence `json:"evidence,omitempty"`
@@ -85,12 +90,13 @@ func (s *Store) RecordDecision(ctx context.Context, d Decision, cited []CitedEvi
 		INSERT INTO decisions
 			(id, ts, query_log_id, subject_type, subject, action, category,
 			 rule, policy_path, policy_id, network_id, client_ip, client_name,
-			 qtype, explanation, explanation_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			 qtype, explanation, explanation_version, block_mode, feed_id, feed_name)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if _, err := tx.ExecContext(ctx, insert,
 		d.ID, unixMilli(d.Time), qlID, string(d.Subject.Type), d.Subject.Value,
 		d.Action, d.Category, d.Rule, d.PolicyPath, d.PolicyID, d.NetworkID,
 		d.ClientIP, d.ClientName, d.QType, d.Explanation, d.ExplanationVersion,
+		d.BlockMode, d.FeedID, d.FeedName,
 	); err != nil {
 		return Decision{}, err
 	}
@@ -203,7 +209,7 @@ func (s *Store) ListDecisionsPage(ctx context.Context, f DecisionFilter) ([]Deci
 	// #nosec G202 -- predicates and order are literal fragments; every value is bound.
 	q := `SELECT id, ts, query_log_id, subject_type, subject, action, category,
 	       rule, policy_path, policy_id, network_id, client_ip, client_name,
-	       qtype, explanation, explanation_version
+	       qtype, explanation, explanation_version, block_mode, feed_id, feed_name
 	       FROM decisions WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -235,7 +241,7 @@ func (s *Store) DecisionWithEvidence(ctx context.Context, id string) (Decision, 
 	const q = `
 		SELECT id, ts, query_log_id, subject_type, subject, action, category,
 		       rule, policy_path, policy_id, network_id, client_ip, client_name,
-		       qtype, explanation, explanation_version
+		       qtype, explanation, explanation_version, block_mode, feed_id, feed_name
 		  FROM decisions WHERE id = ?`
 	d, err := scanDecision(s.db.QueryRowContext(ctx, q, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -345,7 +351,7 @@ func scanDecision(sc rowScanner) (Decision, error) {
 	if err := sc.Scan(&d.ID, &ts, &qlID, &subjType, &d.Subject.Value, &d.Action,
 		&d.Category, &d.Rule, &d.PolicyPath, &d.PolicyID, &d.NetworkID,
 		&d.ClientIP, &d.ClientName, &d.QType, &d.Explanation,
-		&d.ExplanationVersion); err != nil {
+		&d.ExplanationVersion, &d.BlockMode, &d.FeedID, &d.FeedName); err != nil {
 		return Decision{}, err
 	}
 	d.Time = fromUnixMilli(ts)

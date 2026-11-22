@@ -5085,6 +5085,31 @@ components:
           - encrypted_forwarded
           description: 'Recorded provenance: native or encrypted_forwarded for locally checked Live answers,
             upstream for forwarding assertions, empty for unknown legacy rows.'
+        answer:
+          $ref: '#/components/schemas/AnswerTelemetry'
+          description: Opt-in A/AAAA answer summary when log.answer_telemetry is enabled and the answer
+            contained address records. Omitted or empty when the setting is off, the row predates the
+            feature, or the answer had no A/AAAA records. Never includes TXT contents or raw addresses.
+    AnswerTelemetry:
+      type: object
+      description: Privacy-preserving summary of A/AAAA answers beside a query-log row.
+      properties:
+        recorded:
+          type: boolean
+          description: True when address telemetry was collected for this row.
+        addrCount:
+          type: integer
+          description: Number of unique A/AAAA addresses in the answer.
+        addrSha256:
+          type: string
+          description: Hex SHA-256 of the sorted unique address strings.
+        minTtl:
+          type: integer
+          format: int64
+          description: Lowest TTL among those address records, in seconds. Always
+            present when recorded is true (including zero). Absence of the whole
+            answer object means telemetry was unavailable or not collected —
+            not that minTtl was zero.
     Category:
       type: object
       properties:
@@ -5431,6 +5456,16 @@ components:
           type: string
         name:
           type: string
+        confidence:
+          type: string
+          description: Identity confidence. unknown means no operator-assigned name.
+          enum:
+          - unknown
+          - operator
+          - observed
+        source:
+          type: string
+          description: How the name was assigned. manual for operator-set names.
         updatedAt:
           type: string
           format: date-time
@@ -6561,6 +6596,20 @@ components:
           type: string
           example: '1.0'
           description: Moves when the wording rules change, so two explanations can be told apart.
+        blockMode:
+          type: string
+          description: Block response mode captured at decision time.
+          enum:
+          - nxdomain
+          - zeroip
+          - refused
+          - ''
+        feedId:
+          type: string
+          description: Feed id that listed the domain when the rule was category.
+        feedName:
+          type: string
+          description: Feed display name captured at decision time.
         evidence:
           type: array
           description: Captured evidence on detail and export endpoints. Consult evidenceSource for legacy
@@ -7117,6 +7166,8 @@ components:
               type: string
         window:
           $ref: '#/components/schemas/InvestigationWindow'
+        firstSeen:
+          $ref: '#/components/schemas/InvestigationFirstSeen'
         activity:
           $ref: '#/components/schemas/InvestigationActivity'
         decisions:
@@ -7129,6 +7180,29 @@ components:
           $ref: '#/components/schemas/InvestigationFindings'
         observations:
           $ref: '#/components/schemas/InvestigationObservations'
+    InvestigationFirstSeen:
+      type: object
+      description: Retention-independent registered-domain observation for Investigate.
+      properties:
+        available:
+          type: boolean
+          description: False when the index is disabled or unreadable.
+        registeredDomain:
+          type: string
+          description: eTLD+1 when the name has a registered domain.
+        firstSeen:
+          type: string
+          format: date-time
+          description: Absent when no observation has been successfully recorded.
+        lastSeen:
+          type: string
+          format: date-time
+        queryCount:
+          type: integer
+          format: int64
+        note:
+          type: string
+          description: Limits of the index, including unavailable and not-yet-observed states.
     ClientInvestigation:
       type: object
       properties:
@@ -7144,6 +7218,10 @@ components:
               type: object
               description: The network and policy the current configuration maps this address to. Current,
                 not historical.
+            identity:
+              $ref: '#/components/schemas/Client'
+              description: Confidence-labelled device identity. confidence unknown with an empty name is
+                a valid result when no operator name exists.
         window:
           $ref: '#/components/schemas/InvestigationWindow'
         activity:

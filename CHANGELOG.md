@@ -24,6 +24,12 @@ should be swapping a binary, not restoring a backup.
 
 ### Added
 
+- **Investigation Depth** (Phase 4 foundations): retention-independent
+  registered-domain first-seen index (`log.first_seen_index`), decision
+  `blockMode` / `feedId` / `feedName` fields, confidence-labelled device
+  identity on client Investigate, and opt-in A/AAAA answer telemetry
+  (`log.answer_telemetry`). See
+  [docs/investigation-depth.md](docs/investigation-depth.md).
 - **DNS Security Map** (Phase 1): Workspace page and authenticated
   `GET /api/v1/network-map` aggregating retained query evidence into
   network → observed client → exact queried-name relationships, with

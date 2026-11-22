@@ -84,10 +84,17 @@ CREATE TABLE IF NOT EXISTS network_cidrs (
 
 -- Operator-supplied friendly names for devices, so query logs read
 -- "laptop-07" rather than "10.0.4.23".
+--
+-- identity_confidence / identity_source label how sure we are about the
+-- name. Operator-assigned names are high-confidence "operator"/"manual".
+-- Absence of a row means unknown — that is a valid result, not a missing
+-- feature. No active discovery, MAC-OUI, ARP/NDP or lease parsing lives here.
 CREATE TABLE IF NOT EXISTS clients (
-    ip         TEXT PRIMARY KEY,
-    name       TEXT    NOT NULL,
-    updated_at INTEGER NOT NULL
+    ip                   TEXT PRIMARY KEY,
+    name                 TEXT    NOT NULL,
+    identity_confidence  TEXT    NOT NULL DEFAULT 'operator',
+    identity_source      TEXT    NOT NULL DEFAULT 'manual',
+    updated_at           INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS feeds (
@@ -134,7 +141,13 @@ CREATE TABLE IF NOT EXISTS query_log (
     -- the other. A dangling id means "no observation", not an error.
     dnssec_obs  TEXT    NOT NULL DEFAULT '',
     -- Origin recorded when this answer was served; blank is legacy/unknown.
-    dnssec_source TEXT NOT NULL DEFAULT ''
+    dnssec_source TEXT NOT NULL DEFAULT '',
+    -- Opt-in answer telemetry (A/AAAA only): unique address count, SHA-256 of
+    -- sorted unique addresses, and minimum TTL. Empty when the setting is off
+    -- or the answer had no address records. Never stores TXT or raw addresses.
+    answer_addr_count  INTEGER NOT NULL DEFAULT 0,
+    answer_addrs_sha256 TEXT NOT NULL DEFAULT '',
+    answer_min_ttl     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS query_log_ts_idx        ON query_log (ts DESC);
@@ -485,7 +498,12 @@ CREATE TABLE IF NOT EXISTS decisions (
     explanation   TEXT    NOT NULL DEFAULT '',
     -- Schema version of the explanation, so a later wording change is visible
     -- as a version rather than silently rewriting history.
-    explanation_version TEXT NOT NULL DEFAULT '1.0'
+    explanation_version TEXT NOT NULL DEFAULT '1.0',
+    -- Block response mode and feed identity captured at decision time so a
+    -- later policy or feed rename cannot rewrite the historical record.
+    block_mode TEXT NOT NULL DEFAULT '',
+    feed_id    TEXT NOT NULL DEFAULT '',
+    feed_name  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS decisions_ts_idx ON decisions (ts DESC);
@@ -500,3 +518,17 @@ CREATE TABLE IF NOT EXISTS decision_evidence (
     contributed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (decision_id, evidence_id)
 );
+
+-- Registered-domain first-seen index. Independent of query-log retention:
+-- pruning the log must not erase "have we ever seen this eTLD+1". One row per
+-- registered domain; no client addresses; local observation only — not WHOIS
+-- registration age or threat intelligence.
+CREATE TABLE IF NOT EXISTS domain_first_seen (
+    registered_domain TEXT    PRIMARY KEY,
+    first_seen        INTEGER NOT NULL,
+    last_seen         INTEGER NOT NULL,
+    query_count       INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS domain_first_seen_last_idx
+    ON domain_first_seen (last_seen DESC);

@@ -685,9 +685,10 @@ func replaceCIDRs(ctx context.Context, tx *sql.Tx, networkID string, cidrs []str
 	return nil
 }
 
-// ListClients returns operator-assigned device names.
+// ListClients returns operator-assigned device names with identity labels.
 func (s *Store) ListClients(ctx context.Context) ([]Client, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT ip, name, updated_at FROM clients ORDER BY name")
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT ip, name, identity_confidence, identity_source, updated_at FROM clients ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -697,7 +698,7 @@ func (s *Store) ListClients(ctx context.Context) ([]Client, error) {
 	for rows.Next() {
 		var c Client
 		var updated int64
-		if err := rows.Scan(&c.IP, &c.Name, &updated); err != nil {
+		if err := rows.Scan(&c.IP, &c.Name, &c.Confidence, &c.Source, &updated); err != nil {
 			return nil, err
 		}
 		c.UpdatedAt = fromUnixMilli(updated)
@@ -706,7 +707,32 @@ func (s *Store) ListClients(ctx context.Context) ([]Client, error) {
 	return out, rows.Err()
 }
 
+// ClientIdentity returns the confidence-labelled identity for an IP.
+//
+// When no row exists, Confidence is unknown and Name is empty — unknown is a
+// valid result. This never invents a name from reverse DNS or leases.
+func (s *Store) ClientIdentity(ctx context.Context, ip string) (Client, error) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ip))
+	if err != nil {
+		return Client{IP: ip, Confidence: IdentityConfidenceUnknown}, fmt.Errorf("invalid IP %q", ip)
+	}
+	var c Client
+	var updated int64
+	err = s.db.QueryRowContext(ctx,
+		`SELECT ip, name, identity_confidence, identity_source, updated_at FROM clients WHERE ip = ?`,
+		addr.String()).Scan(&c.IP, &c.Name, &c.Confidence, &c.Source, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Client{IP: addr.String(), Confidence: IdentityConfidenceUnknown}, nil
+	}
+	if err != nil {
+		return Client{}, err
+	}
+	c.UpdatedAt = fromUnixMilli(updated)
+	return c, nil
+}
+
 // SetClientName names a device by IP, or clears the name if name is empty.
+// Operator-assigned names are recorded as high-confidence manual identity.
 func (s *Store) SetClientName(ctx context.Context, ip, name string) error {
 	addr, err := netip.ParseAddr(strings.TrimSpace(ip))
 	if err != nil {
@@ -718,9 +744,14 @@ func (s *Store) SetClientName(ctx context.Context, ip, name string) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO clients (ip, name, updated_at) VALUES (?, ?, ?)
-		ON CONFLICT(ip) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
-		addr.String(), name, unixMilli(time.Now()))
+		INSERT INTO clients (ip, name, identity_confidence, identity_source, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(ip) DO UPDATE SET
+			name = excluded.name,
+			identity_confidence = excluded.identity_confidence,
+			identity_source = excluded.identity_source,
+			updated_at = excluded.updated_at`,
+		addr.String(), name, IdentityConfidenceOperator, IdentitySourceManual, unixMilli(time.Now()))
 	return err
 }
 

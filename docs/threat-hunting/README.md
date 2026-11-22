@@ -297,8 +297,9 @@ this hunt is noisy on any network with normal browsing. It works best scoped to
 a server VLAN, where the set of domains a machine legitimately talks to is small
 and stable — and it is close to useless pointed at a floor of laptops.
 
-A first-seen index maintained independently of query-log retention would fix
-this properly. It is not implemented; see [../roadmap.md](../roadmap.md).
+A first-seen index is maintained independently of query-log retention
+(`domain_first_seen` / Investigate → First seen). See
+[../investigation-depth.md](../investigation-depth.md).
 
 **Investigation.** Registration date. Whether one host or many. Whether the
 name resembles a brand you use. Whether any detector fired for the same host.
@@ -359,7 +360,7 @@ Listed so the gaps are visible rather than implied.
 |---|---|
 | **Response-content analysis** — payloads in TXT/CNAME answers | Answer records are not stored. Only the question, action and metadata are logged. |
 | **Correlating DNS with connections** — a resolved domain never connected to, or a connection with no lookup (the DoH-bypass tell) | Needs flow or endpoint data. DNS Daddy sees DNS only. |
-| **Long-baseline rarity scoring** — "this host has never asked for anything like this" | Needs a persistent first-seen index independent of query-log retention. |
+| **Long-baseline rarity scoring** — "this host has never asked for anything like this" | First-seen index is available; calibrated rarity detectors remain research. |
 | **Fast-flux detection** — one name resolving to constantly changing addresses | Answer addresses are not stored. |
 | **Registration-age enrichment** | No WHOIS/RDAP lookup. The newly-registered *category* exists as a feed, which is not the same as per-domain age at query time. |
 

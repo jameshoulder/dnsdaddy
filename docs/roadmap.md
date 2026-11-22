@@ -81,26 +81,28 @@ checkpoint is needed; do not describe a local hash chain as protection against
 a compromised host. Preserve refusal of a management write when its initial
 journal entry cannot be saved.
 
-### Phase 4 — investigation depth
+### Phase 4 — investigation depth (foundations implemented)
 
 **Available (Phase 1 map):** the [DNS Security Map](dns-security-map.md) visualises
 retained network→client→domain query relationships without topology discovery.
 Optional UniFi / pfSense / SNMPv3 collectors remain deferred; see
 [dns-security-map-topology.md](dns-security-map-topology.md).
 
-Plan a registered-domain first-seen index independent of query-log retention,
-one row per domain, explicitly local observation rather than threat intelligence.
-Extend existing decision records rather than replace them, including versioned
-allowed/blocked evidence, selected policy, category, feed and block mode.
+**Available:** a registered-domain first-seen index (`domain_first_seen`)
+independent of query-log retention, one row per eTLD+1, local observation only.
+See [investigation-depth.md](investigation-depth.md).
 
-Plan minimal, confidence-labelled device identity from observed source addresses,
-configured networks and operator names, with optional deliberately configured
-lease-file/reverse-DNS input. Unknown must remain a valid result. No active
-network discovery, MAC-OUI inference, ARP/NDP sweeps or new raw-socket privileges.
+**Available:** decision records now also store `blockMode`, `feedId` and
+`feedName` at decision time alongside existing immutable evidence snapshots.
 
-Plan opt-in, bounded answer telemetry for record type, address, TTL and a hash.
-Full TXT contents would require a separate explicit setting and documented privacy
-trade-off. Do not silently collect more browsing data to populate a dashboard.
+**Available (minimal):** confidence-labelled device identity for operator-named
+clients (`operator` / `manual`); unknown remains a valid result when no name
+exists. Optional lease-file / reverse-DNS input remains planned; no active
+discovery, MAC-OUI, ARP/NDP or new raw-socket privileges.
+
+**Available (opt-in):** bounded answer telemetry for A/AAAA address count,
+address SHA-256 and minimum TTL (`log.answer_telemetry`, default off). Full TXT
+contents remain a separate future setting with an explicit privacy trade-off.
 
 ### Phase 5 — deployment and authentication guidance
 

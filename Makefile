@@ -48,7 +48,7 @@ run-encrypted: build ## Try Daddybound Live with the explicit Cloudflare HTTPS e
 
 .PHONY: test-race
 test-race: ## Run tests with the race detector
-	go test -race ./...
+	go test -race -timeout 20m ./...
 
 .PHONY: test-ui
 test-ui: ## Run the dashboard's JavaScript tests (needs node; no packages to install)

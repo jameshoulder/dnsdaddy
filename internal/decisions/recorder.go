@@ -53,6 +53,7 @@ type Event struct {
 	Action      string
 	Blocked     bool
 	Reason      string
+	BlockMode   store.BlockMode
 	Basis       *policy.Basis
 }
 
@@ -239,6 +240,9 @@ func (r *Recorder) write(ctx context.Context, e Event) {
 		ClientIP:   e.ClientIP,
 		ClientName: e.ClientName,
 		QType:      e.QType,
+		BlockMode:  string(e.BlockMode),
+		FeedID:     basisFeedID(e.Basis),
+		FeedName:   basisFeedName(e.Basis),
 	}
 	d.Explanation = Explain(e, cited)
 
@@ -508,4 +512,18 @@ func basisPolicyID(b *policy.Basis) string {
 		return ""
 	}
 	return b.PolicyID
+}
+
+func basisFeedID(b *policy.Basis) string {
+	if b == nil {
+		return ""
+	}
+	return b.FeedID
+}
+
+func basisFeedName(b *policy.Basis) string {
+	if b == nil {
+		return ""
+	}
+	return b.FeedName
 }

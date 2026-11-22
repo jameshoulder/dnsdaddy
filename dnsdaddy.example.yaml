@@ -285,6 +285,17 @@ log:
   # asked weeks after the fact.
   decision_retention_days: 30
 
+  # One row per registered domain (eTLD+1) with first/last seen. Survives
+  # query-log pruning, but only writes when the query log would also keep a
+  # row. No client addresses. Local observation only — not WHOIS registration
+  # age. Set false to disable.
+  first_seen_index: true
+
+  # Opt-in: store a SHA-256 of sorted unique A/AAAA addresses, address count and
+  # minimum TTL beside query-log rows. Off by default. Never stores TXT contents
+  # or raw address lists.
+  answer_telemetry: false
+
   # How long the hourly statistics used by the dashboard and reports are kept.
   # These survive the query-log prune, so charts keep their history.
   rollup_days: 90
