@@ -65,6 +65,19 @@ daddybound-report: ## Regenerate the Verified Trust laboratory conformance packa
 	go run ./cmd/dnsdaddy daddybound report -format json -o docs/daddybound/conformance-report.json
 	@echo "Wrote docs/daddybound/conformance-report.md and .json"
 
+.PHONY: claims-export
+claims-export: ## Regenerate website and markdown product-claims artefacts from docs/product-claims.json
+	go run ./cmd/dnsdaddy claims export
+
+.PHONY: claims-check
+claims-check: ## Verify product-claims references and generated artefacts are current
+	go run ./cmd/dnsdaddy claims check
+
+.PHONY: operator-smoke
+operator-smoke: ## Bounded local smoke for operator-validation packages (not a long soak)
+	go test ./internal/productclaims/ ./internal/support/ ./internal/store/ -run 'InventoryLoads|ExportRoundTrip|CriticalDigest|CollectDefault|SecretCanaries|WritePermissions|IncludeDoctor|InvalidUTF8|SchemaGeneration' -count=1
+	@echo "Long soak is documented in docs/maturity/operator-trial.md and must not gate CI."
+
 .PHONY: test-adversarial
 test-adversarial: ## Offline Verified Trust adversarial suites (hostile DNS, lab, CD/AD, encrypted no-downgrade)
 	@# Named gate for docs/daddybound/adversarial-lab.md. No network, no CGO.

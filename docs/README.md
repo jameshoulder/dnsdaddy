@@ -43,6 +43,9 @@ and compliance roadmap without claiming certification or an independent audit.
 | [audit-2026-08.md](audit-2026-08.md) | August 2026 maturation audit: findings, fixes, and where a reviewer should start |
 | [roadmap.md](roadmap.md) | What might come next, and what would have to be true first |
 | [maturity/README.md](maturity/README.md) | Privacy, post-quantum stance, roaming agents and human-validation programme — without certification claims |
+| [product-claims.json](product-claims.json) | Structured claims inventory; `make claims-check` / website import under [website/](website/) |
+| [maturity/operator-trial.md](maturity/operator-trial.md) | Independent operator trial path (Docker, one client) |
+| [maturity/support-export.md](maturity/support-export.md) | Local `dnsdaddy support` allowlisted package |
 | [../SECURITY.md](../SECURITY.md) | Reporting a vulnerability |
 | [security/](security/) | Point-in-time security review records |
 

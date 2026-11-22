@@ -155,7 +155,7 @@ Public resolvers like Quad9 and Cloudflare can block known-bad domains. What the
 | **DoH and DoT** | Serves DNS-over-HTTPS and DNS-over-TLS as well as plain DNS. |
 | **Server address on the homepage** | Copy a compatible local server IP with its configured DNS ports. Address discovery is authenticated and labels interface, loopback, container/NAT and accepted-socket fallback limitations. |
 | **Behavioural detection** | Six experimental heuristics plus a local learned baseline, with explainable measurements and no automatic heuristic blocking. |
-| **Self-diagnosis** | `dnsdaddy doctor` explains configuration, listener, ACL, upstream and threat-intelligence problems. |
+| **Self-diagnosis** | `dnsdaddy doctor` explains configuration, listener, ACL, upstream and threat-intelligence problems. `dnsdaddy support` writes a local allowlisted package (no upload by default). Structured product claims live in [`docs/product-claims.json`](docs/product-claims.json) (`make claims-check`). |
 | **Investigation and policy preview** | Domain/client history, original decisions, current evidence, findings and native observations in one workflow. Policy preview is read-only and does not silently contact external providers. |
 | **Finding review** | Acknowledge, resolve, classify false positives and add notes with versioned review history, preserving original evidence. |
 | **Operational protection** | Bounded per-client rate limiting and IPv4/IPv6 rebinding checks, with explicit internal/split-DNS exceptions and counters. |
