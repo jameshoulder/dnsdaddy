@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,14 +42,27 @@ func runSupport(args []string) error {
 	}
 	if *includeDoctor {
 		opt.DoctorRuns = func(ctx context.Context, configPath string) (support.DoctorSection, error) {
-			checks := collectDoctorChecks(ctx, configPath, 5*time.Second)
+			probeTimeout := 5 * time.Second
+			if deadline, ok := ctx.Deadline(); ok {
+				remain := time.Until(deadline)
+				if remain <= 0 {
+					return support.DoctorSection{}, context.DeadlineExceeded
+				}
+				if remain < probeTimeout {
+					probeTimeout = remain
+				}
+			}
+			checks := collectDoctorChecks(ctx, configPath, probeTimeout)
+			if err := ctx.Err(); err != nil {
+				return support.DoctorSection{}, err
+			}
 			raw, err := json.Marshal(sanitizeDoctorChecks(checks))
 			if err != nil {
 				return support.DoctorSection{}, err
 			}
 			return support.DoctorSection{
 				Label:   "active-diagnostics",
-				Summary: "Explicit doctor probes. Evidence strings may still need review before sharing.",
+				Summary: "Explicit doctor probes. Only section, status and stable check IDs are exported — names, summaries, evidence and actions are omitted because they may contain URLs, tokens or addresses.",
 				Checks:  raw,
 			}, nil
 		}
@@ -61,23 +76,24 @@ func runSupport(args []string) error {
 	return nil
 }
 
-// sanitizeDoctorChecks keeps status fields and drops free-form evidence/action
-// text that may contain addresses or paths.
+// doctorCheckExport is the allowlisted doctor row for support packages.
+// Free-form Name/Summary/Evidence/Action are intentionally omitted: they can
+// embed upstream specs (including DoH path tokens), listen addresses and
+// operator-assigned network names.
 type doctorCheckExport struct {
 	Section string `json:"section"`
-	Name    string `json:"name"`
+	CheckID string `json:"checkId"`
 	Status  string `json:"status"`
-	Summary string `json:"summary"`
 }
 
 func sanitizeDoctorChecks(checks []diag.Check) []doctorCheckExport {
 	out := make([]doctorCheckExport, 0, len(checks))
 	for _, c := range checks {
+		sum := sha256.Sum256([]byte(c.Section + "\x00" + c.Name))
 		out = append(out, doctorCheckExport{
 			Section: c.Section,
-			Name:    c.Name,
+			CheckID: hex.EncodeToString(sum[:8]),
 			Status:  string(c.Status),
-			Summary: c.Summary,
 		})
 	}
 	return out

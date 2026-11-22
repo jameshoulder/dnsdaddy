@@ -31,7 +31,9 @@ inside a `0700` directory.
 - Whether UDP/TCP/HTTP listeners and data_dir are configured (booleans only)
 - File-configured local DNSSEC mode and a coarse transport hint
 - Bounded placeholder for counters (offline collector does not scrape a live process)
-- Sanitised doctor check summaries **only** when `-include-doctor` is set
+- Doctor section **only** when `-include-doctor` is set: section, status and a
+  stable `checkId` hash — not names, summaries, evidence or actions (those can
+  embed upstream URLs/tokens, listen addresses or network names)
 - Omitted-field explanations and any `reviewRequired` warnings
 
 ## Default exclusions

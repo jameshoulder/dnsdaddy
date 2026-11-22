@@ -90,6 +90,13 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 
+	// Refuse a newer schema generation before CREATE/ALTER from the base
+	// schema can mutate an incompatible database.
+	if err := rejectIncompatibleSchemaGeneration(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	if err := applySchemaAndAdminAuth(context.Background(), db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
