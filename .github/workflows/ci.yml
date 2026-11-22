@@ -61,7 +61,10 @@ jobs:
       # cache, and a batching log writer. A data race here would be a
       # correctness bug in the DNS path, so it is worth the slower run.
       - name: Test with race detector
-        run: go test -race ./...
+        # Default per-package timeout is 10m; internal/api under -race regularly
+        # approaches that on GitHub runners (bcrypt login in the harness). Give
+        # the race job headroom so a slow runner is not a false failure.
+        run: go test -race -timeout 20m ./...
 
       # The dashboard is hand-written JavaScript with no build step, which is
       # exactly why it needs pinning: a wrong branch in the Threat Observatory
