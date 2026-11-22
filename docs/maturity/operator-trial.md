@@ -112,3 +112,13 @@ soak unless that environment was measured.
   feed-refresh/recovery exercises in
   [compatibility-evidence.json](compatibility-evidence.json). Do not claim the
   soak ran unless an ledger entry exists with provenance.
+
+## Feedback channels
+
+Prefer the
+[trial feedback issue form](https://github.com/jameshoulder/dnsdaddy/issues/new?template=trial-feedback.yml).
+A Discussion category form exists at
+`.github/DISCUSSION_TEMPLATE/operator-trial.yml` only as a fallback: it does
+**not** appear unless repository Discussions are enabled **and** a non-poll
+category with slug `operator-trial` has been created by a maintainer. This PR
+does not enable Discussions or create that category.

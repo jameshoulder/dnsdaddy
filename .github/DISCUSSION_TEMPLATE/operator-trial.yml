@@ -6,9 +6,12 @@ body:
       value: |
         Prefer the structured
         [trial feedback issue form](https://github.com/jameshoulder/dnsdaddy/issues/new?template=trial-feedback.yml)
-        when Issues are available. Use this discussion only if Discussions are
-        enabled and you cannot open an issue. Do not post secrets, query names
-        or unreviewed support packages.
+        when Issues are available.
+
+        This form only appears when Discussions are enabled and a non-poll
+        category with slug `operator-trial` exists. Maintainers must create that
+        category; shipping this YAML file alone does not enable Discussions.
+        Do not post secrets, query names or unreviewed support packages.
   - type: input
     id: version
     attributes:
