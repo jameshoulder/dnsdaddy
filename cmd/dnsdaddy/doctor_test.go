@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
@@ -82,7 +83,7 @@ func answeringDNS(t *testing.T) string {
 // reported as having answered. The UPSTREAM section then passed while every
 // cache miss returned SERVFAIL.
 func TestProbeUpstreamFailsOnASilentUDPResolver(t *testing.T) {
-	p := probeUpstream("udp://"+blackholeUDP(t), 500*time.Millisecond)
+	p := probeUpstream(context.Background(), "udp://"+blackholeUDP(t), 500*time.Millisecond)
 	if p.Err == nil {
 		t.Fatal("a resolver that never answers was reported as reachable")
 	}
@@ -98,7 +99,7 @@ func TestProbeUpstreamFailsWhenNothingIsListening(t *testing.T) {
 	addr := c.LocalAddr().String()
 	_ = c.Close() // free the port; nothing is there now
 
-	p := probeUpstream("udp://"+addr, 500*time.Millisecond)
+	p := probeUpstream(context.Background(), "udp://"+addr, 500*time.Millisecond)
 	if p.Err == nil {
 		t.Fatalf("an absent resolver at %s was reported as reachable", addr)
 	}
@@ -106,7 +107,7 @@ func TestProbeUpstreamFailsWhenNothingIsListening(t *testing.T) {
 
 // A TCP accept proves a socket opened, not that DNS is spoken over it.
 func TestProbeUpstreamFailsOnASilentTCPResolver(t *testing.T) {
-	p := probeUpstream("tcp://"+blackholeTCP(t), 500*time.Millisecond)
+	p := probeUpstream(context.Background(), "tcp://"+blackholeTCP(t), 500*time.Millisecond)
 	if p.Err == nil {
 		t.Fatal("a TCP listener that speaks no DNS was reported as reachable")
 	}
@@ -115,7 +116,7 @@ func TestProbeUpstreamFailsOnASilentTCPResolver(t *testing.T) {
 // DoT to a plain-TCP listener connects and then fails the TLS handshake. A raw
 // dial cannot see that, so a broken certificate or a wrong port passed.
 func TestProbeUpstreamFailsOnDoTWithoutTLS(t *testing.T) {
-	p := probeUpstream("tls://"+blackholeTCP(t)+"#dns.example.com", 500*time.Millisecond)
+	p := probeUpstream(context.Background(), "tls://"+blackholeTCP(t)+"#dns.example.com", 500*time.Millisecond)
 	if p.Err == nil {
 		t.Fatal("a DoT upstream with no TLS behind it was reported as reachable")
 	}
@@ -124,7 +125,7 @@ func TestProbeUpstreamFailsOnDoTWithoutTLS(t *testing.T) {
 // The probe must still pass against something that really answers, or it has
 // simply traded one wrong verdict for another.
 func TestProbeUpstreamPassesAgainstARealResolver(t *testing.T) {
-	p := probeUpstream("udp://"+answeringDNS(t), 2*time.Second)
+	p := probeUpstream(context.Background(), "udp://"+answeringDNS(t), 2*time.Second)
 	if p.Err != nil {
 		t.Fatalf("a working resolver was reported as failing: %v", p.Err)
 	}
@@ -133,7 +134,7 @@ func TestProbeUpstreamPassesAgainstARealResolver(t *testing.T) {
 // A malformed upstream spec is a configuration error, and must be reported as
 // one rather than silently skipped.
 func TestProbeUpstreamReportsAnUnparseableSpec(t *testing.T) {
-	p := probeUpstream("tls://", 500*time.Millisecond)
+	p := probeUpstream(context.Background(), "tls://", 500*time.Millisecond)
 	if p.Err == nil {
 		t.Fatal("an unparseable upstream spec was reported as reachable")
 	}

@@ -64,6 +64,18 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "support":
+			if err := runSupport(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "claims":
+			if err := runClaims(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case "daddybound":
 			if err := runDaddybound(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "dnsdaddy: %v\n", err)
@@ -107,6 +119,9 @@ func usage(w io.Writer) {
 Usage:
   dnsdaddy [flags]           run the resolver
   dnsdaddy doctor [flags]    diagnose a deployment and exit
+  dnsdaddy support [flags]   write a local allowlisted support package
+  dnsdaddy claims check|export
+                             verify or regenerate the product-claims artefacts
   dnsdaddy daddybound ...    the experimental DNSSEC validation engine
   dnsdaddy backup [flags]    create an encrypted recovery package
   dnsdaddy restore [flags]   restore offline into a new directory
@@ -125,6 +140,16 @@ Doctor flags:
   -timeout duration         per-probe timeout (default 5s)
 
 Doctor exits non-zero when a check fails, so it can gate a deployment.
+
+Support flags:
+  -config path              config file
+  -output directory         new directory for the package (must not exist)
+  -note text                optional operator note (review before sharing)
+  -repro text               optional synthetic reproducer
+  -include-doctor           run active doctor probes (may use the network)
+  -timeout duration         collection timeout (default 30s)
+
+Default support collection makes no outbound requests and uploads nothing.
 
 Daddybound Live resolves and validates native answers; Learn observes alongside
 forwarding. Both native modes are experimental. The daddybound subcommand runs

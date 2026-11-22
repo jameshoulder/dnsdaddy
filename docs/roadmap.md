@@ -106,6 +106,12 @@ contents remain a separate future setting with an explicit privacy trade-off.
 
 ### Phase 5 — deployment and authentication guidance
 
+**Partial (operator validation pass):** structured product claims, a reproducible
+single-client Docker trial, local `dnsdaddy support` export, upgrade/recovery
+rehearsal notes, trial feedback form and an empty compatibility ledger are
+documented under [maturity/](maturity/). They prepare a five-tester recruitment
+target; they do not claim completed external validation or a 1 vCPU soak.
+
 Document Daddybound graduation evidence without promoting Live: comparison with
 a known-good validator, investigation of disagreements/local-bogus cases, and
 latency/resource measurements on the 1 vCPU target. Per-network validation modes
@@ -118,7 +124,8 @@ primitive; a signed Windows/macOS stub is a separate later project.
 
 Design a read-only export token scope and optional TOTP unless each is demonstrably
 a small additive change compatible with current authentication. Preserve bcrypt
-and login rate limiting. No mandatory SSO or enterprise tenancy model.
+and login rate limiting. No mandatory SSO or enterprise tenancy model. Follow-ons
+wait on [evidence-gated-backlog.md](maturity/evidence-gated-backlog.md).
 
 ## Planned — coherent stateful DNS lifecycle
 

@@ -85,3 +85,35 @@ body:
         Host: Linode Nanode 1 GB
         Upstreams: Quad9 + Cloudflare over DoT
         Clients: ~40 devices, one VLAN
+
+  - type: dropdown
+    id: topology
+    attributes:
+      label: Topology (installation / compatibility)
+      options:
+        - Single client → DNS Daddy → upstream
+        - Client → DNS Daddy → Pi-hole → upstream
+        - Other / describe in Environment
+      default: 0
+
+  - type: input
+    id: mode-transport
+    attributes:
+      label: Mode and transport
+      description: "e.g. Forward + native, Learn + encrypted DoH2"
+      placeholder: "Forward + native"
+
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Recovery attempted
+      description: Client DNS rollback, `dnsdaddy restore`, or none. Optional.
+      placeholder: "Restored client DNS; did not restore the database"
+
+  - type: checkboxes
+    id: diary
+    attributes:
+      label: Seven-day deployment diary
+      description: Optional. Tick if you kept notes; paste a short summary in Environment or attach a reviewed support package.
+      options:
+        - label: I can share a short seven-day diary (redacted)

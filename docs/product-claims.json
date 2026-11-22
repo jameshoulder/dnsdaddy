@@ -1,0 +1,375 @@
+{
+  "schemaVersion": 1,
+  "title": "DNS Daddy product claims inventory",
+  "description": "Structured source for website-consumable claims and documentation tables. Maturity is separate from the strength of validation evidence: an automated test is not an independent review. Availability describes where the claim is true today (main vs experimental vs planned vs open PR).",
+  "reviewedSourceRevision": "3f8794909147d40525e7157e77da3f5131859110",
+  "reviewedSourceLabel": "main after Investigation Depth (#105); operator-validation tooling lands in PR #106",
+  "reviewedAt": "2026-11-22",
+  "dependencies": [
+    {
+      "id": "pr-104-verified-integrity",
+      "status": "open",
+      "url": "https://github.com/jameshoulder/dnsdaddy/pull/104",
+      "note": "Feed provenance checksums/parser counts and hash-chained configuration history. Do not advertise as released until merged."
+    }
+  ],
+  "claims": [
+    {
+      "id": "resolver.fresh-install-forward-cloudflare",
+      "title": "Fresh installs start in Forward with default Cloudflare DoH",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "Fresh installs without an explicit resolver-mode override start in Forward (off) and use the default Cloudflare DoH forwarding URLs unless configuration says otherwise. Upgrades retain saved mode; explicit configuration takes precedence.",
+      "caveats": [
+        "Saved dashboard or YAML mode pins override the fresh-install default.",
+        "Mode, transport encryption and DNSSEC are separate controls."
+      ],
+      "implementation": [
+        "internal/config",
+        "cmd/dnsdaddy"
+      ],
+      "documentation": [
+        "docs/capabilities.md",
+        "README.md"
+      ],
+      "tests": [
+        "cmd/dnsdaddy/forwarding_modes_test.go"
+      ],
+      "critical": true
+    },
+    {
+      "id": "resolver.mode-transport-dnssec-separate",
+      "title": "Mode, transport encryption and DNSSEC are separate",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "Forward/Learn/Live selection is independent of the native versus encrypted outbound profile. Inbound DoH/DoT listeners differ from outbound DoQ/HTTP3/HTTP2 support.",
+      "caveats": [
+        "Encrypted outbound profile does not imply inbound DoQ/HTTP3 listeners.",
+        "Live local validation remains experimental."
+      ],
+      "implementation": [
+        "internal/api/handlers_dnssec_mode.go",
+        "internal/resolver"
+      ],
+      "documentation": [
+        "docs/capabilities.md",
+        "docs/encrypted-dns.md"
+      ],
+      "tests": [
+        "cmd/dnsdaddy/dns_transport_test.go"
+      ],
+      "critical": true
+    },
+    {
+      "id": "dnssec.learn-does-not-authenticate-returned-answer",
+      "title": "Learn observation does not authenticate an already-returned answer",
+      "maturity": "experimental",
+      "availability": "main",
+      "scope": "In Learn mode the client answer comes from the selected profile's forwarding path. Daddybound independently observes afterwards and cannot authenticate or change that answer.",
+      "caveats": [
+        "Learn verdicts are observational evidence only."
+      ],
+      "implementation": [
+        "internal/dnsserver",
+        "internal/daddybound"
+      ],
+      "documentation": [
+        "docs/capabilities.md",
+        "docs/dns-security/dnssec.md"
+      ],
+      "tests": [
+        "internal/dnsserver/protection_runtime_test.go"
+      ],
+      "critical": true
+    },
+    {
+      "id": "dnssec.live-experimental",
+      "title": "Live local validation remains experimental",
+      "maturity": "experimental",
+      "availability": "main",
+      "scope": "Native or encrypted Live validation can SERVFAIL on bogus/indeterminate/operational failures. CD requests skip DNSSEC checking while policy and rebinding still apply. Existing failure/CD semantics remain intact.",
+      "caveats": [
+        "Implementation and default selection do not establish production reliability.",
+        "Verified Trust laboratory evidence is offline conformance, not an external audit."
+      ],
+      "implementation": [
+        "internal/daddybound",
+        "internal/dnsserver"
+      ],
+      "documentation": [
+        "docs/capabilities.md",
+        "docs/maturity/verified-trust.md"
+      ],
+      "tests": [
+        "internal/daddybound/lab"
+      ],
+      "critical": true
+    },
+    {
+      "id": "detectors.alert-only-experimental",
+      "title": "Behavioural detectors and local learning are experimental and alert-only",
+      "maturity": "experimental",
+      "availability": "main",
+      "scope": "Detectors and the local learner raise findings and do not block domains by themselves. A false-positive review changes no enforcement.",
+      "caveats": [
+        "Synthetic evaluation is not a production false-positive rate."
+      ],
+      "implementation": [
+        "internal/detect",
+        "internal/learning"
+      ],
+      "documentation": [
+        "docs/capabilities.md",
+        "docs/detection/README.md",
+        "docs/learning.md"
+      ],
+      "tests": [
+        "labs/evaluation"
+      ],
+      "critical": true
+    },
+    {
+      "id": "policy.safe-search-not-enforced",
+      "title": "Safe Search is not enforced",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "The deprecated safeSearch policy field is stored for compatibility and does not rewrite answers or restrict search engines.",
+      "caveats": [
+        "Future CNAME rewriting would require a separate answer-path change and review."
+      ],
+      "implementation": [
+        "internal/policy",
+        "internal/api"
+      ],
+      "documentation": [
+        "docs/capabilities.md",
+        "README.md"
+      ],
+      "tests": [
+        "internal/policy"
+      ],
+      "critical": true
+    },
+    {
+      "id": "map.edges-are-retained-queries",
+      "title": "Map edges are retained DNS query relationships",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "DNS Security Map edges mean recorded query_log relationships for the selected window, not visits, TCP connections or discovered L2/L3 topology.",
+      "caveats": [
+        "Optional UniFi/pfSense/SNMPv3 collectors remain deferred.",
+        "Respects query-log and client-IP privacy controls."
+      ],
+      "implementation": [
+        "internal/store/networkmap.go",
+        "internal/web/static/map.js"
+      ],
+      "documentation": [
+        "docs/dns-security-map.md",
+        "docs/capabilities.md"
+      ],
+      "tests": [
+        "internal/store/networkmap_test.go",
+        "internal/web/map.test.js"
+      ],
+      "critical": true
+    },
+    {
+      "id": "investigate.first-seen-local-not-registration-age",
+      "title": "Local first-seen is not registration age",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "domain_first_seen records local observation of a registered domain (eTLD+1). It is independent of query-log retention and is not WHOIS age or threat intelligence.",
+      "caveats": [
+        "Writes only when query-log admission would also persist a row."
+      ],
+      "implementation": [
+        "internal/store/firstseen.go",
+        "internal/firstseen"
+      ],
+      "documentation": [
+        "docs/investigation-depth.md",
+        "docs/capabilities.md"
+      ],
+      "tests": [
+        "internal/firstseen/recorder_test.go"
+      ],
+      "critical": true
+    },
+    {
+      "id": "investigate.client-identity-not-authenticated",
+      "title": "Client IP and manual naming are not authenticated identity",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "Operator-assigned client names carry confidence operator and source manual. Unknown remains valid when no name exists. Source IP is not authenticated device identity.",
+      "caveats": [
+        "Lease/PTR enrichment remains planned and evidence-gated."
+      ],
+      "implementation": [
+        "internal/store/networks.go",
+        "internal/api/handlers_investigate.go"
+      ],
+      "documentation": [
+        "docs/investigation-depth.md",
+        "docs/capabilities.md"
+      ],
+      "tests": [
+        "internal/api/investigate_test.go"
+      ],
+      "critical": true
+    },
+    {
+      "id": "integrations.observatory-retirement-vs-website",
+      "title": "Observatory integration retirement is distinct from website status",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "Legacy Observatory integration is retired in-process. That is unrelated to whether any separate marketing website is operating.",
+      "caveats": [
+        "Do not infer website uptime from product code paths."
+      ],
+      "implementation": [
+        "internal/store"
+      ],
+      "documentation": [
+        "docs/capabilities.md",
+        "CHANGELOG.md"
+      ],
+      "tests": [],
+      "critical": true
+    },
+    {
+      "id": "assurance.audit-and-benchmark-limits",
+      "title": "Audit and benchmark limitations remain visible",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "Available means implemented and tested, not adversarially audited. Synthetic evaluation and laboratory reports are not independent production efficacy claims. Constrained 1 GB / 1 vCPU targets remain unverified unless that environment was measured.",
+      "caveats": [
+        "Formatting or CI green alone does not prove a claim matches implementation."
+      ],
+      "implementation": [
+        "docs/assurance.md",
+        "labs/evaluation"
+      ],
+      "documentation": [
+        "docs/assurance.md",
+        "docs/capabilities.md",
+        "SECURITY.md"
+      ],
+      "tests": [
+        "labs/evaluation/main_test.go"
+      ],
+      "critical": true
+    },
+    {
+      "id": "access.operator-scoped-grants-only",
+      "title": "Client access is operator-selected and narrowly scoped",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "DNS Daddy never automatically widens ACLs or authorises observed clients merely to make a diagnostic pass. Default ad-hoc access only covers unmatched clients already inside the configured ACL.",
+      "caveats": [
+        "Completed responses are not proof of remote delivery, NAT mapping or firewall reachability."
+      ],
+      "implementation": [
+        "internal/clientacl",
+        "internal/diag"
+      ],
+      "documentation": [
+        "docs/guided-setup.md",
+        "docs/deploy.md",
+        "docs/resolver-access-recovery.md"
+      ],
+      "tests": [
+        "internal/diag/diag_test.go",
+        "cmd/dnsdaddy/doctor_test.go"
+      ],
+      "critical": true
+    },
+    {
+      "id": "recovery.offline-restore-not-inplace",
+      "title": "Restore targets a fresh directory and never overwrites a live database",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "Encrypted backup packages database, secrets key and recovery files. Restore verifies into a new private directory and revokes restored sessions. Live databases are preserved.",
+      "caveats": [
+        "A passing backup test is not a downgrade guarantee.",
+        "Already-published binaries without schema-generation checks are not retroactively protected."
+      ],
+      "implementation": [
+        "internal/backup",
+        "cmd/dnsdaddy/recovery.go"
+      ],
+      "documentation": [
+        "docs/recovery.md",
+        "docs/maturity/upgrade-recovery-rehearsal.md"
+      ],
+      "tests": [
+        "internal/backup/backup_test.go",
+        "cmd/dnsdaddy/recovery_test.go"
+      ],
+      "critical": true
+    },
+    {
+      "id": "feed.supply-chain-evidence",
+      "title": "Feed supply-chain evidence and hash-chained journal",
+      "maturity": "planned",
+      "availability": "open-pr",
+      "scope": "Extended feed refresh evidence (URL, checksum, parser rejects, last-success age) and hash-chained management history are tracked in open PR #104 and must not be advertised as released until merged.",
+      "caveats": [
+        "Existing cached-feed fallback is not signed publisher provenance.",
+        "A local hash chain is not protection against a compromised host."
+      ],
+      "implementation": [],
+      "documentation": [
+        "docs/roadmap.md"
+      ],
+      "tests": [],
+      "critical": false,
+      "openPullRequest": "https://github.com/jameshoulder/dnsdaddy/pull/104"
+    },
+    {
+      "id": "diagnostics.doctor",
+      "title": "dnsdaddy doctor diagnoses deployments without mutating the database",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "doctor opens the database read-only, may send explicit bounded probes, and exits non-zero on failure. It does not widen ACLs or change saved modes.",
+      "caveats": [
+        "Active probes are part of doctor; support export defaults to offline collection."
+      ],
+      "implementation": [
+        "cmd/dnsdaddy/doctor.go",
+        "internal/diag"
+      ],
+      "documentation": [
+        "docs/capabilities.md",
+        "docs/maturity/operator-trial.md"
+      ],
+      "tests": [
+        "cmd/dnsdaddy/doctor_test.go",
+        "cmd/dnsdaddy/doctor_transport_test.go"
+      ],
+      "critical": false
+    },
+    {
+      "id": "diagnostics.support-export",
+      "title": "dnsdaddy support writes a local allowlisted diagnostic package",
+      "maturity": "available",
+      "availability": "main",
+      "scope": "Offline-by-default support export with an explicit allowlist, restrictive permissions, preview/manifest and no upload. Active doctor probes require an explicit option and are labelled separately.",
+      "caveats": [
+        "Hashed domains/IPs are not anonymous and are not included by default.",
+        "Sharing is a separate manual action."
+      ],
+      "implementation": [
+        "internal/support",
+        "cmd/dnsdaddy/support.go"
+      ],
+      "documentation": [
+        "docs/maturity/support-export.md"
+      ],
+      "tests": [
+        "internal/support/export_test.go"
+      ],
+      "critical": false
+    }
+  ]
+}

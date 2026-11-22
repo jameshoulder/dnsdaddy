@@ -1,0 +1,28 @@
+title: "Operator trial notes (optional)"
+labels: ["trial"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Prefer the structured
+        [trial feedback issue form](https://github.com/jameshoulder/dnsdaddy/issues/new?template=trial-feedback.yml)
+        when Issues are available.
+
+        This form only appears when Discussions are enabled and a non-poll
+        category with slug `operator-trial` exists. Maintainers must create that
+        category; shipping this YAML file alone does not enable Discussions.
+        Do not post secrets, query names or unreviewed support packages.
+  - type: input
+    id: version
+    attributes:
+      label: Version or revision
+      placeholder: "v0.3.1.3 or git SHA"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Trial notes
+      description: Environment, topology, mode/transport, expected vs actual, recovery used (redacted)
+    validations:
+      required: true

@@ -2,6 +2,10 @@
 
 **Short answer:** put DNS Daddy in front, with Pi-hole as its upstream.
 
+For the optional **lab-client trial** (native transport + Forward → Pi-hole →
+upstream) see [maturity/operator-trial.md](maturity/operator-trial.md). AdGuard
+coexistence remains unverified until measured.
+
 ```
 Clients ──► DNS Daddy ──► Pi-hole ──► Upstream
 ```

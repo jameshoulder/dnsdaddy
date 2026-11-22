@@ -350,7 +350,11 @@ func doctorUpstreams(ctx context.Context, cfg config.Config, timeout time.Durati
 	}
 	probes := make([]diag.UpstreamProbe, 0, len(cfg.DNS.Upstreams))
 	for _, spec := range cfg.DNS.Upstreams {
-		probes = append(probes, probeUpstream(spec, timeout))
+		if err := ctx.Err(); err != nil {
+			probes = append(probes, diag.UpstreamProbe{Spec: spec, Err: err})
+			continue
+		}
+		probes = append(probes, probeUpstream(ctx, spec, timeout))
 	}
 	return diag.Upstreams(probes)
 }
@@ -516,8 +520,15 @@ func queryResolver(ctx context.Context, proto, addr string, timeout time.Duratio
 // Using the resolver's own transport also means DoT verification, the DoH
 // request shape, and the truncation retry are exercised exactly as they are in
 // production, and cannot drift away from it.
-func probeUpstream(spec string, timeout time.Duration) diag.UpstreamProbe {
+func probeUpstream(parent context.Context, spec string, timeout time.Duration) diag.UpstreamProbe {
 	p := diag.UpstreamProbe{Spec: spec}
+	if parent == nil {
+		parent = context.Background()
+	}
+	if err := parent.Err(); err != nil {
+		p.Err = err
+		return p
+	}
 
 	u, err := resolver.ParseUpstream(spec, timeout)
 	if err != nil {
@@ -530,7 +541,7 @@ func probeUpstream(spec string, timeout time.Duration) diag.UpstreamProbe {
 	m.SetQuestion(doctorProbeName, dns.TypeA)
 	m.RecursionDesired = true
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	start := time.Now()

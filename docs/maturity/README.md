@@ -113,18 +113,40 @@ features stay labelled, release evidence is reproducible, restoration is tested,
 and the highest-risk paths have been reviewed by a competent human. It does not
 mean badges on the README.
 
+## Operator validation cohort (current pass)
+
+Prepare a first cohort of **five independent testers** (recruitment target, not
+existing usage). Structured claims, trial path, support export, upgrade
+rehearsal and an empty evidence ledger live here:
+
+| Document | Role |
+| --- | --- |
+| [../product-claims.json](../product-claims.json) | Reviewed structured claims source |
+| [../product-claims-table.md](../product-claims-table.md) | Generated table (`dnsdaddy claims export`) |
+| [../website/product-claims.json](../website/product-claims.json) | Static site import at build time |
+| [operator-trial.md](operator-trial.md) | One reproducible Docker + single-client trial |
+| [support-export.md](support-export.md) | `dnsdaddy support` allowlisted local package |
+| [upgrade-recovery-rehearsal.md](upgrade-recovery-rehearsal.md) | Client rollback vs upgrade vs offline restore |
+| [compatibility-evidence.json](compatibility-evidence.json) | Empty ledger until real evidence arrives |
+| [evidence-gated-backlog.md](evidence-gated-backlog.md) | Follow-ons that wait for cohort evidence |
+| [verified-trust.md](verified-trust.md) | P0 Daddybound laboratory package |
+
 ## Suggested validation sequence
 
 1. Freeze a revision and run the checks that already exist today (`go test ./...`,
-   dashboard tests, CI workflows, `dnsdaddy doctor`). The roadmap's Phase 2
-   release-assurance *bundle* is still planned work — create those artefacts as
-   they are defined; do not treat the proposal as a runnable checklist yet.
-2. Exercise Forward / Learn / Live and encrypted transports on constrained hardware.
-3. Walk Findings → Investigate → policy change on labelled lab traffic.
-4. Verify backup/restore and management-journal behaviour.
-5. Commission an independent review of authentication, ACL, feed ingestion and
+   dashboard tests, CI workflows, `dnsdaddy doctor`, `make claims-check`). The
+   roadmap's Phase 2 release-assurance *bundle* is still planned work — create
+   those artefacts as they are defined; do not treat the proposal as a runnable
+   checklist yet.
+2. Walk [operator-trial.md](operator-trial.md) on a lab client; record results in
+   the compatibility ledger only when real.
+3. Exercise Forward / Learn / Live and encrypted transports on constrained hardware.
+4. Walk Findings → Investigate → policy change on labelled lab traffic.
+5. Verify backup/restore and management-journal behaviour
+   ([upgrade-recovery-rehearsal.md](upgrade-recovery-rehearsal.md)).
+6. Commission an independent review of authentication, ACL, feed ingestion and
    the DNS answer path.
-6. Only then discuss organisational certification scopes.
+7. Only then discuss organisational certification scopes.
 
 ## Non-goals for this programme
 
