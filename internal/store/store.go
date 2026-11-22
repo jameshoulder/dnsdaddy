@@ -257,6 +257,9 @@ var addedColumns = []struct{ table, column, definition string }{
 const SettingStatsErrorsSince = "stats.errors_since"
 
 func migrate(db *sql.DB) error {
+	if err := migrateSchemaGeneration(db); err != nil {
+		return err
+	}
 	if err := migrateDecisionSnapshots(db); err != nil {
 		return err
 	}

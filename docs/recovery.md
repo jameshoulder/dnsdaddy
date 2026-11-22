@@ -95,6 +95,15 @@ Stop the source service first when an exact cross-file recovery point is
 required. Neither live nor stopped recovery can recreate observations that
 were never persisted.
 
+## Schema generation and downgrades
+
+Current binaries record a `schema_generation` marker when opening a writable
+database. A binary refuses to open a database whose generation is newer than it
+understands. Already-published binaries without that check are not retroactively
+protected. Prefer a pre-upgrade encrypted backup and the
+[upgrade/recovery rehearsal](maturity/upgrade-recovery-rehearsal.md) before
+rolling back across releases.
+
 ## Create a backup in the dashboard
 
 Open **System Settings → Recovery**, provide a new backup passphrase and
