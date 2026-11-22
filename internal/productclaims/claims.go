@@ -88,6 +88,8 @@ type WebsiteClaim struct {
 
 // Load reads and validates structural requirements of the inventory.
 func Load(path string) (*Inventory, error) {
+	// #nosec G304 -- Maintainer/CI path to the reviewed docs/product-claims.json
+	// inventory (or an explicit -root). Not a remote-controlled inclusion.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -293,6 +295,7 @@ func escapeCell(s string) string {
 // WriteAtomic writes data to path with mode 0o644, replacing only on success.
 func WriteAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
+	// #nosec G301 -- Public documentation artefacts under docs/ are world-readable by design.
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -311,6 +314,7 @@ func WriteAtomic(path string, data []byte) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	// #nosec G302 -- Generated website/markdown claims artefacts are public docs (0644).
 	if err := tmp.Chmod(0o644); err != nil {
 		return err
 	}
@@ -336,6 +340,7 @@ func ArtefactsCurrent(root string, inv *Inventory) error {
 	if err != nil {
 		return err
 	}
+	// #nosec G304 -- Fixed relative artefact paths under the discovered repo root.
 	gotWebsite, err := os.ReadFile(filepath.Join(root, WebsiteArtifact))
 	if err != nil {
 		return fmt.Errorf("%s: %w", WebsiteArtifact, err)
@@ -348,6 +353,7 @@ func ArtefactsCurrent(root string, inv *Inventory) error {
 		return fmt.Errorf("%s is stale; run: dnsdaddy claims export", WebsiteArtifact)
 	}
 	wantMD := []byte(inv.MarkdownTable())
+	// #nosec G304 -- Fixed relative artefact paths under the discovered repo root.
 	gotMD, err := os.ReadFile(filepath.Join(root, MarkdownArtifact))
 	if err != nil {
 		return fmt.Errorf("%s: %w", MarkdownArtifact, err)

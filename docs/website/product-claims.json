@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFromRevision": "3f8794909147d40525e7157e77da3f5131859110",
-  "generatedAt": "2026-11-22T09:15:08Z",
+  "generatedAt": "2026-11-22T09:23:49Z",
   "title": "DNS Daddy product claims inventory",
   "description": "Structured source for website-consumable claims and documentation tables. Maturity is separate from the strength of validation evidence: an automated test is not an independent review. Availability describes where the claim is true today (main vs experimental vs planned vs open PR).",
   "importGuidance": "Import this file at site build time from the repository (for example docs/website/product-claims.json). Do not fetch an unauthenticated operational endpoint from a live resolver. Treat availability open-pr as not released.",

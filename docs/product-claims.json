@@ -3,7 +3,7 @@
   "title": "DNS Daddy product claims inventory",
   "description": "Structured source for website-consumable claims and documentation tables. Maturity is separate from the strength of validation evidence: an automated test is not an independent review. Availability describes where the claim is true today (main vs experimental vs planned vs open PR).",
   "reviewedSourceRevision": "3f8794909147d40525e7157e77da3f5131859110",
-  "reviewedSourceLabel": "main after Investigation Depth foundations (#105)",
+  "reviewedSourceLabel": "main after Investigation Depth (#105); operator-validation tooling lands in PR #106",
   "reviewedAt": "2026-11-22",
   "dependencies": [
     {

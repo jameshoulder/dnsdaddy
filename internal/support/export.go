@@ -312,6 +312,7 @@ func Write(ctx context.Context, opt Options) (Result, error) {
 		return Result{}, fmt.Errorf("support package exceeds %d bytes", MaxPackageBytes)
 	}
 
+	// #nosec G301 -- Private support package directory; owner-only is intentional.
 	if err := os.Mkdir(opt.OutputDir, 0o700); err != nil {
 		return Result{}, fmt.Errorf("create output directory: %w", err)
 	}
@@ -352,6 +353,8 @@ func Write(ctx context.Context, opt Options) (Result, error) {
 }
 
 func writePrivateFile(path string, data []byte) error {
+	// #nosec G304 -- Callers pass filepath.Join(outputDir, fixed PackageName|ManifestName)
+	// inside a newly created private directory; O_EXCL prevents overwrite.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err

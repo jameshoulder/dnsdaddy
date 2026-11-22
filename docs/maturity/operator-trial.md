@@ -8,10 +8,12 @@ decision or client behaviour well enough to keep using it.
 **Recruitment target:** five independent testers. This document does not claim
 those testers already exist.
 
-**Source revision for this trial text:** `3f8794909147d40525e7157e77da3f5131859110`
-(main after Investigation Depth foundations). Prefer a released tag when one
-exists for the same behaviour; until then cite this revision rather than a
-fictional release.
+**Source revision for this trial text:** use the git revision that contains
+this guide and the `operator-smoke` Makefile target (for example the merge
+commit of the operator-validation PR, or the branch tip while that PR is open).
+Confirm both `docs/maturity/operator-trial.md` and `make operator-smoke` exist
+at the checked-out revision before starting. Prefer a released tag when one
+ships the same behaviour; do not invent a fictional release.
 
 ## Prerequisites (timed separately from time-to-first-query)
 
