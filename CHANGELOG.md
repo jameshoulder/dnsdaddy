@@ -24,6 +24,17 @@ should be swapping a binary, not restoring a backup.
 
 ### Added
 
+- **Operator validation cohort tooling:** structured
+  [`docs/product-claims.json`](docs/product-claims.json) with
+  `dnsdaddy claims check|export` / `make claims-check`, static website artifact
+  under [`docs/website/`](docs/website/), independent-operator
+  [trial path](docs/maturity/operator-trial.md), local allowlisted
+  [`dnsdaddy support`](docs/maturity/support-export.md) export, schema
+  generation guard for newer databases, upgrade/recovery rehearsal notes,
+  trial feedback issue form, empty
+  [compatibility evidence ledger](docs/maturity/compatibility-evidence.json),
+  and an [evidence-gated backlog](docs/maturity/evidence-gated-backlog.md).
+  Does not claim external testers or merge open PR #104.
 - **Investigation Depth** (Phase 4 foundations): retention-independent
   registered-domain first-seen index (`log.first_seen_index`), decision
   `blockMode` / `feedId` / `feedName` fields, confidence-labelled device

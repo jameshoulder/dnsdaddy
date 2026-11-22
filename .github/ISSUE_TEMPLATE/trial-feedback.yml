@@ -1,0 +1,106 @@
+name: Operator trial / investigation feedback
+description: Feedback from an independent install or investigation task (not a vulnerability)
+labels: ["feedback", "trial"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues do not belong here.** Use
+        [private vulnerability reporting](https://github.com/jameshoulder/dnsdaddy/security/advisories/new)
+        — see [SECURITY.md](https://github.com/jameshoulder/dnsdaddy/blob/main/SECURITY.md).
+
+        Keep sensitive fields optional. Prefer a local
+        [`dnsdaddy support`](https://github.com/jameshoulder/dnsdaddy/blob/main/docs/maturity/support-export.md)
+        package over pasting logs with query names.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or revision
+      description: "`dnsdaddy -version`, image tag, or git SHA"
+      placeholder: "v0.3.1.3 or 3f87949"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Coarse environment
+      options:
+        - Docker Compose on Linux (homelab)
+        - Docker on a small VPS
+        - systemd / native Linux
+        - Lab-only / CI fixture
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: topology
+    attributes:
+      label: Topology under test
+      options:
+        - Single noncritical client → DNS Daddy → upstream
+        - Lab client → DNS Daddy → Pi-hole → upstream
+        - Other / describe below
+    validations:
+      required: true
+
+  - type: input
+    id: mode-transport
+    attributes:
+      label: Mode and transport
+      description: "e.g. Forward + native, Learn + encrypted"
+      placeholder: "Forward + native"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual result
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: dig/API/dashboard steps. Redact names if needed.
+      placeholder: |
+        1. Permit 192.0.2.10/32
+        2. dig @… example.com +tcp
+    validations:
+      required: true
+
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Recovery / rollback used
+      description: Client DNS rollback, backup/restore, or none
+      placeholder: "Restored client DNS to router; left DNS Daddy running"
+
+  - type: textarea
+    id: diary
+    attributes:
+      label: Seven-day deployment diary (optional)
+      description: Short day-by-day notes; omit if this is a single-session trial
+
+  - type: dropdown
+    id: investigation-useful
+    attributes:
+      label: Investigation task usefulness
+      options:
+        - Not attempted
+        - Not useful
+        - Somewhat useful
+        - Useful enough to keep using
+        - Essential
+    validations:
+      required: true
+
+  - type: textarea
+    id: support-package
+    attributes:
+      label: Support package (optional)
+      description: Confirm you reviewed a local `dnsdaddy support` preview before attaching anything. Do not paste secrets.

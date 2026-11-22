@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "title": "Compatibility and cohort evidence ledger",
+  "description": "Versioned ledger for independent operator trials. Start empty where no evidence exists. Do not manufacture testers or results. Security reviews stay separate from compatibility rows.",
+  "metricsDefinitions": {
+    "installationSuccess": "Expected external UDP and TCP answers from a permitted client; REFUSED when denied",
+    "timeToFirstQuery": "Wall time from ready dashboard to first confirmed external client query; prerequisites timed separately",
+    "unexpectedFailuresPerAttemptedQuery": "Failures divided by attempted queries in the recorded window",
+    "investigationTaskUsefulness": "Operator-reported usefulness of Investigate/Map/decision evidence for one synthetic task",
+    "retention7d30d": "Still running at 7 and 30 days, with leave reasons if not",
+    "maintainerSupportEffort": "Maintainer time spent per tester"
+  },
+  "provenanceEnum": [
+    "self-reported",
+    "maintainer-reproduced",
+    "independently-reproduced"
+  ],
+  "entries": []
+}
