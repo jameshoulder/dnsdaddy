@@ -2364,7 +2364,7 @@ pages.detections = {
                         <div class="muted small">${d.description}</div>
                       </td>
                       <td><span class="badge tier">${d.maturity}</span></td>
-                      <td class="muted mono nowrap">${goDuration(d.window)}</td>
+                      <td class="muted mono">${goDuration(d.window)}</td>
                       <td>${raw(severityBadge(d.maxSeverity))}</td>
                       <td class="muted">${d.enforces ? 'yes' : 'no'}</td>
                     </tr>`

@@ -219,10 +219,10 @@ async function expectedAsset(name) {
     check('query logging records the actual synthetic lookups', (await api('/queries?limit=10')).queries.length > 0);
     check('Forward mode remains explicitly selected for the offline capture', (await api('/dnssec/status')).mode.effective === 'off');
     await visit('#/dashboard', '.server-address-card');
-    await shot('hacker-dashboard.png', '#/dashboard', 'Real overview over synthetic lab traffic; loopback-only listeners; native validation explicitly off.');
+    await shot('hacker-dashboard.png', '#/dashboard', 'Real overview over synthetic lab traffic; loopback-only listeners; native validation explicitly off.', false);
     await page.locator('#theme-toggle').click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
-    await shot('hacker-dashboard-light.png', '#/dashboard', 'The same running overview in the operator-selected light theme.');
+    await shot('hacker-dashboard-light.png', '#/dashboard', 'The same running overview in the operator-selected light theme.', false);
     await page.locator('#theme-toggle').click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
     await visit('#/queries?action=blocked', '.query-row');
@@ -231,6 +231,8 @@ async function expectedAsset(name) {
     await shot('hacker-queries.png', '#/queries?action=blocked', 'Actual stored blocked query expanded; Synthetic capture feed; no fabricated decisions.');
     await visit('#/detections', '[data-finding]');
     await page.locator('[data-finding] > summary').first().click();
+    check('the desktop detector inventory fits its table without clipping columns',
+      await page.locator('#view .table-wrap').last().evaluate((table) => table.scrollWidth <= table.clientWidth + 1));
     await shot('hacker-findings.png', '#/detections', 'Real experimental heuristic findings from seeded offline tunnelling/TXT scenarios; not a production accuracy claim.');
     await visit('#/investigate?domain=blocked.lab.example', '#inv-decisions');
     await shot('hacker-investigate.png', '#/investigate?domain=blocked.lab.example', 'Stored activity and decision evidence for a reserved synthetic domain.');
