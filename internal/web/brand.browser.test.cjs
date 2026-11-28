@@ -133,6 +133,14 @@ async function expectedAsset(name) {
     const images = [];
     async function shot(file, route, scope, fullPage = true) {
       await page.waitForFunction(() => document.querySelectorAll('#toasts .toast').length === 0);
+      // A changed theme attribute precedes the end of the normal colour
+      // transitions. Capture their final rendered state, not a mixed-theme frame.
+      await page.evaluate(async () => {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await Promise.all(document.getAnimations()
+          .filter((animation) => Number.isFinite(animation.effect?.getComputedTiming().iterations))
+          .map((animation) => animation.finished.catch(() => {})));
+      });
       check(`${file}: no entered passwords are captured`, await page.locator('input[type=password]').evaluateAll((inputs) => inputs.every((input) => !input.value)));
       await page.evaluate(() => window.scrollTo(0, 0));
       const target = path.join(output, file);
