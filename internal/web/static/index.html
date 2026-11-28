@@ -8,19 +8,7 @@
 <meta name="theme-color" content="#0B1014">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/app.css">
-<script>
-  // Apply the saved theme before paint so the charcoal workspace does not flash.
-  (function () {
-    try {
-      var theme = localStorage.getItem('dnsdaddy.theme');
-      if (theme !== 'light' && theme !== 'dark') theme = 'dark';
-      document.documentElement.dataset.theme = theme;
-      document.documentElement.style.colorScheme = theme;
-    } catch (e) {
-      document.documentElement.dataset.theme = 'dark';
-    }
-  })();
-</script>
+<script src="/theme.js"></script>
 </head>
 <body>
 <a class="skip-link" href="#view">Skip to content</a>
@@ -70,36 +58,22 @@
       instance behind the form. This page is reachable from the internet in
       the HTTPS deployment, so it is a reconnaissance surface and stays inert.
     -->
-    <svg class="login-globe" viewBox="0 0 420 420" preserveAspectRatio="xMidYMid meet" focusable="false">
-      <!-- Brand illustration only; these lines are not live network telemetry. -->
-      <circle cx="210" cy="210" r="166" fill="#E5252A" opacity=".09"/>
-      <circle cx="210" cy="210" r="186" fill="none" stroke="currentColor" opacity=".15"/>
-      <path d="M15 112h62l35 35M308 273l35 35h62M29 298h54l32-32" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".45"/>
-      <g transform="translate(70 70) scale(7)"><g fill="none" stroke="#E5252A" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M9 14H6l-2-3M9 22H3M31 14h3l2-3M31 22h6"/>
-      <circle cx="3.5" cy="10" r="1.6"/><circle cx="2" cy="22" r="1.2"/>
-      <circle cx="36.5" cy="10" r="1.6"/><circle cx="38" cy="22" r="1.2"/>
-    </g><path d="M20 3 31 7.5v11.2c0 7.6-4.7 13.7-11 17.1C13.7 32.4 9 26.3 9 18.7V7.5Z"
-      fill="#141B22" stroke="#E5252A" stroke-width="2.2" stroke-linejoin="round"/>
-    <path d="M14 12v12c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7V12Z" fill="#F7F4ED"/>
-    <ellipse cx="20" cy="12" rx="6" ry="2.6" fill="#F7F4ED" stroke="#141B22" stroke-width="1"/>
-    <path d="M14 17c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7M14 22c0 1.5 2.7 2.7 6 2.7s6-1.2 6-2.7"
-      fill="none" stroke="#141B22" stroke-width="1.2"/></g>
+    <svg class="login-emblem" viewBox="0 0 40 40" focusable="false">
+      <use href="/logo.svg#mark"></use>
     </svg>
 
     <div class="login-aside-copy">
       <p class="login-tagline">Protect. Observe. Respond.</p>
-      <p class="login-lede">Protective DNS with visibility into what your
+      <p class="login-lede">Your DNS.<br>Your rules.</p>
+      <p class="login-description">Protective DNS with visibility into what your
         network is asking for.</p>
     </div>
   </div>
 
   <form class="login-card" id="login-form" autocomplete="on">
     <div class="login-brand">
-      <svg class="logo-mark logo-mark-lg" viewBox="0 0 40 40" aria-hidden="true">
-        <use href="/logo.svg#mark"></use>
-      </svg>
-      <span class="wordmark wordmark-lg">DNS <b>Daddy</b></span>
+      <img class="brand-lockup login-lockup" src="/logo-hacker.png"
+           width="2172" height="724" alt="DNS Daddy — Protective DNS">
     </div>
     <h1>Sign in</h1>
     <p class="muted">Welcome back to your DNS workspace.</p>
@@ -119,10 +93,8 @@
   <aside class="sidebar" id="sidebar">
     <button class="icon-btn nav-close" id="nav-close" aria-label="Close navigation">×</button>
     <div class="brand">
-      <svg class="logo-mark" viewBox="0 0 40 40" aria-hidden="true">
-        <use href="/logo.svg#mark"></use>
-      </svg>
-      <div><span class="wordmark">DNS <b>Daddy</b></span><span class="brand-note">Protective DNS</span></div>
+      <img class="brand-lockup" src="/logo-hacker.png"
+           width="2172" height="724" alt="DNS Daddy — Protective DNS">
     </div>
 
     <nav class="nav" aria-label="Main">
@@ -168,6 +140,9 @@
       <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-menu"/></svg>
       </button>
+      <svg class="compact-brand" viewBox="0 0 40 40" role="img" aria-label="DNS Daddy" focusable="false">
+        <use href="/logo.svg#mark"></use>
+      </svg>
       <div class="topbar-title">
         <h1 id="page-title">Overview</h1>
         <p class="muted small" id="page-subtitle"></p>
