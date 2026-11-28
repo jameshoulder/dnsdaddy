@@ -1,0 +1,407 @@
+{
+  "generatedAt": "2026-11-28T14:22:01.157Z",
+  "sourceCommit": "1ec2b43d03cfe3461d1c7a65788ddde766ddfecf",
+  "headCommit": "8e1ac8b4680f0610f7753366a07931b98970ea86",
+  "browser": "143.0.7499.4",
+  "binarySha256": "6248b450a14a691281e9b2e0038fd6f8feab04e5aec43d28246c195672b2dbc1",
+  "labBinarySha256": "9c85336877d5f4bae40ccbcd03300f34ace7f77ea5e84bd04076ef8913a1ea66",
+  "checks": [
+    "approved logo loads on sign-in",
+    "hacker-sign-in.png: no entered passwords are captured",
+    "approved logo loads in the workspace",
+    "synthetic local feed is loaded",
+    "dns-tunnelling completed every scheduled lab query without a send failure",
+    "suspicious-txt completed every scheduled lab query without a send failure",
+    "dns-tunnelling finished within the lab capture deadline",
+    "dns-tunnelling produced dns_tunnel_suspected for 127.0.0.3",
+    "suspicious-txt finished within the lab capture deadline",
+    "suspicious-txt produced txt_activity_anomaly for 127.0.0.6",
+    "query logging records the actual synthetic lookups",
+    "Forward mode remains explicitly selected for the offline capture",
+    "hacker-dashboard.png: no entered passwords are captured",
+    "hacker-dashboard-light.png: no entered passwords are captured",
+    "expanded query explains its actual synthetic feed match",
+    "hacker-queries.png: no entered passwords are captured",
+    "the desktop detector inventory fits its table without clipping columns",
+    "hacker-findings.png: no entered passwords are captured",
+    "hacker-investigate.png: no entered passwords are captured",
+    "hacker-daddybound.png: no entered passwords are captured",
+    "hacker-assurance.png: no entered passwords are captured",
+    "#/dashboard fits 390px without page-level overflow",
+    "#/queries?action=blocked fits 390px without page-level overflow",
+    "#/detections fits 390px without page-level overflow",
+    "#/assurance fits 390px without page-level overflow",
+    "#/dashboard fits 320px without page-level overflow",
+    "#/queries?action=blocked fits 320px without page-level overflow",
+    "#/detections fits 320px without page-level overflow",
+    "#/assurance fits 320px without page-level overflow",
+    "hacker-mobile.png: no entered passwords are captured",
+    "mobile navigation opens accessibly",
+    "hacker-mobile-navigation.png: no entered passwords are captured",
+    "mobile navigation closes accessibly",
+    "embedded application and branding assets match the captured source",
+    "no uncaught browser errors",
+    "no console or CSP errors",
+    "the browser loaded no remote resources"
+  ],
+  "images": [
+    {
+      "file": "hacker-sign-in.png",
+      "route": "sign-in",
+      "scope": "Unauthenticated sign-in; empty password; no instance telemetry.",
+      "capturedAt": "2026-11-28T14:21:22.063Z",
+      "fullPage": false,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "width": 1440,
+      "height": 1000,
+      "sha256": "8a5597403c9a8ef29b3409ee6d79750bd6cd683a64b1fea5aaf31bd5673c5598"
+    },
+    {
+      "file": "hacker-dashboard.png",
+      "route": "#/dashboard",
+      "scope": "Real overview over synthetic lab traffic; loopback-only listeners; native validation explicitly off.",
+      "capturedAt": "2026-11-28T14:21:58.682Z",
+      "fullPage": false,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "width": 1440,
+      "height": 1000,
+      "sha256": "b8863743feeb56879c1e7721cefbb6377169a8c3ce7c9f57bab2b0b331fcac98"
+    },
+    {
+      "file": "hacker-dashboard-light.png",
+      "route": "#/dashboard",
+      "scope": "The same running overview in the operator-selected light theme.",
+      "capturedAt": "2026-11-28T14:21:58.928Z",
+      "fullPage": false,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "width": 1440,
+      "height": 1000,
+      "sha256": "7b1d3f20ff75e4791b126861dc87dd29324cef52a39a4812ae279d3940241afa"
+    },
+    {
+      "file": "hacker-queries.png",
+      "route": "#/queries?action=blocked",
+      "scope": "Actual stored blocked query expanded; Synthetic capture feed; no fabricated decisions.",
+      "capturedAt": "2026-11-28T14:21:59.256Z",
+      "fullPage": true,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "width": 1440,
+      "height": 1481,
+      "sha256": "97573a6b367b64d456669b260bb9c22f799c345f192e19b711740e3c0c3f9905"
+    },
+    {
+      "file": "hacker-findings.png",
+      "route": "#/detections",
+      "scope": "Real experimental heuristic findings from seeded offline tunnelling/TXT scenarios; not a production accuracy claim.",
+      "capturedAt": "2026-11-28T14:21:59.722Z",
+      "fullPage": true,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "width": 1440,
+      "height": 4396,
+      "sha256": "4f36b687f91cc9a3504666901a139d07924e888959a2813f44a0f72f3db8c0ab"
+    },
+    {
+      "file": "hacker-investigate.png",
+      "route": "#/investigate?domain=blocked.lab.example",
+      "scope": "Stored activity and decision evidence for a reserved synthetic domain.",
+      "capturedAt": "2026-11-28T14:22:00.060Z",
+      "fullPage": true,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "width": 1440,
+      "height": 4614,
+      "sha256": "28fa230ab4c520e694bc834283d6ac111a3fb35f96c0ccba31bd11091244fa91"
+    },
+    {
+      "file": "hacker-daddybound.png",
+      "route": "#/daddybound",
+      "scope": "Forward selected; local validation off; the untrained learner and other limitations remain visible.",
+      "capturedAt": "2026-11-28T14:22:00.412Z",
+      "fullPage": true,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "width": 1440,
+      "height": 3294,
+      "sha256": "d8e36deb8dc7135a48283873154ed9408f05832853007048604c510ee94fa077"
+    },
+    {
+      "file": "hacker-assurance.png",
+      "route": "#/assurance",
+      "scope": "Unedited assurance statements and their limits from the current app.",
+      "capturedAt": "2026-11-28T14:22:00.692Z",
+      "fullPage": true,
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "width": 1440,
+      "height": 2508,
+      "sha256": "555e3e1ef19e10781e479f9b36935b40290a865724306e62d214a2dede1bde5d"
+    },
+    {
+      "file": "hacker-mobile.png",
+      "route": "#/dashboard",
+      "scope": "390px phone viewport over the same isolated synthetic lab.",
+      "capturedAt": "2026-11-28T14:22:00.985Z",
+      "fullPage": false,
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "width": 390,
+      "height": 844,
+      "sha256": "03dd55c8ffbdcd5d45a588d3611aa570620dc92f42ce28facf9313bad3459b35"
+    },
+    {
+      "file": "hacker-mobile-navigation.png",
+      "route": "#/dashboard",
+      "scope": "Actual mobile navigation and approved branding.",
+      "capturedAt": "2026-11-28T14:22:01.084Z",
+      "fullPage": false,
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "width": 390,
+      "height": 844,
+      "sha256": "71f9d63c8e1ab20878daee587f4d06cd7c462302008a0c810af01664dc0c83d7"
+    }
+  ],
+  "sourceAssets": {
+    "app.js": "2761b41eabad029a58f7eb580df2a9aeb63ab6820c66d17664b281378c2e8f5c",
+    "app.css": "93826fe8ac0e07c3051db9b7ef829de26c2af7a7b3393dc505384d7ded4e2449",
+    "index.html": "1b4891744fc99e2f7cf9685e0ac7f4fd25067653e54419c1b64a490f8f870ed1",
+    "logo.svg": "b18b541c354feed359a8e819f4ebeaec77b1e8cf59e7793c36807f927fd8bc17",
+    "favicon.svg": "8a826631ed6f33e989a94468a14aa59ed7683178c3d88230e9165b3144648e5e",
+    "logo-hacker.png": "cd53acedeee1f9c572dfb744b4774f5972a186d9b824f0b3daa5a7bbb44638ee",
+    "theme.js": "d0e5f3093901c2814c8c3410231feaf9c3750bb74567fc2c1be66e2917dcff8e"
+  },
+  "servedAssets": {
+    "app.js": "2761b41eabad029a58f7eb580df2a9aeb63ab6820c66d17664b281378c2e8f5c",
+    "app.css": "93826fe8ac0e07c3051db9b7ef829de26c2af7a7b3393dc505384d7ded4e2449",
+    "index.html": "057e70cf295516df95dc3866616e1e77ac3e047fd6ab3c41d01fdd0e31ab339c",
+    "logo.svg": "b18b541c354feed359a8e819f4ebeaec77b1e8cf59e7793c36807f927fd8bc17",
+    "favicon.svg": "8a826631ed6f33e989a94468a14aa59ed7683178c3d88230e9165b3144648e5e",
+    "logo-hacker.png": "cd53acedeee1f9c572dfb744b4774f5972a186d9b824f0b3daa5a7bbb44638ee",
+    "theme.js": "d0e5f3093901c2814c8c3410231feaf9c3750bb74567fc2c1be66e2917dcff8e"
+  },
+  "pageErrors": [],
+  "consoleErrors": [],
+  "externalResources": [],
+  "lab": {
+    "synthetic": true,
+    "source": "cmd/dnsdaddy-lab",
+    "seed": 1,
+    "scenarios": [
+      "dns-tunnelling",
+      "suspicious-txt"
+    ],
+    "speed": 10,
+    "scenarioOutcomes": [
+      {
+        "scenario": "dns-tunnelling",
+        "clientIp": "127.0.0.3",
+        "expectedEventType": "dns_tunnel_suspected",
+        "startedAt": "2026-11-28T14:21:22.384Z",
+        "finishedAt": "2026-11-28T14:21:58.337Z",
+        "exitCode": 0,
+        "signal": null,
+        "plannedQueries": 384,
+        "sentQueries": 384,
+        "failedQueries": 0,
+        "reportedDuration": "36s",
+        "findings": [
+          {
+            "id": "6b9158545c1e0a3132b29a64",
+            "time": "2026-11-28T14:21:56.534Z",
+            "eventType": "dns_tunnel_suspected",
+            "clientIp": "127.0.0.3",
+            "detector": "dns_tunnel"
+          }
+        ]
+      },
+      {
+        "scenario": "suspicious-txt",
+        "clientIp": "127.0.0.6",
+        "expectedEventType": "txt_activity_anomaly",
+        "startedAt": "2026-11-28T14:21:22.386Z",
+        "finishedAt": "2026-11-28T14:21:58.297Z",
+        "exitCode": 0,
+        "signal": null,
+        "plannedQueries": 222,
+        "sentQueries": 222,
+        "failedQueries": 0,
+        "reportedDuration": "36s",
+        "findings": [
+          {
+            "id": "b0ea6565639fd8dda4b212b0",
+            "time": "2026-11-28T14:21:56.534Z",
+            "eventType": "txt_activity_anomaly",
+            "clientIp": "127.0.0.6",
+            "detector": "txt_anomaly"
+          }
+        ]
+      }
+    ],
+    "detectionWindowScale": 0.1,
+    "detectionEvalInterval": "5s",
+    "queries": "reserved .example names only",
+    "listeners": "loopback only",
+    "queryLogging": true,
+    "localValidationMode": "off",
+    "feed": "Synthetic capture feed; local file",
+    "note": "No API response, DOM content or screenshot pixels were replaced. Counts and timings are observations of this run, not benchmarks. No production data, external provider credentials or live threat infrastructure were used."
+  },
+  "observed": {
+    "overview": {
+      "protectionStatus": "protected",
+      "resolverStatus": "operational",
+      "queries24h": 654,
+      "threatsBlocked24h": 12,
+      "blockRate24h": 1.83,
+      "protectedNetworks": 1,
+      "activePolicies": 3,
+      "blocklistDomains": 1,
+      "lastFeedRefresh": "2026-11-28T14:21:22.356Z",
+      "uptimeSeconds": 39,
+      "version": "dev+1ec2b43",
+      "hasSeenClients": false,
+      "clientAttribution": true,
+      "permittedNetworks": 0,
+      "unrestrictedAccess": false,
+      "servesOnlyLoopback": true,
+      "refusedClients": 0,
+      "measured": {
+        "window": {
+          "hours": 24,
+          "from": "2026-11-27T14:22:01.211552564Z",
+          "to": "2026-11-28T14:22:01.211552564Z",
+          "measuredAt": "2026-11-28T14:22:01.211552564Z",
+          "source": "hourly_rollups",
+          "rollupRetentionDays": 90
+        },
+        "networks": {
+          "configured": 1,
+          "enabled": 1,
+          "resolverPermitted": 0,
+          "adHocAccess": false,
+          "withBlockingPolicy": 1,
+          "monitorOnly": 0,
+          "withTrafficInWindow": 1
+        },
+        "clients": {
+          "attribution": true,
+          "observedInWindow": 3,
+          "everSeen": false
+        },
+        "filtering": {
+          "policies": 3,
+          "blockingPolicies": 2,
+          "blockingPoliciesAssigned": 1,
+          "monitorOnlyPolicies": 1,
+          "customBlockingPolicies": 0,
+          "categoryBlockingAvailable": true,
+          "indexedDomains": 1
+        },
+        "feeds": {
+          "configured": 11,
+          "enabled": 1,
+          "loaded": 1,
+          "failing": 0,
+          "neverDownloaded": 0,
+          "lastSuccessAt": "2026-11-28T14:21:22.356Z",
+          "lastAttemptAt": "2026-11-28T14:21:22.356Z",
+          "refreshing": false
+        },
+        "outcomes": {
+          "queries": 654,
+          "blocked": 12,
+          "blockedByClass": {
+            "custom": 0,
+            "precaution": 0,
+            "preference": 0,
+            "security": 12,
+            "unclassified": 0
+          },
+          "errors": {
+            "count": 0,
+            "measuredSince": null,
+            "complete": true
+          }
+        },
+        "resolver": {
+          "errorRate": {
+            "available": true,
+            "numerator": 0,
+            "denominator": 654,
+            "ratio": 0,
+            "windowHours": 24
+          },
+          "sinceStart": {
+            "uptimeSeconds": 39,
+            "queries": 654,
+            "blocked": 12,
+            "errors": 0,
+            "refused": 0,
+            "coversWindow": false
+          }
+        }
+      },
+      "live": {
+        "available": true,
+        "status": "active",
+        "startedAt": "2026-11-28T14:21:21.536503861Z",
+        "measuredAt": "2026-11-28T14:22:01.212220078Z",
+        "lastQueryAt": "2026-11-28T14:21:58.336972638Z",
+        "lastResponseAt": "2026-11-28T14:21:58.337170748Z",
+        "lastOutcome": "answered",
+        "lastRcode": "NOERROR",
+        "inflight": 0,
+        "sinceStart": {
+          "received": 654,
+          "completed": 654,
+          "answered": 642,
+          "blocked": 12,
+          "cached": 51,
+          "errors": 0,
+          "refused": 0,
+          "rateLimited": 0,
+          "invalid": 0
+        },
+        "recent": {
+          "received": 654,
+          "completed": 654,
+          "answered": 642,
+          "blocked": 12,
+          "cached": 51,
+          "errors": 0,
+          "refused": 0,
+          "rateLimited": 0,
+          "invalid": 0,
+          "windowSeconds": 60,
+          "queriesPerSecond": 10.9
+        }
+      }
+    },
+    "findingCount": 4
+  }
+}

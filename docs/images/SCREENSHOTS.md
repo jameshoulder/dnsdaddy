@@ -1,13 +1,87 @@
 # UI screenshot provenance
 
-The repository contains a **red-identity capture group from 15 November 2026**
-and **two historical light-theme groups from 29 September 2026**. All are
-unedited captures of the running application over synthetic lab traffic; no
-API response or DOM content was substituted. They illustrate implemented
-controls, not production detection accuracy or field reliability. Brand
-artwork has separate [provenance](../brand/README.md).
+The current README uses the **original hacker-identity gallery** described
+below. The red-identity group from 15 November 2026 and both light-theme groups
+from 29 September 2026 are retained as **historical evidence**; their images,
+source revisions and observed states have not been relabelled as current.
 
-## Red identity: 15 November 2026, 19:48 UTC
+These are unedited captures of the running application over synthetic lab
+traffic. No API response, DOM content or screenshot pixel is substituted.
+They illustrate implemented controls, not production detection accuracy,
+performance or field reliability. Brand artwork has separate
+[provenance](../brand/README.md).
+
+## Current gallery: 28 November 2026, 14:22 UTC
+
+Capture workflow: [Deployment regression evidence](https://github.com/jameshoulder/dnsdaddy/actions/runs/46154026008).
+PR head: `8e1ac8b4680f0610f7753366a07931b98970ea86`.
+
+The [capture manifest](hacker-brand-capture-manifest.json) is the source of
+record for the exact source and head commits, UTC capture times, browser
+version, binary and lab-generator hashes, source and served-asset hashes,
+individual image dimensions and hashes, completed checks and observed state.
+The reproducible runner is
+[brand.browser.test.cjs](../../internal/web/brand.browser.test.cjs).
+
+| File | Route | Capture and scope |
+| --- | --- | --- |
+| [hacker-sign-in.png](hacker-sign-in.png) | Sign-in | Unauthenticated screen with an empty password field and no instance telemetry. |
+| [hacker-dashboard.png](hacker-dashboard.png) | `#/dashboard` | Dark overview over actual synthetic lab traffic, loopback-only listeners and Forward mode. |
+| [hacker-dashboard-light.png](hacker-dashboard-light.png) | `#/dashboard` | The same running overview in the operator-selected light theme. |
+| [hacker-queries.png](hacker-queries.png) | `#/queries?action=blocked` | A stored blocked query expanded to show the local synthetic feed match. |
+| [hacker-findings.png](hacker-findings.png) | `#/detections` | An experimental finding expanded after seeded DNS tunnelling and suspicious TXT lab scenarios. |
+| [hacker-investigate.png](hacker-investigate.png) | `#/investigate?domain=blocked.lab.example` | Stored activity and original decision evidence for a reserved synthetic domain. |
+| [hacker-daddybound.png](hacker-daddybound.png) | `#/daddybound` | Forward selected, local validation off, and the untrained learner's limitations visible. |
+| [hacker-assurance.png](hacker-assurance.png) | `#/assurance` | The application's evidence categories, statements and limitations without alteration. |
+| [hacker-mobile.png](hacker-mobile.png) | `#/dashboard` | 390px phone viewport over the same isolated synthetic lab. |
+| [hacker-mobile-navigation.png](hacker-mobile-navigation.png) | `#/dashboard` | The actual mobile navigation opened through its menu control. |
+
+**37 gallery checks passed**, together with the existing access-recovery,
+refresh/focus and transport browser regressions. The gallery was captured with
+Chromium **143.0.7499.4** from GitHub merge commit
+`1ec2b43d03cfe3461d1c7a65788ddde766ddfecf`; the PR head above identifies the reviewed source change.
+The source and served frontend hashes match this checkout.
+
+The ten PNGs and manifest are byte-identical copies from artifact
+`15266513573`. The downloaded archive matched GitHub's SHA-256 digest:
+
+```text
+986ca00dc9219c226e1ecc12eb34f0ccba81b3d7a398df98f4cd2666d996caa4
+```
+
+### Capture conditions and limits
+
+The runner starts the real daemon with a temporary database and loopback-only
+DNS and HTTP listeners. A local `cmd/dnsdaddy-lab` sink answers upstream
+queries; a local file labelled **Synthetic capture feed** supplies the blocked
+domain. External catalog feeds are disabled. Query logging, client-IP logging
+and decision records are enabled so the query and investigation views show
+stored evidence from this run. No production data or external provider
+credentials are used.
+
+The generator runs the `dns-tunnelling` and `suspicious-txt` scenarios with seed
+`1` and speed `10`. Detector windows are scaled to `0.1` and evaluated every
+five seconds for this bounded demonstration. The manifest records the actual
+generator outcomes and resulting finding IDs. Shortened lab windows, query
+counts and finding totals must not be presented as production benchmarks or
+measured detector accuracy.
+
+The resolver is explicitly pinned to Forward (`off`); **local DNSSEC validation
+is off**. These images do not establish native internet resolution, successful
+external encrypted transport, mature learning or long-term efficacy. The
+behavioural detectors remain experimental and alert-only. DNS Daddy remains
+AI-assisted alpha software without an independent professional security
+review.
+
+The runner captures both themes and checks selected routes at 390px and
+320px, mobile navigation state, empty password fields, source/served-asset
+agreement, browser errors and remote resource requests. The manifest records
+which checks completed; the workflow is the authority for the run outcome.
+Production Content Security Policy stays enabled during capture. The runner
+waits for finite CSS transitions to finish before each image, so theme changes
+are captured in their settled state without changing application content.
+
+## Historical red identity: 15 November 2026, 19:48 UTC
 
 These five images came from the successful [Deployment regression evidence
 workflow](https://github.com/jameshoulder/dnsdaddy/actions/runs/43754259178).

@@ -12,7 +12,7 @@ remains alpha and its security and maturity claims have not changed.
 
 The authoritative full logo is
 [`logos/dns-daddy-logo-hacker.png`](logos/dns-daddy-logo-hacker.png).
-It is **2172 × 724, RGBA with a genuinely transparent background**. This is the
+It is **2172 × 724, RGBA with a transparent background**. This is the
 exact approved image, preserved byte-for-byte. The application serves an
 identical copy as [`/logo-hacker.png`](../../internal/web/static/logo-hacker.png).
 Use it for website headers, sign-in branding, the application sidebar and larger
@@ -162,6 +162,13 @@ of an independent professional security review. Behavioural findings are
 alert-only. Keep resolution mode, DNSSEC validation and DNS transport distinct
 when describing Daddybound. Technical claims remain governed by the
 [capability documentation](../capabilities.md) and [trust statement](../../TRUST.md).
+
+## Website implementation briefs
+
+The [three independent Lovable prompts](lovable-prompts/README.md) apply this
+identity to the main website, the synthetic demo and the separate Threat
+Observatory. Each preserves the existing site's working interactions and
+provides its own asset, evidence and verification instructions.
 
 ## Screenshot provenance
 
