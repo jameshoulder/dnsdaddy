@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/dnsdaddy-banner.png" alt="DNS Daddy — Protective DNS. Clearly explained." width="100%">
+<img src="docs/brand/github-readme-banner-1600x500.png" alt="DNS Daddy — open-source, self-hosted protective DNS. Alpha." width="100%">
 
 # DNS Daddy
 
@@ -10,10 +10,12 @@ Block malicious domains at the resolver. See which device asked for what, why it
 
 **Free & Open Source · No Account · No Trial · No Subscription**
 
-[![Go](https://img.shields.io/badge/Go-1.26.8+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26.11+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/license-Apache--2.0-B91C2B)](LICENSE)
 [![CI](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/ci.yml)
 [![Security](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml/badge.svg)](https://github.com/jameshoulder/dnsdaddy/actions/workflows/security.yml)
+
+[Website](https://dnsdaddy.com) · [Synthetic demo](https://demo.dnsdaddy.dev) · [Threat-source research](https://threats.dnsdaddy.dev)
 
 </div>
 
@@ -28,94 +30,102 @@ Block malicious domains at the resolver. See which device asked for what, why it
 
 ## See DNS Daddy in action
 
-The application uses a charcoal, ivory and red identity. The overview, encrypted-DNS controls, server details and mobile captures below show the running application on 15 November 2026 with synthetic lab traffic. Query, Findings, sign-in and Assurance images retain their September light-theme capture and are labelled historical. [Capture details and source revisions](docs/images/SCREENSHOTS.md) · [Current brand assets](docs/brand/README.md).
+DNS Daddy's original red, black and off-white identity carries through the sign-in screen, dashboard and mobile navigation. The distressed wordmark is paired with a compact technical emblem, readable controls and distinct operational status colours. Dark and light themes are both available.
+
+**Real application, synthetic offline lab.** These views come from the running daemon, a local threat-feed fixture and seeded traffic under reserved `.example` names. Forward mode is selected and local DNSSEC validation is off. Counts and findings describe that lab run; they are not production accuracy or performance claims. [Capture evidence and source revisions](docs/images/SCREENSHOTS.md) · [Brand assets](docs/brand/README.md).
 
 <p align="center">
-  <img src="docs/images/red-dashboard.png" alt="DNS Daddy charcoal and red overview showing live resolver activity, client access and the selected Forward mode" width="100%">
+  <img src="docs/images/hacker-dashboard.png" alt="DNS Daddy dark overview showing actual synthetic query activity, resolver setup and Forward mode in an isolated offline lab" width="100%">
 </p>
 
 The overview brings together **query activity, blocks, findings and resolver setup**, including a suggested server IP and configured DNS ports when a compatible local address is known. It identifies loopback-only access and incomplete address discovery, so you can see when another device still needs configuration.
 
 <details>
-<summary>Encrypted DNS controls and server connection details</summary>
-
-Choose your own DoQ, HTTP/3 DoH and HTTP/2 DoH endpoints independently of
-Daddybound's local validation mode. The image shows a deliberately failed
-loopback test, so its TLS status correctly stays unobserved.
+<summary>The same overview in the light theme</summary>
 
 <p align="center">
-  <img src="docs/images/red-features-daddybound.png" alt="Daddybound in the red interface, with selectable resolver modes, encrypted endpoints, explicit consent and an actual failed loopback connection test" width="100%">
+  <img src="docs/images/hacker-dashboard-light.png" alt="The same running DNS Daddy overview in the operator-selected light theme" width="100%">
 </p>
 
-The Setup card identifies the server IP source, configured listener ports and
-where an address can be used. This isolated capture reports its actual
-host-only listener and detected interfaces, and explains that no LAN address
-matches that listener.
-
-<p align="center">
-  <img src="docs/images/red-server-addresses.png" alt="Server address details in the red interface with Copy IP, loopback listener ports and warnings that the detected LAN interfaces have no matching DNS listener" width="100%">
-</p>
-
-[Encrypted transport setup and scope](docs/encrypted-dns.md).
+The theme control changes presentation while preserving the same data, controls and status labels.
 
 </details>
 
 ### Understand a blocked query
 
-*Historical light-theme capture, September 2026.*
-
 <p align="center">
-  <img src="docs/images/queries.png" alt="DNS Daddy query log filtered to blocked queries, with a synthetic query expanded to show its explanation" width="100%">
+  <img src="docs/images/hacker-queries.png" alt="DNS Daddy query log filtered to blocks, with a real stored query for blocked.lab.example expanded to explain the synthetic feed match" width="100%">
 </p>
 
 Filter the query log, open a decision and inspect the client, network, source and reason in context. The example above uses a clearly labelled synthetic threat feed.
 
 ### Explainable behavioural detections
 
-*Historical light-theme capture, September 2026.*
-
 <p align="center">
-  <img src="docs/images/detections.png" alt="DNS Daddy Findings page with a synthetic beaconing finding expanded to show measurements and evidence" width="100%">
+  <img src="docs/images/hacker-findings.png" alt="DNS Daddy Findings page with an experimental finding expanded, produced by seeded offline DNS tunnelling and suspicious TXT scenarios" width="100%">
 </p>
 
-DNS Daddy includes six experimental behavioural detectors for DNS tunnelling, beaconing, NXDOMAIN anomalies, DGA-like domains, unusual TXT activity and repeated resolution failures. **They alert and explain; they do not block.**
+DNS Daddy includes six experimental heuristic detectors for DNS tunnelling, beaconing, NXDOMAIN anomalies, DGA-like domains, unusual TXT activity and repeated resolution failures. **They alert and explain; they do not block.** The catalogue also includes an experimental [local traffic model](docs/learning.md) that compares a client's activity with its own learned baseline. Its scores describe deviation from that baseline and remain alert-only.
 
 <details>
-<summary>More interface previews: sign-in, assurance and mobile</summary>
+<summary>Investigate a domain and inspect resolver modes</summary>
+
+### Follow the evidence
+
+<p align="center">
+  <img src="docs/images/hacker-investigate.png" alt="DNS Daddy investigation of blocked.lab.example, showing stored activity and original decision evidence for a synthetic domain" width="100%">
+</p>
+
+Bring domain history, recorded decisions and available evidence into one investigation. The example uses a reserved lab name and actual stored queries.
+
+### Resolver modes with visible limits
+
+<p align="center">
+  <img src="docs/images/hacker-daddybound.png" alt="Daddybound with Forward selected, local DNSSEC validation off and the untrained learner's limitations visible" width="100%">
+</p>
+
+Daddybound exposes Forward, Learn and Live mode choices, local-validation state and optional encrypted-DNS controls. This offline capture leaves Forward selected and the learner untrained. It does not demonstrate native internet resolution, a successful external encrypted connection or mature learning. [Encrypted transport setup and scope](docs/encrypted-dns.md).
+
+</details>
+
+<details>
+<summary>Sign-in, assurance and mobile navigation</summary>
 
 ### A straightforward control plane
 
-*Historical light-theme capture, September 2026.*
-
 <p align="center">
-  <img src="docs/images/sign-in.png" alt="DNS Daddy sign-in screen in the light interface, with the password field empty" width="100%">
+  <img src="docs/images/hacker-sign-in.png" alt="DNS Daddy sign-in screen with the approved distressed logo, an empty password field and no instance telemetry" width="100%">
 </p>
 
-The web control plane provides a consistent place to configure, observe and investigate a self-hosted resolver.
+The web control plane provides a consistent place to configure, observe and investigate a self-hosted resolver. Instance telemetry stays behind authentication.
 
 ### Assurance you can inspect
 
-*Historical light-theme capture, September 2026.*
-
 <p align="center">
-  <img src="docs/images/assurance.png" alt="Full DNS Daddy Assurance page showing evidence categories, automated checks, experimental features and project limitations" width="100%">
+  <img src="docs/images/hacker-assurance.png" alt="DNS Daddy Assurance page showing evidence categories, automated checks, experimental features and project limitations in the refreshed interface" width="100%">
 </p>
 
-The **Assurance** page separates what is *verified*, *tested*, *experimental* and *not verified*. DNS Daddy is AI-assisted and early-stage; the project links claims to CI, security testing, threat modelling and documented limitations.
+The **Assurance** page separates what is *verified*, *tested*, *experimental* and *not verified*. DNS Daddy is AI-assisted and early-stage; the project links claims to CI, security testing, threat modelling and documented limitations. It has **not had an independent professional security review**.
 
 ### Useful on a smaller screen
 
 <p align="center">
-  <img src="docs/images/red-mobile.png" alt="DNS Daddy charcoal and red overview on a 390-pixel phone viewport, showing the deliberately induced lab failure honestly" width="390">
+  <img src="docs/images/hacker-mobile.png" alt="DNS Daddy overview on a 390-pixel phone viewport using the same isolated synthetic lab" width="390">
 </p>
 
-The same overview adapts to a phone viewport, with navigation available from the menu. This capture follows a deliberately failed loopback query and preserves the real warning state.
+<p align="center">
+  <img src="docs/images/hacker-mobile-navigation.png" alt="DNS Daddy mobile navigation open, with the approved logo and the application's actual route controls" width="390">
+</p>
+
+The same overview adapts to a phone viewport. The menu opens the application's navigation with its current route and controls.
 
 </details>
 
 ### Brand assets
 
-The charcoal, ivory and red identity includes a shield/database/network mark, accessible action colours and distinct operational status colours. [Logo masters, palette and repository artwork](docs/brand/README.md) are available for contributors and public use. This visual refresh does not change the software's alpha status.
+The identity uses an original distressed wordmark and an angular shield/database/circuit emblem. [Approved logo, compact SVG marks, palette and repository artwork](docs/brand/README.md) are available for contributors. Keep the logo's texture in brand surfaces and operational data clean and readable. This visual refresh does not change the software's alpha status.
+
+[Separate Lovable implementation briefs](docs/brand/lovable-prompts/README.md) align the main website, synthetic demo and separate Threat Observatory with the same identity while preserving each site's purpose and working interactions.
 
 ## What is DNS Daddy?
 
@@ -182,7 +192,7 @@ The Docker quick start expects:
 - Docker Engine
 - Docker Compose v2 (`docker compose`)
 
-Source builds require Go 1.26.8 or newer; CI and container builds use Go 1.27.1.
+Source builds require Go 1.26.11 or newer; CI and container builds use Go 1.27.4.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup.
 
 Check them first:

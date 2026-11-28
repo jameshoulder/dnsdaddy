@@ -1,0 +1,117 @@
+{
+  "edition": "2026-11-28 hacker print identity",
+  "approvedLogo": {
+    "path": "docs/brand/logos/dns-daddy-logo-hacker.png",
+    "sha256": "cd53acedeee1f9c572dfb744b4774f5972a186d9b824f0b3daa5a7bbb44638ee",
+    "width": 2172,
+    "height": 724,
+    "alpha": true,
+    "provenance": "AI-generated logo concept explicitly approved by James Houlder on 28 November 2026; preserved byte-for-byte"
+  },
+  "vectorAdaptations": "Original code-native simplified mark and untextured geometric utility lettering; not a pixel-identical vectorisation of the approved raster",
+  "layoutSources": "README and social SVG layouts reference the adjacent approved PNG; use PNG exports for standalone web display",
+  "renderCommand": "python3 docs/brand/build-assets.py --render",
+  "renderer": "Inkscape 1.4 (e7c3feb100, 2024-10-09)",
+  "files": [
+    {
+      "path": "docs/brand/dns-daddy-icon-400x400.svg",
+      "bytes": 1244,
+      "sha256": "3171ce8f8c77e51aacf50db0eaf72b2e76307c75b25b477e8063e8d9157ee783"
+    },
+    {
+      "path": "docs/brand/github-readme-banner-1600x500.svg",
+      "bytes": 1642,
+      "sha256": "58635319a98fa4ed13c4d2666d7c9d74e9417cdf7ca7347e21633414e8295344"
+    },
+    {
+      "path": "docs/brand/github-social-preview-1280x640.svg",
+      "bytes": 1138,
+      "sha256": "ef50aa990ce416bb878408a459fcb078ef0a619cea09b468620a45e4800d69d4"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-logo-hacker.png",
+      "bytes": 977205,
+      "sha256": "cd53acedeee1f9c572dfb744b4774f5972a186d9b824f0b3daa5a7bbb44638ee"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-logo-monochrome-ink.svg",
+      "bytes": 2478,
+      "sha256": "fc7fba512a4fd3b43be15002b9eaf90382d4f3f7d0fa9c39fc50dbe25d0c4d34"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-logo-monochrome-white.svg",
+      "bytes": 2480,
+      "sha256": "996b24918609799b74eb14f83e106d452b97fca3391790052db7ca8b3474e78c"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-logo-primary.svg",
+      "bytes": 2302,
+      "sha256": "089899ad004b9348d8712d81c48be051e993fd1ff49ff90bd2b4131a8475a033"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-logo-reversed.svg",
+      "bytes": 2303,
+      "sha256": "821f63478f7ffb8ded2a4b84993f26153cbda01e845a6ce4a74ecf4fd8e9ad97"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-logo-stacked-primary.svg",
+      "bytes": 2308,
+      "sha256": "90555e56df63740360c5eeeb08dddfc0e9ce96995b13d363258d71794b06009d"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-logo-stacked-reversed.svg",
+      "bytes": 2309,
+      "sha256": "c310c4d020ba776f95c4e37b422028d294e8a0367bd0db488f3ddc8bb818251e"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-mark-monochrome-ink.svg",
+      "bytes": 1243,
+      "sha256": "c27882141e67628f60524759f23c550754bbb648623abb45d96db374236fc306"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-mark-monochrome-white.svg",
+      "bytes": 1245,
+      "sha256": "d0e6cbc7d1619c8a053bf89adda6be8ff763c02a81e003e7c9f8a301af536a38"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-mark-primary.svg",
+      "bytes": 1067,
+      "sha256": "7736bd342b25c5b21bf8418233f1f991eadb8eb3ea1a82409599ea4d8e62b761"
+    },
+    {
+      "path": "docs/brand/logos/dns-daddy-mark-reversed.svg",
+      "bytes": 1068,
+      "sha256": "50a462e9fb7c743c5c40704a7d981edd8e66f44a7f32b6287b3a894cbb042f8e"
+    },
+    {
+      "path": "internal/web/static/favicon.svg",
+      "bytes": 677,
+      "sha256": "8a826631ed6f33e989a94468a14aa59ed7683178c3d88230e9165b3144648e5e"
+    },
+    {
+      "path": "internal/web/static/logo-hacker.png",
+      "bytes": 977205,
+      "sha256": "cd53acedeee1f9c572dfb744b4774f5972a186d9b824f0b3daa5a7bbb44638ee"
+    },
+    {
+      "path": "internal/web/static/logo.svg",
+      "bytes": 1104,
+      "sha256": "b18b541c354feed359a8e819f4ebeaec77b1e8cf59e7793c36807f927fd8bc17"
+    },
+    {
+      "path": "docs/brand/github-readme-banner-1600x500.png",
+      "bytes": 267542,
+      "sha256": "7392ab11102803480dd9a770e03428dc25fa20f629373184420074eee99ba46c"
+    },
+    {
+      "path": "docs/brand/github-social-preview-1280x640.png",
+      "bytes": 305141,
+      "sha256": "730a11b43a0dc93bbe352b56dde8c76b9747a925cd129b5ea17efe949a93c668"
+    },
+    {
+      "path": "docs/brand/dns-daddy-icon-400x400.png",
+      "bytes": 17628,
+      "sha256": "6f7a9ea5c6cce7f11df49f8854080b4a1019f81ba468e304d56d9b30e09f9566"
+    }
+  ]
+}

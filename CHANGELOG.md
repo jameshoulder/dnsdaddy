@@ -24,6 +24,13 @@ should be swapping a binary, not restoring a backup.
 
 ### Added
 
+- **Hacker-print brand refresh:** the approved red, black and ivory logo,
+  simplified small-screen emblem, sharper application chrome, and matching
+  repository artwork. Operational status colours remain distinct from brand
+  red; light mode, keyboard navigation and existing controls are retained.
+  A reproducible offline capture gallery records real application screens,
+  source hashes and synthetic-lab provenance. This does not change the
+  project's alpha status or add an assurance claim.
 - **Investigation Depth** (Phase 4 foundations): retention-independent
   registered-domain first-seen index (`log.first_seen_index`), decision
   `blockMode` / `feedId` / `feedName` fields, confidence-labelled device
